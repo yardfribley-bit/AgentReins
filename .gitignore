@@ -1,0 +1,18 @@
+# macOS
+.DS_Store
+
+# Swift build artifacts
+.build/
+*.app
+DerivedData/
+
+# Python
+__pycache__/
+*.pyc
+
+# Local runtime data / audit logs (may contain host paths)
+*.jsonl
+
+# Secrets
+.env
+openai.sh
