@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "monitor": {
+    "file_poll_interval": 1.0,
+    "cmd_poll_interval": 1.0,
+    "agent_process_markers": ["codex", "cursor", "workbuddy", "kiro", "aider", "claude", "agent"],
+    "log_file": "agentguard_audit.jsonl"
+  },
+  "rules": [
+    {
+      "id": "protect_ssh",
+      "kind": "file",
+      "watch": ["~/.ssh", "~/.aws"],
+      "severity": "critical",
+      "action": "alert",
+      "message": "编码智能体正在读写凭据目录 ~/.ssh 或 ~/.aws"
+    },
+    {
+      "id": "destructive_rm",
+      "kind": "cmd",
+      "pattern": "rm\\s+(-rf|-fr|--recursive\\s+--force)|rm\\s+-r\\s+-f",
+      "severity": "critical",
+      "action": "alert",
+      "message": "检测到 rm -rf 递归强制删除命令"
+    },
+    {
+      "id": "curl_pipe_bash",
+      "kind": "cmd",
+      "pattern": "(curl|wget)\\s+[^|]*\\|\\s*(ba)?sh",
+      "severity": "critical",
+      "action": "alert",
+      "message": "检测到从网络下载并直接执行脚本（curl|bash / wget|sh）"
+    },
+    {
+      "id": "read_secret",
+      "kind": "cmd",
+      "pattern": "(cat|less|vim|nvim|grep)\\s+.*(\\.pem|\\.key|id_rsa|\\.env|credentials)",
+      "severity": "high",
+      "action": "alert",
+      "message": "检测到读取密钥/凭据文件"
+    },
+    {
+      "id": "git_force_push",
+      "kind": "cmd",
+      "pattern": "git\\s+push\\s+(--force|--force-with-lease|-f)",
+      "severity": "high",
+      "action": "alert",
+      "message": "检测到 git 强制推送（可能覆盖远程历史）"
+    }
+  ]
+}
