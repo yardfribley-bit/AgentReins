@@ -55,6 +55,9 @@ struct GuardEvent: Identifiable, Codable {
     let outputTokens: Int?
     let cachedTokens: Int?
     let reasoningTokens: Int?
+    let beforeContent: String?
+    let afterContent: String?
+    let fileDiff: String?
     let source: String?
 
     init(id: UUID = UUID(), kind: String, ruleId: String, path: String,
@@ -64,6 +67,7 @@ struct GuardEvent: Identifiable, Codable {
          modelReasoning: String? = nil, modelPrompt: String? = nil, modelResponse: String? = nil,
          toolName: String? = nil, model: String? = nil, inputTokens: Int? = nil,
          outputTokens: Int? = nil, cachedTokens: Int? = nil, reasoningTokens: Int? = nil,
+         beforeContent: String? = nil, afterContent: String? = nil, fileDiff: String? = nil,
          source: String? = nil) {
         self.id = id
         self.kind = kind
@@ -90,6 +94,9 @@ struct GuardEvent: Identifiable, Codable {
         self.outputTokens = outputTokens
         self.cachedTokens = cachedTokens
         self.reasoningTokens = reasoningTokens
+        self.beforeContent = beforeContent
+        self.afterContent = afterContent
+        self.fileDiff = fileDiff
         self.source = source
     }
 }

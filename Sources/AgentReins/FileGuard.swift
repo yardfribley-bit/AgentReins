@@ -17,6 +17,7 @@ final class FileGuard: ObservableObject {
     private let bgQueue = DispatchQueue(label: "com.agentspec.fileguard.bg", qos: .utility)
     private var timer: Timer?
     private var lastMtime: [String: Date] = [:]
+    private var lastContent: [String: String] = [:]
     private let lock = NSLock()
 
     static func defaultBackupRoot() -> URL {
@@ -64,6 +65,7 @@ final class FileGuard: ObservableObject {
                 if fm.fileExists(atPath: url.path) {
                     lock.lock(); defer { lock.unlock() }
                     lastMtime[url.path] = mtime(of: url.path)
+                    lastContent[url.path] = textContent(at: url)
                 }
             }
         }
@@ -72,7 +74,7 @@ final class FileGuard: ObservableObject {
     private func poll() {
         let fm = FileManager.default
         let rules = currentRules
-        var pending: [(Rule, String, String, String)] = []
+        var pending: [(rule: Rule, path: String, op: String, action: String, before: String?, after: String?, diff: String?)] = []
         for rule in rules where rule.isProtect {
             for w in rule.watch ?? [] {
                 let url = URL(fileURLWithPath: (w as NSString).expandingTildeInPath)
@@ -81,22 +83,40 @@ final class FileGuard: ObservableObject {
                 if !exists {
                     if (rule.opsSet.contains("delete") || rule.opsSet.contains("modify")),
                        fm.fileExists(atPath: backup.path) {
+                        lock.lock()
+                        let before = lastContent[url.path]
+                        lastContent[url.path] = nil
+                        lock.unlock()
                         try? fm.copyItem(at: backup, to: url)   // 还原
-                        pending.append((rule, url.path, "delete", "restored"))
+                        lock.lock()
+                        lastMtime[url.path] = mtime(of: url.path)
+                        lastContent[url.path] = textContent(at: url)
+                        lock.unlock()
+                        pending.append((rule, url.path, "delete", "restored", before, nil,
+                                        makeDiff(before: before, after: nil)))
                     }
                 } else {
                     let now = mtime(of: url.path)
+                    let current = textContent(at: url)
                     lock.lock()
                     let last = lastMtime[url.path]
+                    let before = lastContent[url.path]
                     lastMtime[url.path] = now
+                    lastContent[url.path] = current
                     lock.unlock()
                     if let last, last < now {
                         if rule.opsSet.contains("modify") {
+                            let diff = makeDiff(before: before, after: current)
                             if rule.restore == true, fm.fileExists(atPath: backup.path) {
+                                try? fm.removeItem(at: url)
                                 try? fm.copyItem(at: backup, to: url)   // 还原修改
-                                pending.append((rule, url.path, "modify", "restored"))
+                                lock.lock()
+                                lastMtime[url.path] = mtime(of: url.path)
+                                lastContent[url.path] = textContent(at: url)
+                                lock.unlock()
+                                pending.append((rule, url.path, "modify", "restored", before, current, diff))
                             } else {
-                                pending.append((rule, url.path, "modify", "alert"))
+                                pending.append((rule, url.path, "modify", "alert", before, current, diff))
                             }
                         }
                     }
@@ -108,7 +128,10 @@ final class FileGuard: ObservableObject {
         }
         if !pending.isEmpty {
             DispatchQueue.main.async {
-                for (rule, path, op, action) in pending { self.emit(rule: rule, path: path, op: op, action: action) }
+                for item in pending {
+                    self.emit(rule: item.rule, path: item.path, op: item.op, action: item.action,
+                              before: item.before, after: item.after, diff: item.diff)
+                }
             }
         }
     }
@@ -122,12 +145,38 @@ final class FileGuard: ObservableObject {
         (try? FileManager.default.attributesOfItem(atPath: path)[.modificationDate] as? Date) ?? Date.distantPast
     }
 
+    private func textContent(at url: URL) -> String? {
+        guard let values = try? url.resourceValues(forKeys: [.isRegularFileKey]), values.isRegularFile == true,
+              let data = try? Data(contentsOf: url), data.count <= 512_000 else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private func makeDiff(before: String?, after: String?) -> String? {
+        guard before != after else { return nil }
+        let oldLines = (before ?? "").components(separatedBy: .newlines)
+        let newLines = (after ?? "").components(separatedBy: .newlines)
+        var output = ["--- before", "+++ after"]
+        let count = max(oldLines.count, newLines.count)
+        for index in 0..<count {
+            let old = index < oldLines.count ? oldLines[index] : nil
+            let new = index < newLines.count ? newLines[index] : nil
+            guard old != new else { continue }
+            if let old { output.append("-\(old)") }
+            if let new { output.append("+\(new)") }
+            if output.count >= 2_000 { output.append("… diff truncated …"); break }
+        }
+        return output.joined(separator: "\n")
+    }
+
     // MARK: - 主线程 UI 更新
 
-    private func emit(rule: Rule, path: String, op: String, action: String) {
+    private func emit(rule: Rule, path: String, op: String, action: String,
+                      before: String?, after: String?, diff: String?) {
         let sev = rule.severity.isEmpty ? "high" : rule.severity
         let ev = GuardEvent(kind: "file", ruleId: rule.id, path: path, command: nil, agent: nil,
-                            op: op, severity: sev, ts: Date(), action: action)
+                            op: op, severity: sev, ts: Date(), action: action,
+                            beforeContent: before, afterContent: after, fileDiff: diff,
+                            source: "fileguard")
         events.insert(ev, at: 0)
         if events.count > 200 { events.removeLast() }
         onEvent?(ev)

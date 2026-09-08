@@ -655,6 +655,19 @@ struct ContentView: View {
                             GridRow { Text("关联规则").foregroundStyle(.secondary); Text(incident.ruleIDs.joined(separator: "、")).textSelection(.enabled) }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                     }
+                    if let diff = incident.events.compactMap(\.fileDiff).first {
+                        GroupBox("Code changes") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                Label(incident.wasRestored ? "AgentReins restored the original file" : "Change recorded — original file available", systemImage: incident.wasRestored ? "arrow.uturn.backward.circle.fill" : "doc.badge.clock")
+                                    .font(.headline).foregroundStyle(incident.wasRestored ? .green : .orange)
+                                Text(incident.primary.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                                ScrollView([.horizontal, .vertical]) {
+                                    Text(diff).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                                        .fixedSize(horizontal: true, vertical: true)
+                                }.frame(maxHeight: 320)
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                        }
+                    }
                     if let command = incident.command {
                         GroupBox("完整命令") {
                             ScrollView(.horizontal) {
