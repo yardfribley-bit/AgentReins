@@ -1,0 +1,118 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    name: Build Universal 2 release
+    runs-on: macos-14
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Resolve version
+        id: version
+        shell: bash
+        run: |
+          if [[ "$GITHUB_REF_TYPE" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+          else
+            version="0.0.0-dev"
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Detect release credentials
+        id: credentials
+        env:
+          CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          [[ -n "$CERTIFICATE_P12" ]] && echo "has_signing=true" >> "$GITHUB_OUTPUT" || echo "has_signing=false" >> "$GITHUB_OUTPUT"
+          [[ -n "$APPLE_ID" && -n "$APPLE_TEAM_ID" && -n "$APPLE_APP_PASSWORD" ]] && echo "has_notary=true" >> "$GITHUB_OUTPUT" || echo "has_notary=false" >> "$GITHUB_OUTPUT"
+
+      - name: Require trusted distribution credentials for tags
+        if: ${{ github.ref_type == 'tag' && (steps.credentials.outputs.has_signing != 'true' || steps.credentials.outputs.has_notary != 'true') }}
+        run: |
+          echo "Developer ID signing and notarization secrets are required for tagged releases." >&2
+          exit 1
+
+      - name: Import Developer ID certificate
+        if: ${{ steps.credentials.outputs.has_signing == 'true' }}
+        env:
+          CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
+          CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+        run: |
+          keychain="$RUNNER_TEMP/agentreins-signing.keychain-db"
+          certificate="$RUNNER_TEMP/developer-id.p12"
+          echo "$CERTIFICATE_P12" | base64 --decode > "$certificate"
+          security create-keychain -p "" "$keychain"
+          security set-keychain-settings -lut 21600 "$keychain"
+          security unlock-keychain -p "" "$keychain"
+          security import "$certificate" -P "$CERTIFICATE_PASSWORD" -A -t cert -f pkcs12 -k "$keychain"
+          security list-keychains -d user -s "$keychain"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "" "$keychain"
+          identity="$(security find-identity -v -p codesigning "$keychain" | sed -n '1s/.*"\(.*\)"/\1/p')"
+          test -n "$identity"
+          echo "CODE_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
+
+      - name: Build and package app
+        env:
+          AGENTREINS_VERSION: ${{ steps.version.outputs.version }}
+          AGENTREINS_BUILD_NUMBER: ${{ github.run_number }}
+        run: ./package_app.sh
+
+      - name: Create notarization upload
+        run: ditto -c -k --sequesterRsrc --keepParent AgentReins.app AgentReins-notarization.zip
+
+      - name: Notarize and staple
+        if: ${{ steps.credentials.outputs.has_signing == 'true' && steps.credentials.outputs.has_notary == 'true' }}
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_APP_PASSWORD: ${{ secrets.APPLE_APP_PASSWORD }}
+        run: |
+          xcrun notarytool submit AgentReins-notarization.zip \
+            --apple-id "$APPLE_ID" \
+            --team-id "$APPLE_TEAM_ID" \
+            --password "$APPLE_APP_PASSWORD" \
+            --wait
+          xcrun stapler staple AgentReins.app
+          spctl --assess --type execute --verbose=2 AgentReins.app
+
+      - name: Create distribution archive and checksum
+        run: |
+          rm -f AgentReins-notarization.zip
+          archive="AgentReins-${{ steps.version.outputs.version }}-macOS-universal.zip"
+          ditto -c -k --sequesterRsrc --keepParent AgentReins.app "$archive"
+          shasum -a 256 "$archive" > "$archive.sha256"
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: AgentReins-${{ steps.version.outputs.version }}-macOS-universal
+          path: |
+            AgentReins-*-macOS-universal.zip
+            AgentReins-*-macOS-universal.zip.sha256
+          if-no-files-found: error
+
+      - name: Publish GitHub Release
+        if: ${{ github.ref_type == 'tag' }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            AgentReins-*-macOS-universal.zip \
+            AgentReins-*-macOS-universal.zip.sha256 \
+            --verify-tag \
+            --generate-notes \
+            --title "AgentReins $GITHUB_REF_NAME"

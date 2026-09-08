@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build and package Universal 2 app
+    runs-on: macos-14
+    timeout-minutes: 20
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v6
+
+      - name: Show toolchain
+        run: swift --version
+
+      - name: Validate packaging script
+        run: bash -n package_app.sh
+
+      - name: Build release app
+        env:
+          AGENTREINS_VERSION: 0.0.0-ci
+          AGENTREINS_BUILD_NUMBER: ${{ github.run_number }}
+        run: ./package_app.sh
+
+      - name: Verify architectures and signature
+        run: |
+          lipo -archs AgentReins.app/Contents/MacOS/AgentReins | grep arm64
+          lipo -archs AgentReins.app/Contents/MacOS/AgentReins | grep x86_64
+          codesign --verify --deep --strict --verbose=2 AgentReins.app
+
+      - name: Create CI artifact
+        run: ditto -c -k --sequesterRsrc --keepParent AgentReins.app AgentReins-ci-universal.zip
+
+      - name: Upload packaged app
+        uses: actions/upload-artifact@v7
+        with:
+          name: AgentReins-macOS-universal
+          path: AgentReins-ci-universal.zip
+          if-no-files-found: error
+          retention-days: 14
+

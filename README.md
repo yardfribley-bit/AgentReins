@@ -8,6 +8,7 @@
   <p>A local-first safety and transparency companion for personal AI coding agents on macOS.</p>
 
   <p>
+    <a href="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml/badge.svg"></a>
     <img alt="Platform: macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple">
     <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
     <img alt="Status: Alpha" src="https://img.shields.io/badge/status-alpha-F59E0B">
@@ -125,6 +126,8 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 │   └── SemanticAnalyzer.swift    Optional redacted AI analysis
 ├── Assets/                       Packaged application assets
 ├── AppIcon.iconset/              Source application icons
+├── Resources/                    Runtime resources bundled with the app
+├── .github/workflows/            Universal 2 CI and release automation
 ├── docs/                         Architecture, roadmaps, and launch plans
 ├── Package.swift                 Swift Package Manager manifest
 └── package_app.sh                Local app packaging script
@@ -151,6 +154,7 @@ Read [Architecture](docs/ARCHITECTURE.md) for the runtime flow, trust model, sou
 | [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md) | Relay detection, outbound exposure, and model-identity boundaries. |
 | [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md) | Positioning, launch demo, claims, and readiness checklist. |
 | [Community Launch Copy](docs/COMMUNITY-LAUNCH-COPY.md) | Platform-specific Reddit, Hacker News, and social copy. |
+| [Release Process](docs/RELEASING.md) | Universal 2 CI/CD, signing, notarization, and release instructions. |
 
 ## Contributing and feedback
 
