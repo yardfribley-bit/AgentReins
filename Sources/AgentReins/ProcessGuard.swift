@@ -60,14 +60,15 @@ final class ProcessGuard: ObservableObject {
         running = true
         // ps 的子进程调用放到后台线程，避免主线程阻塞（首次 ps 触发 TCC 时不会卡 UI）。
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            guard !self.snapshotInFlight else { return }
-            self.snapshotInFlight = true
-            DispatchQueue.global(qos: .utility).async {
-                let procs = self.getProcs()
-                Task { @MainActor in
-                    self.process(procs: procs)
-                    self.snapshotInFlight = false
+            Task { @MainActor [weak self] in
+                guard let self, !self.snapshotInFlight else { return }
+                self.snapshotInFlight = true
+                DispatchQueue.global(qos: .utility).async {
+                    let procs = self.getProcs()
+                    Task { @MainActor in
+                        self.process(procs: procs)
+                        self.snapshotInFlight = false
+                    }
                 }
             }
         }
