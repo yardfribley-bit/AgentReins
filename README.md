@@ -30,6 +30,10 @@ swift build
 
 The packaged application is written to `AgentReins.app`.
 
+## Development roadmap
+
+See [Trace, Verify, Recover — Development Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) for the prioritized capability gaps, acceptance criteria, and next implementation sequence.
+
 ## Distribution
 
 Development builds use an ad-hoc signature. A public build that opens normally on other Macs requires an Apple Developer ID Application certificate and Apple notarization.
