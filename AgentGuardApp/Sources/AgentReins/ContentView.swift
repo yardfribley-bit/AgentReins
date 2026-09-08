@@ -668,6 +668,31 @@ struct ContentView: View {
                             }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                         }
                     }
+                    let codeFindings = incident.events.flatMap { $0.codeFindings ?? [] }
+                    if !codeFindings.isEmpty {
+                        GroupBox("Security review") {
+                            VStack(alignment: .leading, spacing: 12) {
+                                Text("\(codeFindings.count) potential security issue\(codeFindings.count == 1 ? "" : "s") in agent-generated code")
+                                    .font(.headline)
+                                Text("These findings require review. A pattern match does not prove the code is exploitable.")
+                                    .font(.caption).foregroundStyle(.secondary)
+                                ForEach(codeFindings) { finding in
+                                    HStack(alignment: .top, spacing: 10) {
+                                        Image(systemName: "exclamationmark.shield.fill")
+                                            .foregroundStyle(Color.agrSeverity(finding.severity))
+                                        VStack(alignment: .leading, spacing: 3) {
+                                            Text(finding.title).font(.body.weight(.semibold))
+                                            Text("Line \(finding.line) · \(finding.severity.uppercased())")
+                                                .font(.caption).foregroundStyle(.secondary)
+                                            Text(finding.evidence).font(.system(.caption, design: .monospaced))
+                                                .textSelection(.enabled)
+                                        }
+                                        Spacer()
+                                    }
+                                }
+                            }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                        }
+                    }
                     if let command = incident.command {
                         GroupBox("完整命令") {
                             ScrollView(.horizontal) {
