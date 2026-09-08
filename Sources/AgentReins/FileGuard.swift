@@ -74,7 +74,7 @@ final class FileGuard: ObservableObject {
     private func poll() {
         let fm = FileManager.default
         let rules = currentRules
-        var pending: [(rule: Rule, path: String, op: String, action: String, before: String?, after: String?, diff: String?)] = []
+        var pending: [(rule: Rule, path: String, op: String, action: String, before: String?, after: String?, diff: String?, findings: [CodeFinding])] = []
         for rule in rules where rule.isProtect {
             for w in rule.watch ?? [] {
                 let url = URL(fileURLWithPath: (w as NSString).expandingTildeInPath)
@@ -93,7 +93,7 @@ final class FileGuard: ObservableObject {
                         lastContent[url.path] = textContent(at: url)
                         lock.unlock()
                         pending.append((rule, url.path, "delete", "restored", before, nil,
-                                        makeDiff(before: before, after: nil)))
+                                        makeDiff(before: before, after: nil), []))
                     }
                 } else {
                     let now = mtime(of: url.path)
@@ -107,6 +107,7 @@ final class FileGuard: ObservableObject {
                     if let last, last < now {
                         if rule.opsSet.contains("modify") {
                             let diff = makeDiff(before: before, after: current)
+                            let findings = CodeSecurityScanner.scan(path: url.path, before: before, after: current)
                             if rule.restore == true, fm.fileExists(atPath: backup.path) {
                                 try? fm.removeItem(at: url)
                                 try? fm.copyItem(at: backup, to: url)   // 还原修改
@@ -114,9 +115,9 @@ final class FileGuard: ObservableObject {
                                 lastMtime[url.path] = mtime(of: url.path)
                                 lastContent[url.path] = textContent(at: url)
                                 lock.unlock()
-                                pending.append((rule, url.path, "modify", "restored", before, current, diff))
+                                pending.append((rule, url.path, "modify", "restored", before, current, diff, findings))
                             } else {
-                                pending.append((rule, url.path, "modify", "alert", before, current, diff))
+                                pending.append((rule, url.path, "modify", "alert", before, current, diff, findings))
                             }
                         }
                     }
@@ -130,7 +131,7 @@ final class FileGuard: ObservableObject {
             DispatchQueue.main.async {
                 for item in pending {
                     self.emit(rule: item.rule, path: item.path, op: item.op, action: item.action,
-                              before: item.before, after: item.after, diff: item.diff)
+                              before: item.before, after: item.after, diff: item.diff, findings: item.findings)
                 }
             }
         }
@@ -171,11 +172,14 @@ final class FileGuard: ObservableObject {
     // MARK: - 主线程 UI 更新
 
     private func emit(rule: Rule, path: String, op: String, action: String,
-                      before: String?, after: String?, diff: String?) {
-        let sev = rule.severity.isEmpty ? "high" : rule.severity
+                      before: String?, after: String?, diff: String?, findings: [CodeFinding]) {
+        let rank = ["medium": 1, "high": 2, "critical": 3]
+        let findingSeverity = findings.max { rank[$0.severity, default: 0] < rank[$1.severity, default: 0] }?.severity
+        let sev = findingSeverity ?? (rule.severity.isEmpty ? "high" : rule.severity)
         let ev = GuardEvent(kind: "file", ruleId: rule.id, path: path, command: nil, agent: nil,
                             op: op, severity: sev, ts: Date(), action: action,
                             beforeContent: before, afterContent: after, fileDiff: diff,
+                            codeFindings: findings,
                             source: "fileguard")
         events.insert(ev, at: 0)
         if events.count > 200 { events.removeLast() }

@@ -58,6 +58,7 @@ struct GuardEvent: Identifiable, Codable {
     let beforeContent: String?
     let afterContent: String?
     let fileDiff: String?
+    let codeFindings: [CodeFinding]?
     let source: String?
 
     init(id: UUID = UUID(), kind: String, ruleId: String, path: String,
@@ -68,6 +69,7 @@ struct GuardEvent: Identifiable, Codable {
          toolName: String? = nil, model: String? = nil, inputTokens: Int? = nil,
          outputTokens: Int? = nil, cachedTokens: Int? = nil, reasoningTokens: Int? = nil,
          beforeContent: String? = nil, afterContent: String? = nil, fileDiff: String? = nil,
+         codeFindings: [CodeFinding]? = nil,
          source: String? = nil) {
         self.id = id
         self.kind = kind
@@ -97,6 +99,7 @@ struct GuardEvent: Identifiable, Codable {
         self.beforeContent = beforeContent
         self.afterContent = afterContent
         self.fileDiff = fileDiff
+        self.codeFindings = codeFindings
         self.source = source
     }
 }
