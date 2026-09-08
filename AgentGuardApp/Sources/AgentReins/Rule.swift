@@ -29,8 +29,8 @@ struct RuleWrapper: Decodable {
 }
 
 /// 监控事件（文件层 / 命令层共用，用于 UI 统一时间线展示）。
-struct GuardEvent: Identifiable {
-    let id = UUID()
+struct GuardEvent: Identifiable, Codable {
+    let id: UUID
     let kind: String          // "file" | "cmd"
     let ruleId: String
     let path: String          // 文件层：受保护路径；命令层填 "-"
@@ -40,4 +40,56 @@ struct GuardEvent: Identifiable {
     let severity: String      // critical | high | medium | info
     let ts: Date
     let action: String        // restored | alert | seen
+    let sessionId: String?
+    let traceId: String?
+    let turnId: String?
+    let toolCallId: String?
+    let userIntent: String?
+    let modelDecision: String?
+    let modelReasoning: String?
+    let modelPrompt: String?
+    let modelResponse: String?
+    let toolName: String?
+    let model: String?
+    let inputTokens: Int?
+    let outputTokens: Int?
+    let cachedTokens: Int?
+    let reasoningTokens: Int?
+    let source: String?
+
+    init(id: UUID = UUID(), kind: String, ruleId: String, path: String,
+         command: String?, agent: String?, op: String, severity: String,
+         ts: Date, action: String, sessionId: String? = nil, traceId: String? = nil, turnId: String? = nil,
+         toolCallId: String? = nil, userIntent: String? = nil, modelDecision: String? = nil,
+         modelReasoning: String? = nil, modelPrompt: String? = nil, modelResponse: String? = nil,
+         toolName: String? = nil, model: String? = nil, inputTokens: Int? = nil,
+         outputTokens: Int? = nil, cachedTokens: Int? = nil, reasoningTokens: Int? = nil,
+         source: String? = nil) {
+        self.id = id
+        self.kind = kind
+        self.ruleId = ruleId
+        self.path = path
+        self.command = command
+        self.agent = agent
+        self.op = op
+        self.severity = severity
+        self.ts = ts
+        self.action = action
+        self.sessionId = sessionId
+        self.traceId = traceId
+        self.turnId = turnId
+        self.toolCallId = toolCallId
+        self.userIntent = userIntent
+        self.modelDecision = modelDecision
+        self.modelReasoning = modelReasoning
+        self.modelPrompt = modelPrompt
+        self.modelResponse = modelResponse
+        self.toolName = toolName
+        self.model = model
+        self.inputTokens = inputTokens
+        self.outputTokens = outputTokens
+        self.cachedTokens = cachedTokens
+        self.reasoningTokens = reasoningTokens
+        self.source = source
+    }
 }

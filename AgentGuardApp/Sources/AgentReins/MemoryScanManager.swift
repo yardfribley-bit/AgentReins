@@ -23,11 +23,12 @@ final class MemoryScanManager: ObservableObject {
     @Published var lastScan: Date?
     @Published var scanning = false
     @Published var autoScan = true
+    var onFindings: (([MemoryFinding], Date) -> Void)?
     private var timer: Timer?
     private let autoInterval: TimeInterval = 86400  // 24h
     private var currentRules: [MemoryRule] = []
     /// 当前正在运行的扫描子进程（用于退出时强杀，避免残留 python 进程）。
-    private static var scanProcess: Process?
+    nonisolated(unsafe) private static var scanProcess: Process?
 
     /// 脚本优先从 App bundle 取，开发期回退到项目内脚本。
     private func scriptURL() -> URL? {
@@ -117,9 +118,11 @@ final class MemoryScanManager: ObservableObject {
                 guard let self else { return }
                 self.files = resultFiles
                 self.findings = resultFindings
-                self.lastScan = Date()
+                let scanDate = Date()
+                self.lastScan = scanDate
                 self.scanning = false
                 MemoryScanManager.scanProcess = nil
+                self.onFindings?(resultFindings, scanDate)
                 if !resultFindings.isEmpty {
                     self.notify(title: "AgentReins 记忆体审计", body: "发现 \(resultFindings.count) 处敏感信息（密钥/令牌）")
                 }
@@ -161,7 +164,7 @@ final class MemoryScanManager: ObservableObject {
     func editFile(path: String, content: String, completion: @escaping () -> Void) {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             let url = URL(fileURLWithPath: path)
-            self?.backupAndWrite(url: url, content: content)
+            Self.backupAndWrite(url: url, content: content)
             DispatchQueue.main.async {
                 self?.runScan(rules: self?.currentRules)
                 completion()
@@ -216,7 +219,7 @@ final class MemoryScanManager: ObservableObject {
                     lines.remove(at: i)
                 }
             }
-            self?.backupAndWrite(url: url, content: lines.joined(separator: "\n"))
+            Self.backupAndWrite(url: url, content: lines.joined(separator: "\n"))
             DispatchQueue.main.async {
                 self?.runScan(rules: self?.currentRules)
                 completion()
@@ -224,7 +227,7 @@ final class MemoryScanManager: ObservableObject {
         }
     }
 
-    private func backupAndWrite(url: URL, content: String) {
+    nonisolated private static func backupAndWrite(url: URL, content: String) {
         let bak = URL(fileURLWithPath: url.path + ".agentreins.bak")
         try? FileManager.default.removeItem(at: bak)
         try? FileManager.default.copyItem(at: url, to: bak)
@@ -275,9 +278,6 @@ final class MemoryScanManager: ObservableObject {
     }
 
     private func notify(title: String, body: String) {
-        let n = NSUserNotification()
-        n.title = title
-        n.informativeText = body
-        NSUserNotificationCenter.default.deliver(n)
+        AppNotifier.send(title: title, body: body)
     }
 }

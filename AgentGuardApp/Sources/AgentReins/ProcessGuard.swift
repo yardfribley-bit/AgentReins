@@ -15,8 +15,11 @@ struct CmdRule {
 final class ProcessGuard: ObservableObject {
     @Published var events: [GuardEvent] = []
     @Published var running = false
+    @Published private(set) var activeAgents: [String] = []
+    var onEvent: ((GuardEvent) -> Void)?
 
     private var timer: Timer?
+    private var snapshotInFlight = false
     private var seen: Set<String> = []
     private var currentCmdRules: [CmdRule] = []
     private let agentMarkers = ["codex", "kiro", "cursor", "workbuddy", "claude", "aider", "windsurf", "trae"]
@@ -56,11 +59,17 @@ final class ProcessGuard: ObservableObject {
         guard !running else { return }
         running = true
         // ps 的子进程调用放到后台线程，避免主线程阻塞（首次 ps 触发 TCC 时不会卡 UI）。
-        timer = Timer.scheduledTimer(withTimeInterval: 1.0, repeats: true) { [weak self] _ in
-            guard let self else { return }
-            DispatchQueue.global(qos: .utility).async {
-                let procs = self.getProcs()
-                Task { @MainActor in self.process(procs: procs) }
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                guard let self, !self.snapshotInFlight else { return }
+                self.snapshotInFlight = true
+                DispatchQueue.global(qos: .utility).async {
+                    let procs = self.getProcs()
+                    Task { @MainActor in
+                        self.process(procs: procs)
+                        self.snapshotInFlight = false
+                    }
+                }
             }
         }
     }
@@ -69,22 +78,38 @@ final class ProcessGuard: ObservableObject {
         running = false
         timer?.invalidate()
         timer = nil
+        snapshotInFlight = false
     }
 
     // MARK: - 内部
 
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
     private func process(procs: [(pid: String, ppid: String, cmd: String)]) {
+        let detectedAgents = Array(Set(procs.compactMap { attribute(procs: procs, pid: $0.pid) })).sorted()
+        if detectedAgents != activeAgents { activeAgents = detectedAgents }
         for p in procs {
             if seen.contains(p.cmd) { continue }
             seen.insert(p.cmd)
-            for r in currentCmdRules where r.regex.firstMatch(in: p.cmd,
-                    range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil {
-                let agent = attribute(procs: procs, pid: p.pid)
+            let agent = attribute(procs: procs, pid: p.pid)
+            let matched = currentCmdRules.filter { $0.regex.firstMatch(in: p.cmd,
+                range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil }
+            for r in matched {
                 emit(rule: r, command: p.cmd, agent: agent)
+            }
+            if matched.isEmpty, let agent, isUserActivity(p.cmd) {
+                emitActivity(command: p.cmd, agent: agent)
             }
         }
         if seen.count > 5000 { seen.removeAll() }
+    }
+
+    /// 过滤 Agent 自身常驻服务，只保留能帮助用户理解“它正在做什么”的短生命周期命令。
+    private func isUserActivity(_ command: String) -> Bool {
+        let text = command.lowercased()
+        let noise = ["crashpad", "mcp-server", "--prewarm", "electron framework", "agentreins", "ps -eo"]
+        if noise.contains(where: text.contains) { return false }
+        let activity = ["/bin/zsh", "/bin/bash", "python", "node ", "git ", "curl ", "wget ", "swift ", "npm ", "npx ", "make "]
+        return activity.contains(where: text.contains)
     }
 
     private nonisolated func getProcs() -> [(pid: String, ppid: String, cmd: String)] {
@@ -131,13 +156,19 @@ final class ProcessGuard: ObservableObject {
                             op: "exec", severity: rule.severity, ts: Date(), action: "seen")
         events.insert(ev, at: 0)
         if events.count > 300 { events.removeLast() }
+        onEvent?(ev)
         notify(title: "AgentReins 监测到命令", body: "\(rule.message) · \(command)")
     }
 
+    private func emitActivity(command: String, agent: String) {
+        let ev = GuardEvent(kind: "activity", ruleId: "activity_process", path: "-", command: command,
+                            agent: agent, op: "exec", severity: "info", ts: Date(), action: "observed")
+        events.insert(ev, at: 0)
+        if events.count > 300 { events.removeLast() }
+        onEvent?(ev)
+    }
+
     private func notify(title: String, body: String) {
-        let n = NSUserNotification()
-        n.title = title
-        n.informativeText = body
-        NSUserNotificationCenter.default.deliver(n)
+        AppNotifier.send(title: title, body: body)
     }
 }

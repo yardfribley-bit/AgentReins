@@ -12,6 +12,7 @@ final class FileGuard: ObservableObject {
     @Published var events: [GuardEvent] = []
     @Published var running = false
     var currentRules: [Rule] = []
+    var onEvent: ((GuardEvent) -> Void)?
     private let backupRoot: URL
     private let bgQueue = DispatchQueue(label: "com.agentspec.fileguard.bg", qos: .utility)
     private var timer: Timer?
@@ -129,13 +130,11 @@ final class FileGuard: ObservableObject {
                             op: op, severity: sev, ts: Date(), action: action)
         events.insert(ev, at: 0)
         if events.count > 200 { events.removeLast() }
+        onEvent?(ev)
         notify(title: "AgentReins 已干预", body: "\(action) · \(op) · \(path)")
     }
 
     private func notify(title: String, body: String) {
-        let n = NSUserNotification()
-        n.title = title
-        n.informativeText = body
-        NSUserNotificationCenter.default.deliver(n)
+        AppNotifier.send(title: title, body: body)
     }
 }

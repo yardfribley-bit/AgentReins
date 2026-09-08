@@ -14,6 +14,7 @@ cp .build/release/AgentReins AgentReins.app/Contents/MacOS/AgentReins
 chmod +x AgentReins.app/Contents/MacOS/AgentReins
 cp ../agentguard/agentguard-memory-scan.py AgentReins.app/Contents/Resources/ 2>/dev/null || \
   cp /Users/jatsmith/AgentSpec/agentguard/agentguard-memory-scan.py AgentReins.app/Contents/Resources/
+cp Assets/AgentReins.icns AgentReins.app/Contents/Resources/AgentReins.icns
 
 # 版本与构建日期：每次打包自动写入，便于用户判断手里的 .app 是否最新
 BUILD_DATE=$(date "+%Y-%m-%d %H:%M")
@@ -32,6 +33,8 @@ cat > AgentReins.app/Contents/Info.plist <<EOF
   <key>CFBundleShortVersionString</key><string>$SHORT_VER</string>
   <key>AGRBuiltDate</key><string>$BUILD_DATE</string>
   <key>CFBundleExecutable</key><string>AgentReins</string>
+  <key>CFBundleIconFile</key><string>AgentReins</string>
+  <key>CFBundleIconName</key><string>AgentReins</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>LSMinimumSystemVersion</key><string>13.0</string>
   <key>NSHighResolutionCapable</key><true/>

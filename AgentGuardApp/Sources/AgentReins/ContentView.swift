@@ -1,692 +1,708 @@
 import SwiftUI
 
-struct ContentView: View {
-    @EnvironmentObject var store: RuleStore
-    @EnvironmentObject var fileGuard: FileGuard
-    @EnvironmentObject var processGuard: ProcessGuard
-    @EnvironmentObject var memoryScan: MemoryScanManager
-    @EnvironmentObject var memoryRuleStore: MemoryRuleStore
-
-    @AppStorage("agr_useLLM") private var useLLM = false
-    @AppStorage("agr_baseURL") private var baseURL = "https://openrouter.ai/api/v1"
-    @AppStorage("agr_model") private var model = "tencent/hy4-preview"
-    @AppStorage("agr_apiKey") private var apiKey = ""
-
-    @State private var nlText = ""
-    @State private var showConfig = false
-    @State private var busy = false
-    @State private var status = ""
-    @State private var rightTab = "rules"          // 默认直接展示「拦截规则」，让用户一眼看到在拦什么
-    @State private var banner: GuardEvent? = nil    // 拦截/还原时的强提示横幅
-
-    // 添加自定义记忆体规则
-    @State private var showAddMemoryRule = false
-    @State private var newMemName = ""
-    @State private var newMemPattern = ""
-    @State private var newMemDesc = ""
-    @State private var newMemSeverity = "high"
-
-    // 记忆体 Inspector 选中状态
-    @State private var selectedPath: String? = nil
-    @State private var selectedFile: MemoryFile? = nil
-    @State private var selectedContent: String? = nil
-    @State private var selectedHit: MemoryFinding? = nil
-    @State private var showingEditor = false
-
-    private let df: DateFormatter = {
-        let f = DateFormatter(); f.dateFormat = "HH:mm:ss"; return f
-    }()
-
-    private var appVersion: String {
-        let v = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "1.0"
-        let b = Bundle.main.infoDictionary?["CFBundleVersion"] as? String ?? "1"
-        return "v\(v) (build \(b))"
-    }
-    private var buildDateText: String {
-        Bundle.main.infoDictionary?["AGRBuiltDate"] as? String ?? ""
-    }
-
-    /// 文件层 + 命令层事件合并为统一时间线（按时间倒序）。
-    private var timeline: [GuardEvent] {
-        (fileGuard.events + processGuard.events).sorted { $0.ts > $1.ts }
-    }
-
-    // 状态栏计数
-    private var protectedFiles: Int { store.rules.filter { $0.kind == "file" }.count }
-    private var cmdRuleCount: Int { store.rules.filter { $0.kind == "cmd" }.count + ProcessGuard.builtin.count }
-    private var eventCount: Int { fileGuard.events.count + processGuard.events.count }
-
-    var body: some View {
-        HSplitView {
-            // 左：规则设置 + 列表
-            VStack(alignment: .leading, spacing: 12) {
-                Text("AgentReins · 编码智能体护栏").font(.headline)
-                Text("用自然语言描述一条规则，例如：\n「agent 不允许 删除 修改 我项目中的 .env 文件」")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-
-                TextField("用自然语言描述规则…", text: $nlText, axis: .vertical)
-                    .textFieldStyle(.roundedBorder)
-                    .frame(minHeight: 48)
-
-                Toggle("使用 LLM 解析（更准，需自己的模型 key）", isOn: $useLLM)
-                DisclosureGroup("模型配置（可填任意 OpenAI 兼容服务）", isExpanded: $showConfig) {
-                    VStack(alignment: .leading, spacing: 6) {
-                        Text("Base URL").font(.caption2).foregroundStyle(.secondary)
-                        TextField("https://openrouter.ai/api/v1", text: $baseURL)
-                            .textFieldStyle(.roundedBorder)
-                        Text("模型名").font(.caption2).foregroundStyle(.secondary)
-                        TextField("tencent/hy4-preview", text: $model)
-                            .textFieldStyle(.roundedBorder)
-                        Text("API Key").font(.caption2).foregroundStyle(.secondary)
-                        SecureField("留空则用本地解析", text: $apiKey)
-                            .textFieldStyle(.roundedBorder)
-                        Text("支持 OpenRouter / OpenAI / DeepSeek / 本地 Ollama(/v1) 等任意 OpenAI 兼容接口。")
-                            .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-                    }
-                }
-                if useLLM && apiKey.isEmpty {
-                    Text("已开启 LLM 但没填 Key，将自动用本地解析。").font(.caption2).foregroundStyle(.orange)
-                }
-
-                HStack {
-                    Button(busy ? "解析中…" : "添加规则") { addRule() }
-                        .disabled(busy || nlText.trimmingCharacters(in: .whitespaces).isEmpty)
-                    Button(fileGuard.running ? "停止监控" : "启动监控") {
-                        if fileGuard.running {
-                            fileGuard.stop(); processGuard.stop()
-                        } else {
-                            fileGuard.start(); processGuard.start()
-                        }
-                    }
-                    .buttonStyle(.borderedProminent)
-                }
-
-                if !status.isEmpty {
-                    Text(status).font(.caption).foregroundStyle(.orange).fixedSize(horizontal: false, vertical: true)
-                }
-
-                Divider()
-                HStack {
-                    Text("规则库").font(.subheadline.bold())
-                    Spacer()
-                    Text("\(store.rules.count + memoryRuleStore.rules.count) 条")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                List {
-                    Section("Agent 规则") {
-                        if store.rules.isEmpty {
-                            Text("暂无。用左侧自然语言添加，例如「保护 ~/Projects/.env 不被删除」")
-                                .font(.caption).foregroundStyle(.secondary)
-                        }
-                        ForEach(store.rules) { r in
-                            VStack(alignment: .leading, spacing: 3) {
-                                HStack(spacing: 6) {
-                                    Circle().fill(Color.agrSeverity(r.severity.isEmpty ? "high" : r.severity))
-                                        .frame(width: 8, height: 8)
-                                    Text(r.message).font(.body)
-                                }
-                                HStack(spacing: 6) {
-                                    Label(r.kindLabel, systemImage: "flag").foregroundStyle(.secondary)
-                                    if let ops = r.ops { Label(ops.joined(separator: ","), systemImage: "bolt") }
-                                    Label(r.action.agrActionLabel, systemImage: "shield")
-                                }.font(.caption2).foregroundStyle(.secondary)
-                                if let nl = r.naturalLanguage {
-                                    Text("↳ \(nl)").font(.caption2).foregroundStyle(.tertiary)
-                                }
-                            }
-                        }
-                        .onDelete { indices in
-                            for i in indices { store.remove(store.rules[i]) }
-                        }
-                    }
-
-                    Section("记忆体规则") {
-                        if memoryRuleStore.rules.isEmpty {
-                            Text("暂无记忆体规则").font(.caption).foregroundStyle(.secondary)
-                        }
-                        ForEach(memoryRuleStore.rules) { r in
-                            HStack(alignment: .top, spacing: 8) {
-                                Toggle("", isOn: Binding(
-                                    get: { r.enabled },
-                                    set: { _ in memoryRuleStore.toggle(r) }
-                                ))
-                                .toggleStyle(.checkbox)
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(r.name).font(.body)
-                                    Text(r.description)
-                                        .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
-                                    Text(r.pattern)
-                                        .font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
-                                }
-                                Spacer()
-                                if !isBuiltInMemoryRule(r) {
-                                    Button { memoryRuleStore.remove(r) } label: {
-                                        Image(systemName: "trash").foregroundStyle(.secondary)
-                                    }
-                                    .buttonStyle(.plain)
-                                }
-                            }
-                        }
-
-                        DisclosureGroup("添加自定义规则", isExpanded: $showAddMemoryRule) {
-                            VStack(alignment: .leading, spacing: 6) {
-                                TextField("规则名称", text: $newMemName)
-                                TextField("描述", text: $newMemDesc)
-                                TextField("正则表达式", text: $newMemPattern)
-                                Picker("严重级", selection: $newMemSeverity) {
-                                    Text("critical").tag("critical")
-                                    Text("high").tag("high")
-                                    Text("medium").tag("medium")
-                                    Text("info").tag("info")
-                                }
-                                .pickerStyle(.segmented)
-                                Button("添加") { addMemoryRule() }
-                                    .disabled(newMemName.isEmpty || newMemPattern.isEmpty)
-                            }
-                            .textFieldStyle(.roundedBorder)
-                            .padding(.top, 4)
-                        }
-
-                        Button("恢复默认规则") { memoryRuleStore.resetToDefaults() }
-                            .font(.caption)
-                    }
-                }
-                .listStyle(.inset(alternatesRowBackgrounds: true))
-
-                Divider()
-                VStack(alignment: .leading, spacing: 2) {
-                    HStack(spacing: 4) {
-                        Image(systemName: "shippingbox").foregroundStyle(.tertiary)
-                        Text("\(appVersion) · 开发编译版（未公证，非发布版）").font(.caption2).foregroundStyle(.tertiary)
-                    }
-                    if !buildDateText.isEmpty {
-                        Text("构建于 \(buildDateText) · 重新打包后会更新此时间，可据此判断是否最新")
-                            .font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
-            }
-            .padding(14)
-            .frame(minWidth: 380)
-
-            // 右：状态栏 + 强提示横幅 + 分段视图
-            VStack(alignment: .leading, spacing: 10) {
-                // 状态栏
-                HStack(spacing: 14) {
-                    let active = fileGuard.running || processGuard.running
-                    Label(active ? "监控中" : "未启动",
-                          systemImage: active ? "dot.radiowaves.left.and.right" : "pause.circle")
-                        .foregroundStyle(active ? .green : .secondary)
-                        .font(.subheadline.bold())
-                    Divider().frame(height: 18)
-                    Label("受保护文件 \(protectedFiles)", systemImage: "doc.badge.lock")
-                    Label("命令规则 \(cmdRuleCount)", systemImage: "terminal")
-                    Label("记忆体规则 \(memoryRuleStore.enabledRules.count)", systemImage: "key")
-                    Label("事件 \(eventCount)", systemImage: "list.bullet")
-                    Label("密钥命中 \(memoryScan.findings.count)", systemImage: "key.fill")
-                        .foregroundColor(memoryScan.findings.isEmpty ? Color.secondary : Color.red)
-                }
-                .font(.caption).foregroundStyle(.secondary)
-                .padding(.vertical, 2)
-
-                // 强提示横幅：拦截/还原时高亮
-                if let b = banner {
-                    HStack(spacing: 10) {
-                        Image(systemName: b.kind == "cmd" ? "terminal.fill" : "exclamationmark.triangle.fill")
-                            .foregroundStyle(Color.agrSeverity(b.severity))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(" AgentReins 已处置：\(b.action.agrActionLabel)").font(.subheadline.bold())
-                            Text(b.kind == "cmd" ? (b.command ?? "") : "\(b.op) · \(b.path)")
-                                .font(.caption).foregroundStyle(.secondary).lineLimit(2)
-                        }
-                        Spacer()
-                        Button { banner = nil } label: { Image(systemName: "xmark.circle.fill").foregroundStyle(.secondary) }
-                    }
-                    .padding(10)
-                    .background(RoundedRectangle(cornerRadius: 8)
-                        .fill(Color.agrSeverity(b.severity).opacity(0.12)))
-                    .overlay(RoundedRectangle(cornerRadius: 8)
-                        .stroke(Color.agrSeverity(b.severity).opacity(0.5), lineWidth: 1))
-                }
-
-                Picker("视图", selection: $rightTab) {
-                    Text("拦截规则").tag("rules")
-                    Text("实时运行过程").tag("timeline")
-                    Text("记忆体审计").tag("memory")
-                }
-                .pickerStyle(.segmented)
-                .padding(.bottom, 4)
-
-                if rightTab == "rules" {
-                    rulesView
-                } else if rightTab == "timeline" {
-                    timelineView
-                } else {
-                    memoryView
-                }
-            }
-            .padding(14)
-            .frame(minWidth: 380)
-        }
-        .onReceive(fileGuard.$events) { list in
-            if let e = list.first, e.action == "restored" || e.action == "alert" { banner = e }
-        }
-        .onReceive(processGuard.$events) { list in
-            if let e = list.first, e.severity == "critical" { banner = e }
+private enum CenterPage: String, CaseIterable, Identifiable {
+    case home, sessions, timeline, protection, recovery
+    var id: String { rawValue }
+    func title(english: Bool) -> String {
+        switch self {
+        case .home: return english ? "Overview" : "安全状态"
+        case .sessions: return english ? "Agent Sessions" : "Agent 会话"
+        case .timeline: return english ? "Activity" : "活动时间线"
+        case .protection: return english ? "Protection" : "保护设置"
+        case .recovery: return english ? "Recovery" : "恢复"
         }
     }
-
-    // MARK: - 拦截规则面板
-    private var rulesView: some View {
-        List {
-            Section("文件保护规则（\(store.rules.filter { $0.kind == "file" }.count)）") {
-                if store.rules.filter({ $0.kind == "file" }).isEmpty {
-                    Text("暂无。用左侧自然语言添加，例如「保护 ~/Projects/.env 不被删除」")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                ForEach(store.rules.filter { $0.kind == "file" }) { r in
-                    RuleRow(rule: r)
-                }
-            }
-            Section("命令监测规则（\(store.rules.filter { $0.kind == "cmd" }.count + ProcessGuard.builtin.count)）") {
-                ForEach(ProcessGuard.builtin, id: \.id) { cr in
-                    HStack(alignment: .top, spacing: 8) {
-                        Circle().fill(Color.agrSeverity(cr.severity)).frame(width: 8, height: 8).padding(.top, 5)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(cr.message).font(.body)
-                            HStack(spacing: 6) {
-                                Label("命令", systemImage: "flag").foregroundStyle(.secondary)
-                                Label(cr.severity, systemImage: "exclamationmark.circle")
-                                Label("实时监测（可视化）", systemImage: "eye")
-                            }.font(.caption2).foregroundStyle(.secondary)
-                        }
-                        Spacer()
-                    }
-                }
-                ForEach(store.rules.filter { $0.kind == "cmd" }) { r in
-                    RuleRow(rule: r)
-                }
-            }
-            Section("记忆体检测规则（\(memoryRuleStore.enabledRules.count)/\(memoryRuleStore.rules.count)）") {
-                if memoryRuleStore.enabledRules.isEmpty {
-                    Text("未启用任何记忆体规则。去左侧「记忆体规则」打开开关或添加自定义规则。")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-                ForEach(memoryRuleStore.enabledRules) { r in
-                    HStack(alignment: .top, spacing: 8) {
-                        Circle().fill(Color.agrSeverity(r.severity)).frame(width: 8, height: 8).padding(.top, 5)
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(r.name).font(.body)
-                            Text(r.pattern).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
-                        }
-                        Spacer()
-                    }
-                }
-            }
+    var icon: String {
+        switch self {
+        case .home: return "shield.checkered"
+        case .sessions: return "bubble.left.and.bubble.right"
+        case .timeline: return "clock.arrow.circlepath"
+        case .protection: return "lock.shield"
+        case .recovery: return "arrow.uturn.backward.circle"
         }
-        .listStyle(.inset(alternatesRowBackgrounds: true))
-    }
-
-    // MARK: - 实时运行过程时间线
-    private var timelineView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            let active = fileGuard.running || processGuard.running
-            Text(active ? "● 监控中（文件改动 + agent 命令）" : "○ 未启动")
-                .font(.caption).foregroundStyle(active ? .green : .secondary)
-            List {
-                if timeline.isEmpty {
-                    Text("暂无事件").foregroundStyle(.secondary).font(.caption)
-                }
-                ForEach(timeline) { ev in
-                    HStack(alignment: .top, spacing: 8) {
-                        Image(systemName: ev.kind == "cmd" ? "terminal" : (ev.action == "restored" ? "arrow.uturn.backward" : "exclamationmark.triangle"))
-                            .foregroundStyle(Color.agrSeverity(ev.severity))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(ev.kind == "cmd" ? "命令 · \(ev.action.agrActionLabel)" : "\(ev.action.agrActionLabel) · \(ev.op)").font(.body)
-                            if ev.kind == "cmd" {
-                                Text(ev.command ?? "").font(.caption).foregroundStyle(.secondary).lineLimit(3)
-                            } else {
-                                Text(ev.path).font(.caption).foregroundStyle(.secondary)
-                            }
-                            HStack(spacing: 6) {
-                                if let ag = ev.agent { Label(ag, systemImage: "cpu") }
-                                Label(ev.severity, systemImage: "exclamationmark.circle")
-                            }.font(.caption2).foregroundStyle(.tertiary)
-                        }
-                        Spacer()
-                        Text(df.string(from: ev.ts)).font(.caption2).foregroundStyle(.tertiary)
-                    }
-                }
-            }
-            Text("说明：文件改动自动还原（软拦截）；agent 命令实时展示（可视化，硬拦截需 ESF）。\n GUI agent 的 LLM 思考为黑盒，仅能看到其落地的文件/命令。")
-                .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-        }
-    }
-
-    // MARK: - 记忆体 Inspector（结构树 + 内容 + 修正）
-    private var memoryView: some View {
-        VStack(alignment: .leading, spacing: 8) {
-            HStack {
-                Button(memoryScan.scanning ? "扫描中…" : "立即扫描") {
-                    memoryScan.runScan(rules: memoryRuleStore.enabledRules)
-                }
-                .disabled(memoryScan.scanning)
-                Toggle("每日自动", isOn: $memoryScan.autoScan)
-                    .onChange(of: memoryScan.autoScan) { on in
-                        if on {
-                            memoryScan.startAuto { memoryRuleStore.enabledRules }
-                        } else {
-                            memoryScan.stopAuto()
-                        }
-                    }
-                Spacer()
-                if !memoryScan.files.isEmpty {
-                    Label("\(memoryScan.files.count) 文件", systemImage: "doc")
-                        .font(.caption).foregroundStyle(.secondary)
-                }
-            }
-            if let last = memoryScan.lastScan {
-                Text("上次 \(df.string(from: last)) · 命中 \(memoryScan.findings.count) 处")
-                    .font(.caption).foregroundStyle(.secondary)
-            }
-
-            HSplitView {
-                // 左：结构树（按 agent 分组）
-                structureList
-                    .frame(minWidth: 190, idealWidth: 220)
-                // 右：内容 + 修正
-                inspectorDetail
-                    .frame(minWidth: 240)
-            }
-
-            Text("扫描 agent 记忆体（Kiro/Claude/Cursor/Codex）是否保存密钥/令牌。\n需「系统设置 → 隐私与安全性 → 完全磁盘访问权限」授权 AgentReins 才能读 ~/.kiro 等。修正会备份原文件为 .agentreins.bak。")
-                .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-        }
-        .sheet(isPresented: $showingEditor) {
-            if let p = selectedPath {
-                EditorView(path: p, initial: selectedContent ?? "",
-                    onSave: { newContent in
-                        memoryScan.editFile(path: p, content: newContent) { reloadSelected() }
-                        showingEditor = false
-                    },
-                    onCancel: { showingEditor = false })
-            }
-        }
-    }
-
-    private var structureList: some View {
-        List {
-            let groups = MemoryFile.groupByAgent(memoryScan.files)
-            if groups.isEmpty {
-                Text("暂无。点「立即扫描」后查看记忆体结构。")
-                    .foregroundStyle(.secondary).font(.caption)
-            }
-            ForEach(groups, id: \.agent) { g in
-                Section(g.agent) {
-                    ForEach(g.files) { f in
-                        HStack(alignment: .top, spacing: 6) {
-                            Image(systemName: f.kind == "sqlite" ? "database" : "doc.text")
-                                .foregroundStyle(.secondary)
-                            VStack(alignment: .leading, spacing: 2) {
-                                Text(f.rel).font(.caption).lineLimit(1)
-                                HStack(spacing: 6) {
-                                    if f.sensitiveCount > 0 {
-                                        Label("\(f.sensitiveCount)", systemImage: "key.fill")
-                                            .foregroundStyle(.red)
-                                    } else {
-                                        Label("干净", systemImage: "checkmark.shield")
-                                            .foregroundStyle(.green)
-                                    }
-                                    Text("\(f.size)B").font(.caption2).foregroundStyle(.tertiary)
-                                }
-                            }
-                            Spacer()
-                        }
-                        .contentShape(Rectangle())
-                        .onTapGesture { selectFile(f) }
-                        .listRowBackground(selectedPath == f.path ? Color.accentColor.opacity(0.12) : nil)
-                    }
-                }
-            }
-        }
-        .listStyle(.inset(alternatesRowBackgrounds: true))
-    }
-
-    @ViewBuilder
-    private var inspectorDetail: some View {
-        if let f = selectedFile {
-            VStack(alignment: .leading, spacing: 6) {
-                Text(f.rel).font(.subheadline.bold()).lineLimit(2)
-                HStack(spacing: 6) {
-                    Label(f.agent, systemImage: "cpu")
-                    if f.kind == "sqlite" {
-                        Label("二进制库·仅展示命中", systemImage: "eye")
-                    }
-                    Label("\(f.size)B", systemImage: "doc")
-                }.font(.caption).foregroundStyle(.secondary)
-
-                Divider()
-
-                if f.kind == "sqlite" {
-                    sqliteHits(f)
-                } else if let content = selectedContent {
-                    ScrollView { contentLines(content, file: f) }
-                        .frame(maxHeight: 260)
-                } else {
-                    ProgressView("读取中…").font(.caption)
-                }
-
-                Divider()
-                correctionPanel(f)
-            }
-            .padding(.leading, 4)
-        } else {
-            VStack(alignment: .leading, spacing: 6) {
-                Image(systemName: "magnifyingglass").font(.title).foregroundStyle(.tertiary)
-                Text("选择左侧文件查看内容；敏感行高亮，点敏感行可打码/删行。")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
-    /// 文本文件：逐行渲染，命中行高亮，点敏感行选中命中。
-    private func contentLines(_ content: String, file: MemoryFile) -> some View {
-        let lines = content.components(separatedBy: "\n")
-        return VStack(alignment: .leading, spacing: 0) {
-            ForEach(Array(lines.enumerated()), id: \.offset) { idx, line in
-                let ln = idx + 1
-                HStack(alignment: .top, spacing: 6) {
-                    Text("\(ln)").font(.caption2).foregroundStyle(.tertiary)
-                        .frame(width: 30, alignment: .trailing)
-                    Text(line.isEmpty ? " " : line)
-                        .font(.system(.caption, design: .monospaced))
-                        .fixedSize(horizontal: false, vertical: true)
-                    Spacer()
-                }
-                .padding(.vertical, 1)
-                .background(file.hitLines.contains(ln) ? Color.agrSeverity("high").opacity(0.16) : nil)
-                .onTapGesture {
-                    if let h = file.hits.first(where: { $0.line == ln }) { selectedHit = h }
-                }
-            }
-        }
-    }
-
-    /// SQLite 二进制库：不内联编辑，仅列命中（脱敏预览）。
-    private func sqliteHits(_ f: MemoryFile) -> some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 6) {
-                if f.hits.isEmpty {
-                    Text("该库无文本命中。").font(.caption).foregroundStyle(.secondary)
-                }
-                ForEach(f.hits) { h in
-                    HStack(alignment: .top, spacing: 6) {
-                        Image(systemName: "key.fill").foregroundStyle(Color.agrSeverity(h.severity))
-                        VStack(alignment: .leading, spacing: 2) {
-                            Text(h.type).font(.caption)
-                            Text(h.preview).font(.caption2).foregroundStyle(.tertiary)
-                        }
-                    }
-                    .contentShape(Rectangle())
-                    .onTapGesture { selectedHit = h }
-                }
-            }
-        }
-        .frame(maxHeight: 260)
-    }
-
-    /// 修正面板：选中命中→打码/删行/忽略；否则文件级编辑/还原。
-    @ViewBuilder
-    private func correctionPanel(_ f: MemoryFile) -> some View {
-        VStack(alignment: .leading, spacing: 6) {
-            if let h = selectedHit {
-                HStack(spacing: 6) {
-                    Image(systemName: "key.fill").foregroundStyle(.red)
-                    Text(h.type).font(.subheadline.bold())
-                }
-                Text("行 \(h.line) · \(h.preview)")
-                    .font(.caption).foregroundStyle(.secondary)
-                if f.isTextEditable {
-                    HStack {
-                        Button("打码") { memoryScan.redact(h) { reloadSelected() } }
-                            .buttonStyle(.bordered)
-                        Button("删行") { memoryScan.deleteLine(h) { reloadSelected() } }
-                            .buttonStyle(.bordered)
-                        Button("忽略") { selectedHit = nil }
-                            .buttonStyle(.borderless)
-                    }
-                } else {
-                    Text("二进制库不支持内联打码/删行，请手动编辑或用「还原」撤销。")
-                        .font(.caption2).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
-                }
-            } else {
-                Text("选中敏感行可精确打码/删行；或整文件编辑（改前自动备份）。")
-                    .font(.caption).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-                HStack {
-                    Button("编辑全文") { showingEditor = true }
-                        .buttonStyle(.bordered)
-                    if memoryScan.hasBackup(f.path) {
-                        Button("还原 .bak") { memoryScan.restoreBackup(path: f.path) { reloadSelected() } }
-                            .buttonStyle(.bordered)
-                    }
-                }
-            }
-        }
-    }
-
-    private func selectFile(_ f: MemoryFile) {
-        selectedFile = f
-        selectedPath = f.path
-        selectedHit = nil
-        selectedContent = nil
-        memoryScan.loadContent(path: f.path) { c in selectedContent = c }
-    }
-
-    private func reloadSelected() {
-        guard let p = selectedPath else { return }
-        memoryScan.loadContent(path: p) { c in selectedContent = c }
-        selectedFile = memoryScan.files.first { $0.path == p }
-    }
-
-    private func addRule() {
-        let text = nlText.trimmingCharacters(in: .whitespaces)
-        guard !text.isEmpty else { return }
-        busy = true; status = ""
-        Task {
-            var rule: Rule? = nil
-            var warn: String? = nil
-            if useLLM, !apiKey.isEmpty {
-                let cfg = NLParser.LLMConfig(baseURL: baseURL, apiKey: apiKey, model: model)
-                do {
-                    rule = try await NLParser.parseLLM(text, config: cfg)
-                } catch {
-                    rule = NLParser.parseLocal(text)
-                    warn = "云端解析失败（\(error.localizedDescription)），已使用本地解析。"
-                }
-            } else {
-                rule = NLParser.parseLocal(text)
-            }
-            if let r = rule {
-                await MainActor.run {
-                    store.add(r)
-                    fileGuard.setRules(store.rules)
-                    processGuard.setRules(store.rules)
-                    nlText = ""
-                    status = (warn ?? "") + (warn == nil ? "" : "\n") + "已添加：\(r.message)"
-                }
-            }
-            await MainActor.run { busy = false }
-        }
-    }
-
-    private func addMemoryRule() {
-        let name = newMemName.trimmingCharacters(in: .whitespaces)
-        let pat = newMemPattern.trimmingCharacters(in: .whitespaces)
-        guard !name.isEmpty && !pat.isEmpty else { return }
-        let rid = "custom_\(UUID().uuidString.prefix(8))"
-        let rule = MemoryRule(id: rid, name: name, description: newMemDesc,
-                              pattern: pat, severity: newMemSeverity, enabled: true)
-        memoryRuleStore.add(rule)
-        newMemName = ""; newMemPattern = ""; newMemDesc = ""; newMemSeverity = "high"
-        showAddMemoryRule = false
-    }
-
-    private func isBuiltInMemoryRule(_ r: MemoryRule) -> Bool {
-        MemoryRuleStore.builtInRules().contains(where: { $0.id == r.id })
     }
 }
 
-/// 单条规则行（拦截规则面板复用）。
-private struct RuleRow: View {
-    let rule: Rule
+struct ContentView: View {
+    @EnvironmentObject private var store: RuleStore
+    @EnvironmentObject private var fileGuard: FileGuard
+    @EnvironmentObject private var processGuard: ProcessGuard
+    @EnvironmentObject private var eventStore: EventStore
+    @EnvironmentObject private var workBuddySight: WorkBuddySight
+    @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
+    @EnvironmentObject private var memoryScan: MemoryScanManager
+    @EnvironmentObject private var memoryRuleStore: MemoryRuleStore
+
+    @AppStorage("agr_protectionMode") private var protectionMode = "recommended"
+    @AppStorage("agr_onboardingComplete") private var onboardingComplete = false
+    @State private var page: CenterPage? = .home
+    @State private var ruleText = ""
+    @State private var ruleFeedback = ""
+    @State private var dismissedEventIDs = Set<UUID>()
+    @State private var selectedIncident: SecurityIncident?
+    @State private var selectedSession: AgentSessionSnapshot?
+    @State private var openRouterKey = ""
+    @State private var analysisModel = "openai/gpt-4o-mini"
+    @State private var modelFeedback = ""
+
+    private var events: [GuardEvent] {
+        eventStore.events
+    }
+    private var todayEvents: [GuardEvent] { eventStore.events(on: Date()) }
+    private var incidents: [SecurityIncident] { eventStore.incidents }
+    private var sessions: [AgentSessionSnapshot] { eventStore.sessions }
+    private var riskIncidents: [SecurityIncident] { incidents.filter { $0.severity != "info" } }
+    private var activityIncidents: [SecurityIncident] { incidents.filter { $0.severity == "info" } }
+    private var todayIncidents: [SecurityIncident] { SecurityIncident.correlate(todayEvents) }
+    private var attentionIncident: SecurityIncident? {
+        riskIncidents.first { ($0.severity == "critical" || $0.severity == "high") && !dismissedEventIDs.contains($0.id) }
+    }
+    private var isRunning: Bool { fileGuard.running || processGuard.running }
+    private let english = true
+    private func l(_ en: String, _ localizedFallback: String) -> String { en }
+
     var body: some View {
-        HStack(alignment: .top, spacing: 8) {
-            Circle().fill(Color.agrSeverity(rule.severity.isEmpty ? "high" : rule.severity))
-                .frame(width: 8, height: 8).padding(.top, 5)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(rule.message).font(.body)
-                HStack(spacing: 6) {
-                    Label(rule.kindLabel, systemImage: "flag").foregroundStyle(.secondary)
-                    Label(rule.severity, systemImage: "exclamationmark.circle")
-                    Label(rule.enforceSummary, systemImage: "shield")
-                }.font(.caption2).foregroundStyle(.secondary)
-                Text(rule.triggerSummary).font(.caption2).foregroundStyle(.tertiary).lineLimit(2)
+        NavigationSplitView {
+            List(CenterPage.allCases, selection: $page) { item in
+                Label(item.title(english: english), systemImage: item.icon).tag(item)
+            }
+            .navigationTitle("AgentReins")
+            .safeAreaInset(edge: .bottom) { localOnlyBadge }
+        } detail: {
+            Group {
+                switch page ?? .home {
+                case .home: home
+                case .sessions: sessionsPage
+                case .timeline: timeline
+                case .protection: protection
+                case .recovery: recovery
+                }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(Color(nsColor: .windowBackgroundColor))
+        }
+        .frame(minWidth: 960, minHeight: 640)
+        .task {
+            guard !isRunning else { return }
+            fileGuard.start()
+            processGuard.start()
+        }
+        .sheet(isPresented: Binding(
+            get: { !onboardingComplete },
+            set: { if !$0 { onboardingComplete = true } }
+        )) { onboarding }
+        .sheet(item: $selectedIncident) { incident in incidentDetail(incident) }
+        .sheet(item: $selectedSession) { session in sessionDetail(session) }
+    }
+
+    private var localOnlyBadge: some View {
+        HStack(spacing: 8) {
+            Image(systemName: "network.slash")
+            VStack(alignment: .leading, spacing: 1) {
+                Text(l("Private by default", "完全本地运行")).font(.caption.bold())
+                Text(l("Activity stays on this Mac", "安全数据不会上传")).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer()
+        }
+        .padding(12).background(.ultraThinMaterial)
+    }
+
+    private var home: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                header(l("See what your AI agent is doing", "看清你的 Agent 正在做什么"), subtitle: l("AgentReins connects intent, model activity, tool calls, and outcomes — in one clear timeline.", "AgentReins 将用户意图、模型活动、工具调用和结果关联在一条清晰时间线上。"))
+                safetyHero
+                liveAgentsCard
+                recentSessions
+                if let incident = attentionIncident { decisionCard(incident) }
+                HStack(spacing: 14) {
+                    metricCard(title: l("Protection", "正在保护"), value: isRunning ? l("Active", "运行中") : l("Paused", "已暂停"), icon: "dot.radiowaves.left.and.right", tint: isRunning ? .green : .secondary)
+                    metricCard(title: l("Today's activity", "今日活动"), value: "\(todayIncidents.count)", icon: "waveform.path.ecg", tint: .blue)
+                    metricCard(title: l("Auto-recovered", "今日自动恢复"), value: "\(todayEvents.filter { $0.action == "restored" }.count)", icon: "arrow.uturn.backward", tint: .purple)
+                }
+                recentActivity
+            }
+            .padding(32).frame(maxWidth: 980, alignment: .leading)
+        }
+    }
+
+    private var recentSessions: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Text(l("Recent agent sessions", "最近 Agent 会话")).font(.headline)
+                Spacer(); Button(l("View all", "查看全部")) { page = .sessions }.buttonStyle(.link)
+            }
+            if sessions.isEmpty {
+                emptyState(l("No connected sessions yet", "暂无可关联会话"), detail: l("AgentSight automatically discovers supported local agents.", "接入 Agent 原生上下文后，会话会出现在这里。"), icon: "bubble.left")
+                    .frame(height: 120)
+            } else {
+                ForEach(sessions.prefix(4)) { session in
+                    Button { selectedSession = session } label: { sessionRow(session) }.buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private var sessionsPage: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header(l("Agent sessions", "Agent 会话"), subtitle: l("Follow every turn from user intent to model response, tool calls, and system impact.", "以用户意图和模型上下文为起点，查看 Agent 的完整执行过程。"))
+            if sessions.isEmpty {
+                emptyState(l("No sessions yet", "暂无会话"), detail: l("AgentSight automatically discovers supported local agents.", "AgentSight 会自动发现支持的本地 Agent 会话。"), icon: "bubble.left.and.bubble.right")
+            } else {
+                List(sessions) { session in
+                    Button { selectedSession = session } label: { sessionRow(session).padding(.vertical, 7) }.buttonStyle(.plain)
+                }.listStyle(.inset)
+            }
+        }.padding(32)
+    }
+
+    private func sessionRow(_ session: AgentSessionSnapshot) -> some View {
+        HStack(spacing: 13) {
+            ZStack {
+                Circle().fill(Color.blue.opacity(0.12))
+                Image(systemName: "sparkles").foregroundStyle(.blue)
+            }.frame(width: 38, height: 38)
+            VStack(alignment: .leading, spacing: 4) {
+                HStack {
+                    Text(session.agent.capitalized).font(.headline)
+                    if let model = session.model { Text(model).font(.caption).foregroundStyle(.secondary) }
+                }
+                Text(session.latestIntent ?? l("User intent wasn't captured", "未采集用户意图")).lineLimit(2).foregroundStyle(.primary)
+                Text(session.plainSummary).font(.callout).foregroundStyle(.secondary).lineLimit(1)
+                Text(english ? "\(session.toolCallCount) actions · \(session.riskCount == 0 ? "No risk found" : "\(session.riskCount) risks found")" : "完成了 \(session.toolCallCount) 次操作 · \(session.riskCount == 0 ? "未发现风险" : "发现 \(session.riskCount) 项风险")")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            Spacer(); Text(session.lastActivityAt, style: .relative).font(.caption).foregroundStyle(.tertiary)
+            Image(systemName: "chevron.right").foregroundStyle(.tertiary)
+        }.contentShape(Rectangle())
+    }
+
+    private func sessionDetail(_ session: AgentSessionSnapshot) -> some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 5) {
+                            Text(session.agent.capitalized).font(.largeTitle.bold())
+                            Text(session.model ?? l("Model not recorded", "模型未记录")).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Label(english ? "\(session.riskCount) risks" : "\(session.riskCount) 项风险", systemImage: session.riskCount == 0 ? "checkmark.shield" : "exclamationmark.shield")
+                            .foregroundStyle(session.riskCount == 0 ? .green : .orange)
+                    }
+                    GroupBox(l("Session context", "会话上下文")) {
+                        VStack(alignment: .leading, spacing: 10) {
+                            contextField(l("Latest user intent", "用户意图"), session.latestIntent ?? l("Not captured", "未采集"))
+                            contextField("Session ID", session.id)
+                            contextField(l("Workspace", "工作区"), session.workspace ?? l("Not recorded", "未记录"))
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                    }
+                    ForEach(session.turns) { turn in turnDetail(turn) }
+                }.padding(28)
+            }.frame(minWidth: 780, minHeight: 650)
+            .toolbar { Button(l("Done", "完成")) { selectedSession = nil } }
+        }
+    }
+
+    private func turnDetail(_ turn: AgentTurn) -> some View {
+        GroupBox {
+            VStack(alignment: .leading, spacing: 16) {
+                HStack(spacing: 18) {
+                    Label(turn.modelNames, systemImage: "cpu")
+                    Divider().frame(height: 18)
+                    Label(english ? "\(turn.contextCharacters.formatted()) context chars" : "上下文 \(turn.contextCharacters.formatted()) 字符", systemImage: "text.alignleft")
+                    Divider().frame(height: 18)
+                    Label(english ? "\(turn.responseCharacters.formatted()) response chars" : "返回 \(turn.responseCharacters.formatted()) 字符", systemImage: "arrow.down.message")
+                    Spacer()
+                }.font(.caption.weight(.medium)).foregroundStyle(.secondary)
+                if let input = turn.inputTokens {
+                    HStack(spacing: 14) {
+                        Label(english ? "\(input.formatted()) input tokens" : "输入 \(input.formatted()) tokens", systemImage: "arrow.up.circle")
+                        if let output = turn.outputTokens { Text(english ? "\(output.formatted()) output" : "输出 \(output.formatted())") }
+                        if let cached = turn.cachedTokens { Text(english ? "\(cached.formatted()) cached" : "缓存命中 \(cached.formatted())") }
+                        if let reasoning = turn.reasoningTokens { Text(english ? "\(reasoning.formatted()) reasoning" : "推理 \(reasoning.formatted())") }
+                        Spacer()
+                    }.font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(l("Exact token usage was not reported for this turn", "本轮未采集到模型上报的精确 Token 用量"))
+                        .font(.caption).foregroundStyle(.tertiary)
+                }
+                aiAnalysisCard(turn)
+                summaryStep(number: "1", title: l("Your instruction", "用户输入的指令"), value: turn.userInput ?? l("Not captured", "未采集"), tint: .blue)
+                evidenceStep(number: "2", title: l("Model context captured by WorkBuddy", "WorkBuddy 已落盘的模型上下文"), value: turn.fullPrompt, tint: .indigo, showPreview: true)
+                summaryStep(number: "3", title: l("Instructions returned by the model", "模型返回的指令"), value: turn.modelInstructionSummary, tint: .purple)
+                summaryStep(number: "4", title: l("Tools & MCP actually called", "Agent 实际调用的 Tool / MCP"), value: turn.executionSummary, tint: .cyan)
+                evidenceStep(number: "5", title: l("Tool execution results", "工具执行结果"), value: turn.toolResultSummary, tint: .teal)
+                evidenceStep(number: "6", title: l("File & code changes", "发现的文件与代码更改"), value: turn.codeChangeSummary, tint: .orange)
+                evidenceStep(number: "7", title: l("Final result", "最终回答与任务结果"), value: turn.finalResponse ?? l("No final response was captured", "未采集到最终回答"), tint: .green, showPreview: true)
+                evidenceStep(number: "8", title: l("Memory retrieved", "记忆读取与隐私唤醒"), value: turn.memoryRetrievalSummary, tint: .pink)
+                evidenceStep(number: "9", title: l("Memory committed", "新增或修改的持久化记忆"), value: turn.memoryCommitSummary, tint: .red)
+
+                DisclosureGroup(l("View complete model & execution evidence", "查看完整模型与执行证据")) {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(turn.exchanges) { exchange in
+                            Divider()
+                            contextField(l("Full prompt sent to the model", "Agent 向大模型发送的完整内容"), exchange.prompt ?? exchange.userIntent ?? l("Not captured", "未采集"))
+                            contextField(l("Full model response", "大模型完整返回"), exchange.response ?? l("No text response recorded", "未记录文本返回"))
+                            contextField(l("Recorded reasoning", "模型推理记录"), exchange.reasoning ?? l("Not logged by the agent", "未落盘"))
+                            contextField(l("Model decision", "模型执行决定"), exchange.decision ?? l("Not recorded", "未记录"))
+                            ForEach(exchange.toolCalls) { call in toolCallView(call) }
+                        }
+                    }.padding(.top, 10)
+                }
+            }.padding(.vertical, 7)
+        } label: {
+            HStack {
+                Text(english ? "Turn \(turn.index)" : "第 \(turn.index) 轮")
+                Spacer(); Text(english ? "\(turn.toolCalls.count) tool calls" : "\(turn.toolCalls.count) 次工具调用").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func aiAnalysisCard(_ turn: AgentTurn) -> some View {
+        if let analysis = semanticAnalyzer.results[turn.id] {
+            VStack(alignment: .leading, spacing: 10) {
+                Label(l("AI summary", "AI 分析结论"), systemImage: "sparkles")
+                    .font(.headline).foregroundStyle(.indigo)
+                contextField(l("Goal", "用户目标"), analysis.goal)
+                contextField(l("Agent actions", "Agent 实际行为"), analysis.actions)
+                contextField(l("Risk", "是否值得关注"), analysis.risk)
+                contextField(l("Recommendation", "用户需要做什么"), analysis.nextStep)
+                if let usage = semanticAnalyzer.usage[turn.id] {
+                    Text(english ? "OpenRouter usage: \(usage.inputTokens.formatted()) input + \(usage.outputTokens.formatted()) output = \(usage.totalTokens.formatted()) tokens" : "OpenRouter 用量：输入 \(usage.inputTokens.formatted()) + 输出 \(usage.outputTokens.formatted()) = 共 \(usage.totalTokens.formatted()) tokens")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 13).fill(Color.indigo.opacity(0.08)))
+        } else {
+            HStack(spacing: 14) {
+                Image(systemName: "sparkles").font(.title2).foregroundStyle(.indigo)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(l("Understand this turn at a glance", "先看懂这一轮发生了什么")).font(.headline)
+                    Text(l("Get a plain-language summary before reviewing the raw evidence.", "AI 会先用普通语言说明目标、行为、风险和建议，再由你查看原始证据。"))
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    Task { await semanticAnalyzer.analyze(turn) }
+                } label: {
+                    Text(semanticAnalyzer.analyzing.contains(turn.id) ? l("Analyzing…", "正在分析…") : l("Analyze", "AI 分析"))
+                }.buttonStyle(.borderedProminent).tint(.indigo)
+                    .disabled(semanticAnalyzer.analyzing.contains(turn.id))
+            }
+            .padding(16).background(RoundedRectangle(cornerRadius: 13).fill(Color.indigo.opacity(0.06)))
+        }
+    }
+
+    private func summaryStep(number: String, title: String, value: String, tint: Color) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            Text(number).font(.caption.bold()).foregroundStyle(.white)
+                .frame(width: 23, height: 23).background(Circle().fill(tint))
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.headline)
+                Text(value).foregroundStyle(.secondary).lineLimit(5)
             }
             Spacer()
         }
     }
-}
 
-/// 全文件编辑 sheet：加载原文，用户改后保存（改前自动备份由 MemoryScanManager 处理）。
-private struct EditorView: View {
-    let path: String
-    let initial: String
-    let onSave: (String) -> Void
-    let onCancel: () -> Void
-    @State private var text: String = ""
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("编辑文件").font(.headline)
-            Text(URL(fileURLWithPath: path).lastPathComponent)
-                .font(.caption).foregroundStyle(.secondary).lineLimit(1)
-            Text("保存会先备份原文件为 .agentreins.bak，可一键还原。")
-                .font(.caption2).foregroundStyle(.tertiary)
-            TextEditor(text: $text)
-                .font(.system(.caption, design: .monospaced))
-                .frame(minWidth: 480, minHeight: 320)
-                .overlay(RoundedRectangle(cornerRadius: 6).stroke(Color.gray.opacity(0.4)))
-            HStack {
-                Spacer()
-                Button("取消", role: .cancel) { onCancel() }
-                Button("保存") {
-                    onSave(text)
+    private func evidenceStep(number: String, title: String, value: String?, tint: Color, showPreview: Bool = false) -> some View {
+        let evidence = value ?? l("Not captured", "未采集")
+        return HStack(alignment: .top, spacing: 12) {
+            Text(number).font(.caption.bold()).foregroundStyle(.white)
+                .frame(width: 23, height: 23).background(Circle().fill(tint))
+            VStack(alignment: .leading, spacing: 5) {
+                Text(title).font(.headline)
+                if showPreview {
+                    Text(english ? "\(evidence.utf8.count.formatted()) bytes captured" : "已采集 \(evidence.utf8.count.formatted()) 字节")
+                        .font(.caption).foregroundStyle(.indigo)
+                    Text(String(evidence.prefix(900)) + (evidence.count > 900 ? "…" : ""))
+                        .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+                        .textSelection(.enabled).lineLimit(12)
+                        .padding(10).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(RoundedRectangle(cornerRadius: 9).fill(tint.opacity(0.06)))
                 }
-                .buttonStyle(.borderedProminent)
-                .disabled(text == initial)
+                DisclosureGroup(l("View complete evidence", "查看完整证据")) {
+                    ScrollView(.horizontal) {
+                        Text(evidence).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            .fixedSize(horizontal: false, vertical: true).frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(maxHeight: 260).padding(.top, 6)
+                }
+            }
+            Spacer()
+        }
+    }
+
+    private func toolCallView(_ call: AgentToolCall) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack { Label(call.friendlyName, systemImage: "function").font(.headline); Spacer(); Text(call.friendlyStatus).font(.caption).foregroundStyle(.secondary) }
+            Text("Function call：\(call.name)").font(.caption).foregroundStyle(.secondary)
+            if let args = call.arguments {
+                ScrollView(.horizontal) { Text(args).font(.system(.caption, design: .monospaced)).textSelection(.enabled).fixedSize(horizontal: true, vertical: false) }
+            }
+            if let result = call.result {
+                DisclosureGroup(l("Tool result", "工具返回")) {
+                    Text(result).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        .frame(maxWidth: .infinity, alignment: .leading).padding(.top, 6)
+                }
+            }
+        }.padding(10).background(RoundedRectangle(cornerRadius: 9).fill(Color.secondary.opacity(0.07)))
+    }
+
+    private func contextField(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).font(.caption.weight(.semibold)).foregroundStyle(.secondary)
+            Text(value).textSelection(.enabled)
+        }
+    }
+
+    private var liveAgentsCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(l("Live agents", "实时 Agent"), systemImage: "dot.radiowaves.left.and.right").font(.headline)
+                Spacer()
+                Text(l("Live", "实时更新")).font(.caption).foregroundStyle(.secondary)
+            }
+            if processGuard.activeAgents.isEmpty {
+                Text(l("No supported agent is running", "当前未识别到运行中的 Agent")).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 10) {
+                    ForEach(processGuard.activeAgents, id: \.self) { agent in
+                        HStack(spacing: 7) {
+                            Circle().fill(Color.green).frame(width: 8, height: 8)
+                            Text(agent.capitalized).font(.callout.weight(.medium))
+                            Text(l("Active", "运行中")).font(.caption).foregroundStyle(.secondary)
+                        }.padding(.horizontal, 11).padding(.vertical, 7)
+                            .background(Capsule().fill(Color.green.opacity(0.09)))
+                    }
+                    Spacer()
+                }
+            }
+            HStack(spacing: 6) {
+                Image(systemName: workBuddySight.connected ? "link.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle(workBuddySight.connected ? .green : .orange)
+                Text(workBuddySight.connected ? l("AgentSight connected to WorkBuddy", "AgentSight · WorkBuddy 会话源已连接") : l("AgentSight is waiting for WorkBuddy", "AgentSight · WorkBuddy 会话源未连接"))
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            if let latest = activityIncidents.first {
+                Divider()
+                Button { selectedIncident = latest } label: {
+                    HStack {
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(l("Latest activity", "最近正常活动")).font(.caption).foregroundStyle(.secondary)
+                            Text(latest.command ?? latest.title).lineLimit(2).font(.system(.callout, design: .monospaced))
+                        }
+                        Spacer(); Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    }
+                }.buttonStyle(.plain)
+            }
+        }.cardStyle()
+    }
+
+    private var safetyHero: some View {
+        HStack(spacing: 18) {
+            ZStack {
+                Circle().fill((attentionIncident == nil ? Color.green : Color.orange).opacity(0.14))
+                Image(systemName: attentionIncident == nil ? "checkmark.shield.fill" : "exclamationmark.shield.fill")
+                    .font(.system(size: 34)).foregroundStyle(attentionIncident == nil ? .green : .orange)
+            }.frame(width: 72, height: 72)
+            VStack(alignment: .leading, spacing: 5) {
+                Text(attentionIncident == nil ? l("You're in control", "一切正常") : l("One action needs your attention", "有一项操作需要注意")).font(.title2.bold())
+                Text(attentionIncident == nil ? l("Agent activity is visible and no action needs your attention.", "Agent 活动清晰可见，目前无需你处理。") : l("Review the plain-English explanation before you decide.", "查看下方说明，然后决定是否信任该操作。"))
+                    .foregroundStyle(.secondary)
+            }
+            Spacer()
+            Button(isRunning ? l("Pause", "暂停保护") : l("Resume", "继续保护")) {
+                if isRunning { fileGuard.stop(); processGuard.stop() }
+                else { fileGuard.start(); processGuard.start() }
+            }.buttonStyle(.bordered)
+        }
+        .padding(22).background(RoundedRectangle(cornerRadius: 18).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+
+    private func decisionCard(_ incident: SecurityIncident) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack {
+                Label(l("Your decision needed", "需要你的决定"), systemImage: "exclamationmark.triangle.fill").font(.headline).foregroundStyle(.orange)
+                Spacer()
+                Text(incident.agent?.capitalized ?? "本机 Agent").font(.caption).padding(.horizontal, 9).padding(.vertical, 4)
+                    .background(Capsule().fill(Color.secondary.opacity(0.12)))
+            }
+            Text(incident.title).font(.title3.bold())
+            Text(incident.summary).foregroundStyle(.secondary)
+            if let command = incident.command {
+                Text(command).font(.system(.callout, design: .monospaced)).textSelection(.enabled).lineLimit(4)
+                    .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+                    .background(RoundedRectangle(cornerRadius: 9).fill(Color.black.opacity(0.06)))
+            } else if incident.primary.path != "-" {
+                Label(incident.primary.path, systemImage: "doc").font(.callout).textSelection(.enabled)
+            }
+            HStack {
+                Button(l("Don't trust", "标记为不信任")) { dismissedEventIDs.insert(incident.id) }.buttonStyle(.borderedProminent).tint(.red)
+                Button(l("Trust once", "仅本次信任")) { dismissedEventIDs.insert(incident.id) }.buttonStyle(.bordered)
+                Spacer(); Button(l("View full trace", "查看完整过程")) { selectedIncident = incident }.buttonStyle(.link)
             }
         }
-        .padding(16)
-        .frame(minWidth: 520, minHeight: 440)
-        .onAppear { text = initial }
+        .padding(22).background(RoundedRectangle(cornerRadius: 18).fill(Color.orange.opacity(0.08)))
+        .overlay(RoundedRectangle(cornerRadius: 18).stroke(Color.orange.opacity(0.35)))
+    }
+
+    private var recentActivity: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack { Text(l("Recent activity", "最近活动")).font(.headline); Spacer(); Button(l("View all", "查看全部")) { page = .timeline }.buttonStyle(.link) }
+            if incidents.isEmpty {
+                emptyState(l("Nothing needs attention", "还没有重要活动"), detail: l("Important agent actions will appear here in plain language.", "Agent 的重要操作会以容易理解的方式出现在这里。"), icon: "checkmark.circle")
+                    .frame(height: 180)
+            } else { ForEach(incidents.prefix(5)) { incident in incidentRow(incident) } }
+        }
+    }
+
+    private var timeline: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header(l("Activity timeline", "活动时间线"), subtitle: l("See the agent's intent and its real impact on your computer, in order.", "按时间查看 Agent 的意图和在电脑上造成的实际影响。"))
+            if incidents.isEmpty {
+                emptyState(l("No activity yet", "暂无活动"), detail: l("Keep protection on and activity will appear automatically.", "保持保护开启，活动会自动出现在这里。"), icon: "clock")
+            } else { List(incidents) { incident in Button { selectedIncident = incident } label: { incidentRow(incident).padding(.vertical, 6) }.buttonStyle(.plain) }.listStyle(.inset) }
+        }.padding(32)
+    }
+
+    private var protection: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: 24) {
+                header("Protection", subtitle: "Choose a protection level or describe what your agents must never do.")
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Protection mode").font(.headline)
+                    Picker("Protection mode", selection: $protectionMode) {
+                        Text("Quiet").tag("quiet"); Text("Recommended").tag("recommended"); Text("Strict").tag("strict")
+                    }.pickerStyle(.segmented)
+                    Text(modeDescription).font(.callout).foregroundStyle(.secondary)
+                }.cardStyle()
+                VStack(alignment: .leading, spacing: 14) {
+                    Text("Add a protection rule").font(.headline)
+                    TextField("Example: Never let agents modify my Photos folder", text: $ruleText).textFieldStyle(.roundedBorder).onSubmit(addLocalRule)
+                    HStack {
+                        Text("Rules are parsed and stored locally. No account or API key required.").font(.caption).foregroundStyle(.secondary)
+                        Spacer(); Button("Add") { addLocalRule() }.disabled(ruleText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                    }
+                    if !ruleFeedback.isEmpty { Text(ruleFeedback).font(.caption).foregroundStyle(.green) }
+                }.cardStyle()
+                modelConfigurationCard
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Your protection rules").font(.headline)
+                    if store.rules.isEmpty { Text("No custom rules yet. Built-in high-risk rules remain active.").foregroundStyle(.secondary) }
+                    ForEach(store.rules) { rule in
+                        HStack(spacing: 12) {
+                            Image(systemName: "checkmark.shield.fill").foregroundStyle(.green)
+                            VStack(alignment: .leading) {
+                                Text(rule.naturalLanguage ?? rule.message)
+                                Text(rule.triggerSummary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                            }
+                            Spacer(); Button { store.remove(rule) } label: { Image(systemName: "trash") }.buttonStyle(.plain)
+                        }.padding(.vertical, 7)
+                    }
+                }.cardStyle()
+            }.padding(32).frame(maxWidth: 900, alignment: .leading)
+        }
+    }
+
+    private var modelConfigurationCard: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                Label(l("AI analysis model", "AI 分析模型"), systemImage: "sparkles")
+                    .font(.headline)
+                Spacer()
+                Text(semanticAnalyzer.configured ? l("Configured", "已配置") : l("Not configured", "未配置"))
+                    .font(.caption).foregroundStyle(semanticAnalyzer.configured ? .green : .secondary)
+            }
+            Text(l("Use your own OpenRouter key and choose any compatible model. The key is stored in your Mac Keychain and is never included in the app package.", "使用你自己的 OpenRouter Key，并选择任意兼容模型。Key 只保存在本机钥匙串，不会写入安装包。"))
+                .font(.callout).foregroundStyle(.secondary)
+            SecureField(l("OpenRouter API key", "OpenRouter API Key"), text: $openRouterKey)
+                .textFieldStyle(.roundedBorder)
+            Picker(l("Model", "模型"), selection: $analysisModel) {
+                Text("GPT-4o mini").tag("openai/gpt-4o-mini")
+                Text("Claude 3.5 Haiku").tag("anthropic/claude-3.5-haiku")
+                Text("Gemini 2.5 Flash").tag("google/gemini-2.5-flash")
+                Text("DeepSeek Chat").tag("deepseek/deepseek-chat-v3.1")
+                Text("Qwen 3").tag("qwen/qwen3-30b-a3b")
+            }
+            HStack {
+                Button(l("Save configuration", "保存配置")) {
+                    if semanticAnalyzer.configure(key: openRouterKey, model: analysisModel) {
+                        openRouterKey = ""
+                        modelFeedback = l("Saved securely", "已安全保存")
+                    } else {
+                        modelFeedback = semanticAnalyzer.lastError ?? l("Save failed", "保存失败")
+                    }
+                }.buttonStyle(.borderedProminent).disabled(openRouterKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                if semanticAnalyzer.configured {
+                    Button(l("Remove key", "删除 Key"), role: .destructive) {
+                        semanticAnalyzer.removeConfiguration()
+                        modelFeedback = l("Key removed", "Key 已删除")
+                    }
+                }
+                Spacer()
+                if !modelFeedback.isEmpty { Text(modelFeedback).font(.caption).foregroundStyle(.secondary) }
+            }
+        }
+        .cardStyle()
+        .onAppear { analysisModel = semanticAnalyzer.model }
+    }
+
+    private var recovery: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            header("Recovery", subtitle: "Review file operations automatically recovered by AgentReins. Irreversible external actions are clearly labeled.")
+            let restored = events.filter { $0.action == "restored" }
+            if restored.isEmpty {
+                emptyState("Nothing to recover", detail: "When protected files change, AgentReins keeps a recovery record.", icon: "arrow.uturn.backward.circle")
+            } else { List(restored) { event in eventRow(event).padding(.vertical, 6) }.listStyle(.inset) }
+        }.padding(32)
+    }
+
+    private var onboarding: some View {
+        VStack(spacing: 22) {
+            Image(systemName: "shield.lefthalf.filled").font(.system(size: 62)).foregroundStyle(.blue)
+            Text(l("Let AI agents work. Stay in control.", "让 Agent 放心工作")).font(.largeTitle.bold())
+            Text(l("AgentReins reveals what your local AI agent sees, decides, and does — without turning every action into an alarm.", "AgentReins 在本机理解 Agent 的上下文和实际操作。\n平时保持安静，遇到风险时讲清楚再让你决定。"))
+                .multilineTextAlignment(.center).foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 12) {
+                Label(l("Local-first activity monitoring", "完整离线，不上传监控数据"), systemImage: "network.slash")
+                Label(l("Plain-English agent timelines", "高风险操作及时提醒"), systemImage: "list.bullet.rectangle")
+                Label(l("Recovery for protected files", "重要文件改错后可以恢复"), systemImage: "arrow.uturn.backward")
+            }
+            Button(l("Start protecting", "开始保护")) { onboardingComplete = true }.buttonStyle(.borderedProminent).controlSize(.large)
+        }.padding(46).frame(width: 520, height: 470)
+    }
+
+    private func header(_ title: String, subtitle: String) -> some View {
+        VStack(alignment: .leading, spacing: 5) { Text(title).font(.largeTitle.bold()); Text(subtitle).foregroundStyle(.secondary) }
+    }
+    private func emptyState(_ title: String, detail: String, icon: String) -> some View {
+        VStack(spacing: 10) {
+            Image(systemName: icon).font(.system(size: 34)).foregroundStyle(.secondary)
+            Text(title).font(.headline)
+            Text(detail).font(.callout).foregroundStyle(.secondary)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+    private func metricCard(title: String, value: String, icon: String, tint: Color) -> some View {
+        HStack(spacing: 12) { Image(systemName: icon).font(.title2).foregroundStyle(tint); VStack(alignment: .leading) { Text(value).font(.headline); Text(title).font(.caption).foregroundStyle(.secondary) }; Spacer() }
+            .padding(16).frame(maxWidth: .infinity).background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor)))
+    }
+    private func eventRow(_ event: GuardEvent) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: event.kind == "cmd" ? "terminal" : (event.kind == "memory" ? "key.horizontal" : "doc.badge.gearshape")).frame(width: 28).foregroundStyle(Color.agrSeverity(event.severity))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(eventTitle(event)).font(.body.weight(.medium))
+                Text(event.command ?? event.path).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer(); Text(event.ts, style: .time).font(.caption).foregroundStyle(.tertiary)
+        }
+    }
+    private func incidentRow(_ incident: SecurityIncident) -> some View {
+        HStack(spacing: 12) {
+            Image(systemName: (incident.primary.kind == "cmd" || incident.primary.kind == "activity") ? "terminal" : (incident.primary.kind == "memory" ? "key.horizontal" : "doc.badge.gearshape"))
+                .frame(width: 28).foregroundStyle(Color.agrSeverity(incident.severity))
+            VStack(alignment: .leading, spacing: 3) {
+                Text(incident.title).font(.body.weight(.medium))
+                Text(incident.summary).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+            }
+            Spacer()
+            if incident.events.count > 1 { Text("\(incident.events.count) 条关联").font(.caption).foregroundStyle(.blue) }
+            Text(incident.ts, style: .time).font(.caption).foregroundStyle(.tertiary)
+        }
+        .contentShape(Rectangle())
+    }
+
+    private func incidentDetail(_ incident: SecurityIncident) -> some View {
+        NavigationStack {
+            ScrollView {
+                VStack(alignment: .leading, spacing: 20) {
+                    Text(incident.title).font(.title2.bold())
+                    Text(incident.summary).foregroundStyle(.secondary)
+                    GroupBox("完整事件链") {
+                        VStack(alignment: .leading, spacing: 0) {
+                            ForEach(Array(incident.causalChain.enumerated()), id: \.element.id) { index, stage in
+                                HStack(alignment: .top, spacing: 13) {
+                                    VStack(spacing: 0) {
+                                        Circle().fill(stage.captured ? Color.green : Color.orange).frame(width: 11, height: 11)
+                                        if index < incident.causalChain.count - 1 {
+                                            Rectangle().fill(Color.secondary.opacity(0.25)).frame(width: 2, height: 50)
+                                        }
+                                    }.padding(.top, 5)
+                                    VStack(alignment: .leading, spacing: 3) {
+                                        HStack {
+                                            Text(stage.title).font(.headline)
+                                            if !stage.captured {
+                                                Text(stage.value == "未采集" || stage.value == "未识别" ? "证据缺失" : "推断")
+                                                    .font(.caption2).padding(.horizontal, 6).padding(.vertical, 2)
+                                                    .background(Capsule().fill(Color.orange.opacity(0.14))).foregroundStyle(.orange)
+                                            }
+                                        }
+                                        Text(stage.value).font(.body)
+                                        Text(stage.evidence).font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                }
+                            }
+                        }.padding(.vertical, 8)
+                    }
+                    GroupBox("事件信息") {
+                        Grid(alignment: .leading, horizontalSpacing: 18, verticalSpacing: 9) {
+                            GridRow { Text("时间").foregroundStyle(.secondary); Text(incident.ts.formatted(date: .abbreviated, time: .standard)) }
+                            GridRow { Text("Agent").foregroundStyle(.secondary); Text(incident.agent?.capitalized ?? "未识别") }
+                            GridRow { Text("结果").foregroundStyle(.secondary); Text(incident.wasBlocked ? "已阻止" : (incident.wasRestored ? "已恢复" : "仅记录")) }
+                            GridRow { Text("关联规则").foregroundStyle(.secondary); Text(incident.ruleIDs.joined(separator: "、")).textSelection(.enabled) }
+                        }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
+                    }
+                    if let command = incident.command {
+                        GroupBox("完整命令") {
+                            ScrollView(.horizontal) {
+                                Text(command).font(.system(.callout, design: .monospaced)).textSelection(.enabled).fixedSize(horizontal: true, vertical: false)
+                            }.padding(.vertical, 6)
+                        }
+                    }
+                    GroupBox("关联证据（\(incident.events.count)）") {
+                        VStack(alignment: .leading, spacing: 12) {
+                            ForEach(incident.events) { event in
+                                VStack(alignment: .leading, spacing: 4) {
+                                    HStack { Text(event.ruleId).font(.headline); Spacer(); Text(event.ts, style: .time).foregroundStyle(.secondary) }
+                                    Text("严重级别：\(event.severity) · 动作：\(event.action)").font(.caption).foregroundStyle(.secondary)
+                                    if event.path != "-" { Text(event.path).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+                                }
+                                if event.id != incident.events.last?.id { Divider() }
+                            }
+                        }.padding(.vertical, 6)
+                    }
+                }.padding(28)
+            }
+            .frame(minWidth: 720, minHeight: 560)
+            .toolbar { Button("完成") { selectedIncident = nil } }
+        }
+    }
+    private func eventTitle(_ event: GuardEvent) -> String {
+        if event.kind == "memory" { return "记忆体扫描发现敏感信息" }
+        if event.kind == "cmd" { return "\((event.agent ?? "Agent").capitalized) 执行了高风险命令" }
+        if event.action == "restored" { return "已恢复 Agent 对文件的\(event.op == "delete" ? "删除" : "修改")" }
+        return "Agent 改动了受保护文件"
+    }
+    private var modeDescription: String {
+        switch protectionMode {
+        case "quiet": return "只提醒明显危险的操作，其余行为安静记录。"
+        case "strict": return "Agent 离开项目范围、访问敏感数据或运行高风险命令时都要求确认。"
+        default: return "密钥、破坏性删除、数据外传和重要外部操作需要确认。适合大多数人。"
+        }
+    }
+    private func addLocalRule() {
+        let input = ruleText.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !input.isEmpty else { return }
+        let rule = NLParser.parseLocal(input)
+        store.add(rule); ruleText = ""; ruleFeedback = "已添加：\(rule.message)"
+    }
+}
+
+private extension View {
+    func cardStyle() -> some View {
+        padding(20).background(RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .controlBackgroundColor)))
     }
 }
