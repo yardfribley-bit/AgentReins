@@ -55,6 +55,7 @@ The packaged application is written to `AgentReins.app`.
 - [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md)
 - [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md)
 - [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md)
+- [Community Launch Copy](docs/COMMUNITY-LAUNCH-COPY.md)
 
 ## Distribution
 
