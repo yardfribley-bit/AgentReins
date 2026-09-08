@@ -1,73 +1,171 @@
-# AgentReins for macOS
+<div align="center">
+  <img src="Assets/agentreins-logo.png" width="144" alt="AgentReins logo">
 
-AgentReins is a local-first safety and transparency center for personal AI agents. It connects user intent, captured model context, model responses, tool and MCP calls, execution results, file changes, and memory activity into a readable session timeline.
+  <h1>AgentReins</h1>
 
-> See what your AI agent changed. Verify it. Undo it.
+  <p><strong>See what your AI agent changed. Verify it. Undo it.</strong></p>
 
-## Repository layout
+  <p>A local-first safety and transparency companion for personal AI coding agents on macOS.</p>
 
-```text
-.
-├── Sources/AgentReins/   macOS application source
-├── Assets/               packaged application assets
-├── AppIcon.iconset/      source icon sizes
-├── docs/                 architecture and product roadmaps
-├── Package.swift         Swift Package Manager manifest
-└── package_app.sh        local application packaging script
+  <p>
+    <img alt="Platform: macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple">
+    <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
+    <img alt="Status: Alpha" src="https://img.shields.io/badge/status-alpha-F59E0B">
+    <img alt="Local-first" src="https://img.shields.io/badge/privacy-local--first-2563EB">
+  </p>
+</div>
+
+---
+
+Coding agents can edit files, run commands, call tools, read memory, and send private context to model providers in seconds. Their logs contain activity, but often fail to answer the questions that matter after a task:
+
+- What did I ask the agent to do?
+- What context and instructions passed between the agent and the model?
+- Which tools, processes, and files were involved?
+- Did the result actually work?
+- Where did my code and private data go?
+- Can I recover safely if the agent made a mistake?
+
+AgentReins turns that evidence into one understandable account of the task.
+
+## The product direction
+
+| Pillar | Question AgentReins should answer |
+| --- | --- |
+| **Trace** | What did the user ask, and what did the agent actually do? |
+| **Verify** | Did the resulting code pass checks independent of the agent's own claim? |
+| **Recover** | Can the complete agent turn be previewed and undone safely? |
+| **Provider Trust** | Which endpoint received the user's prompts, code, files, and memory? |
+
+```mermaid
+flowchart LR
+    U[User request] --> A[Coding agent]
+    A --> M[Model exchange]
+    A --> T[Tools and MCP]
+    T --> S[Processes and files]
+
+    M -. captured evidence .-> R[AgentReins]
+    T -. captured evidence .-> R
+    S -. local evidence .-> R
+
+    R --> O[Readable outcome]
+    O --> K[Keep changes]
+    O --> X[Review or recover]
 ```
 
-Start with [the architecture guide](docs/ARCHITECTURE.md) to understand how agent evidence becomes a session timeline.
+## What works today
 
-## Product principles
+AgentReins is an early alpha. The repository is public so that the implementation and its limitations can be inspected directly.
 
-- Show what the agent is doing without turning normal activity into an alarm.
-- Explain who acted, what happened, why it matters, and what the user should do.
-- Keep monitoring records, protection rules, and recovery data on the device.
-- Preserve raw evidence and label missing evidence instead of guessing.
-- Make file mistakes recoverable whenever possible.
-
-## Current capabilities
-
-- Native macOS menu bar app and security center.
-- WorkBuddy session discovery through the AgentSight local session adapter.
-- Per-turn model, context length, token usage, tool calls, results, and memory activity.
-- Optional AI summaries using the user's OpenRouter key and selected model.
-- Process and protected-file monitoring.
+- Native macOS menu bar application and security center.
+- WorkBuddy session discovery through the current AgentSight adapter.
+- Per-turn views of captured user intent, model context, model response, model name, token usage, tool calls, and tool results.
+- Process snapshots and monitoring for explicitly protected files.
+- Before-and-after evidence and recovery records for protected text files.
+- Local scanning of newly changed code lines for common security patterns.
+- Discovery and scanning of supported local agent-memory files.
 - Natural-language protection rules.
-- Sensitive-data scanning for local agent memory.
-- Recovery records for protected files.
+- Optional AI summaries through a user-supplied OpenRouter key and selected model.
 
-## Build
+## What is not finished yet
 
-Requirements: macOS 13 or later and Xcode Command Line Tools.
+These are active roadmap items, not shipping claims:
+
+- Reliable attribution from every file change to the responsible session, turn, tool call, and process.
+- Git-quality separation of pre-existing user work from agent-introduced changes.
+- Independent build and test verification.
+- Transactional preview and undo for a complete agent turn.
+- Native adapters for additional coding agents.
+- Actual network-destination and model-relay evidence.
+- Universal pre-execution interception or kernel-level enforcement.
+- Signed and notarized public distribution.
+
+See the [Trace, Verify, Recover roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) for acceptance criteria rather than aspirational feature names.
+
+## Build and run
+
+### Requirements
+
+- macOS 13 or later
+- Xcode Command Line Tools
+- Swift 6 toolchain
+
+### Development build
 
 ```bash
+git clone https://github.com/yardfribley-bit/AgentReins.git
+cd AgentReins
 swift build
+swift run AgentReins
+```
+
+### Package the app
+
+```bash
 ./package_app.sh
 open AgentReins.app
 ```
 
-The packaged application is written to `AgentReins.app`.
+The packaging script creates `AgentReins.app` in the repository root and applies an ad-hoc development signature. Distribution to other Macs without security warnings requires a Developer ID Application certificate and Apple notarization.
 
-## Development roadmap
+## How the repository is organized
 
-- [Architecture](docs/ARCHITECTURE.md)
-- [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md)
-- [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md)
-- [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md)
-- [Community Launch Copy](docs/COMMUNITY-LAUNCH-COPY.md)
+```text
+.
+├── Sources/AgentReins/
+│   ├── AgentGuardApp.swift       App lifecycle and menu bar entry
+│   ├── ContentView.swift         Main product interface
+│   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
+│   ├── AgentSession.swift        Session and turn reconstruction
+│   ├── EventStore.swift          Local normalized event storage
+│   ├── ProcessGuard.swift        Process observation
+│   ├── FileGuard.swift           Protected-file monitoring and recovery
+│   ├── CodeSecurityScanner.swift Changed-line security checks
+│   ├── MemoryScanManager.swift   Agent-memory discovery and scanning
+│   └── SemanticAnalyzer.swift    Optional redacted AI analysis
+├── Assets/                       Packaged application assets
+├── AppIcon.iconset/              Source application icons
+├── docs/                         Architecture, roadmaps, and launch plans
+├── Package.swift                 Swift Package Manager manifest
+└── package_app.sh                Local app packaging script
+```
 
-## Distribution
+Read [Architecture](docs/ARCHITECTURE.md) for the runtime flow, trust model, source map, and adapter contract.
 
-Development builds use an ad-hoc signature. A public build that opens normally on other Macs requires an Apple Developer ID Application certificate and Apple notarization.
+## Privacy and trust model
 
-## Current limitations
+- Monitoring records are stored locally.
+- Optional AI analysis is disabled until the user configures a provider key.
+- Common API keys, tokens, passwords, and private-key blocks are redacted locally before optional OpenRouter analysis.
+- Captured evidence and inferred correlation must be labeled separately.
+- Missing evidence is reported as unknown instead of being guessed.
+- AgentReins does not claim access to hidden model reasoning that an agent or provider did not record.
+- A client can identify where data was sent, but cannot prove that a remote server did not retain it.
 
-- Command monitoring uses process snapshots and is not a universal pre-execution interceptor.
-- File protection uses backups and recovery rather than kernel-level authorization.
-- WorkBuddy logs expose only the context the agent writes to disk; this may be smaller than the complete request reported by model token usage.
-- Endpoint Security enforcement requires Apple approval, the relevant entitlement, Developer ID signing, and notarization.
+## Documentation
 
-## Privacy
+| Document | Purpose |
+| --- | --- |
+| [Architecture](docs/ARCHITECTURE.md) | Runtime flow, source map, trust model, and integration contract. |
+| [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) | Prioritized engineering gaps and acceptance tests. |
+| [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md) | Relay detection, outbound exposure, and model-identity boundaries. |
+| [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md) | Positioning, launch demo, claims, and readiness checklist. |
+| [Community Launch Copy](docs/COMMUNITY-LAUNCH-COPY.md) | Platform-specific Reddit, Hacker News, and social copy. |
 
-Agent activity is stored locally. AI summaries are opt-in. Before evidence is sent to OpenRouter, AgentReins redacts common API keys, tokens, passwords, and private-key blocks on the device.
+## Contributing and feedback
+
+AgentReins is looking for real coding-agent failure cases more than generic feature requests. Useful contributions include:
+
+- Reproducible examples where an agent's activity log did not explain the outcome.
+- Adapter research for coding-agent lifecycle and tool events.
+- Tests for file attribution, Git state, interrupted turns, and safe recovery.
+- Security findings with a minimal reproduction and clear impact.
+- Feedback on whether a non-security expert can understand the result of one agent turn.
+
+Please open a GitHub issue before starting a large change so the evidence model and product scope can be agreed first. Never include real API keys, private prompts, personal data, or proprietary source code in an issue.
+
+## Project status
+
+AgentReins is under active development and is not yet a substitute for endpoint security, backups, code review, or Git. The immediate milestone is one trustworthy end-to-end workflow that can trace a supported agent turn, verify its result independently, and recover it without damaging pre-existing work.
+
+If this is a problem you have encountered, [open an issue](https://github.com/yardfribley-bit/AgentReins/issues) and describe the workflow you want AgentReins to make understandable.
