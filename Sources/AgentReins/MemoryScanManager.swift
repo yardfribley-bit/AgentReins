@@ -30,10 +30,11 @@ final class MemoryScanManager: ObservableObject {
     /// 当前正在运行的扫描子进程（用于退出时强杀，避免残留 python 进程）。
     nonisolated(unsafe) private static var scanProcess: Process?
 
-    /// 脚本优先从 App bundle 取，开发期回退到项目内脚本。
+    /// Prefer the packaged resource and fall back to the repository copy during development.
     private func scriptURL() -> URL? {
         if let u = Bundle.main.url(forResource: "agentguard-memory-scan", withExtension: "py") { return u }
-        let dev = URL(fileURLWithPath: "/Users/jatsmith/AgentSpec/agentguard/agentguard-memory-scan.py")
+        let dev = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+            .appendingPathComponent("Resources/agentguard-memory-scan.py")
         return FileManager.default.fileExists(atPath: dev.path) ? dev : nil
     }
 

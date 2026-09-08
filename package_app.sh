@@ -1,38 +1,41 @@
 #!/bin/bash
-# 编译 + 打包 + 签名 + 清除隔离属性，产出可在本机双击打开的 AgentReins.app
-# 说明：本机无 Developer ID 证书时只能 ad-hoc 签名（同机可用，跨机/分发需 Developer ID + 公证）。
-set -e
-cd "$(dirname "$0")"
+# Build and package a Universal 2 macOS application.
+set -euo pipefail
 
-echo "==> swift build -c release"
-swift build -c release
+PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$PROJECT_DIR"
 
-echo "==> 组装 .app"
-rm -rf AgentReins.app
-mkdir -p AgentReins.app/Contents/MacOS AgentReins.app/Contents/Resources
-cp .build/release/AgentReins AgentReins.app/Contents/MacOS/AgentReins
-chmod +x AgentReins.app/Contents/MacOS/AgentReins
-cp ../agentguard/agentguard-memory-scan.py AgentReins.app/Contents/Resources/ 2>/dev/null || \
-  cp /Users/jatsmith/AgentSpec/agentguard/agentguard-memory-scan.py AgentReins.app/Contents/Resources/
-cp Assets/AgentReins.icns AgentReins.app/Contents/Resources/AgentReins.icns
+APP_NAME="AgentReins"
+APP_BUNDLE="$PROJECT_DIR/$APP_NAME.app"
+VERSION="${AGENTREINS_VERSION:-1.1.0}"
+BUILD_NUMBER="${AGENTREINS_BUILD_NUMBER:-$(date -u '+%Y%m%d.%H%M')}"
+BUILD_DATE="${AGENTREINS_BUILD_DATE:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
+SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 
-# 版本与构建日期：每次打包自动写入，便于用户判断手里的 .app 是否最新
-BUILD_DATE=$(date "+%Y-%m-%d %H:%M")
-BUILD_NUM=$(date "+%Y%m%d.%H%M")
-SHORT_VER="1.1.0"
-echo "    版本 v$SHORT_VER · build $BUILD_NUM · 构建于 $BUILD_DATE"
-cat > AgentReins.app/Contents/Info.plist <<EOF
+echo "==> Building Universal 2 release binary (arm64 + x86_64)"
+BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
+swift build -c release --arch arm64 --arch x86_64
+
+echo "==> Creating $APP_NAME.app"
+rm -rf "$APP_BUNDLE"
+mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+cp "$BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
+cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
+
+cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
 <dict>
-  <key>CFBundleName</key><string>AgentReins</string>
-  <key>CFBundleDisplayName</key><string>AgentReins</string>
+  <key>CFBundleName</key><string>$APP_NAME</string>
+  <key>CFBundleDisplayName</key><string>$APP_NAME</string>
   <key>CFBundleIdentifier</key><string>com.agentspec.agentreins</string>
-  <key>CFBundleVersion</key><string>$BUILD_NUM</string>
-  <key>CFBundleShortVersionString</key><string>$SHORT_VER</string>
+  <key>CFBundleVersion</key><string>$BUILD_NUMBER</string>
+  <key>CFBundleShortVersionString</key><string>$VERSION</string>
   <key>AGRBuiltDate</key><string>$BUILD_DATE</string>
-  <key>CFBundleExecutable</key><string>AgentReins</string>
+  <key>CFBundleExecutable</key><string>$APP_NAME</string>
   <key>CFBundleIconFile</key><string>AgentReins</string>
   <key>CFBundleIconName</key><string>AgentReins</string>
   <key>CFBundlePackageType</key><string>APPL</string>
@@ -42,13 +45,17 @@ cat > AgentReins.app/Contents/Info.plist <<EOF
 </plist>
 EOF
 
-echo "==> ad-hoc 签名 (本机无 Developer ID 证书)"
-codesign --force --deep --sign - AgentReins.app
+echo "==> Signing with: $SIGNING_IDENTITY"
+codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY" "$APP_BUNDLE"
 
-echo "==> 清除隔离属性 (否则 macOS 26 仍报'无法验证开发者')"
-xattr -dr com.apple.quarantine AgentReins.app 2>/dev/null || true
-xattr -dr com.apple.provenance AgentReins.app 2>/dev/null || true
-xattr -cr AgentReins.app 2>/dev/null || true
+echo "==> Verifying package"
+codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
+ARCHITECTURES="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME")"
+[[ "$ARCHITECTURES" == *arm64* && "$ARCHITECTURES" == *x86_64* ]] || {
+  echo "error: expected arm64 and x86_64, found: $ARCHITECTURES" >&2
+  exit 1
+}
 
-echo "==> 完成: $(du -sh AgentReins.app | cut -f1)"
-codesign -vvv AgentReins.app 2>&1 | head -2
+echo "==> Complete: $APP_BUNDLE"
+echo "    Version: $VERSION ($BUILD_NUMBER)"
+echo "    Architectures: $ARCHITECTURES"
