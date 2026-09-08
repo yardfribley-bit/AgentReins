@@ -1,7 +1,0 @@
-.DS_Store
-.build/
-AgentReins.app/
-*.zip
-*.dmg
-xcuserdata/
-DerivedData/

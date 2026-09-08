@@ -2,6 +2,22 @@
 
 AgentReins is a local-first safety and transparency center for personal AI agents. It connects user intent, captured model context, model responses, tool and MCP calls, execution results, file changes, and memory activity into a readable session timeline.
 
+> See what your AI agent changed. Verify it. Undo it.
+
+## Repository layout
+
+```text
+.
+├── Sources/AgentReins/   macOS application source
+├── Assets/               packaged application assets
+├── AppIcon.iconset/      source icon sizes
+├── docs/                 architecture and product roadmaps
+├── Package.swift         Swift Package Manager manifest
+└── package_app.sh        local application packaging script
+```
+
+Start with [the architecture guide](docs/ARCHITECTURE.md) to understand how agent evidence becomes a session timeline.
+
 ## Product principles
 
 - Show what the agent is doing without turning normal activity into an alarm.
@@ -23,12 +39,22 @@ AgentReins is a local-first safety and transparency center for personal AI agent
 
 ## Build
 
+Requirements: macOS 13 or later and Xcode Command Line Tools.
+
 ```bash
 swift build
 ./package_app.sh
+open AgentReins.app
 ```
 
 The packaged application is written to `AgentReins.app`.
+
+## Development roadmap
+
+- [Architecture](docs/ARCHITECTURE.md)
+- [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md)
+- [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md)
+- [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md)
 
 ## Distribution
 
