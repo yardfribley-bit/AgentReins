@@ -13,13 +13,20 @@ BUILD_DATE="${AGENTREINS_BUILD_DATE:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 
 echo "==> Building Universal 2 release binary (arm64 + x86_64)"
-BIN_DIR="$(swift build -c release --arch arm64 --arch x86_64 --show-bin-path)"
-swift build -c release --arch arm64 --arch x86_64
+ARM_SCRATCH="$PROJECT_DIR/.build/arm64"
+INTEL_SCRATCH="$PROJECT_DIR/.build/x86_64"
+swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH"
+swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH"
+ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH" --show-bin-path)"
+INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH" --show-bin-path)"
 
 echo "==> Creating $APP_NAME.app"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-cp "$BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+lipo -create \
+  "$ARM_BIN_DIR/$APP_NAME" \
+  "$INTEL_BIN_DIR/$APP_NAME" \
+  -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
