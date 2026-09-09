@@ -205,6 +205,30 @@ enum ProjectVerifier {
             }
             return commands
         }
+        if fm.fileExists(atPath: root.appendingPathComponent("package.json").path) {
+            let manager: String
+            if fm.fileExists(atPath: root.appendingPathComponent("pnpm-lock.yaml").path) { manager = "pnpm" }
+            else if fm.fileExists(atPath: root.appendingPathComponent("yarn.lock").path) { manager = "yarn" }
+            else { manager = "npm" }
+            let packageURL = root.appendingPathComponent("package.json")
+            let scripts = (try? Data(contentsOf: packageURL))
+                .flatMap { try? JSONSerialization.jsonObject(with: $0) as? [String: Any] }?["scripts"] as? [String: Any] ?? [:]
+            return ["build", "test"].compactMap { script in
+                guard scripts[script] != nil else { return nil }
+                return Command(executable: "/usr/bin/env", arguments: [manager, "run", script],
+                               displayName: "\(manager) run \(script)")
+            }
+        }
+        if fm.fileExists(atPath: root.appendingPathComponent("pyproject.toml").path) ||
+            fm.fileExists(atPath: root.appendingPathComponent("pytest.ini").path) {
+            return [Command(executable: "/usr/bin/python3", arguments: ["-m", "pytest"], displayName: "python3 -m pytest")]
+        }
+        if fm.fileExists(atPath: root.appendingPathComponent("go.mod").path) {
+            return [Command(executable: "/usr/bin/env", arguments: ["go", "test", "./..."], displayName: "go test ./...")]
+        }
+        if fm.fileExists(atPath: root.appendingPathComponent("Cargo.toml").path) {
+            return [Command(executable: "/usr/bin/env", arguments: ["cargo", "test"], displayName: "cargo test")]
+        }
         return []
     }
 

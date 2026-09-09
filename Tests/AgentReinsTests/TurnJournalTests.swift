@@ -83,6 +83,33 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertGreaterThanOrEqual(run.duration, 0)
     }
 
+    func testProjectVerifierDetectsSupportedProjectTypes() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-verifier-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+
+        try "// swift-tools-version:6.0\n".write(to: root.appendingPathComponent("Package.swift"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProjectVerifier.commands(for: root.path).map(\.displayName), ["swift build"])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("Package.swift"))
+
+        try #"{"scripts":{"build":"echo build","test":"echo test"}}"#.write(
+            to: root.appendingPathComponent("package.json"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProjectVerifier.commands(for: root.path).map(\.displayName), ["npm run build", "npm run test"])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("package.json"))
+
+        try "[tool.pytest.ini_options]\n".write(to: root.appendingPathComponent("pyproject.toml"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProjectVerifier.commands(for: root.path).map(\.displayName), ["python3 -m pytest"])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("pyproject.toml"))
+
+        try "module fixture\n".write(to: root.appendingPathComponent("go.mod"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProjectVerifier.commands(for: root.path).map(\.displayName), ["go test ./..."])
+        try FileManager.default.removeItem(at: root.appendingPathComponent("go.mod"))
+
+        try "[package]\n".write(to: root.appendingPathComponent("Cargo.toml"), atomically: true, encoding: .utf8)
+        XCTAssertEqual(ProjectVerifier.commands(for: root.path).map(\.displayName), ["cargo test"])
+    }
+
     func testRecoveryRestoresCleanTrackedStateAndRemovesRecordedUntrackedFiles() throws {
         let root = try makeRepository()
         defer { try? FileManager.default.removeItem(at: root) }

@@ -16,6 +16,7 @@ This report covers the first end-to-end engineering slice of the AgentReins **Tr
 | Label changes without a baseline as unknown | `testMutationWithoutBaselineIsUnknown` | Passed |
 | Capture repository root, HEAD, file states, and patch | `testGitSnapshotCapturesRepositoryState` | Passed |
 | Capture a verifier's real exit code, stdout, and stderr | `testIndependentVerificationRecordsRealExitCodeAndOutput` | Passed |
+| Detect Swift, npm/pnpm/yarn, pytest, Go, and Cargo verification commands | `testProjectVerifierDetectsSupportedProjectTypes` | Passed |
 | Reject recovery when the baseline already contains user changes | `testRecoveryEligibilityRejectsPreExistingChanges` | Passed |
 | Recover modified and deleted tracked files | `testRecoveryRestoresCleanTrackedStateAndRemovesRecordedUntrackedFiles` | Passed |
 | Remove newly created and renamed untracked files during recovery | `testRecoveryRestoresCleanTrackedStateAndRemovesRecordedUntrackedFiles` | Passed |
@@ -23,7 +24,7 @@ This report covers the first end-to-end engineering slice of the AgentReins **Tr
 | Build and package Intel and Apple Silicon code | GitHub Actions Universal 2 job | Passed |
 | Verify the packaged app signature | GitHub Actions `codesign --verify` step | Passed |
 
-Automated test result: **7 tests passed, 0 failed**.
+Automated test result: **8 tests passed, 0 failed**.
 
 ## Implemented behavior
 
@@ -32,7 +33,7 @@ Automated test result: **7 tests passed, 0 failed**.
 - A snapshot records HEAD, porcelain v2, unstaged and staged patches, diff statistics, numeric statistics, and file states.
 - Interrupted journals are marked `stuck` after an application restart.
 - The outcome card distinguishes captured lifecycle evidence from partial historical evidence.
-- Swift workspaces can run independent `swift build` and `swift test` verification.
+- Swift, npm/pnpm/yarn, pytest, Go, and Cargo workspaces can run detected build or test commands after an explicit user action.
 - Verification stops after the first failing command and records the real outcome.
 - Recovery is enabled only when the baseline was clean, HEAD did not change, mutations exist, and the workspace still matches the recorded final snapshot.
 - Recovery requires an explicit destructive-action confirmation.
@@ -58,7 +59,7 @@ This restriction provides a credible recovery path for the clean-baseline Produc
 | Exact attribution when the user and agent edit the same file | Not implemented | Content-level baseline and three-way attribution fixtures. |
 | Recovery with pre-existing user work | Intentionally blocked | Transactional snapshot and replay tests across staged, unstaged, untracked, binary, and permission changes. |
 | Recovery after the agent creates commits | Intentionally blocked | Commit-aware preview and explicit branch/reset policy. |
-| Build/test verification outside SwiftPM | Not implemented | Controlled npm, Python, Go, and Cargo fixtures with timeouts. |
+| Full build/test execution outside SwiftPM | Detection implemented; execution not certified in CI | Controlled npm, Python, Go, and Cargo fixtures with success, failure, timeout, and missing-tool cases. |
 | Verification sandboxing | Not implemented | Process, filesystem, network, timeout, and output-limit tests. |
 | Complete WorkBuddy UI workflow | Not yet manually certified | Start a real task, observe the live journal, verify, recover, and compare Git state. |
 | Claude Code, Codex, Cursor, or other adapters | Not implemented | Adapter-specific lifecycle fixtures and end-to-end tests. |

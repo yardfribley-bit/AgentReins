@@ -313,6 +313,21 @@ struct ContentView: View {
                         Text("+ \(journal.mutations.count - 8) more changes")
                             .font(.caption).foregroundStyle(.secondary)
                     }
+                    if let snapshot = journal.finalSnapshot {
+                        DisclosureGroup("View Git diff evidence") {
+                            VStack(alignment: .leading, spacing: 10) {
+                                if !snapshot.diffStat.isEmpty {
+                                    contextField("Diff summary", snapshot.diffStat)
+                                }
+                                contextField("Working-tree patch",
+                                             snapshot.patch.isEmpty ? "No unstaged patch captured" : snapshot.patch)
+                                if !snapshot.stagedPatch.isEmpty {
+                                    contextField("Staged patch", snapshot.stagedPatch)
+                                }
+                            }
+                            .font(.caption).padding(.top, 8)
+                        }
+                    }
                 } else {
                     Text(journal.finalSnapshot == nil
                          ? "No final Git snapshot was captured for this turn."
