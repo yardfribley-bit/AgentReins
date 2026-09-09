@@ -3,6 +3,28 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testContextGrowthPreservesEveryModelRequest() throws {
+        let inputs = [34_994, 37_186, 38_278, 39_074, 42_815, 45_789, 53_220, 53_731, 54_261, 56_147]
+        let samples = inputs.enumerated().map { index, input in
+            ContextUsageSample(id: "request-\(index)", timestamp: Date(timeIntervalSince1970: Double(index)),
+                inputTokens: input, outputTokens: index == 0 ? 1_000 : 1_854,
+                cachedTokens: 0, reasoningTokens: nil, model: "Hy4 preview")
+        }
+
+        let metrics = try XCTUnwrap(ContextGrowthMetrics(samples: samples))
+
+        XCTAssertEqual(metrics.requestCount, 10)
+        XCTAssertEqual(metrics.initialInputTokens, 34_994)
+        XCTAssertEqual(metrics.latestInputTokens, 56_147)
+        XCTAssertEqual(metrics.growthTokens, 21_153)
+        XCTAssertEqual(metrics.cumulativeInputTokens, 455_495)
+        XCTAssertEqual(metrics.cumulativeOutputTokens, 17_686)
+        XCTAssertEqual(metrics.cumulativeCachedTokens, 0)
+        XCTAssertEqual(metrics.largestInputIncrease, 7_431)
+        XCTAssertEqual(metrics.growthPercent, 60.4475, accuracy: 0.001)
+        XCTAssertTrue(metrics.needsAttention)
+    }
+
     func testPorcelainParserHandlesOrdinaryAndRenamedFiles() {
         let input = Data(" M Sources/App.swift\0?? New File.md\0R  NewName.swift\0OldName.swift\0".utf8)
 

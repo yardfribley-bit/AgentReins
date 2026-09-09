@@ -55,6 +55,7 @@ struct AgentTurn: Identifiable {
     let userInput: String?
     let startedAt: Date
     let exchanges: [ModelExchange]
+    let usageSamples: [ContextUsageSample]
     let riskCount: Int
 
     var toolCalls: [AgentToolCall] { exchanges.flatMap(\.toolCalls) }
@@ -73,6 +74,7 @@ struct AgentTurn: Identifiable {
     var outputTokens: Int? { exchanges.compactMap(\.outputTokens).max() }
     var cachedTokens: Int? { exchanges.compactMap(\.cachedTokens).max() }
     var reasoningTokens: Int? { exchanges.compactMap(\.reasoningTokens).max() }
+    var contextGrowth: ContextGrowthMetrics? { ContextGrowthMetrics(samples: usageSamples) }
     var needsAttention: Bool { riskCount > 0 }
     var modelInstructionSummary: String {
         if !toolCalls.isEmpty {
@@ -118,6 +120,47 @@ struct AgentTurn: Identifiable {
             return "\(call.name): \(call.arguments ?? "Arguments not captured")\(outcome)"
         }.joined(separator: "\n\n")
     }
+}
+
+struct ContextUsageSample: Identifiable, Equatable {
+    let id: String
+    let timestamp: Date
+    let inputTokens: Int
+    let outputTokens: Int?
+    let cachedTokens: Int?
+    let reasoningTokens: Int?
+    let model: String?
+}
+
+struct ContextGrowthMetrics: Equatable {
+    let requestCount: Int
+    let initialInputTokens: Int
+    let latestInputTokens: Int
+    let growthTokens: Int
+    let cumulativeInputTokens: Int
+    let cumulativeOutputTokens: Int
+    let cumulativeCachedTokens: Int
+    let largestInputIncrease: Int
+
+    init?(samples: [ContextUsageSample]) {
+        guard let first = samples.first, let last = samples.last else { return nil }
+        requestCount = samples.count
+        initialInputTokens = first.inputTokens
+        latestInputTokens = last.inputTokens
+        growthTokens = last.inputTokens - first.inputTokens
+        cumulativeInputTokens = samples.reduce(0) { $0 + $1.inputTokens }
+        cumulativeOutputTokens = samples.reduce(0) { $0 + ($1.outputTokens ?? 0) }
+        cumulativeCachedTokens = samples.reduce(0) { $0 + ($1.cachedTokens ?? 0) }
+        largestInputIncrease = zip(samples, samples.dropFirst())
+            .map { $1.inputTokens - $0.inputTokens }.max() ?? 0
+    }
+
+    var growthPercent: Double {
+        guard initialInputTokens > 0 else { return 0 }
+        return Double(growthTokens) / Double(initialInputTokens) * 100
+    }
+
+    var needsAttention: Bool { growthPercent >= 25 || latestInputTokens >= 50_000 }
 }
 
 struct ModelExchange: Identifiable {
@@ -186,9 +229,15 @@ struct AgentSessionSnapshot: Identifiable {
         return orderedGroups.enumerated().map { offset, pair in
             let (id, turnEvents) = pair
             let matched = exchanges.filter { $0.turnId == id || (id == "unattributed" && $0.turnId == nil) }
+            let usageSamples = turnEvents.filter { $0.inputTokens != nil }.map { event in
+                ContextUsageSample(id: event.id.uuidString, timestamp: event.ts,
+                    inputTokens: event.inputTokens!, outputTokens: event.outputTokens,
+                    cachedTokens: event.cachedTokens, reasoningTokens: event.reasoningTokens,
+                    model: event.model)
+            }
             return AgentTurn(id: id, index: offset + 1,
                 userInput: turnEvents.first(where: { $0.op == "prompt" })?.userIntent ?? turnEvents.compactMap(\.userIntent).first,
-                startedAt: turnEvents.first?.ts ?? Date(), exchanges: matched,
+                startedAt: turnEvents.first?.ts ?? Date(), exchanges: matched, usageSamples: usageSamples,
                 riskCount: turnEvents.filter { $0.severity != "info" }.count)
         }
     }
