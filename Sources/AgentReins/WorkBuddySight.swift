@@ -18,7 +18,8 @@ final class WorkBuddySight: ObservableObject {
     func start() {
         guard timer == nil else { return }
         poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 8.0, repeats: true) { [weak self] _ in
+        // Keep the live monitor responsive while avoiding a permanent busy loop.
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
     }
