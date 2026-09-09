@@ -188,6 +188,10 @@ struct ContentView: View {
                 }
             }
 
+            if let turn = sessions.first?.turns.last {
+                contextIntegritySummary(turn.contextIntegrity)
+            }
+
             Divider()
             if liveContextEvents.isEmpty {
                 HStack {
@@ -216,6 +220,35 @@ struct ContentView: View {
         .padding(16)
         .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
+    }
+
+    private func contextIntegritySummary(_ assessment: ContextIntegrityAssessment) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Label("Context health: \(assessment.health.rawValue)", systemImage: assessment.health == .healthy ? "checkmark.circle.fill" : "brain.head.profile")
+                    .font(.callout.bold()).foregroundStyle(contextHealthColor(assessment.health))
+                Spacer()
+                securityBadge("\(assessment.evidence.rawValue) evidence", color: assessment.evidence == .exact ? .green : .orange)
+            }
+            HStack(spacing: 22) {
+                contextMetric("Requirement retention", assessment.requirementRetentionPercent.map { "\($0)%" } ?? "Unknown")
+                contextMetric("Repeated payload", "\(assessment.duplicatePayloadPercent)%")
+                contextMetric("Tool noise", "\(assessment.toolNoisePercent)%")
+                Spacer()
+            }
+            ForEach(assessment.findings, id: \.self) { finding in
+                Label(finding, systemImage: "info.circle").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(12).background(RoundedRectangle(cornerRadius: 10).fill(contextHealthColor(assessment.health).opacity(0.07)))
+    }
+
+    private func contextHealthColor(_ health: ContextHealth) -> Color {
+        switch health {
+        case .healthy: return .green
+        case .growing: return .orange
+        case .memoryAtRisk: return .red
+        }
     }
 
     private func liveContextRow(_ event: GuardEvent) -> some View {
@@ -439,6 +472,7 @@ struct ContentView: View {
                         .font(.caption).foregroundStyle(.tertiary)
                 }
                 contextGrowthCard(turn.contextGrowth)
+                contextIntegritySummary(turn.contextIntegrity)
                 outcomeCard(journal)
                 aiAnalysisCard(turn)
                 summaryStep(number: "1", title: l("Your instruction", "用户输入的指令"), value: turn.userInput ?? l("Not captured", "未采集"), tint: .blue)
