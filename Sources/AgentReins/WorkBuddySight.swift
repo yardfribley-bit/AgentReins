@@ -61,6 +61,7 @@ final class WorkBuddySight: ObservableObject {
         var lastIntent: [String: String] = [:]
         var lastReasoning: [String: String] = [:]
         var currentTurn: [String: String] = [:]
+        var toolNames: [String: String] = [:]
         var result: [GuardEvent] = []
         // 启动时只读取活跃窗口；完整历史已在 EventStore，避免重复解析巨型会话。
         for line in text.split(whereSeparator: \.isNewline).suffix(400) {
@@ -110,11 +111,13 @@ final class WorkBuddySight: ObservableObject {
             guard type == "function_call" || type == "function_call_result" else { continue }
             let provider = row["providerData"] as? [String: Any] ?? [:]
             let usage = (provider["rawUsage"] as? [String: Any]) ?? (row["message"] as? [String: Any])?["usage"] as? [String: Any] ?? [:]
-            let name = row["name"] as? String ?? "unknown_tool"
+            let callId = row["callId"] as? String
+            let recordedName = row["name"] as? String
+            if type == "function_call", let callId, let recordedName { toolNames[callId] = recordedName }
+            let name = recordedName ?? callId.flatMap { toolNames[$0] } ?? "unknown_tool"
             let args = row["arguments"] as? String
             let status = row["status"] as? String
             let timestamp = date(row["timestamp"])
-            let callId = row["callId"] as? String
             let rawAgent = provider["agent"] as? String
             let agent = (rawAgent == nil || rawAgent == "cli") ? "workbuddy" : rawAgent!
             let model = provider["requestModelName"] as? String ?? provider["model"] as? String
