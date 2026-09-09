@@ -10,7 +10,7 @@ enum TurnJournalStatus: String, Codable, Sendable {
     case stuck
 }
 
-enum EvidenceConfidence: String, Codable, Sendable {
+enum EvidenceConfidence: String, Codable, Sendable, Equatable {
     case confirmed
     case inferred
     case unknown
@@ -473,13 +473,14 @@ final class TurnJournalStore: ObservableObject {
         let value = event.action.lowercased()
         if ["failed", "error"].contains(value) { return .failed }
         if value == "cancelled" { return .cancelled }
-        if event.kind == "model" && event.op == "response" { return .completed }
+        if isTerminal(event) { return .completed }
         if event.kind == "tool" { return event.op == "result" ? .thinking : .running }
         return .thinking
     }
 
     private func isTerminal(_ event: GuardEvent) -> Bool {
-        (event.kind == "model" && event.op == "response") ||
+        (event.kind == "model" && event.op == "response" &&
+            (event.source != "agentsight:codex-local-compat" || event.action == "final_answer")) ||
         ["failed", "error", "cancelled"].contains(event.action.lowercased())
     }
 

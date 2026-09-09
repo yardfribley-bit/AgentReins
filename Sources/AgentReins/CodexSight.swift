@@ -16,7 +16,7 @@ final class CodexSight: ObservableObject {
 
     private var timer: Timer?
     private var seen = Set<UUID>()
-    private var lastPoll = Date.distantPast
+    private var fileSizes: [String: UInt64] = [:]
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
     func start() {
@@ -56,14 +56,14 @@ final class CodexSight: ObservableObject {
 
     private func poll() {
         let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
-        let changedAfter = lastPoll
-        lastPoll = Date()
+        let previousSizes = fileSizes
         queue.async { [weak self] in
-            let events = Self.readRecentEvents(root: root, changedAfter: changedAfter)
+            let batch = Self.readLiveEvents(root: root, previousSizes: previousSizes)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.connected = FileManager.default.fileExists(atPath: root)
-                let fresh = events.filter { self.seen.insert($0.id).inserted }
+                self.fileSizes.merge(batch.sizes) { _, new in new }
+                let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
                     self.lastUpdate = Date()
@@ -72,17 +72,29 @@ final class CodexSight: ObservableObject {
         }
     }
 
-    nonisolated static func readRecentEvents(root: String, changedAfter: Date) -> [GuardEvent] {
+    private nonisolated static func readLiveEvents(root: String, previousSizes: [String: UInt64])
+        -> (events: [GuardEvent], sizes: [String: UInt64]) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:]) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
-        var files: [(URL, Date)] = []
+        var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            if mtime >= cutoff && mtime >= changedAfter { files.append((url, mtime)) }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            let mtime = values?.contentModificationDate ?? .distantPast
+            let size = UInt64(values?.fileSize ?? 0)
+            if mtime >= cutoff, previousSizes[url.path] != size { files.append((url, mtime, size)) }
         }
-        return files.sorted { $0.1 > $1.1 }.prefix(2).flatMap { parseSession($0.0) }
+        var sizes: [String: UInt64] = [:]
+        let events = files.sorted { $0.1 > $1.1 }.prefix(2).flatMap { item -> [GuardEvent] in
+            let (url, _, size) = item
+            sizes[url.path] = size
+            let previous = previousSizes[url.path]
+            let start = previous.map { min($0, size) > 64 * 1_024 ? min($0, size) - 64 * 1_024 : 0 }
+                ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)
+            return parseSession(url, liveStartOffset: start)
+        }
+        return (events, sizes)
     }
 
     private nonisolated static func sessionFiles(root: String) -> [URL] {
@@ -99,6 +111,15 @@ final class CodexSight: ObservableObject {
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {
         guard let text = sessionText(url, fullHistory: fullHistory) else { return [] }
+        return parseSessionText(text, url: url)
+    }
+
+    private nonisolated static func parseSession(_ url: URL, liveStartOffset: UInt64) -> [GuardEvent] {
+        guard let text = sessionText(url, fullHistory: false, startOffset: liveStartOffset) else { return [] }
+        return parseSessionText(text, url: url)
+    }
+
+    private nonisolated static func parseSessionText(_ text: String, url: URL) -> [GuardEvent] {
         let lines = text.split(whereSeparator: \.isNewline)
         var session = url.deletingPathExtension().lastPathComponent
         var workspace = "-"
@@ -148,7 +169,7 @@ final class CodexSight: ObservableObject {
                 let turn = metadataTurn(payload) ?? currentTurn
                 result.append(event(identity: "\(session):\(turn ?? "none"):\(timestampKey):response", kind: "model",
                     rule: "codex_model_response", workspace: workspace, op: "response", timestamp: timestamp,
-                    action: "received", session: session, trace: nil, turn: turn, intent: lastIntent,
+                    action: payload["phase"] as? String ?? "received", session: session, trace: nil, turn: turn, intent: lastIntent,
                     prompt: nil, response: String(content.prefix(64_000)), toolCallId: nil,
                     toolName: nil, command: nil, model: model))
                 continue
@@ -208,13 +229,26 @@ final class CodexSight: ObservableObject {
     /// Keep startup bounded even when a long-running Codex task has produced a
     /// multi-megabyte rollout. The first record carries session metadata; recent
     /// records carry the active turns that the live monitor needs.
-    private nonisolated static func sessionText(_ url: URL, fullHistory: Bool) -> String? {
+    private nonisolated static func sessionText(_ url: URL, fullHistory: Bool, startOffset: UInt64? = nil) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
         if fullHistory {
             try? handle.seek(toOffset: 0)
             return String(data: handle.readDataToEndOfFile(), encoding: .utf8)
+        }
+        if let startOffset {
+            try? handle.seek(toOffset: 0)
+            let first = handle.readData(ofLength: 64 * 1_024)
+            try? handle.seek(toOffset: min(startOffset, size))
+            var tail = handle.readDataToEndOfFile()
+            if startOffset > 0, let newline = tail.firstIndex(of: 0x0A) {
+                tail = tail.suffix(from: tail.index(after: newline))
+            }
+            guard let headText = String(data: first, encoding: .utf8),
+                  let tailText = String(data: tail, encoding: .utf8) else { return nil }
+            let firstLine = headText.split(whereSeparator: \.isNewline).first.map(String.init) ?? ""
+            return firstLine + "\n" + tailText
         }
         let tailBytes: UInt64 = 512 * 1_024
         guard size > tailBytes else {

@@ -60,13 +60,15 @@ struct AgentReinsApp: App {
                         eventStore.recordMemoryFindings(findings, scannedAt: date)
                     }
                     workBuddySight.onEvents = { events in
-                        turnJournalStore.ingest(events)
-                        eventStore.record(events)
+                        let fresh = eventStore.unrecorded(events)
+                        turnJournalStore.ingest(journalEvents(from: fresh))
+                        eventStore.record(fresh)
                     }
                     workBuddySight.start()
                     codexSight.onEvents = { events in
-                        turnJournalStore.ingest(events)
-                        eventStore.record(events)
+                        let fresh = eventStore.unrecorded(events)
+                        turnJournalStore.ingest(journalEvents(from: fresh))
+                        eventStore.record(fresh)
                     }
                     codexSight.start()
                     memoryScan.startAuto { memoryRuleStore.enabledRules }
@@ -81,6 +83,16 @@ struct AgentReinsApp: App {
                 .environmentObject(workBuddySight)
         } label: {
             Image(systemName: "shield.lefthalf.filled")
+        }
+    }
+
+    private func journalEvents(from events: [GuardEvent]) -> [GuardEvent] {
+        events.filter { event in
+            if event.kind == "tool" { return true }
+            if event.kind != "model" { return false }
+            if event.op == "prompt" { return true }
+            if event.op != "response" { return false }
+            return event.source != "agentsight:codex-local-compat" || event.action == "final_answer"
         }
     }
 }
