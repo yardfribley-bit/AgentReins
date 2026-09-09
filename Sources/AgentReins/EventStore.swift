@@ -7,6 +7,7 @@ final class EventStore: ObservableObject {
     @Published private(set) var incidents: [SecurityIncident] = []
     @Published private(set) var sessions: [AgentSessionSnapshot] = []
     @Published private(set) var influenceChains: [InfluenceChain] = []
+    @Published private(set) var historyLoaded = false
 
     private let fileURL: URL
     private let encoder: JSONEncoder
@@ -60,6 +61,15 @@ final class EventStore: ObservableObject {
         events.filter { calendar.isDate($0.ts, inSameDayAs: date) }
     }
 
+    /// Historical session reconstruction is intentionally opt-in. The overview
+    /// only needs the active task and must not pay the cost of rebuilding every
+    /// archived session during application launch.
+    func loadHistory() {
+        guard !historyLoaded else { return }
+        historyLoaded = true
+        rebuildViews()
+    }
+
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {
         guard !findings.isEmpty else { return }
         for finding in findings {
@@ -88,8 +98,19 @@ final class EventStore: ObservableObject {
     private func rebuildViews() {
         // 首页/时间线只物化最近窗口，完整原始记录仍保留在本地事件库。
         incidents = SecurityIncident.correlate(Array(events.prefix(1_200)))
-        sessions = AgentSessionSnapshot.build(from: events)
+        sessions = AgentSessionSnapshot.build(from: historyLoaded ? events : liveSessionEvents())
         influenceChains = ExternalContentSecurity.influenceChains(events: Array(events.prefix(500)))
+    }
+
+    private func liveSessionEvents() -> [GuardEvent] {
+        let sessionEvents = events.filter { $0.sessionId != nil }
+        guard let newest = sessionEvents.first else { return [] }
+        let cutoff = newest.ts.addingTimeInterval(-10 * 60)
+        let activeIds = Set(sessionEvents.filter { $0.ts >= cutoff }.compactMap(\.sessionId))
+        return sessionEvents.filter { event in
+            guard let id = event.sessionId else { return false }
+            return activeIds.contains(id)
+        }
     }
 
     /// Parser v2 fixes user-query extraction and WorkBuddy's reused tool row IDs.

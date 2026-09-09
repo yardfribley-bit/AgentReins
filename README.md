@@ -61,6 +61,7 @@ AgentReins is an early alpha. The repository is public so that the implementatio
 - Native macOS menu bar application and security center.
 - WorkBuddy session discovery and a local compatibility adapter for Codex rollout records.
 - Per-turn views of captured user intent, model context, model response, model name, token usage, tool calls, and tool results.
+- Fast active-task startup with explicit, on-demand reconstruction of historical WorkBuddy and Codex sessions.
 - Process snapshots and monitoring for explicitly protected files.
 - Before-and-after evidence and recovery records for protected text files.
 - Local scanning of newly changed code lines for common security patterns.

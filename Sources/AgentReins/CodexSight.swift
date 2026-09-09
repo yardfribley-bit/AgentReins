@@ -9,6 +9,9 @@ import CryptoKit
 final class CodexSight: ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
+    @Published private(set) var historyRestoring = false
+    @Published private(set) var historyProgress = 0.0
+    @Published private(set) var historyFileCount = 0
     var onEvents: (([GuardEvent]) -> Void)?
 
     private var timer: Timer?
@@ -25,6 +28,31 @@ final class CodexSight: ObservableObject {
     }
 
     func stop() { timer?.invalidate(); timer = nil }
+
+    func restoreHistory() {
+        guard !historyRestoring else { return }
+        let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
+        historyRestoring = true
+        historyProgress = 0
+        queue.async { [weak self] in
+            let files = Self.sessionFiles(root: root)
+            var restored: [GuardEvent] = []
+            for (index, url) in files.enumerated() {
+                restored.append(contentsOf: Self.parseSession(url, fullHistory: true))
+                DispatchQueue.main.async {
+                    self?.historyProgress = files.isEmpty ? 1 : Double(index + 1) / Double(files.count)
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let fresh = restored.filter { self.seen.insert($0.id).inserted }
+                self.onEvents?(fresh)
+                self.historyFileCount = files.count
+                self.historyRestoring = false
+                self.historyProgress = 1
+            }
+        }
+    }
 
     private func poll() {
         let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
@@ -57,8 +85,20 @@ final class CodexSight: ObservableObject {
         return files.sorted { $0.1 > $1.1 }.prefix(2).flatMap { parseSession($0.0) }
     }
 
-    nonisolated static func parseSession(_ url: URL) -> [GuardEvent] {
-        guard let text = sessionText(url) else { return [] }
+    private nonisolated static func sessionFiles(root: String) -> [URL] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
+            includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        var files: [(URL, Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            files.append((url, date))
+        }
+        return files.sorted { $0.1 > $1.1 }.map(\.0)
+    }
+
+    nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {
+        guard let text = sessionText(url, fullHistory: fullHistory) else { return [] }
         let lines = text.split(whereSeparator: \.isNewline)
         var session = url.deletingPathExtension().lastPathComponent
         var workspace = "-"
@@ -73,7 +113,7 @@ final class CodexSight: ObservableObject {
             workspace = payload["cwd"] as? String ?? workspace
         }
 
-        for line in lines.suffix(800) {
+        for line in lines {
             guard let row = dictionary(line), let payload = row["payload"] as? [String: Any] else { continue }
             let type = row["type"] as? String ?? ""
             let payloadType = payload["type"] as? String ?? ""
@@ -168,11 +208,15 @@ final class CodexSight: ObservableObject {
     /// Keep startup bounded even when a long-running Codex task has produced a
     /// multi-megabyte rollout. The first record carries session metadata; recent
     /// records carry the active turns that the live monitor needs.
-    private nonisolated static func sessionText(_ url: URL) -> String? {
+    private nonisolated static func sessionText(_ url: URL, fullHistory: Bool) -> String? {
         guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? 0
-        let tailBytes: UInt64 = 1 * 1_024 * 1_024
+        if fullHistory {
+            try? handle.seek(toOffset: 0)
+            return String(data: handle.readDataToEndOfFile(), encoding: .utf8)
+        }
+        let tailBytes: UInt64 = 512 * 1_024
         guard size > tailBytes else {
             try? handle.seek(toOffset: 0)
             return String(data: handle.readDataToEndOfFile(), encoding: .utf8)

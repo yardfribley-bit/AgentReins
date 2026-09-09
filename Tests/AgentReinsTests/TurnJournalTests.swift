@@ -28,6 +28,20 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(snapshot.turns.first?.cachedTokens, 800)
     }
 
+    func testCodexHistoryIsOnlyReconstructedOnDemand() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("codex-history-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let metadata = #"{"timestamp":"2026-09-09T00:00:00Z","type":"session_meta","payload":{"id":"history-session","cwd":"/tmp/project"}}"#
+        let prompt = #"{"timestamp":"2026-09-09T00:00:01Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"old-turn","item":{"type":"UserMessage","id":"old-user","content":[{"type":"text","text":"Old requirement"}]}}}"#
+        let filler = #"{"timestamp":"2026-09-09T00:00:02Z","type":"event_msg","payload":{"type":"status","padding":""#
+            + String(repeating: "x", count: 600_000) + #""}}"#
+        let text = metadata + "\n" + prompt + "\n" + filler
+        try text.write(to: url, atomically: true, encoding: .utf8)
+
+        XCTAssertFalse(CodexSight.parseSession(url).contains { $0.userIntent == "Old requirement" })
+        XCTAssertTrue(CodexSight.parseSession(url, fullHistory: true).contains { $0.userIntent == "Old requirement" })
+    }
+
     func testWorkBuddyFixtureProducesExternalContentInfluenceChain() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("workbuddy-\(UUID().uuidString).jsonl")
         defer { try? FileManager.default.removeItem(at: url) }
