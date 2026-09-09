@@ -42,6 +42,7 @@ struct ContentView: View {
     @State private var dismissedEventIDs = Set<UUID>()
     @State private var selectedIncident: SecurityIncident?
     @State private var selectedSession: AgentSessionSnapshot?
+    @State private var recoveryCandidate: AgentTurnJournal?
     @State private var openRouterKey = ""
     @State private var analysisModel = "openai/gpt-4o-mini"
     @State private var modelFeedback = ""
@@ -94,6 +95,18 @@ struct ContentView: View {
         )) { onboarding }
         .sheet(item: $selectedIncident) { incident in incidentDetail(incident) }
         .sheet(item: $selectedSession) { session in sessionDetail(session) }
+        .confirmationDialog("Restore the clean Git baseline?", isPresented: Binding(
+            get: { recoveryCandidate != nil },
+            set: { if !$0 { recoveryCandidate = nil } }
+        ), presenting: recoveryCandidate) { journal in
+            Button("Undo this agent turn", role: .destructive) {
+                turnJournalStore.recoverCleanBaseline(journalId: journal.id)
+                recoveryCandidate = nil
+            }
+            Button("Cancel", role: .cancel) { recoveryCandidate = nil }
+        } message: { journal in
+            Text("This restores \(journal.mutations.count) recorded working-tree changes. Recovery will stop if the workspace changed after the snapshot.")
+        }
     }
 
     private var localOnlyBadge: some View {
@@ -305,6 +318,31 @@ struct ContentView: View {
                          ? "No final Git snapshot was captured for this turn."
                          : "No working-tree state change was detected between snapshots.")
                         .font(.caption).foregroundStyle(.secondary)
+                }
+                Divider()
+                HStack {
+                    if let run = journal.verificationRuns.last {
+                        Label(run.exitCode == 0 ? "Independent verification passed" : "Independent verification failed",
+                              systemImage: run.exitCode == 0 ? "checkmark.seal.fill" : "xmark.octagon.fill")
+                            .font(.caption.bold()).foregroundStyle(run.exitCode == 0 ? .green : .red)
+                        Text("\(run.command) · \(run.duration.formatted(.number.precision(.fractionLength(1))))s")
+                            .font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Build and tests have not been independently verified.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                    Spacer()
+                    Button(turnJournalStore.verificationStates[journal.id] == .running ? "Verifying…" : "Run verification") {
+                        turnJournalStore.runVerification(journalId: journal.id)
+                    }
+                    .buttonStyle(.bordered)
+                    .disabled(turnJournalStore.verificationStates[journal.id] == .running || journal.workspace == nil)
+                    Button("Undo turn") { recoveryCandidate = journal }
+                        .buttonStyle(.borderedProminent).tint(.orange)
+                        .disabled(!journal.canRecoverSafely)
+                }
+                if let message = turnJournalStore.recoveryMessages[journal.id] {
+                    Text(message).font(.caption).foregroundStyle(.secondary)
                 }
             }
             .padding(16).frame(maxWidth: .infinity, alignment: .leading)

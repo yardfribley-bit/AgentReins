@@ -1,6 +1,6 @@
 import Foundation
 
-enum TurnJournalStatus: String, Codable {
+enum TurnJournalStatus: String, Codable, Sendable {
     case thinking
     case running
     case waiting
@@ -10,18 +10,18 @@ enum TurnJournalStatus: String, Codable {
     case stuck
 }
 
-enum EvidenceConfidence: String, Codable {
+enum EvidenceConfidence: String, Codable, Sendable {
     case confirmed
     case inferred
     case unknown
 }
 
-struct GitFileState: Codable, Hashable {
+struct GitFileState: Codable, Hashable, Sendable {
     let path: String
     let status: String
 }
 
-struct GitSnapshot: Codable {
+struct GitSnapshot: Codable, Sendable {
     let capturedAt: Date
     let repositoryRoot: String
     let head: String?
@@ -33,7 +33,7 @@ struct GitSnapshot: Codable {
     let files: [GitFileState]
 }
 
-struct FileMutation: Identifiable, Codable {
+struct FileMutation: Identifiable, Codable, Sendable {
     let id: UUID
     let path: String
     let baselineStatus: String?
@@ -52,7 +52,7 @@ struct FileMutation: Identifiable, Codable {
     }
 }
 
-struct VerificationRun: Identifiable, Codable {
+struct VerificationRun: Identifiable, Codable, Sendable {
     let id: UUID
     let command: String
     let startedAt: Date
@@ -78,7 +78,7 @@ struct VerificationRun: Identifiable, Codable {
     }
 }
 
-struct AgentTurnJournal: Identifiable, Codable {
+struct AgentTurnJournal: Identifiable, Codable, Sendable {
     let id: String
     let sessionId: String
     let turnId: String
@@ -98,6 +98,17 @@ struct AgentTurnJournal: Identifiable, Codable {
         guard let baseline else { return false }
         return !baseline.files.isEmpty
     }
+
+    var canRecoverSafely: Bool {
+        guard let baseline, let finalSnapshot else { return false }
+        return baseline.files.isEmpty && baseline.head == finalSnapshot.head && !mutations.isEmpty
+    }
+}
+
+enum VerificationState: Equatable {
+    case idle
+    case running
+    case finished(Int32)
 }
 
 enum GitRepositoryInspector {
@@ -177,9 +188,118 @@ enum GitRepositoryInspector {
     }
 }
 
+enum ProjectVerifier {
+    struct Command: Sendable {
+        let executable: String
+        let arguments: [String]
+        let displayName: String
+    }
+
+    static func commands(for workspace: String) -> [Command] {
+        let root = URL(fileURLWithPath: workspace)
+        let fm = FileManager.default
+        if fm.fileExists(atPath: root.appendingPathComponent("Package.swift").path) {
+            var commands = [Command(executable: "/usr/bin/swift", arguments: ["build"], displayName: "swift build")]
+            if fm.fileExists(atPath: root.appendingPathComponent("Tests").path) {
+                commands.append(Command(executable: "/usr/bin/swift", arguments: ["test"], displayName: "swift test"))
+            }
+            return commands
+        }
+        return []
+    }
+
+    static func run(_ command: Command, workspace: String, timeout: TimeInterval = 300) -> VerificationRun {
+        let startedAt = Date()
+        let process = Process()
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("agentreins-verify-\(UUID().uuidString).out")
+        let errorURL = FileManager.default.temporaryDirectory.appendingPathComponent("agentreins-verify-\(UUID().uuidString).err")
+        FileManager.default.createFile(atPath: outputURL.path, contents: nil)
+        FileManager.default.createFile(atPath: errorURL.path, contents: nil)
+        guard let output = try? FileHandle(forWritingTo: outputURL),
+              let error = try? FileHandle(forWritingTo: errorURL) else {
+            return VerificationRun(command: command.displayName, startedAt: startedAt, duration: 0,
+                                   exitCode: -1, standardOutput: "", standardError: "Unable to create verification logs.")
+        }
+        defer {
+            try? output.close()
+            try? error.close()
+            try? FileManager.default.removeItem(at: outputURL)
+            try? FileManager.default.removeItem(at: errorURL)
+        }
+        process.executableURL = URL(fileURLWithPath: command.executable)
+        process.arguments = command.arguments
+        process.currentDirectoryURL = URL(fileURLWithPath: workspace)
+        process.standardOutput = output
+        process.standardError = error
+        do {
+            try process.run()
+        } catch {
+            return VerificationRun(command: command.displayName, startedAt: startedAt,
+                                   duration: Date().timeIntervalSince(startedAt), exitCode: -1,
+                                   standardOutput: "", standardError: error.localizedDescription)
+        }
+
+        let deadline = Date().addingTimeInterval(timeout)
+        while process.isRunning && Date() < deadline { Thread.sleep(forTimeInterval: 0.1) }
+        if process.isRunning { process.terminate() }
+        process.waitUntilExit()
+        try? output.synchronize()
+        try? error.synchronize()
+        let stdout = (try? String(contentsOf: outputURL, encoding: .utf8)) ?? ""
+        var stderr = (try? String(contentsOf: errorURL, encoding: .utf8)) ?? ""
+        if Date() >= deadline { stderr += "\nVerification timed out after \(Int(timeout)) seconds." }
+        return VerificationRun(command: command.displayName, startedAt: startedAt,
+                               duration: Date().timeIntervalSince(startedAt),
+                               exitCode: process.terminationStatus,
+                               standardOutput: String(stdout.suffix(64_000)),
+                               standardError: String(stderr.suffix(64_000)))
+    }
+}
+
+enum GitRecovery {
+    struct Result: Sendable {
+        let success: Bool
+        let message: String
+    }
+
+    static func restoreCleanBaseline(workspace: String, head: String, untrackedPaths: [String]) -> Result {
+        guard let root = GitRepositoryInspector.capture(workspace: workspace)?.repositoryRoot else {
+            return Result(success: false, message: "Recovery failed because the Git repository is unavailable.")
+        }
+        let reset = runGit(["-C", root, "reset", "--hard", head])
+        guard reset == 0 else {
+            return Result(success: false, message: "Git could not restore the tracked files.")
+        }
+        let rootURL = URL(fileURLWithPath: root).standardizedFileURL
+        for path in untrackedPaths {
+            let candidate = rootURL.appendingPathComponent(path).standardizedFileURL
+            guard candidate.path.hasPrefix(rootURL.path + "/") else {
+                return Result(success: false, message: "Recovery stopped because a path escaped the repository.")
+            }
+            try? FileManager.default.removeItem(at: candidate)
+            if FileManager.default.fileExists(atPath: candidate.path) {
+                return Result(success: false, message: "Recovery could not remove \(path).")
+            }
+        }
+        return Result(success: true, message: "The clean Git baseline was restored and verified.")
+    }
+
+    private static func runGit(_ arguments: [String]) -> Int32 {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = arguments
+        process.standardOutput = Pipe()
+        process.standardError = Pipe()
+        do { try process.run(); process.waitUntilExit(); return process.terminationStatus }
+        catch { return -1 }
+    }
+}
+
 @MainActor
 final class TurnJournalStore: ObservableObject {
     @Published private(set) var journals: [AgentTurnJournal] = []
+    @Published private(set) var verificationStates: [String: VerificationState] = [:]
+    @Published private(set) var recoveryMessages: [String: String] = [:]
 
     private let fileURL: URL
     private let encoder: JSONEncoder
@@ -210,26 +330,90 @@ final class TurnJournalStore: ObservableObject {
         save()
     }
 
+    func runVerification(journalId: String) {
+        guard verificationStates[journalId] != .running,
+              let journal = journals.first(where: { $0.id == journalId }),
+              let workspace = journal.workspace else { return }
+        let commands = ProjectVerifier.commands(for: workspace)
+        guard !commands.isEmpty else {
+            recoveryMessages[journalId] = "No supported verification command was detected."
+            return
+        }
+        verificationStates[journalId] = .running
+        Task {
+            let runs = await Task.detached {
+                var completed: [VerificationRun] = []
+                for command in commands {
+                    let run = ProjectVerifier.run(command, workspace: workspace)
+                    completed.append(run)
+                    if run.exitCode != 0 { break }
+                }
+                return completed
+            }.value
+            guard let index = journals.firstIndex(where: { $0.id == journalId }) else { return }
+            journals[index].verificationRuns.append(contentsOf: runs)
+            verificationStates[journalId] = .finished(runs.last?.exitCode ?? -1)
+            save()
+        }
+    }
+
+    func recoverCleanBaseline(journalId: String) {
+        guard let index = journals.firstIndex(where: { $0.id == journalId }),
+              journals[index].canRecoverSafely,
+              let workspace = journals[index].workspace,
+              let head = journals[index].baseline?.head,
+              let recordedFinal = journals[index].finalSnapshot else {
+            recoveryMessages[journalId] = "Recovery was blocked because the baseline was not clean or HEAD changed."
+            return
+        }
+        let untracked = journals[index].finalSnapshot?.files
+            .filter { $0.status == "??" }.map(\.path) ?? []
+        Task {
+            let current = await Task.detached { GitRepositoryInspector.capture(workspace: workspace) }.value
+            guard let current,
+                  current.head == recordedFinal.head,
+                  current.porcelainV2 == recordedFinal.porcelainV2 else {
+                recoveryMessages[journalId] = "Recovery was blocked because the workspace changed after the recorded turn."
+                return
+            }
+            let outcome = await Task.detached {
+                let result = GitRecovery.restoreCleanBaseline(workspace: workspace, head: head, untrackedPaths: untracked)
+                let snapshot = result.success ? GitRepositoryInspector.capture(workspace: workspace) : nil
+                return (result, snapshot)
+            }.value
+            guard let current = journals.firstIndex(where: { $0.id == journalId }) else { return }
+            recoveryMessages[journalId] = outcome.0.message
+            if let snapshot = outcome.1 {
+                journals[current].finalSnapshot = snapshot
+                journals[current].mutations = GitRepositoryInspector.mutations(
+                    between: journals[current].baseline, and: snapshot)
+            }
+            save()
+        }
+    }
+
     private func create(_ event: GuardEvent, id: String, sessionId: String, turnId: String) {
         let workspace = normalizedWorkspace(event.path)
         let isPrompt = event.kind == "model" && event.op == "prompt"
-        let baseline = workspace.flatMap { GitRepositoryInspector.capture(workspace: $0, at: event.ts) }
-        var journal = AgentTurnJournal(
+        let journal = AgentTurnJournal(
             id: id, sessionId: sessionId, turnId: turnId,
             agent: event.agent ?? "Agent", workspace: workspace,
             startedAt: event.ts, completedAt: nil,
             status: status(for: event), captureComplete: isPrompt,
-            baseline: baseline, finalSnapshot: nil, mutations: [], verificationRuns: [],
+            baseline: nil, finalSnapshot: nil, mutations: [], verificationRuns: [],
             toolCallIds: event.toolCallId.map { [$0] } ?? [])
-        if isTerminal(event) { finish(&journal, with: event) }
         journals.append(journal)
         journals.sort { $0.startedAt > $1.startedAt }
+        if let workspace { captureSnapshot(journalId: id, workspace: workspace, baseline: true) }
+        if isTerminal(event), let index = journals.firstIndex(where: { $0.id == id }) {
+            finish(&journals[index], with: event)
+        }
     }
 
     private func update(_ event: GuardEvent, at index: Int) {
         if journals[index].workspace == nil, let workspace = normalizedWorkspace(event.path) {
             journals[index].workspace = workspace
-            journals[index].baseline = GitRepositoryInspector.capture(workspace: workspace, at: event.ts)
+            captureSnapshot(journalId: journals[index].id, workspace: workspace, baseline: true)
         }
         if event.kind == "model" && event.op == "prompt" {
             journals[index].captureComplete = true
@@ -244,8 +428,21 @@ final class TurnJournalStore: ObservableObject {
     private func finish(_ journal: inout AgentTurnJournal, with event: GuardEvent) {
         journal.completedAt = event.ts
         journal.status = status(for: event)
-        journal.finalSnapshot = journal.workspace.flatMap { GitRepositoryInspector.capture(workspace: $0, at: event.ts) }
-        journal.mutations = GitRepositoryInspector.mutations(between: journal.baseline, and: journal.finalSnapshot)
+        if let workspace = journal.workspace {
+            captureSnapshot(journalId: journal.id, workspace: workspace, baseline: false)
+        }
+    }
+
+    private func captureSnapshot(journalId: String, workspace: String, baseline: Bool) {
+        Task {
+            let snapshot = await Task.detached { GitRepositoryInspector.capture(workspace: workspace) }.value
+            guard let index = journals.firstIndex(where: { $0.id == journalId }) else { return }
+            if baseline, journals[index].baseline == nil { journals[index].baseline = snapshot }
+            if !baseline { journals[index].finalSnapshot = snapshot }
+            journals[index].mutations = GitRepositoryInspector.mutations(
+                between: journals[index].baseline, and: journals[index].finalSnapshot)
+            save()
+        }
     }
 
     private func status(for event: GuardEvent) -> TurnJournalStatus {

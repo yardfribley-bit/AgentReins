@@ -69,6 +69,59 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(snapshot.patch.contains("+changed"))
     }
 
+    func testIndependentVerificationRecordsRealExitCodeAndOutput() {
+        let command = ProjectVerifier.Command(
+            executable: "/bin/sh",
+            arguments: ["-c", "printf verified; printf warning >&2; exit 7"],
+            displayName: "fixture verification")
+
+        let run = ProjectVerifier.run(command, workspace: FileManager.default.temporaryDirectory.path)
+
+        XCTAssertEqual(run.exitCode, 7)
+        XCTAssertEqual(run.standardOutput, "verified")
+        XCTAssertEqual(run.standardError, "warning")
+        XCTAssertGreaterThanOrEqual(run.duration, 0)
+    }
+
+    func testRecoveryRestoresCleanTrackedStateAndRemovesRecordedUntrackedFiles() throws {
+        let root = try makeRepository()
+        defer { try? FileManager.default.removeItem(at: root) }
+        let head = try gitOutput(["rev-parse", "HEAD"], at: root).trimmingCharacters(in: .whitespacesAndNewlines)
+        try "agent change\n".write(to: root.appendingPathComponent("Tracked.txt"), atomically: true, encoding: .utf8)
+        try "created\n".write(to: root.appendingPathComponent("Created.txt"), atomically: true, encoding: .utf8)
+        try FileManager.default.removeItem(at: root.appendingPathComponent("Deleted.txt"))
+        try FileManager.default.moveItem(at: root.appendingPathComponent("Renamed.txt"),
+                                         to: root.appendingPathComponent("RenamedByAgent.txt"))
+
+        let finalSnapshot = try XCTUnwrap(GitRepositoryInspector.capture(workspace: root.path))
+        let untracked = finalSnapshot.files.filter { $0.status == "??" }.map(\.path)
+
+        let result = GitRecovery.restoreCleanBaseline(
+            workspace: root.path, head: head, untrackedPaths: untracked)
+
+        XCTAssertTrue(result.success)
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("Tracked.txt")), "baseline\n")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("Deleted.txt")), "delete baseline\n")
+        XCTAssertEqual(try String(contentsOf: root.appendingPathComponent("Renamed.txt")), "rename baseline\n")
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("Created.txt").path))
+        XCTAssertFalse(FileManager.default.fileExists(atPath: root.appendingPathComponent("RenamedByAgent.txt").path))
+        XCTAssertTrue(try gitOutput(["status", "--porcelain"], at: root).isEmpty)
+    }
+
+    func testRecoveryEligibilityRejectsPreExistingChanges() {
+        let baseline = snapshot(files: [GitFileState(path: "UserWork.swift", status: " M")])
+        let final = snapshot(files: [GitFileState(path: "UserWork.swift", status: " M"),
+                                     GitFileState(path: "Agent.swift", status: "??")])
+        let journal = AgentTurnJournal(
+            id: "session:turn", sessionId: "session", turnId: "turn", agent: "fixture",
+            workspace: "/tmp/repository", startedAt: Date(), completedAt: Date(), status: .completed,
+            captureComplete: true, baseline: baseline, finalSnapshot: final,
+            mutations: GitRepositoryInspector.mutations(between: baseline, and: final),
+            verificationRuns: [], toolCallIds: [])
+
+        XCTAssertFalse(journal.canRecoverSafely)
+    }
+
     private func snapshot(files: [GitFileState]) -> GitSnapshot {
         GitSnapshot(capturedAt: Date(), repositoryRoot: "/tmp/repository", head: "abc",
                     porcelainV2: "", patch: "", stagedPatch: "", diffStat: "", numStat: "",
@@ -84,5 +137,33 @@ final class TurnJournalTests: XCTestCase {
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0, "git \(arguments.joined(separator: " ")) failed")
+    }
+
+    private func gitOutput(_ arguments: [String], at root: URL) throws -> String {
+        let process = Process()
+        let output = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", root.path] + arguments
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        process.waitUntilExit()
+        XCTAssertEqual(process.terminationStatus, 0)
+        return String(data: output.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+    }
+
+    private func makeRepository() throws -> URL {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-recovery-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        try runGit(["init", "-q"], at: root)
+        try runGit(["config", "user.email", "tests@agentreins.local"], at: root)
+        try runGit(["config", "user.name", "AgentReins Tests"], at: root)
+        try "baseline\n".write(to: root.appendingPathComponent("Tracked.txt"), atomically: true, encoding: .utf8)
+        try "delete baseline\n".write(to: root.appendingPathComponent("Deleted.txt"), atomically: true, encoding: .utf8)
+        try "rename baseline\n".write(to: root.appendingPathComponent("Renamed.txt"), atomically: true, encoding: .utf8)
+        try runGit(["add", "Tracked.txt", "Deleted.txt", "Renamed.txt"], at: root)
+        try runGit(["commit", "-qm", "Create baseline"], at: root)
+        return root
     }
 }
