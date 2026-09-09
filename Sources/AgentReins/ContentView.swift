@@ -125,6 +125,7 @@ struct ContentView: View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
                 header(l("See what your AI agent is doing", "看清你的 Agent 正在做什么"), subtitle: l("AgentReins connects intent, model activity, tool calls, and outcomes — in one clear timeline.", "AgentReins 将用户意图、模型活动、工具调用和结果关联在一条清晰时间线上。"))
+                liveContextMonitor
                 safetyHero
                 liveAgentsCard
                 recentSessions
@@ -137,6 +138,169 @@ struct ContentView: View {
                 recentActivity
             }
             .padding(32).frame(maxWidth: 980, alignment: .leading)
+        }
+    }
+
+    private var liveContextEvents: [GuardEvent] {
+        Array(events.filter {
+            $0.source?.hasPrefix("agentsight:") == true &&
+            ["prompt", "call", "result", "response"].contains($0.op)
+        }.prefix(14).reversed())
+    }
+
+    private var latestContextMetrics: ContextGrowthMetrics? {
+        sessions.first?.turns.last?.contextGrowth
+    }
+
+    private var liveContextMonitor: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 8) {
+                        Circle().fill(workBuddySight.connected ? Color.green : Color.secondary)
+                            .frame(width: 8, height: 8)
+                        Text("Live context monitor").font(.headline)
+                    }
+                    Text("Watch model requests, context growth, tool activity, and results as they arrive.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                if let update = workBuddySight.lastUpdate {
+                    Text("Updated \(update, style: .relative)")
+                        .font(.caption).foregroundStyle(.secondary)
+                } else {
+                    Text(workBuddySight.connected ? "Waiting for activity" : "Agent not connected")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+
+            if let metrics = latestContextMetrics {
+                HStack(spacing: 24) {
+                    contextMetric("Current context", metrics.latestInputTokens.formatted())
+                    contextMetric("This turn", "\(metrics.growthTokens >= 0 ? "+" : "")\(metrics.growthTokens.formatted())")
+                    contextMetric("Model requests", metrics.requestCount.formatted())
+                    contextMetric("Cache reported", metrics.cumulativeCachedTokens.formatted())
+                    Spacer()
+                    if metrics.needsAttention {
+                        Label("Context growing quickly", systemImage: "exclamationmark.triangle.fill")
+                            .font(.caption.bold()).foregroundStyle(.orange)
+                    }
+                }
+            }
+
+            Divider()
+            if liveContextEvents.isEmpty {
+                HStack {
+                    Spacer()
+                    Text("Start an agent task to see the live stream.")
+                        .font(.callout).foregroundStyle(.secondary).padding(.vertical, 18)
+                    Spacer()
+                }
+            } else {
+                ScrollViewReader { proxy in
+                    ScrollView(.vertical) {
+                        LazyVStack(alignment: .leading, spacing: 9) {
+                            ForEach(liveContextEvents) { event in
+                                liveContextRow(event).id(event.id)
+                            }
+                        }
+                    }
+                    .frame(height: 190)
+                    .onAppear { if let id = liveContextEvents.last?.id { proxy.scrollTo(id, anchor: .bottom) } }
+                    .onChange(of: liveContextEvents.last?.id) { id in
+                        if let id { withAnimation(.easeOut(duration: 0.2)) { proxy.scrollTo(id, anchor: .bottom) } }
+                    }
+                }
+            }
+        }
+        .padding(16)
+        .background(RoundedRectangle(cornerRadius: 14).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.08)))
+    }
+
+    private func liveContextRow(_ event: GuardEvent) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            Image(systemName: liveContextIcon(event.op))
+                .foregroundStyle(liveContextColor(event.op)).frame(width: 18)
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    if let command = event.command {
+                        liveEvidenceField("Arguments / command", command)
+                    }
+                    if let result = event.modelResponse {
+                        liveEvidenceField("Execution result", result)
+                    }
+                    if let decision = event.modelDecision {
+                        liveEvidenceField("Model decision", decision)
+                    }
+                    if let turn = event.turnId { liveEvidenceField("Turn ID", turn) }
+                    if let trace = event.traceId { liveEvidenceField("Trace ID", trace) }
+                    if event.command == nil && event.modelResponse == nil && event.modelDecision == nil {
+                        Text("No additional payload was recorded for this event.")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }.padding(.top, 7)
+            } label: {
+                VStack(alignment: .leading, spacing: 3) {
+                HStack {
+                    Text(liveContextTitle(event)).font(.callout.weight(.medium))
+                    if let model = event.model { Text(model).font(.caption).foregroundStyle(.secondary) }
+                    Spacer()
+                    Text(event.ts, style: .time).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                }
+                if let input = event.inputTokens {
+                    Text("\(input.formatted()) input · \((event.outputTokens ?? 0).formatted()) output · \((event.cachedTokens ?? 0).formatted()) cached")
+                        .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                } else if event.op == "prompt", let intent = event.userIntent {
+                    Text(intent).font(.caption).foregroundStyle(.secondary).lineLimit(1)
+                } else if event.op == "call", let command = event.command {
+                    Text(command).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(2)
+                } else if event.op == "result", let result = event.modelResponse {
+                    Text(result).font(.caption.monospaced()).foregroundStyle(.secondary).lineLimit(3)
+                }
+            }
+            }
+        }
+    }
+
+    private func liveEvidenceField(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary)
+            Text(value).font(.caption.monospaced()).textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(8).background(RoundedRectangle(cornerRadius: 7).fill(Color.primary.opacity(0.04)))
+        }
+    }
+
+    private func liveContextTitle(_ event: GuardEvent) -> String {
+        switch event.op {
+        case "prompt": return "User turn captured"
+        case "call":
+            let tool = event.toolName ?? "Unknown tool"
+            return event.inputTokens == nil ? "Tool requested · \(tool)" : "Model request · \(tool)"
+        case "result": return "Tool completed · \(event.toolName ?? "Unknown tool")"
+        case "response": return "Model response received"
+        default: return "Agent activity"
+        }
+    }
+
+    private func liveContextIcon(_ op: String) -> String {
+        switch op {
+        case "prompt": return "person.crop.circle"
+        case "call": return "hammer"
+        case "result": return "checkmark.circle"
+        case "response": return "sparkles"
+        default: return "circle.fill"
+        }
+    }
+
+    private func liveContextColor(_ op: String) -> Color {
+        switch op {
+        case "prompt": return .blue
+        case "call": return .orange
+        case "result": return .teal
+        case "response": return .purple
+        default: return .secondary
         }
     }
 
