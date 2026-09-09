@@ -153,7 +153,7 @@ struct ContentView: View {
     }
 
     private var recentInfluenceChains: [InfluenceChain] {
-        Array(ExternalContentSecurity.influenceChains(events: Array(events.prefix(500))).suffix(3))
+        Array(eventStore.influenceChains.suffix(3))
     }
 
     private var liveContextMonitor: some View {

@@ -6,6 +6,7 @@ final class EventStore: ObservableObject {
     @Published private(set) var events: [GuardEvent] = []
     @Published private(set) var incidents: [SecurityIncident] = []
     @Published private(set) var sessions: [AgentSessionSnapshot] = []
+    @Published private(set) var influenceChains: [InfluenceChain] = []
 
     private let fileURL: URL
     private let encoder: JSONEncoder
@@ -88,6 +89,7 @@ final class EventStore: ObservableObject {
         // 首页/时间线只物化最近窗口，完整原始记录仍保留在本地事件库。
         incidents = SecurityIncident.correlate(Array(events.prefix(1_200)))
         sessions = AgentSessionSnapshot.build(from: events)
+        influenceChains = ExternalContentSecurity.influenceChains(events: Array(events.prefix(500)))
     }
 
     /// Parser v2 fixes user-query extraction and WorkBuddy's reused tool row IDs.
