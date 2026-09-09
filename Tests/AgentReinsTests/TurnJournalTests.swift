@@ -3,6 +3,30 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testContextIntegrityDetectsRepeatedToolNoiseAndRequirementLoss() {
+        let repeated = String(repeating: "build output warning ", count: 30)
+        let calls = (0..<4).map { index in
+            AgentToolCall(id: "call-\(index)", name: "Bash", arguments: "swift test",
+                status: "completed", startedAt: Date(), completedAt: Date(), traceId: "trace",
+                result: repeated)
+        }
+        let growth = ContextGrowthMetrics(samples: [
+            ContextUsageSample(id: "1", timestamp: Date(), inputTokens: 10_000, outputTokens: 100, cachedTokens: 0, reasoningTokens: nil, model: "model"),
+            ContextUsageSample(id: "2", timestamp: Date(), inputTokens: 16_000, outputTokens: 100, cachedTokens: 0, reasoningTokens: nil, model: "model")
+        ])
+
+        let assessment = ContextIntegrityAssessment.assess(
+            userInput: "Preserve authentication validation and Intel compatibility",
+            capturedPrompt: "Preserve authentication validation and Intel compatibility",
+            response: "Build finished", toolCalls: calls, growth: growth)
+
+        XCTAssertEqual(assessment.health, .memoryAtRisk)
+        XCTAssertEqual(assessment.evidence, .partial)
+        XCTAssertGreaterThanOrEqual(assessment.duplicatePayloadPercent, 70)
+        XCTAssertGreaterThanOrEqual(assessment.toolNoisePercent, 90)
+        XCTAssertEqual(assessment.requirementRetentionPercent, 0)
+    }
+
     func testToolSecurityAssessmentSeparatesToolMCPAndSkillRisk() {
         let shell = ToolSecurityAssessment.assess(name: "Bash", command: "rm project.txt")
         XCTAssertEqual(shell.kind, .tool)
