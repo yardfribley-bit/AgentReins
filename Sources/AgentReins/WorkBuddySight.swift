@@ -56,7 +56,7 @@ final class WorkBuddySight: ObservableObject {
         return files.sorted { $0.1 > $1.1 }.prefix(4).flatMap { parseSession($0.0) }
     }
 
-    private nonisolated static func parseSession(_ url: URL) -> [GuardEvent] {
+    nonisolated static func parseSession(_ url: URL) -> [GuardEvent] {
         guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
         var lastIntent: [String: String] = [:]
         var lastReasoning: [String: String] = [:]
