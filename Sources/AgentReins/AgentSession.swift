@@ -248,7 +248,14 @@ struct AgentSessionSnapshot: Identifiable {
     }
 
     private static func buildExchanges(_ events: [GuardEvent]) -> [ModelExchange] {
-        let grouped = Dictionary(grouping: events) { $0.traceId ?? "session:\($0.sessionId ?? "unknown")" }
+        // WorkBuddy omits traceId on user prompts and may reuse a provider trace
+        // across several turns. A trace-only key therefore merged unrelated turns
+        // and left later turns without their captured model context.
+        let grouped = Dictionary(grouping: events) { event in
+            let turn = event.turnId ?? "unattributed"
+            let trace = event.traceId ?? "no-trace"
+            return "turn:\(turn)|trace:\(trace)"
+        }
         return grouped.map { key, traceEvents in
             let ordered = traceEvents.sorted { $0.ts < $1.ts }
             let calls = Dictionary(grouping: ordered.filter { $0.toolCallId != nil }, by: { $0.toolCallId! }).map { callId, callEvents in

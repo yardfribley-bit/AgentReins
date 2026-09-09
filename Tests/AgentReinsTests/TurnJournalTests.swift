@@ -3,6 +3,34 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testModelContextRemainsAssociatedWithEachTurnWhenTraceIsMissingOrReused() throws {
+        let session = "session"
+        let first = GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil,
+            agent: "workbuddy", op: "prompt", severity: "info", ts: Date(timeIntervalSince1970: 1),
+            action: "sent", sessionId: session, turnId: "turn-1", userIntent: "first request",
+            modelPrompt: "first complete context")
+        let second = GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil,
+            agent: "workbuddy", op: "prompt", severity: "info", ts: Date(timeIntervalSince1970: 2),
+            action: "sent", sessionId: session, turnId: "turn-2", userIntent: "second request",
+            modelPrompt: "second complete context")
+        let firstCall = GuardEvent(kind: "tool", ruleId: "call", path: "-", command: "read()",
+            agent: "workbuddy", op: "call", severity: "info", ts: Date(timeIntervalSince1970: 3),
+            action: "requested", sessionId: session, traceId: "reused-trace", turnId: "turn-1",
+            toolCallId: "call-1", toolName: "read")
+        let secondCall = GuardEvent(kind: "tool", ruleId: "call", path: "-", command: "write()",
+            agent: "workbuddy", op: "call", severity: "info", ts: Date(timeIntervalSince1970: 4),
+            action: "requested", sessionId: session, traceId: "reused-trace", turnId: "turn-2",
+            toolCallId: "call-2", toolName: "write")
+
+        let snapshot = try XCTUnwrap(AgentSessionSnapshot.build(from: [first, second, firstCall, secondCall]).first)
+
+        XCTAssertEqual(snapshot.turns.count, 2)
+        XCTAssertEqual(snapshot.turns[0].fullPrompt, "first complete context")
+        XCTAssertEqual(snapshot.turns[1].fullPrompt, "second complete context")
+        XCTAssertEqual(snapshot.turns[0].toolCalls.map(\.name), ["read"])
+        XCTAssertEqual(snapshot.turns[1].toolCalls.map(\.name), ["write"])
+    }
+
     func testContextGrowthPreservesEveryModelRequest() throws {
         let inputs = [34_994, 37_186, 38_278, 39_074, 42_815, 45_789, 53_220, 53_731, 54_261, 56_147]
         let samples = inputs.enumerated().map { index, input in
