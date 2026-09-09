@@ -8,6 +8,9 @@ import CryptoKit
 final class WorkBuddySight: ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
+    @Published private(set) var historyRestoring = false
+    @Published private(set) var historyProgress = 0.0
+    @Published private(set) var historyFileCount = 0
     var onEvents: (([GuardEvent]) -> Void)?
 
     private var timer: Timer?
@@ -25,6 +28,31 @@ final class WorkBuddySight: ObservableObject {
     }
 
     func stop() { timer?.invalidate(); timer = nil }
+
+    func restoreHistory() {
+        guard !historyRestoring else { return }
+        let root = ("~/.workbuddy/projects" as NSString).expandingTildeInPath
+        historyRestoring = true
+        historyProgress = 0
+        queue.async { [weak self] in
+            let files = Self.sessionFiles(root: root)
+            var restored: [GuardEvent] = []
+            for (index, url) in files.enumerated() {
+                restored.append(contentsOf: Self.parseSession(url, fullHistory: true))
+                DispatchQueue.main.async {
+                    self?.historyProgress = files.isEmpty ? 1 : Double(index + 1) / Double(files.count)
+                }
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                let fresh = restored.filter { self.seen.insert($0.id).inserted }
+                self.onEvents?(fresh)
+                self.historyFileCount = files.count
+                self.historyRestoring = false
+                self.historyProgress = 1
+            }
+        }
+    }
 
     private func poll() {
         let root = ("~/.workbuddy/projects" as NSString).expandingTildeInPath
@@ -56,15 +84,16 @@ final class WorkBuddySight: ObservableObject {
         return files.sorted { $0.1 > $1.1 }.prefix(4).flatMap { parseSession($0.0) }
     }
 
-    nonisolated static func parseSession(_ url: URL) -> [GuardEvent] {
-        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+    nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {
+        guard let text = sessionText(url, fullHistory: fullHistory) else { return [] }
         var lastIntent: [String: String] = [:]
         var lastReasoning: [String: String] = [:]
         var currentTurn: [String: String] = [:]
         var toolNames: [String: String] = [:]
         var result: [GuardEvent] = []
         // 启动时只读取活跃窗口；完整历史已在 EventStore，避免重复解析巨型会话。
-        for line in text.split(whereSeparator: \.isNewline).suffix(400) {
+        let lines = text.split(whereSeparator: \.isNewline)
+        for line in fullHistory ? ArraySlice(lines) : lines.suffix(400) {
             guard let data = String(line).data(using: .utf8),
                   let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let rawId = row["id"] as? String else { continue }
@@ -140,6 +169,32 @@ final class WorkBuddySight: ObservableObject {
                 source: "agentsight:workbuddy-local"))
         }
         return result
+    }
+
+    private nonisolated static func sessionFiles(root: String) -> [URL] {
+        let fm = FileManager.default
+        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
+            includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        var files: [(URL, Date)] = []
+        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            files.append((url, date))
+        }
+        return files.sorted { $0.1 > $1.1 }.map(\.0)
+    }
+
+    private nonisolated static func sessionText(_ url: URL, fullHistory: Bool) -> String? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        let size = (try? handle.seekToEnd()) ?? 0
+        if fullHistory || size <= 512 * 1_024 {
+            try? handle.seek(toOffset: 0)
+            return String(data: handle.readDataToEndOfFile(), encoding: .utf8)
+        }
+        try? handle.seek(toOffset: size - 512 * 1_024)
+        var data = handle.readDataToEndOfFile()
+        if let newline = data.firstIndex(of: 0x0A) { data = data.suffix(from: data.index(after: newline)) }
+        return String(data: data, encoding: .utf8)
     }
 
     private nonisolated static func textContent(_ value: Any?) -> String? {

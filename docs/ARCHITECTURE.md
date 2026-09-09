@@ -41,6 +41,8 @@ All production code lives in `Sources/AgentReins`.
 5. The UI presents a concise outcome first and keeps raw evidence behind expandable details.
 6. Optional semantic analysis runs only after local redaction and only when the user configures it.
 
+Historical session reconstruction is opt-in. Startup restores only the active session window; the History view scans older local evidence in the background when the user requests it.
+
 ## Trust model
 
 - Local evidence is preferred over an agent's self-reported success.

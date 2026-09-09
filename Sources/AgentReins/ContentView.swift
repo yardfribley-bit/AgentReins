@@ -6,7 +6,7 @@ private enum CenterPage: String, CaseIterable, Identifiable {
     func title(english: Bool) -> String {
         switch self {
         case .home: return english ? "Overview" : "安全状态"
-        case .sessions: return english ? "Agent Sessions" : "Agent 会话"
+        case .sessions: return english ? "History" : "历史"
         case .timeline: return english ? "Activity" : "活动时间线"
         case .protection: return english ? "Protection" : "保护设置"
         case .recovery: return english ? "Recovery" : "恢复"
@@ -15,7 +15,7 @@ private enum CenterPage: String, CaseIterable, Identifiable {
     var icon: String {
         switch self {
         case .home: return "shield.checkered"
-        case .sessions: return "bubble.left.and.bubble.right"
+        case .sessions: return "clock.arrow.circlepath"
         case .timeline: return "clock.arrow.circlepath"
         case .protection: return "lock.shield"
         case .recovery: return "arrow.uturn.backward.circle"
@@ -125,10 +125,11 @@ struct ContentView: View {
     private var home: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {
-                header(l("See what your AI agent is doing", "看清你的 Agent 正在做什么"), subtitle: l("AgentReins connects intent, model activity, tool calls, and outcomes — in one clear timeline.", "AgentReins 将用户意图、模型活动、工具调用和结果关联在一条清晰时间线上。"))
-                liveContextMonitor
+                header(l("Your coding agent, under control", "你的编程 Agent，尽在掌控"), subtitle: l("See what it is doing now, verify what it changed, and recover when something goes wrong.", "实时了解它正在做什么、验证代码更改，并在出现问题时恢复。"))
+                activeTaskCard
+                productValueStrip
                 safetyHero
-                liveAgentsCard
+                liveContextMonitor
                 recentSessions
                 if let incident = attentionIncident { decisionCard(incident) }
                 HStack(spacing: 14) {
@@ -147,6 +148,228 @@ struct ContentView: View {
             $0.source?.hasPrefix("agentsight:") == true &&
             ["prompt", "call", "result", "response"].contains($0.op)
         }.prefix(14).reversed())
+    }
+
+    private var latestSession: AgentSessionSnapshot? { sessions.first }
+    private var latestTurn: AgentTurn? { latestSession?.turns.last }
+    private var latestSessionEvent: GuardEvent? {
+        latestSession?.events.last { ["prompt", "call", "result", "response"].contains($0.op) }
+    }
+    private var latestJournal: AgentTurnJournal? {
+        guard let session = latestSession, let turn = latestTurn else { return nil }
+        return turnJournalStore.journals.first { $0.sessionId == session.id && $0.turnId == turn.id }
+    }
+    private var latestIsLive: Bool {
+        guard let date = latestSession?.lastActivityAt else { return false }
+        return Date().timeIntervalSince(date) < 90
+    }
+
+    private var activeTaskCard: some View {
+        VStack(alignment: .leading, spacing: 18) {
+            if let session = latestSession, let turn = latestTurn {
+                HStack(alignment: .top, spacing: 16) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 12).fill(Color.blue.opacity(0.12))
+                        Image(systemName: "terminal.fill").font(.title2).foregroundStyle(.blue)
+                    }.frame(width: 48, height: 48)
+                    VStack(alignment: .leading, spacing: 5) {
+                        HStack(spacing: 8) {
+                            Text(session.agent.capitalized).font(.caption.bold()).foregroundStyle(.secondary)
+                            Text("·").foregroundStyle(.tertiary)
+                            Text(latestIsLive ? "LIVE NOW" : "LATEST TASK")
+                                .font(.caption2.bold()).foregroundStyle(latestIsLive ? .green : .secondary)
+                        }
+                        Text(turn.userInput ?? session.latestIntent ?? "Agent activity detected")
+                            .font(.title2.weight(.semibold)).lineLimit(2)
+                        if let workspace = session.workspace {
+                            Text(URL(fileURLWithPath: workspace).lastPathComponent)
+                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                        }
+                    }
+                    Spacer()
+                    activeTaskStatusBadge(turn: turn)
+                }
+
+                Divider()
+
+                HStack(alignment: .top, spacing: 12) {
+                    ProgressView().controlSize(.small).opacity(latestIsLive ? 1 : 0)
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(currentActivityTitle).font(.headline)
+                        Text(currentActivityDetail).font(.callout).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer()
+                    if let date = latestSessionEvent?.ts {
+                        Text(date, style: .relative).font(.caption).foregroundStyle(.tertiary)
+                    }
+                }
+
+                taskProgress(turn: turn)
+
+                HStack(spacing: 12) {
+                    taskOutcomeMetric(icon: "wrench.and.screwdriver", value: "\(turn.toolCalls.count)", label: "Tool calls", tint: .blue)
+                    taskOutcomeMetric(icon: "doc.badge.ellipsis", value: "\(detectedChangeCount)", label: changeMetricLabel, tint: .orange)
+                    taskOutcomeMetric(icon: turn.riskCount == 0 ? "checkmark.shield" : "exclamationmark.shield", value: turn.riskCount == 0 ? "None" : "\(turn.riskCount)", label: "Risks detected", tint: turn.riskCount == 0 ? .green : .red)
+                    taskOutcomeMetric(icon: "checkmark.seal", value: verificationLabel, label: "Verification", tint: verificationColor)
+                }
+
+                HStack {
+                    Button("View complete task") { selectedSession = session }
+                        .buttonStyle(.borderedProminent)
+                    Button("Open activity stream") { page = .timeline }
+                        .buttonStyle(.bordered)
+                    Spacer()
+                    Text("Full evidence remains available for every step")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            } else {
+                HStack(spacing: 18) {
+                    ZStack {
+                        RoundedRectangle(cornerRadius: 14).fill(Color.blue.opacity(0.12))
+                        Image(systemName: "scope").font(.largeTitle).foregroundStyle(.blue)
+                    }.frame(width: 64, height: 64)
+                    VStack(alignment: .leading, spacing: 6) {
+                        Text("Start a coding-agent task").font(.title2.bold())
+                        Text("AgentReins will show the request, model activity, tools, code changes, risks, and verified result here in real time.")
+                            .foregroundStyle(.secondary)
+                    }
+                }.padding(.vertical, 12)
+            }
+        }
+        .padding(20)
+        .background(RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .controlBackgroundColor)))
+        .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.blue.opacity(0.22), lineWidth: 1))
+    }
+
+    private var productValueStrip: some View {
+        HStack(spacing: 0) {
+            valuePromise("eye", "Watch", "Understand every live step")
+            Divider().frame(height: 42)
+            valuePromise("checkmark.seal", "Verify", "Run independent checks")
+            Divider().frame(height: 42)
+            valuePromise("lock.shield", "Protect", "Catch risky behavior")
+            Divider().frame(height: 42)
+            valuePromise("arrow.uturn.backward", "Recover", "Undo a bad agent turn")
+        }
+        .padding(.vertical, 14)
+        .background(RoundedRectangle(cornerRadius: 13).fill(Color.primary.opacity(0.035)))
+    }
+
+    private func valuePromise(_ icon: String, _ title: String, _ detail: String) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon).foregroundStyle(.blue).frame(width: 22)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(title).font(.callout.bold())
+                Text(detail).font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+            }
+        }.frame(maxWidth: .infinity)
+    }
+
+    private var currentActivityTitle: String {
+        guard let event = latestSessionEvent else { return "Waiting for activity" }
+        switch event.op {
+        case "prompt": return "Understanding your request"
+        case "call": return "Using \(resolvedToolName(event) ?? "a tool")"
+        case "result": return "Reviewing the tool result"
+        case "response": return latestIsLive ? "Preparing the next step" : "Task response received"
+        case "usage": return "Updating model context"
+        default: return "Working on the task"
+        }
+    }
+
+    private var currentActivityDetail: String {
+        guard let event = latestSessionEvent else { return "Connect WorkBuddy or Codex to begin." }
+        if event.op == "call", let command = event.command { return String(command.replacingOccurrences(of: "\n", with: " ").prefix(220)) }
+        if event.op == "result", let result = event.modelResponse { return String(result.replacingOccurrences(of: "\n", with: " ").prefix(220)) }
+        if event.op == "prompt" { return "The model received the captured task context." }
+        if event.op == "response" { return "A model response was captured and associated with this turn." }
+        return latestSession?.plainSummary ?? "Agent activity is being captured."
+    }
+
+    private func taskProgress(turn: AgentTurn) -> some View {
+        let steps: [(String, String, Bool)] = [
+            ("1", "Request", turn.userInput != nil),
+            ("2", "Model", !turn.exchanges.isEmpty),
+            ("3", "Tools", !turn.toolCalls.isEmpty),
+            ("4", "Verify", verificationLabel == "Passed")
+        ]
+        return HStack(spacing: 0) {
+            ForEach(Array(steps.enumerated()), id: \.offset) { index, step in
+                VStack(spacing: 6) {
+                    ZStack {
+                        Circle().fill(step.2 ? Color.green : (index == currentProgressIndex ? Color.blue : Color.secondary.opacity(0.15)))
+                        if step.2 {
+                            Image(systemName: "checkmark").font(.caption.bold()).foregroundStyle(.white)
+                        } else {
+                            Text(step.0).font(.caption.bold())
+                                .foregroundStyle(index == currentProgressIndex ? .white : .secondary)
+                        }
+                    }.frame(width: 26, height: 26)
+                    Text(step.1).font(.caption.weight(.medium)).foregroundStyle(step.2 || index == currentProgressIndex ? .primary : .secondary)
+                }
+                if index < steps.count - 1 {
+                    Rectangle().fill(step.2 ? Color.green.opacity(0.55) : Color.secondary.opacity(0.15))
+                        .frame(height: 2).padding(.horizontal, 7).offset(y: -10)
+                }
+            }
+        }
+    }
+
+    private var currentProgressIndex: Int {
+        guard let event = latestSessionEvent else { return 0 }
+        if event.op == "prompt" { return 1 }
+        if event.op == "call" || event.op == "result" { return 2 }
+        return 3
+    }
+
+    private func activeTaskStatusBadge(turn: AgentTurn) -> some View {
+        let hasRisk = turn.riskCount > 0
+        return Label(hasRisk ? "Needs review" : (latestIsLive ? "Agent working" : "Activity captured"),
+                     systemImage: hasRisk ? "exclamationmark.triangle.fill" : (latestIsLive ? "waveform" : "checkmark.circle.fill"))
+            .font(.caption.bold()).foregroundStyle(hasRisk ? .orange : (latestIsLive ? .blue : .green))
+            .padding(.horizontal, 10).padding(.vertical, 7)
+            .background(Capsule().fill((hasRisk ? Color.orange : (latestIsLive ? Color.blue : Color.green)).opacity(0.1)))
+    }
+
+    private func taskOutcomeMetric(icon: String, value: String, label: String, tint: Color) -> some View {
+        HStack(spacing: 9) {
+            Image(systemName: icon).foregroundStyle(tint)
+            VStack(alignment: .leading, spacing: 1) {
+                Text(value).font(.callout.bold())
+                Text(label).font(.caption2).foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
+        }.padding(10).frame(maxWidth: .infinity)
+            .background(RoundedRectangle(cornerRadius: 9).fill(tint.opacity(0.07)))
+    }
+
+    private var detectedChangeCount: Int {
+        if let mutations = latestJournal?.mutations, !mutations.isEmpty { return mutations.count }
+        return latestTurn?.toolCalls.filter {
+            let text = "\($0.name) \($0.arguments ?? "")".lowercased()
+            return ["edit", "write", "patch", "create", "delete", "move", "rename"].contains(where: text.contains)
+        }.count ?? 0
+    }
+
+    private var changeMetricLabel: String {
+        if let mutations = latestJournal?.mutations, !mutations.isEmpty { return "Files changed" }
+        return "Change calls"
+    }
+
+    private var verificationLabel: String {
+        guard let journal = latestJournal else { return "Not run" }
+        if turnJournalStore.verificationStates[journal.id] == .running { return "Running" }
+        guard let last = journal.verificationRuns.last else { return "Not run" }
+        return last.exitCode == 0 ? "Passed" : "Failed"
+    }
+
+    private var verificationColor: Color {
+        switch verificationLabel {
+        case "Passed": return .green
+        case "Failed": return .red
+        case "Running": return .blue
+        default: return .secondary
+        }
     }
 
     private var latestContextMetrics: ContextGrowthMetrics? {
@@ -431,16 +654,64 @@ struct ContentView: View {
 
     private var sessionsPage: some View {
         VStack(alignment: .leading, spacing: 18) {
-            header(l("Agent sessions", "Agent 会话"), subtitle: l("Follow every turn from user intent to model response, tool calls, and system impact.", "以用户意图和模型上下文为起点，查看 Agent 的完整执行过程。"))
-            if sessions.isEmpty {
+            header(l("History", "历史"), subtitle: l("Old sessions stay dormant until you choose to reconstruct them. Live monitoring remains fast.", "旧会话默认不加载，只有需要时才在后台还原。"))
+            if !eventStore.historyLoaded {
+                historyRestoreCard
+            } else if historyRestoring {
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack { Text("Reconstructing local agent history…").font(.headline); Spacer(); Text(historyProgress, format: .percent) }
+                    ProgressView(value: historyProgress)
+                    Text("You can leave this page. Live monitoring continues while history is restored in the background.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }.cardStyle()
+            } else if sessions.isEmpty {
                 emptyState(l("No sessions yet", "暂无会话"), detail: l("AgentSight automatically discovers supported local agents.", "AgentSight 会自动发现支持的本地 Agent 会话。"), icon: "bubble.left.and.bubble.right")
             } else {
-                List(sessions) { session in
-                    Button { selectedSession = session } label: { sessionRow(session).padding(.vertical, 7) }.buttonStyle(.plain)
-                }.listStyle(.inset)
+                VStack(alignment: .leading, spacing: 10) {
+                    HStack {
+                        Text("\(sessions.count) reconstructed sessions").font(.caption).foregroundStyle(.secondary)
+                        Spacer()
+                        if historyFileCount > 0 { Text("\(historyFileCount) local logs scanned").font(.caption).foregroundStyle(.tertiary) }
+                    }
+                    List(sessions) { session in
+                        Button { selectedSession = session } label: { sessionRow(session).padding(.vertical, 7) }.buttonStyle(.plain)
+                    }.listStyle(.inset)
+                }
             }
         }.padding(32)
     }
+
+    private var historyRestoreCard: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            HStack(spacing: 14) {
+                Image(systemName: "archivebox").font(.title).foregroundStyle(.blue)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("History is not loaded").font(.title3.bold())
+                    Text("AgentReins only restored the active task at startup, so opening the app stays responsive.")
+                        .foregroundStyle(.secondary)
+                }
+            }
+            Divider()
+            Text("When requested, AgentReins will slowly reconstruct local sessions, prompts, model responses, tools, and results. Processing stays on this Mac.")
+                .font(.callout).foregroundStyle(.secondary)
+            HStack {
+                Button("Restore history") {
+                    eventStore.loadHistory()
+                    codexSight.restoreHistory()
+                    workBuddySight.restoreHistory()
+                }.buttonStyle(.borderedProminent)
+                Text("This may take several minutes for large logs.").font(.caption).foregroundStyle(.tertiary)
+            }
+        }.cardStyle()
+    }
+
+    private var historyRestoring: Bool { codexSight.historyRestoring || workBuddySight.historyRestoring }
+    private var historyProgress: Double {
+        let sources = [codexSight.connected ? codexSight.historyProgress : nil,
+                       workBuddySight.connected ? workBuddySight.historyProgress : nil].compactMap { $0 }
+        return sources.isEmpty ? 0 : sources.reduce(0, +) / Double(sources.count)
+    }
+    private var historyFileCount: Int { codexSight.historyFileCount + workBuddySight.historyFileCount }
 
     private func sessionRow(_ session: AgentSessionSnapshot) -> some View {
         HStack(spacing: 13) {
