@@ -9,6 +9,11 @@ let package = Package(
             name: "AgentReins",
             path: "Sources/AgentReins",
             swiftSettings: [ .swiftLanguageMode(.v5) ]
+        ),
+        .testTarget(
+            name: "AgentReinsTests",
+            dependencies: ["AgentReins"],
+            path: "Tests/AgentReinsTests"
         )
     ]
 )

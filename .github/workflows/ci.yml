@@ -28,6 +28,9 @@ jobs:
       - name: Validate packaging script
         run: bash -n package_app.sh
 
+      - name: Run unit tests
+        run: swift test
+
       - name: Build release app
         env:
           AGENTREINS_VERSION: 0.0.0-ci

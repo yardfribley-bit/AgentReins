@@ -28,6 +28,7 @@ struct ContentView: View {
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
+    @EnvironmentObject private var turnJournalStore: TurnJournalStore
     @EnvironmentObject private var workBuddySight: WorkBuddySight
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     @EnvironmentObject private var memoryScan: MemoryScanManager
@@ -197,15 +198,17 @@ struct ContentView: View {
                             contextField(l("Workspace", "工作区"), session.workspace ?? l("Not recorded", "未记录"))
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                     }
-                    ForEach(session.turns) { turn in turnDetail(turn) }
+                    ForEach(session.turns) { turn in turnDetail(turn, sessionId: session.id) }
                 }.padding(28)
             }.frame(minWidth: 780, minHeight: 650)
             .toolbar { Button(l("Done", "完成")) { selectedSession = nil } }
         }
     }
 
-    private func turnDetail(_ turn: AgentTurn) -> some View {
-        GroupBox {
+    private func turnDetail(_ turn: AgentTurn, sessionId: String) -> some View {
+        let journalId = TurnJournalStore.journalId(sessionId: sessionId, turnId: turn.id)
+        let journal = turnJournalStore.journals.first { $0.id == journalId }
+        return GroupBox {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 18) {
                     Label(turn.modelNames, systemImage: "cpu")
@@ -227,6 +230,7 @@ struct ContentView: View {
                     Text(l("Exact token usage was not reported for this turn", "本轮未采集到模型上报的精确 Token 用量"))
                         .font(.caption).foregroundStyle(.tertiary)
                 }
+                outcomeCard(journal)
                 aiAnalysisCard(turn)
                 summaryStep(number: "1", title: l("Your instruction", "用户输入的指令"), value: turn.userInput ?? l("Not captured", "未采集"), tint: .blue)
                 evidenceStep(number: "2", title: l("Model context captured by WorkBuddy", "WorkBuddy 已落盘的模型上下文"), value: turn.fullPrompt, tint: .indigo, showPreview: true)
@@ -256,6 +260,70 @@ struct ContentView: View {
                 Text(english ? "Turn \(turn.index)" : "第 \(turn.index) 轮")
                 Spacer(); Text(english ? "\(turn.toolCalls.count) tool calls" : "\(turn.toolCalls.count) 次工具调用").font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func outcomeCard(_ journal: AgentTurnJournal?) -> some View {
+        if let journal {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label("Observed outcome", systemImage: "checklist.checked")
+                        .font(.headline)
+                    Spacer()
+                    Text(journal.status.rawValue.capitalized)
+                        .font(.caption.bold())
+                        .padding(.horizontal, 9).padding(.vertical, 4)
+                        .background(Capsule().fill(journal.status == .completed ? Color.green.opacity(0.15) : Color.orange.opacity(0.15)))
+                }
+                HStack(spacing: 20) {
+                    journalMetric("Workspace", value: journal.workspace.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Unknown")
+                    journalMetric("Git changes", value: "\(journal.mutations.count)")
+                    journalMetric("Existing changes", value: journal.hasPreExistingChanges ? "Present" : "None captured")
+                    journalMetric("Lifecycle evidence", value: journal.captureComplete ? "Prompt captured" : "Partial")
+                }
+                if !journal.mutations.isEmpty {
+                    Divider()
+                    ForEach(journal.mutations.prefix(8)) { mutation in
+                        HStack(spacing: 9) {
+                            Image(systemName: mutation.attribution == .confirmed ? "checkmark.seal.fill" : "questionmark.diamond.fill")
+                                .foregroundStyle(mutation.attribution == .confirmed ? .green : .orange)
+                            Text(mutation.path).font(.system(.caption, design: .monospaced)).lineLimit(1)
+                            Spacer()
+                            Text("\(mutation.baselineStatus ?? "clean") → \(mutation.finalStatus ?? "clean")")
+                                .font(.system(.caption2, design: .monospaced)).foregroundStyle(.secondary)
+                            Text(mutation.attribution.rawValue.capitalized)
+                                .font(.caption2.bold()).foregroundStyle(.secondary)
+                        }
+                    }
+                    if journal.mutations.count > 8 {
+                        Text("+ \(journal.mutations.count - 8) more changes")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                } else {
+                    Text(journal.finalSnapshot == nil
+                         ? "No final Git snapshot was captured for this turn."
+                         : "No working-tree state change was detected between snapshots.")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+            }
+            .padding(16).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 13).fill(Color.blue.opacity(0.07)))
+        } else {
+            HStack(spacing: 10) {
+                Image(systemName: "clock.badge.questionmark").foregroundStyle(.secondary)
+                Text("This turn predates the persistent journal or was imported without lifecycle evidence.")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+            .background(RoundedRectangle(cornerRadius: 11).fill(Color.secondary.opacity(0.06)))
+        }
+    }
+
+    private func journalMetric(_ title: String, value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(title).font(.caption2).foregroundStyle(.secondary)
+            Text(value).font(.caption.bold()).lineLimit(1)
         }
     }
 
