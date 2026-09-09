@@ -243,6 +243,7 @@ struct ContentView: View {
                     Text(l("Exact token usage was not reported for this turn", "本轮未采集到模型上报的精确 Token 用量"))
                         .font(.caption).foregroundStyle(.tertiary)
                 }
+                contextGrowthCard(turn.contextGrowth)
                 outcomeCard(journal)
                 aiAnalysisCard(turn)
                 summaryStep(number: "1", title: l("Your instruction", "用户输入的指令"), value: turn.userInput ?? l("Not captured", "未采集"), tint: .blue)
@@ -273,6 +274,43 @@ struct ContentView: View {
                 Text(english ? "Turn \(turn.index)" : "第 \(turn.index) 轮")
                 Spacer(); Text(english ? "\(turn.toolCalls.count) tool calls" : "\(turn.toolCalls.count) 次工具调用").font(.caption).foregroundStyle(.secondary)
             }
+        }
+    }
+
+    @ViewBuilder
+    private func contextGrowthCard(_ metrics: ContextGrowthMetrics?) -> some View {
+        if let metrics {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    Label(l("Context growth", "上下文增长"), systemImage: "chart.line.uptrend.xyaxis")
+                        .font(.headline)
+                    Spacer()
+                    Text(metrics.needsAttention ? l("Growing quickly", "增长较快") : l("Stable", "稳定"))
+                        .font(.caption.bold())
+                        .foregroundStyle(metrics.needsAttention ? .orange : .green)
+                }
+                HStack(spacing: 24) {
+                    contextMetric(l("First request", "首次请求"), metrics.initialInputTokens.formatted())
+                    contextMetric(l("Latest request", "最近请求"), metrics.latestInputTokens.formatted())
+                    contextMetric(l("Growth", "增长"), "\(metrics.growthTokens >= 0 ? "+" : "")\(metrics.growthTokens.formatted()) (\(metrics.growthPercent.formatted(.number.precision(.fractionLength(1))))%)")
+                    contextMetric(l("Cumulative input", "累计输入"), metrics.cumulativeInputTokens.formatted())
+                    contextMetric(l("Cache reported", "上报缓存"), metrics.cumulativeCachedTokens.formatted())
+                }
+                Text(english
+                     ? "Provider-reported usage across \(metrics.requestCount) model requests. Cumulative input is total processed input, not unique context. Largest one-step increase: \(metrics.largestInputIncrease.formatted()) tokens."
+                     : "模型服务商上报了 \(metrics.requestCount) 次请求用量。累计输入是各次处理量之和，并非唯一上下文。最大单步增长：\(metrics.largestInputIncrease.formatted()) tokens。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            .padding(14)
+            .background(RoundedRectangle(cornerRadius: 12).fill((metrics.needsAttention ? Color.orange : Color.blue).opacity(0.08)))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke((metrics.needsAttention ? Color.orange : Color.blue).opacity(0.25)))
+        }
+    }
+
+    private func contextMetric(_ title: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(value).font(.title3.monospacedDigit().bold())
+            Text(title).font(.caption).foregroundStyle(.secondary)
         }
     }
 

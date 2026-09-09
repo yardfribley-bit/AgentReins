@@ -23,8 +23,9 @@ This report covers the first end-to-end engineering slice of the AgentReins **Tr
 | Return the fixture repository to a clean Git state | `testRecoveryRestoresCleanTrackedStateAndRemovesRecordedUntrackedFiles` | Passed |
 | Build and package Intel and Apple Silicon code | GitHub Actions Universal 2 job | Passed |
 | Verify the packaged app signature | GitHub Actions `codesign --verify` step | Passed |
+| Preserve and explain per-request context growth | `testContextGrowthPreservesEveryModelRequest` | Passed |
 
-Automated test result: **8 tests passed, 0 failed**.
+Automated test result: **9 tests passed, 0 failed**.
 
 ## Implemented behavior
 
@@ -37,6 +38,7 @@ Automated test result: **8 tests passed, 0 failed**.
 - Verification stops after the first failing command and records the real outcome.
 - Recovery is enabled only when the baseline was clean, HEAD did not change, mutations exist, and the workspace still matches the recorded final snapshot.
 - Recovery requires an explicit destructive-action confirmation.
+- Each turn preserves provider-reported usage for every model request and explains first-to-last growth, cumulative processing, the largest one-step increase, and reported cache reuse.
 
 ## Safety decisions
 
