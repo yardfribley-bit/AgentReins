@@ -155,6 +155,7 @@ Read [Architecture](docs/ARCHITECTURE.md) for the runtime flow, trust model, sou
 | [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md) | Positioning, launch demo, claims, and readiness checklist. |
 | [Community Launch Copy](docs/COMMUNITY-LAUNCH-COPY.md) | Platform-specific Reddit, Hacker News, and social copy. |
 | [Release Process](docs/RELEASING.md) | Universal 2 CI/CD, signing, notarization, and release instructions. |
+| [Capability Test Report](docs/CAPABILITY-TEST-REPORT.md) | Automated evidence, safety gates, and capabilities that are not yet proven. |
 
 ## Contributing and feedback
 
