@@ -29,6 +29,8 @@ Coding agents can edit files, run commands, call tools, read memory, and send pr
 
 AgentReins turns that evidence into one understandable account of the task.
 
+The live view presents every active coding task as a five-stage development story—Understand, Plan, Build, Test, and Deliver. Each stage opens a layered inspector for readable activity, model context, tool and MCP calls, and the underlying raw evidence.
+
 ## The product direction
 
 | Pillar | Question AgentReins should answer |
@@ -117,6 +119,7 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 ├── Sources/AgentReins/
 │   ├── AgentGuardApp.swift       App lifecycle and menu bar entry
 │   ├── ContentView.swift         Main product interface
+│   ├── DevelopmentTrace.swift    Five-stage live task reconstruction
 │   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
 │   ├── CodexSight.swift          Codex local compatibility adapter
 │   ├── AgentSession.swift        Session and turn reconstruction

@@ -23,6 +23,7 @@ All production code lives in `Sources/AgentReins`.
 | --- | --- | --- |
 | App shell | `AgentGuardApp.swift`, `ContentView.swift`, `UIHelpers.swift` | Menu bar app, navigation, and user-facing evidence views. |
 | Session model | `AgentSession.swift`, `Rule.swift`, `SecurityIncident.swift` | Turns, model exchanges, tool activity, and readable incident summaries. |
+| Development story | `DevelopmentTrace.swift` | Aggregates raw events into Understand, Plan, Build, Test, and Deliver stages with layered drill-down evidence. |
 | Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift` | Read supported WorkBuddy evidence and compatible local Codex rollout records, then map them into normalized events. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
 | Process monitoring | `ProcessGuard.swift` | Observes relevant local processes. |

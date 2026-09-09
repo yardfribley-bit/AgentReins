@@ -12,7 +12,7 @@ final class EventStore: ObservableObject {
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
-    private let maximumEvents = 5_000
+    private var maximumEvents: Int { historyLoaded ? 10_000 : 500 }
 
     init(fileURL: URL = EventStore.defaultURL()) {
         self.fileURL = fileURL
@@ -57,6 +57,11 @@ final class EventStore: ObservableObject {
         trimAndSave()
     }
 
+    func unrecorded(_ incoming: [GuardEvent]) -> [GuardEvent] {
+        let existing = Set(events.map(\.id))
+        return incoming.filter { !existing.contains($0.id) }
+    }
+
     func events(on date: Date, calendar: Calendar = .current) -> [GuardEvent] {
         events.filter { calendar.isDate($0.ts, inSameDayAs: date) }
     }
@@ -97,13 +102,13 @@ final class EventStore: ObservableObject {
 
     private func rebuildViews() {
         // 首页/时间线只物化最近窗口，完整原始记录仍保留在本地事件库。
-        incidents = SecurityIncident.correlate(Array(events.prefix(1_200)))
+        incidents = SecurityIncident.correlate(Array(events.prefix(historyLoaded ? 1_200 : 400)))
         sessions = AgentSessionSnapshot.build(from: historyLoaded ? events : liveSessionEvents())
-        influenceChains = ExternalContentSecurity.influenceChains(events: Array(events.prefix(500)))
+        influenceChains = ExternalContentSecurity.influenceChains(events: Array(events.prefix(historyLoaded ? 500 : 300)))
     }
 
     private func liveSessionEvents() -> [GuardEvent] {
-        let sessionEvents = events.filter { $0.sessionId != nil }
+        let sessionEvents = events.prefix(400).filter { $0.sessionId != nil }
         guard let newest = sessionEvents.first else { return [] }
         let cutoff = newest.ts.addingTimeInterval(-10 * 60)
         let activeIds = Set(sessionEvents.filter { $0.ts >= cutoff }.compactMap(\.sessionId))

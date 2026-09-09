@@ -43,6 +43,9 @@ struct ContentView: View {
     @State private var dismissedEventIDs = Set<UUID>()
     @State private var selectedIncident: SecurityIncident?
     @State private var selectedSession: AgentSessionSnapshot?
+    @State private var selectedTraceNodeID: String?
+    @State private var traceInspectorTab = "Activity"
+    @State private var liveTrace: DevelopmentTaskTrace?
     @State private var recoveryCandidate: AgentTurnJournal?
     @State private var openRouterKey = ""
     @State private var analysisModel = "openai/gpt-4o-mini"
@@ -129,7 +132,6 @@ struct ContentView: View {
                 activeTaskCard
                 productValueStrip
                 safetyHero
-                liveContextMonitor
                 recentSessions
                 if let incident = attentionIncident { decisionCard(incident) }
                 HStack(spacing: 14) {
@@ -163,7 +165,6 @@ struct ContentView: View {
         guard let date = latestSession?.lastActivityAt else { return false }
         return Date().timeIntervalSince(date) < 90
     }
-
     private var activeTaskCard: some View {
         VStack(alignment: .leading, spacing: 18) {
             if let session = latestSession, let turn = latestTurn {
@@ -191,23 +192,10 @@ struct ContentView: View {
                 }
 
                 Divider()
-
-                HStack(alignment: .top, spacing: 12) {
-                    ProgressView().controlSize(.small).opacity(latestIsLive ? 1 : 0)
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(currentActivityTitle).font(.headline)
-                        Text(currentActivityDetail).font(.callout).foregroundStyle(.secondary).lineLimit(2)
-                    }
-                    Spacer()
-                    if let date = latestSessionEvent?.ts {
-                        Text(date, style: .relative).font(.caption).foregroundStyle(.tertiary)
-                    }
-                }
-
-                taskProgress(turn: turn)
+                if let trace = liveTrace { developmentTraceExplorer(trace) }
 
                 HStack(spacing: 12) {
-                    taskOutcomeMetric(icon: "wrench.and.screwdriver", value: "\(turn.toolCalls.count)", label: "Tool calls", tint: .blue)
+                    taskOutcomeMetric(icon: "wrench.and.screwdriver", value: "\(liveTrace?.nodes.reduce(0) { $0 + $1.tools.count } ?? 0)", label: "Tool calls", tint: .blue)
                     taskOutcomeMetric(icon: "doc.badge.ellipsis", value: "\(detectedChangeCount)", label: changeMetricLabel, tint: .orange)
                     taskOutcomeMetric(icon: turn.riskCount == 0 ? "checkmark.shield" : "exclamationmark.shield", value: turn.riskCount == 0 ? "None" : "\(turn.riskCount)", label: "Risks detected", tint: turn.riskCount == 0 ? .green : .red)
                     taskOutcomeMetric(icon: "checkmark.seal", value: verificationLabel, label: "Verification", tint: verificationColor)
@@ -239,6 +227,193 @@ struct ContentView: View {
         .padding(20)
         .background(RoundedRectangle(cornerRadius: 16).fill(Color(nsColor: .controlBackgroundColor)))
         .overlay(RoundedRectangle(cornerRadius: 16).stroke(Color.blue.opacity(0.22), lineWidth: 1))
+        .onAppear { refreshLiveTrace() }
+        .onChange(of: latestSessionEvent?.id) { _ in refreshLiveTrace() }
+    }
+
+    private func refreshLiveTrace() {
+        guard let session = latestSession, let turn = latestTurn else { liveTrace = nil; return }
+        let state = latestJournal.flatMap { turnJournalStore.verificationStates[$0.id] }
+        liveTrace = DevelopmentTaskTrace.build(session: session, turn: turn, journal: latestJournal, verificationState: state)
+    }
+
+    private func developmentTraceExplorer(_ trace: DevelopmentTaskTrace) -> some View {
+        let selected = trace.nodes.first { $0.id == selectedTraceNodeID }
+            ?? trace.nodes.last { $0.status == .running }
+            ?? trace.nodes.first
+        return HStack(alignment: .top, spacing: 0) {
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("Development process").font(.headline)
+                    Spacer()
+                    Text("\(trace.nodes.count) steps").font(.caption).foregroundStyle(.secondary)
+                }.padding(.horizontal, 4)
+                ScrollView {
+                    LazyVStack(alignment: .leading, spacing: 0) {
+                        ForEach(Array(trace.nodes.enumerated()), id: \.element.id) { index, node in
+                            traceNodeRow(node, selected: node.id == selected?.id,
+                                         showConnector: index < trace.nodes.count - 1)
+                        }
+                    }
+                }.frame(height: 350)
+            }
+            .frame(width: 355)
+            Divider().padding(.horizontal, 18)
+            if let selected {
+                traceEvidencePanel(selected)
+                    .frame(maxWidth: .infinity, minHeight: 350, maxHeight: 350, alignment: .topLeading)
+            }
+        }
+    }
+
+    private func traceNodeRow(_ node: DevelopmentTraceNode, selected: Bool, showConnector: Bool) -> some View {
+        Button { selectedTraceNodeID = node.id } label: {
+            HStack(alignment: .top, spacing: 11) {
+                VStack(spacing: 0) {
+                    ZStack {
+                        Circle().fill(traceStatusColor(node.status).opacity(node.status == .pending ? 0.12 : 1))
+                        Image(systemName: traceStatusIcon(node.status))
+                            .font(.caption.bold()).foregroundStyle(node.status == .pending ? Color.secondary : Color.white)
+                    }.frame(width: 27, height: 27)
+                    if showConnector {
+                        Rectangle().fill(Color.secondary.opacity(0.18)).frame(width: 2, height: 37)
+                    }
+                }
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Text(node.kind.title.uppercased()).font(.caption2.bold()).foregroundStyle(traceStatusColor(node.status))
+                        Spacer()
+                        if let timestamp = node.timestamp { Text(timestamp, style: .time).font(.caption2).foregroundStyle(.tertiary) }
+                    }
+                    Text(node.title).font(.callout.weight(.semibold)).foregroundStyle(.primary).lineLimit(1)
+                    Text(node.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }.padding(.bottom, showConnector ? 8 : 0)
+            }
+            .padding(9)
+            .background(RoundedRectangle(cornerRadius: 10).fill(selected ? Color.blue.opacity(0.1) : Color.clear))
+            .contentShape(Rectangle())
+        }.buttonStyle(.plain)
+    }
+
+    private func traceEvidencePanel(_ node: DevelopmentTraceNode) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top) {
+                ZStack {
+                    RoundedRectangle(cornerRadius: 9).fill(traceStatusColor(node.status).opacity(0.1))
+                    Image(systemName: node.kind.icon).foregroundStyle(traceStatusColor(node.status))
+                }.frame(width: 38, height: 38)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(node.title).font(.headline)
+                    Text(node.summary).font(.caption).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer()
+                securityBadge(node.confidence.rawValue + " evidence",
+                              color: node.confidence == .confirmed ? .green : (node.confidence == .inferred ? .orange : .secondary))
+            }
+            Divider()
+            Picker("Inspector", selection: $traceInspectorTab) {
+                ForEach(["Activity", "Context", "Tools", "Evidence"], id: \.self) { Text($0).tag($0) }
+            }.pickerStyle(.segmented).labelsHidden()
+            traceInspectorContent(node)
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 12).fill(Color.primary.opacity(0.035)))
+    }
+
+    @ViewBuilder
+    private func traceInspectorContent(_ node: DevelopmentTraceNode) -> some View {
+        switch traceInspectorTab {
+        case "Activity":
+            if node.activities.isEmpty { traceEmptyState("No stage activity has been observed yet.") }
+            else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        ForEach(node.activities) { activity in
+                            HStack(alignment: .top, spacing: 9) {
+                                Image(systemName: traceStatusIcon(activity.status)).foregroundStyle(traceStatusColor(activity.status)).frame(width: 16)
+                                VStack(alignment: .leading, spacing: 3) {
+                                    Text(activity.title).font(.callout.weight(.semibold))
+                                    Text(activity.summary).font(.caption).foregroundStyle(.secondary)
+                                }
+                                Spacer()
+                                if let timestamp = activity.timestamp { Text(timestamp, style: .time).font(.caption2).foregroundStyle(.tertiary) }
+                            }
+                        }
+                    }
+                }
+            }
+        case "Context": traceEvidenceList(node.context, empty: "No model context belongs to this stage.")
+        case "Tools":
+            if node.tools.isEmpty { traceEmptyState("No Tool, Function Call, or MCP invocation belongs to this stage.") }
+            else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 10) {
+                        ForEach(node.tools) { call in
+                            DisclosureGroup {
+                                VStack(alignment: .leading, spacing: 9) {
+                                    if let arguments = call.arguments { liveEvidenceField("Arguments / command", arguments) }
+                                    if let result = call.result { liveEvidenceField("Execution result", result) }
+                                    liveEvidenceField("Call ID", call.id)
+                                }.padding(.top, 7)
+                            } label: {
+                                HStack {
+                                    Image(systemName: "wrench.and.screwdriver").foregroundStyle(.blue)
+                                    VStack(alignment: .leading) {
+                                        Text(call.friendlyName).font(.callout.weight(.semibold))
+                                        Text("\(call.name) · \(call.friendlyStatus)").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        default: traceEvidenceList(node.evidence, empty: "No raw evidence was captured for this stage.")
+        }
+    }
+
+    private func traceEvidenceList(_ items: [DevelopmentTraceEvidence], empty: String) -> some View {
+        Group {
+            if items.isEmpty { traceEmptyState(empty) }
+            else {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 14) {
+                        ForEach(items) { item in
+                            VStack(alignment: .leading, spacing: 5) {
+                                Text(item.title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary)
+                                Text(item.value).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                                    .frame(maxWidth: .infinity, alignment: .leading)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private func traceEmptyState(_ text: String) -> some View {
+        VStack(spacing: 8) {
+            Image(systemName: "doc.text.magnifyingglass").font(.title).foregroundStyle(.tertiary)
+            Text(text).font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
+        }.frame(maxWidth: .infinity, maxHeight: .infinity)
+    }
+
+    private func traceStatusColor(_ status: DevelopmentTraceNodeStatus) -> Color {
+        switch status {
+        case .completed: return .green
+        case .running: return .blue
+        case .pending: return .secondary
+        case .attention: return .orange
+        }
+    }
+
+    private func traceStatusIcon(_ status: DevelopmentTraceNodeStatus) -> String {
+        switch status {
+        case .completed: return "checkmark"
+        case .running: return "ellipsis"
+        case .pending: return "circle"
+        case .attention: return "exclamationmark"
+        }
     }
 
     private var productValueStrip: some View {
@@ -345,10 +520,7 @@ struct ContentView: View {
 
     private var detectedChangeCount: Int {
         if let mutations = latestJournal?.mutations, !mutations.isEmpty { return mutations.count }
-        return latestTurn?.toolCalls.filter {
-            let text = "\($0.name) \($0.arguments ?? "")".lowercased()
-            return ["edit", "write", "patch", "create", "delete", "move", "rename"].contains(where: text.contains)
-        }.count ?? 0
+        return liveTrace?.nodes.first { $0.kind == .build }?.tools.count ?? 0
     }
 
     private var changeMetricLabel: String {

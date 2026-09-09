@@ -12,7 +12,9 @@ final class TurnJournalTests: XCTestCase {
             #"{"timestamp":"2026-09-09T00:00:02Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"Inspect the project"}]}}}"#,
             #"{"timestamp":"2026-09-09T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","id":"tool-1","call_id":"call-1","name":"exec","input":"run tests","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}"#,
             #"{"timestamp":"2026-09-09T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","id":"out-1","call_id":"call-1","output":[{"type":"input_text","text":"tests passed"}]}}"#,
-            #"{"timestamp":"2026-09-09T00:00:05Z","type":"token_usage_record","payload":{"turn_id":"turn-1","response_id":"response-1","usage":{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":50,"reasoning_output_tokens":10}}}"#
+            #"{"timestamp":"2026-09-09T00:00:05Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"commentary","content":[{"type":"output_text","text":"Still working"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}"#,
+            #"{"timestamp":"2026-09-09T00:00:06Z","type":"response_item","payload":{"type":"message","role":"assistant","phase":"final_answer","content":[{"type":"output_text","text":"Finished"}],"internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}"#,
+            #"{"timestamp":"2026-09-09T00:00:07Z","type":"token_usage_record","payload":{"turn_id":"turn-1","response_id":"response-1","usage":{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":50,"reasoning_output_tokens":10}}}"#
         ]
         try rows.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
 
@@ -26,6 +28,13 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(snapshot.turns.first?.toolCalls.first?.result, "tests passed")
         XCTAssertEqual(snapshot.turns.first?.contextGrowth?.latestInputTokens, 1200)
         XCTAssertEqual(snapshot.turns.first?.cachedTokens, 800)
+        XCTAssertEqual(events.first { $0.modelResponse == "Still working" }?.action, "commentary")
+        XCTAssertEqual(events.first { $0.modelResponse == "Finished" }?.action, "final_answer")
+        let turn = try XCTUnwrap(snapshot.turns.first)
+        let trace = DevelopmentTaskTrace.build(session: snapshot, turn: turn, journal: nil, verificationState: nil)
+        XCTAssertEqual(trace.nodes.map(\.kind), [.understand, .plan, .build, .test, .deliver])
+        XCTAssertTrue(trace.nodes.contains { $0.kind == .plan && $0.context.contains { $0.title == "Captured model context" } })
+        XCTAssertTrue(trace.nodes.contains { $0.tools.contains { $0.result == "tests passed" } })
     }
 
     func testCodexHistoryIsOnlyReconstructedOnDemand() throws {

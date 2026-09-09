@@ -87,12 +87,14 @@ final class ProcessGuard: ObservableObject {
 
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
     private func process(procs: [(pid: String, ppid: String, cmd: String)]) {
-        let detectedAgents = Array(Set(procs.compactMap { attribute(procs: procs, pid: $0.pid) })).sorted()
+        let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
+        let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
+        let detectedAgents = Array(Set(attributions.values.compactMap { $0 })).sorted()
         if detectedAgents != activeAgents { activeAgents = detectedAgents }
         for p in procs {
             if seen.contains(p.cmd) { continue }
             seen.insert(p.cmd)
-            let agent = attribute(procs: procs, pid: p.pid)
+            let agent = attributions[p.pid] ?? nil
             let matched = currentCmdRules.filter { $0.regex.firstMatch(in: p.cmd,
                 range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil }
             for r in matched {
@@ -142,9 +144,7 @@ final class ProcessGuard: ObservableObject {
     }
 
     /// 沿进程树向上回溯，找到包含 agent marker 的祖先进程，即命令的归属 agent。
-    private func attribute(procs: [(pid: String, ppid: String, cmd: String)], pid: String) -> String? {
-        var byPid: [String: (ppid: String, cmd: String)] = [:]
-        for p in procs { byPid[p.pid] = (p.ppid, p.cmd) }
+    private func attribute(byPid: [String: (ppid: String, cmd: String)], pid: String) -> String? {
         var visited = Set<String>()
         var cur = pid
         while let node = byPid[cur], !visited.contains(cur) {
