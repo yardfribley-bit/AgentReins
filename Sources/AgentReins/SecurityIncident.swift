@@ -26,7 +26,10 @@ struct SecurityIncident: Identifiable {
     var ruleIDs: [String] { Array(Set(events.map(\.ruleId))).sorted() }
 
     var title: String {
-        if primary.kind == "model" { return primary.op == "prompt" ? "WorkBuddy 向模型发送了请求" : "模型向 WorkBuddy 返回了内容" }
+        if primary.kind == "model" {
+            let name = (agent ?? "Agent").capitalized
+            return primary.op == "prompt" ? "\(name) 向模型发送了请求" : "模型向 \(name) 返回了内容"
+        }
         if primary.kind == "tool" { return "\((agent ?? "Agent").capitalized) 调用了 \(primary.toolName ?? "工具")" }
         if primary.kind == "activity" { return "\((agent ?? "Agent").capitalized) 正在执行任务" }
         if primary.kind == "memory" { return "Agent 记忆中发现敏感信息" }
@@ -56,7 +59,7 @@ struct SecurityIncident: Identifiable {
                   captured: agent != nil),
             Stage(id: "intent", title: "用户意图",
                   value: primary.userIntent ?? "未采集",
-                  evidence: primary.userIntent == nil ? "会话中没有可关联的用户消息" : "来自 WorkBuddy 原生会话记录",
+                  evidence: primary.userIntent == nil ? "会话中没有可关联的用户消息" : "来自本机 Agent 会话记录",
                   captured: primary.userIntent != nil),
             Stage(id: "decision", title: "模型决策",
                   value: primary.modelDecision ?? "未采集",
@@ -64,7 +67,7 @@ struct SecurityIncident: Identifiable {
                   captured: primary.modelDecision != nil),
             Stage(id: "reasoning", title: "模型推理记录",
                   value: primary.modelReasoning ?? "未记录",
-                  evidence: primary.modelReasoning == nil ? "WorkBuddy 本次调用未落盘 reasoning 内容" : "来自用户本机 WorkBuddy reasoning 记录",
+                  evidence: primary.modelReasoning == nil ? "本次调用未提供可审计的 reasoning 内容" : "来自用户本机 Agent reasoning 记录",
                   captured: primary.modelReasoning != nil),
             Stage(id: "tool", title: "工具执行",
                   value: toolDescription,

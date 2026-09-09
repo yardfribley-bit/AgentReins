@@ -59,7 +59,7 @@ flowchart LR
 AgentReins is an early alpha. The repository is public so that the implementation and its limitations can be inspected directly.
 
 - Native macOS menu bar application and security center.
-- WorkBuddy session discovery through the current AgentSight adapter.
+- WorkBuddy session discovery and a local compatibility adapter for Codex rollout records.
 - Per-turn views of captured user intent, model context, model response, model name, token usage, tool calls, and tool results.
 - Process snapshots and monitoring for explicitly protected files.
 - Before-and-after evidence and recovery records for protected text files.
@@ -117,6 +117,7 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 │   ├── AgentGuardApp.swift       App lifecycle and menu bar entry
 │   ├── ContentView.swift         Main product interface
 │   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
+│   ├── CodexSight.swift          Codex local compatibility adapter
 │   ├── AgentSession.swift        Session and turn reconstruction
 │   ├── EventStore.swift          Local normalized event storage
 │   ├── ProcessGuard.swift        Process observation
