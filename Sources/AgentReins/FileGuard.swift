@@ -97,14 +97,24 @@ final class FileGuard: ObservableObject {
                     }
                 } else {
                     let now = mtime(of: url.path)
-                    let current = textContent(at: url)
                     lock.lock()
                     let last = lastMtime[url.path]
                     let before = lastContent[url.path]
+                    lock.unlock()
+
+                    // Metadata is cheap; reading and decoding every protected file
+                    // once per second is not. Only load content after a real change.
+                    if let last, last == now {
+                        if !fm.fileExists(atPath: backup.path) { try? fm.copyItem(at: url, to: backup) }
+                        continue
+                    }
+
+                    let current = textContent(at: url)
+                    lock.lock()
                     lastMtime[url.path] = now
                     lastContent[url.path] = current
                     lock.unlock()
-                    if let last, last < now {
+                    if let last, last != now {
                         if rule.opsSet.contains("modify") {
                             let diff = makeDiff(before: before, after: current)
                             let findings = CodeSecurityScanner.scan(path: url.path, before: before, after: current)
