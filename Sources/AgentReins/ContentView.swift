@@ -152,6 +152,10 @@ struct ContentView: View {
         sessions.first?.turns.last?.contextGrowth
     }
 
+    private var recentInfluenceChains: [InfluenceChain] {
+        Array(ExternalContentSecurity.influenceChains(events: Array(events.prefix(500))).suffix(3))
+    }
+
     private var liveContextMonitor: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
@@ -190,6 +194,28 @@ struct ContentView: View {
 
             if let turn = sessions.first?.turns.last {
                 contextIntegritySummary(turn.contextIntegrity)
+            }
+
+            if !recentInfluenceChains.isEmpty {
+                VStack(alignment: .leading, spacing: 9) {
+                    Text("Possible influence chains").font(.callout.bold())
+                    ForEach(recentInfluenceChains) { chain in
+                        HStack(alignment: .top, spacing: 8) {
+                            Image(systemName: "link").foregroundStyle(.red)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(chain.source.sourceKind.rawValue) content → \(chain.nextActionName ?? "No later tool call")")
+                                    .font(.caption.bold())
+                                Text(chain.explanation).font(.caption).foregroundStyle(.secondary)
+                                if let command = chain.nextActionCommand {
+                                    Text(command).font(.caption2.monospaced()).lineLimit(2).textSelection(.enabled)
+                                }
+                            }
+                            Spacer()
+                            securityBadge(chain.evidence.rawValue, color: chain.evidence == .inferred ? .orange : .purple)
+                        }
+                    }
+                }
+                .padding(12).background(RoundedRectangle(cornerRadius: 10).fill(Color.red.opacity(0.06)))
             }
 
             Divider()
@@ -254,11 +280,28 @@ struct ContentView: View {
     private func liveContextRow(_ event: GuardEvent) -> some View {
         let toolName = resolvedToolName(event)
         let assessment = ToolSecurityAssessment.assess(name: toolName, command: event.command)
+        let contentAssessment = ExternalContentSecurity.assess(event)
         return HStack(alignment: .top, spacing: 10) {
             Image(systemName: liveContextIcon(event.op))
                 .foregroundStyle(liveContextColor(event.op)).frame(width: 18)
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 8) {
+                    if let contentAssessment {
+                        HStack(spacing: 8) {
+                            securityBadge(contentAssessment.sourceKind.rawValue, color: .purple)
+                            securityBadge(contentAssessment.trust.rawValue, color: contentAssessment.trust == .untrusted ? .red : .orange)
+                            if !contentAssessment.findings.isEmpty {
+                                securityBadge("\(contentAssessment.findings.count) content risks", color: .red)
+                            }
+                        }
+                        ForEach(contentAssessment.findings) { finding in
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text("\(finding.category.rawValue) · \(finding.severity.uppercased()) · \(finding.confidence) confidence")
+                                    .font(.caption.bold()).foregroundStyle(.red)
+                                Text(finding.evidence).font(.caption.monospaced()).textSelection(.enabled)
+                            }
+                        }
+                    }
                     if event.op == "call" || event.op == "result" {
                         HStack(spacing: 8) {
                             securityBadge(assessment.kind.rawValue, color: .blue)
@@ -485,6 +528,8 @@ struct ContentView: View {
                 evidenceStep(number: "8", title: l("Memory retrieved", "记忆读取与隐私唤醒"), value: turn.memoryRetrievalSummary, tint: .pink)
                 evidenceStep(number: "9", title: l("Memory committed", "新增或修改的持久化记忆"), value: turn.memoryCommitSummary, tint: .red)
 
+                externalContentSection(turn)
+
                 DisclosureGroup(l("View complete model & execution evidence", "查看完整模型与执行证据")) {
                     VStack(alignment: .leading, spacing: 14) {
                         ForEach(turn.exchanges) { exchange in
@@ -502,6 +547,34 @@ struct ContentView: View {
             HStack {
                 Text(english ? "Turn \(turn.index)" : "第 \(turn.index) 轮")
                 Spacer(); Text(english ? "\(turn.toolCalls.count) tool calls" : "\(turn.toolCalls.count) 次工具调用").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func externalContentSection(_ turn: AgentTurn) -> some View {
+        let assessments = turn.externalContentAssessments
+        if !assessments.isEmpty {
+            DisclosureGroup("External content security") {
+                VStack(alignment: .leading, spacing: 12) {
+                    ForEach(assessments) { assessment in
+                        HStack {
+                            securityBadge(assessment.sourceKind.rawValue, color: .purple)
+                            securityBadge(assessment.trust.rawValue, color: assessment.trust == .untrusted ? .red : .orange)
+                            Text(assessment.sourceIdentity).font(.callout.bold())
+                            Spacer(); Text(assessment.timestamp, style: .time).font(.caption).foregroundStyle(.secondary)
+                        }
+                        if assessment.findings.isEmpty {
+                            Text("No configured injection pattern was detected. This is not a trust guarantee.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        } else {
+                            ForEach(assessment.findings) { finding in
+                                liveEvidenceField("\(finding.category.rawValue) · \(finding.severity) · \(finding.confidence) confidence", finding.evidence)
+                            }
+                        }
+                        Divider()
+                    }
+                }.padding(.top, 10)
             }
         }
     }

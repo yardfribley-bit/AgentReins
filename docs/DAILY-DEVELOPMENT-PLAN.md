@@ -18,6 +18,8 @@ Turn AgentReins from an activity viewer into a credible local safety layer that 
 
 ## Afternoon — P0 implementation
 
+Implementation status: provenance, deterministic injection scanning, evidence-qualified influence chains, and a controlled WorkBuddy JSONL acceptance fixture are implemented. All 16 automated tests pass. Manual UI observation on a live WorkBuddy task remains a release-validation step.
+
 ### 1. External Content Provenance
 
 Identify and label content entering the agent from:
