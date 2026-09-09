@@ -115,22 +115,25 @@ final class ProcessGuard: ObservableObject {
     private nonisolated func getProcs() -> [(pid: String, ppid: String, cmd: String)] {
         let proc = Process()
         proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-eo", "pid,ppid,user,command"]
+        proc.arguments = ["-axo", "pid=,ppid=,command="]
         let pipe = Pipe()
         proc.standardOutput = pipe
         do {
             try proc.run()
-            proc.waitUntilExit()
         } catch {
             return []
         }
-        guard let out = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) else { return [] }
+        // Drain stdout while ps is running. Waiting first can deadlock once verbose
+        // agent command lines fill the pipe buffer.
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        proc.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return [] }
         var result: [(pid: String, ppid: String, cmd: String)] = []
-        for line in out.split(whereSeparator: \.isNewline).dropFirst() {
+        for line in out.split(whereSeparator: \.isNewline) {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard parts.count >= 4 else { continue }
+            guard parts.count >= 3 else { continue }
             let pid = String(parts[0]); let ppid = String(parts[1])
-            let cmd = parts[3...].joined(separator: " ")
+            let cmd = parts[2...].joined(separator: " ")
             result.append((pid: pid, ppid: ppid, cmd: cmd))
         }
         return result
