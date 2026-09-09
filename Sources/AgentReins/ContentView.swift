@@ -219,11 +219,21 @@ struct ContentView: View {
     }
 
     private func liveContextRow(_ event: GuardEvent) -> some View {
-        HStack(alignment: .top, spacing: 10) {
+        let toolName = resolvedToolName(event)
+        let assessment = ToolSecurityAssessment.assess(name: toolName, command: event.command)
+        return HStack(alignment: .top, spacing: 10) {
             Image(systemName: liveContextIcon(event.op))
                 .foregroundStyle(liveContextColor(event.op)).frame(width: 18)
             DisclosureGroup {
                 VStack(alignment: .leading, spacing: 8) {
+                    if event.op == "call" || event.op == "result" {
+                        HStack(spacing: 8) {
+                            securityBadge(assessment.kind.rawValue, color: .blue)
+                            securityBadge("\(assessment.risk.rawValue) risk", color: riskColor(assessment.risk))
+                            Text(assessment.capability).font(.caption.weight(.medium))
+                        }
+                        Text(assessment.reason).font(.caption).foregroundStyle(.secondary)
+                    }
                     if let command = event.command {
                         liveEvidenceField("Arguments / command", command)
                     }
@@ -243,7 +253,7 @@ struct ContentView: View {
             } label: {
                 VStack(alignment: .leading, spacing: 3) {
                 HStack {
-                    Text(liveContextTitle(event)).font(.callout.weight(.medium))
+                    Text(liveContextTitle(event, toolName: toolName)).font(.callout.weight(.medium))
                     if let model = event.model { Text(model).font(.caption).foregroundStyle(.secondary) }
                     Spacer()
                     Text(event.ts, style: .time).font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
@@ -263,6 +273,27 @@ struct ContentView: View {
         }
     }
 
+    private func resolvedToolName(_ event: GuardEvent) -> String? {
+        if let name = event.toolName, name != "unknown_tool" { return name }
+        guard let callId = event.toolCallId else { return event.toolName }
+        return events.first { $0.toolCallId == callId && $0.op == "call" }?.toolName
+    }
+
+    private func securityBadge(_ text: String, color: Color) -> some View {
+        Text(text.uppercased()).font(.caption2.bold()).foregroundStyle(color)
+            .padding(.horizontal, 7).padding(.vertical, 3)
+            .background(Capsule().fill(color.opacity(0.12)))
+    }
+
+    private func riskColor(_ risk: CapabilityRisk) -> Color {
+        switch risk {
+        case .low: return .green
+        case .medium: return .orange
+        case .high: return .red
+        case .unknown: return .secondary
+        }
+    }
+
     private func liveEvidenceField(_ title: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(title.uppercased()).font(.caption2.bold()).foregroundStyle(.secondary)
@@ -272,13 +303,13 @@ struct ContentView: View {
         }
     }
 
-    private func liveContextTitle(_ event: GuardEvent) -> String {
+    private func liveContextTitle(_ event: GuardEvent, toolName: String?) -> String {
         switch event.op {
         case "prompt": return "User turn captured"
         case "call":
-            let tool = event.toolName ?? "Unknown tool"
+            let tool = toolName ?? "Unknown tool"
             return event.inputTokens == nil ? "Tool requested · \(tool)" : "Model request · \(tool)"
-        case "result": return "Tool completed · \(event.toolName ?? "Unknown tool")"
+        case "result": return "Tool completed · \(toolName ?? "Unknown tool")"
         case "response": return "Model response received"
         default: return "Agent activity"
         }

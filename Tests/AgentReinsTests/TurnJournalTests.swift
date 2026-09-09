@@ -3,6 +3,24 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testToolSecurityAssessmentSeparatesToolMCPAndSkillRisk() {
+        let shell = ToolSecurityAssessment.assess(name: "Bash", command: "rm project.txt")
+        XCTAssertEqual(shell.kind, .tool)
+        XCTAssertEqual(shell.risk, .high)
+        XCTAssertEqual(shell.capability, "Arbitrary command execution")
+
+        let mcp = ToolSecurityAssessment.assess(name: "mcp__github__create_issue", command: nil)
+        XCTAssertEqual(mcp.kind, .mcp)
+        XCTAssertEqual(mcp.risk, .medium)
+
+        let skill = ToolSecurityAssessment.assess(name: "Skill", command: "load audit skill")
+        XCTAssertEqual(skill.kind, .skill)
+        XCTAssertEqual(skill.risk, .medium)
+
+        let unknown = ToolSecurityAssessment.assess(name: nil, command: nil)
+        XCTAssertEqual(unknown.risk, .unknown)
+    }
+
     func testModelContextRemainsAssociatedWithEachTurnWhenTraceIsMissingOrReused() throws {
         let session = "session"
         let first = GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil,
