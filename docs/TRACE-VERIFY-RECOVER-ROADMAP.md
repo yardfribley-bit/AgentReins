@@ -27,7 +27,7 @@ The product promise is:
 
 ### Important limitations
 
-- WorkBuddy is the only native session adapter.
+- WorkBuddy is the native session integration. Codex rollout records are supported through a local compatibility adapter and require ongoing fixture validation as the upstream format changes.
 - Captured model context may be partial and must not be labeled as the complete model request.
 - File events do not have reliable session, turn, tool-call, or process attribution.
 - File monitoring covers configured paths rather than the complete agent workspace.

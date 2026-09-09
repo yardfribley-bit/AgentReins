@@ -3,6 +3,31 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testCodexAdapterCapturesTurnToolResultAndUsage() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("codex-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let rows = [
+            #"{"timestamp":"2026-09-09T00:00:00Z","type":"session_meta","payload":{"id":"codex-session","cwd":"/tmp/project"}}"#,
+            #"{"timestamp":"2026-09-09T00:00:01Z","type":"turn_context","payload":{"turn_id":"turn-1","cwd":"/tmp/project","model":"gpt-test"}}"#,
+            #"{"timestamp":"2026-09-09T00:00:02Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"turn-1","item":{"type":"UserMessage","id":"user-1","content":[{"type":"text","text":"Inspect the project"}]}}}"#,
+            #"{"timestamp":"2026-09-09T00:00:03Z","type":"response_item","payload":{"type":"custom_tool_call","id":"tool-1","call_id":"call-1","name":"exec","input":"run tests","internal_chat_message_metadata_passthrough":{"turn_id":"turn-1"}}}"#,
+            #"{"timestamp":"2026-09-09T00:00:04Z","type":"response_item","payload":{"type":"custom_tool_call_output","id":"out-1","call_id":"call-1","output":[{"type":"input_text","text":"tests passed"}]}}"#,
+            #"{"timestamp":"2026-09-09T00:00:05Z","type":"token_usage_record","payload":{"turn_id":"turn-1","response_id":"response-1","usage":{"input_tokens":1200,"cached_input_tokens":800,"output_tokens":50,"reasoning_output_tokens":10}}}"#
+        ]
+        try rows.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+
+        let events = CodexSight.parseSession(url)
+        let snapshot = try XCTUnwrap(AgentSessionSnapshot.build(from: events).first)
+
+        XCTAssertEqual(snapshot.agent, "codex")
+        XCTAssertEqual(snapshot.workspace, "/tmp/project")
+        XCTAssertEqual(snapshot.turns.first?.userInput, "Inspect the project")
+        XCTAssertEqual(snapshot.turns.first?.toolCalls.first?.name, "exec")
+        XCTAssertEqual(snapshot.turns.first?.toolCalls.first?.result, "tests passed")
+        XCTAssertEqual(snapshot.turns.first?.contextGrowth?.latestInputTokens, 1200)
+        XCTAssertEqual(snapshot.turns.first?.cachedTokens, 800)
+    }
+
     func testWorkBuddyFixtureProducesExternalContentInfluenceChain() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("workbuddy-\(UUID().uuidString).jsonl")
         defer { try? FileManager.default.removeItem(at: url) }

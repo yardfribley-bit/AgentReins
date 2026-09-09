@@ -31,6 +31,7 @@ struct AgentReinsApp: App {
     @StateObject private var eventStore = EventStore()
     @StateObject private var turnJournalStore = TurnJournalStore()
     @StateObject private var workBuddySight = WorkBuddySight()
+    @StateObject private var codexSight = CodexSight()
     @StateObject private var semanticAnalyzer = SemanticAnalyzer()
     @StateObject private var memoryScan = MemoryScanManager()
     @StateObject private var memoryRuleStore = MemoryRuleStore()
@@ -44,6 +45,7 @@ struct AgentReinsApp: App {
                 .environmentObject(eventStore)
                 .environmentObject(turnJournalStore)
                 .environmentObject(workBuddySight)
+                .environmentObject(codexSight)
                 .environmentObject(semanticAnalyzer)
                 .environmentObject(memoryScan)
                 .environmentObject(memoryRuleStore)
@@ -62,6 +64,11 @@ struct AgentReinsApp: App {
                         eventStore.record(events)
                     }
                     workBuddySight.start()
+                    codexSight.onEvents = { events in
+                        turnJournalStore.ingest(events)
+                        eventStore.record(events)
+                    }
+                    codexSight.start()
                     memoryScan.startAuto { memoryRuleStore.enabledRules }
                 }
         }

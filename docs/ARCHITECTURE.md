@@ -23,7 +23,7 @@ All production code lives in `Sources/AgentReins`.
 | --- | --- | --- |
 | App shell | `AgentGuardApp.swift`, `ContentView.swift`, `UIHelpers.swift` | Menu bar app, navigation, and user-facing evidence views. |
 | Session model | `AgentSession.swift`, `Rule.swift`, `SecurityIncident.swift` | Turns, model exchanges, tool activity, and readable incident summaries. |
-| Agent adapter | `WorkBuddySight.swift` | Reads supported WorkBuddy session evidence and maps it into normalized events. |
+| Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift` | Read supported WorkBuddy evidence and compatible local Codex rollout records, then map them into normalized events. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
 | Process monitoring | `ProcessGuard.swift` | Observes relevant local processes. |
 | File protection | `FileGuard.swift`, `RuleStore.swift`, `NLParser.swift` | Watches protected paths, applies rules, and maintains recovery evidence. |
@@ -52,7 +52,7 @@ All production code lives in `Sources/AgentReins`.
 
 ## Current boundaries
 
-- The native session adapter currently targets WorkBuddy.
+- WorkBuddy is the native session integration. Codex support is a defensive local compatibility adapter because its rollout JSONL layout is not a documented stable API.
 - File and process monitoring are observational and do not provide universal pre-execution enforcement.
 - Git-quality turn attribution, independent build/test verification, transactional undo, and Provider Trust are roadmap work.
 - Endpoint Security integration requires Apple approval, entitlements, Developer ID signing, and notarization.

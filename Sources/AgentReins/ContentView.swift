@@ -30,6 +30,7 @@ struct ContentView: View {
     @EnvironmentObject private var eventStore: EventStore
     @EnvironmentObject private var turnJournalStore: TurnJournalStore
     @EnvironmentObject private var workBuddySight: WorkBuddySight
+    @EnvironmentObject private var codexSight: CodexSight
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     @EnvironmentObject private var memoryScan: MemoryScanManager
     @EnvironmentObject private var memoryRuleStore: MemoryRuleStore
@@ -161,7 +162,7 @@ struct ContentView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
-                        Circle().fill(workBuddySight.connected ? Color.green : Color.secondary)
+                        Circle().fill((workBuddySight.connected || codexSight.connected) ? Color.green : Color.secondary)
                             .frame(width: 8, height: 8)
                         Text("Live context monitor").font(.headline)
                     }
@@ -173,7 +174,7 @@ struct ContentView: View {
                     Text("Updated \(update, style: .relative)")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text(workBuddySight.connected ? "Waiting for activity" : "Agent not connected")
+                    Text((workBuddySight.connected || codexSight.connected) ? "Waiting for activity" : "Agent not connected")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -519,7 +520,7 @@ struct ContentView: View {
                 outcomeCard(journal)
                 aiAnalysisCard(turn)
                 summaryStep(number: "1", title: l("Your instruction", "用户输入的指令"), value: turn.userInput ?? l("Not captured", "未采集"), tint: .blue)
-                evidenceStep(number: "2", title: l("Model context captured by WorkBuddy", "WorkBuddy 已落盘的模型上下文"), value: turn.fullPrompt, tint: .indigo, showPreview: true)
+                evidenceStep(number: "2", title: l("Captured model context", "已采集的模型上下文"), value: turn.fullPrompt, tint: .indigo, showPreview: true)
                 summaryStep(number: "3", title: l("Instructions returned by the model", "模型返回的指令"), value: turn.modelInstructionSummary, tint: .purple)
                 summaryStep(number: "4", title: l("Tools & MCP actually called", "Agent 实际调用的 Tool / MCP"), value: turn.executionSummary, tint: .cyan)
                 evidenceStep(number: "5", title: l("Tool execution results", "工具执行结果"), value: turn.toolResultSummary, tint: .teal)
@@ -842,9 +843,9 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 6) {
-                Image(systemName: workBuddySight.connected ? "link.circle.fill" : "exclamationmark.circle")
-                    .foregroundStyle(workBuddySight.connected ? .green : .orange)
-                Text(workBuddySight.connected ? l("AgentSight connected to WorkBuddy", "AgentSight · WorkBuddy 会话源已连接") : l("AgentSight is waiting for WorkBuddy", "AgentSight · WorkBuddy 会话源未连接"))
+                Image(systemName: (workBuddySight.connected || codexSight.connected) ? "link.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle((workBuddySight.connected || codexSight.connected) ? .green : .orange)
+                Text(adapterStatus)
                     .font(.caption).foregroundStyle(.secondary)
             }
             if let latest = activityIncidents.first {
@@ -860,6 +861,14 @@ struct ContentView: View {
                 }.buttonStyle(.plain)
             }
         }.cardStyle()
+    }
+
+    private var adapterStatus: String {
+        let connected = [workBuddySight.connected ? "WorkBuddy" : nil, codexSight.connected ? "Codex" : nil]
+            .compactMap { $0 }
+        if connected.isEmpty { return l("AgentSight is waiting for a supported agent", "AgentSight 正在等待受支持的 Agent") }
+        return l("AgentSight connected to \(connected.joined(separator: " + "))",
+                 "AgentSight · \(connected.joined(separator: " + ")) 会话源已连接")
     }
 
     private var safetyHero: some View {
