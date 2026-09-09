@@ -29,6 +29,7 @@ struct AgentReinsApp: App {
     @StateObject private var fileGuard = FileGuard()
     @StateObject private var processGuard = ProcessGuard()
     @StateObject private var eventStore = EventStore()
+    @StateObject private var turnJournalStore = TurnJournalStore()
     @StateObject private var workBuddySight = WorkBuddySight()
     @StateObject private var semanticAnalyzer = SemanticAnalyzer()
     @StateObject private var memoryScan = MemoryScanManager()
@@ -41,6 +42,7 @@ struct AgentReinsApp: App {
                 .environmentObject(fileGuard)
                 .environmentObject(processGuard)
                 .environmentObject(eventStore)
+                .environmentObject(turnJournalStore)
                 .environmentObject(workBuddySight)
                 .environmentObject(semanticAnalyzer)
                 .environmentObject(memoryScan)
@@ -55,7 +57,10 @@ struct AgentReinsApp: App {
                     memoryScan.onFindings = { findings, date in
                         eventStore.recordMemoryFindings(findings, scannedAt: date)
                     }
-                    workBuddySight.onEvents = { eventStore.record($0) }
+                    workBuddySight.onEvents = { events in
+                        turnJournalStore.ingest(events)
+                        eventStore.record(events)
+                    }
                     workBuddySight.start()
                     memoryScan.startAuto { memoryRuleStore.enabledRules }
                 }
