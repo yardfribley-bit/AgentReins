@@ -59,7 +59,9 @@ final class ProcessGuard: ObservableObject {
         guard !running else { return }
         running = true
         // ps 的子进程调用放到后台线程，避免主线程阻塞（首次 ps 触发 TCC 时不会卡 UI）。
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // Native agent events provide the two-second live path. Process attribution
+        // is a fallback and does not justify running a full ps snapshot that often.
+        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.snapshotInFlight else { return }
                 self.snapshotInFlight = true
