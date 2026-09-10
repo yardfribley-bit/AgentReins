@@ -6,7 +6,9 @@ struct NetworkConnectionRecord: Sendable, Equatable {
     let remoteHost: String
     let remotePort: Int
 
-    var identity: String { "\(pid)|\(localAddress)|\(remoteHost)|\(remotePort)" }
+    /// Local ephemeral ports change frequently for the same logical destination.
+    /// Preserve them as evidence, but deduplicate on the owning process and remote endpoint.
+    var identity: String { "\(pid)|\(remoteHost)|\(remotePort)" }
 }
 
 protocol NetworkSnapshotting: Sendable {

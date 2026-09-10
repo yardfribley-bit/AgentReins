@@ -8,6 +8,9 @@ final class EventAttributionResolver: ObservableObject {
         let sessionId: String
         let turnId: String
         let toolCallId: String?
+        let toolName: String?
+        let kind: String
+        let op: String
         let agent: String?
         let workspace: String?
         let timestamp: Date
@@ -42,7 +45,8 @@ final class EventAttributionResolver: ObservableObject {
         for event in events {
             guard let sessionId = event.sessionId, let turnId = event.turnId else { continue }
             contexts.append(Context(sessionId: sessionId, turnId: turnId,
-                                    toolCallId: event.toolCallId, agent: event.agent?.lowercased(),
+                                    toolCallId: event.toolCallId, toolName: event.toolName,
+                                    kind: event.kind, op: event.op, agent: event.agent?.lowercased(),
                                     workspace: normalizedWorkspace(event.path), timestamp: event.ts))
         }
         contexts.removeAll { now.timeIntervalSince($0.timestamp) > max(window * 4, 180) }
@@ -50,7 +54,21 @@ final class EventAttributionResolver: ObservableObject {
     }
 
     func resolve(_ event: GuardEvent) -> GuardEvent {
-        if event.sessionId != nil, event.turnId != nil { return event }
+        if let sessionId = event.sessionId, let turnId = event.turnId {
+            guard event.kind == "network", event.toolName == nil else { return event }
+            let matching = contexts.filter {
+                $0.sessionId == sessionId && $0.turnId == turnId &&
+                abs(event.ts.timeIntervalSince($0.timestamp)) <= window &&
+                agentMatches(event.agent, $0.agent)
+            }
+            guard let tool = uniqueToolContext(for: event, in: matching,
+                                               sessionId: sessionId, turnId: turnId) else { return event }
+            let previous = event.attributionMethod.map { $0 + " + " } ?? ""
+            return event.attributed(sessionId: sessionId, turnId: turnId,
+                                    toolCallId: tool.toolCallId, toolName: tool.toolName,
+                                    confidence: .inferred,
+                                    method: previous + "single active tool call (late correlation)")
+        }
         // A timestamp alone is not identity evidence. Require either a process-tree
         // agent attribution or a file path that can be checked against a workspace.
         guard event.agent != nil || event.path != "-" else { return event }
@@ -67,9 +85,31 @@ final class EventAttributionResolver: ObservableObject {
         var reasons: [String] = ["bounded \(Int(window))s time window"]
         if event.agent != nil, best.agent != nil { reasons.insert("process-tree agent", at: 0) }
         if event.path != "-", best.workspace != nil { reasons.insert("workspace path", at: 0) }
+        let tool = uniqueToolContext(for: event, in: matching,
+                                     sessionId: best.sessionId, turnId: best.turnId)
+        if tool != nil { reasons.append("single active tool call") }
+        let resolvedToolCallId = event.kind == "network" ? tool?.toolCallId : best.toolCallId
         return event.attributed(sessionId: best.sessionId, turnId: best.turnId,
-                                toolCallId: best.toolCallId, confidence: .inferred,
+                                toolCallId: resolvedToolCallId, toolName: tool?.toolName,
+                                confidence: .inferred,
                                 method: reasons.joined(separator: " + "))
+    }
+
+    /// A socket owner proves the process, not the logical tool. Attribute a
+    /// network event to a tool only when exactly one tool call is present in a
+    /// tighter time window for the already-resolved turn. Ambiguity stays empty.
+    private func uniqueToolContext(for event: GuardEvent, in matching: [Context],
+                                   sessionId: String, turnId: String) -> Context? {
+        guard event.kind == "network" else { return nil }
+        let toolWindow = min(window, 15)
+        let tools = matching.filter {
+            $0.sessionId == sessionId && $0.turnId == turnId &&
+            $0.kind == "tool" && $0.op == "call" && $0.toolCallId != nil &&
+            abs(event.ts.timeIntervalSince($0.timestamp)) <= toolWindow
+        }
+        let byCall = Dictionary(grouping: tools, by: { $0.toolCallId! })
+        guard byCall.count == 1, let group = byCall.values.first else { return nil }
+        return group.max(by: { $0.timestamp < $1.timestamp })
     }
 
     private func agentMatches(_ eventAgent: String?, _ contextAgent: String?) -> Bool {

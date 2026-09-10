@@ -26,7 +26,7 @@ All production code lives in `Sources/AgentReins`.
 | Development story | `DevelopmentTrace.swift` | Aggregates raw events into Understand, Plan, Build, Test, and Deliver stages with layered drill-down evidence. |
 | Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift` | Read supported WorkBuddy evidence and compatible local Codex rollout records, then map them into normalized events. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
-| Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process and file observations to recent turns and records the evidence method and confidence. |
+| Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process, file, and network observations to recent turns. A network endpoint is linked to a Tool/MCP call only when one unambiguous call exists in a tight time window; every join records its evidence method and remains inferred. |
 | System evidence boundary | `SystemEvidenceProvider.swift` | Keeps entitlement-free polling providers behind the same interface reserved for future ESF and ETW sources. |
 | Process monitoring | `ProcessGuard.swift`, `ProcessSnapshotProvider.swift` | Uses entitlement-free macOS libproc identity and parent lineage, with `ps` only as a fallback. |
 | Network monitoring | `NetworkSnapshotProvider.swift` | Uses `lsof` to capture outbound TCP endpoints owned by an observed agent process tree; payload contents remain unavailable. |

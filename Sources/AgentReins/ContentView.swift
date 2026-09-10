@@ -1579,6 +1579,12 @@ struct ContentView: View {
                             if let pid = incident.primary.processId {
                                 GridRow { Text("Process").foregroundStyle(.secondary); Text("PID \(pid)").textSelection(.enabled) }
                             }
+                            if let tool = incident.primary.toolName {
+                                GridRow { Text("Tool / MCP").foregroundStyle(.secondary); Text(tool).textSelection(.enabled) }
+                            }
+                            if let call = incident.primary.toolCallId {
+                                GridRow { Text("Tool call ID").foregroundStyle(.secondary); Text(call).textSelection(.enabled) }
+                            }
                             if let host = incident.primary.remoteHost {
                                 GridRow {
                                     Text("Remote endpoint").foregroundStyle(.secondary)

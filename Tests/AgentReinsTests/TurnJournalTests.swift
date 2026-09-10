@@ -64,6 +64,15 @@ final class TurnJournalTests: XCTestCase {
         ])
     }
 
+    func testNetworkIdentityIgnoresEphemeralLocalPort() {
+        let first = NetworkConnectionRecord(pid: "123", localAddress: "127.0.0.1:51000",
+                                            remoteHost: "203.0.113.10", remotePort: 443)
+        let second = NetworkConnectionRecord(pid: "123", localAddress: "127.0.0.1:51001",
+                                             remoteHost: "203.0.113.10", remotePort: 443)
+
+        XCTAssertEqual(first.identity, second.identity)
+    }
+
     @MainActor
     func testAttributionResolverJoinsWorkspaceFileToRecentTurnAsInferred() {
         let resolver = EventAttributionResolver(window: 45)
@@ -104,6 +113,77 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertNil(resolved.sessionId)
         XCTAssertNil(resolved.turnId)
         XCTAssertNil(resolved.attributionConfidence)
+    }
+
+    @MainActor
+    func testNetworkEvidenceLinksToOneActiveToolCallAsInferred() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        resolver.observe([
+            GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project", command: "{}",
+                       agent: "codex", op: "call", severity: "info", ts: now, action: "started",
+                       sessionId: "session-1", turnId: "turn-1", toolCallId: "call-1",
+                       toolName: "mcp__github__get_issue")
+        ], now: now)
+        let network = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                                 command: nil, agent: "codex", op: "connect", severity: "info",
+                                 ts: now.addingTimeInterval(2), action: "observed", processId: 42,
+                                 remoteHost: "203.0.113.10", remotePort: 443)
+
+        let resolved = resolver.resolve(network)
+
+        XCTAssertEqual(resolved.toolCallId, "call-1")
+        XCTAssertEqual(resolved.toolName, "mcp__github__get_issue")
+        XCTAssertEqual(resolved.attributionConfidence, .inferred)
+        XCTAssertTrue(resolved.attributionMethod?.contains("single active tool call") == true)
+    }
+
+    @MainActor
+    func testNetworkEvidenceDoesNotGuessBetweenParallelToolCalls() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        let callIDs: [String] = ["call-1", "call-2"]
+        let calls = callIDs.map { call in
+            GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project", command: "{}",
+                       agent: "codex", op: "call", severity: "info", ts: now, action: "started",
+                       sessionId: "session-1", turnId: "turn-1", toolCallId: call,
+                       toolName: "tool_\(call)")
+        }
+        resolver.observe(calls, now: now)
+        let network = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                                 command: nil, agent: "codex", op: "connect", severity: "info",
+                                 ts: now.addingTimeInterval(2), action: "observed", processId: 42,
+                                 remoteHost: "203.0.113.10", remotePort: 443)
+
+        let resolved = resolver.resolve(network)
+
+        XCTAssertNil(resolved.toolCallId)
+        XCTAssertNil(resolved.toolName)
+        XCTAssertEqual(resolved.sessionId, "session-1")
+    }
+
+    @MainActor
+    func testNetworkEvidenceCanBeEnrichedWhenToolEventArrivesLater() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        let pending = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                                 command: nil, agent: "codex", op: "connect", severity: "info",
+                                 ts: now, action: "observed", sessionId: "session-1", turnId: "turn-1",
+                                 source: "lsof-network", attributionConfidence: .inferred,
+                                 attributionMethod: "process-tree agent", processId: 42,
+                                 remoteHost: "203.0.113.10", remotePort: 443)
+        resolver.observe([
+            GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project", command: "{}",
+                       agent: "codex", op: "call", severity: "info", ts: now.addingTimeInterval(2),
+                       action: "started", sessionId: "session-1", turnId: "turn-1",
+                       toolCallId: "call-late", toolName: "web_fetch")
+        ], now: now.addingTimeInterval(2))
+
+        let resolved = resolver.resolve(pending)
+
+        XCTAssertEqual(resolved.toolCallId, "call-late")
+        XCTAssertEqual(resolved.toolName, "web_fetch")
+        XCTAssertTrue(resolved.attributionMethod?.contains("late correlation") == true)
     }
 
     @MainActor

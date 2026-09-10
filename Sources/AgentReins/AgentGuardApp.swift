@@ -57,12 +57,16 @@ struct AgentReinsApp: App {
                 .task {
                     fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
+                    processGuard.onEvents = { events in
+                        eventStore.record(events.map { attributionResolver.resolve($0) })
+                    }
                     memoryScan.onFindings = { findings, date in
                         eventStore.recordMemoryFindings(findings, scannedAt: date)
                     }
                     workBuddySight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         attributionResolver.observe(fresh)
+                        refineRecentNetworkEvents()
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh)
                     }
@@ -70,6 +74,7 @@ struct AgentReinsApp: App {
                     codexSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         attributionResolver.observe(fresh)
+                        refineRecentNetworkEvents()
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh)
                     }
@@ -97,6 +102,14 @@ struct AgentReinsApp: App {
             if event.op != "response" { return false }
             return event.source != "agentsight:codex-local-compat" || event.action == "final_answer"
         }
+    }
+
+    private func refineRecentNetworkEvents() {
+        let refined = eventStore.events.prefix(200)
+            .filter { $0.kind == "network" && $0.toolName == nil }
+            .map { attributionResolver.resolve($0) }
+            .filter { $0.toolName != nil }
+        eventStore.record(refined)
     }
 }
 
