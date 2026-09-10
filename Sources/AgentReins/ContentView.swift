@@ -1076,15 +1076,15 @@ struct ContentView: View {
                 HStack(spacing: 20) {
                     journalMetric("Workspace", value: journal.workspace.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Unknown")
                     journalMetric("Git changes", value: "\(journal.mutations.count)")
-                    journalMetric("Existing changes", value: journal.hasPreExistingChanges ? "Present" : "None captured")
-                    journalMetric("Lifecycle evidence", value: journal.captureComplete ? "Prompt captured" : "Partial")
+                    journalMetric("Existing changes", value: journal.baseline == nil ? "Unknown" : (journal.hasPreExistingChanges ? "Present" : "None"))
+                    journalMetric("Baseline", value: journal.baselinePrecedesMutation == true ? "Before tools" : (journal.baselinePrecedesMutation == false ? "Too late" : "Unknown"))
                 }
                 if !journal.mutations.isEmpty {
                     Divider()
                     ForEach(journal.mutations.prefix(8)) { mutation in
                         HStack(spacing: 9) {
                             Image(systemName: mutation.attribution == .confirmed ? "checkmark.seal.fill" : "questionmark.diamond.fill")
-                                .foregroundStyle(mutation.attribution == .confirmed ? .green : .orange)
+                                .foregroundStyle(mutation.attribution == .confirmed ? .green : (mutation.attribution == .inferred ? .orange : .secondary))
                             Text(mutation.path).font(.system(.caption, design: .monospaced)).lineLimit(1)
                             Spacer()
                             Text("\(mutation.baselineStatus ?? "clean") → \(mutation.finalStatus ?? "clean")")

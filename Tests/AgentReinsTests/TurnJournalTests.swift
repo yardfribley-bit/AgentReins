@@ -224,7 +224,8 @@ final class TurnJournalTests: XCTestCase {
             GitFileState(path: "Created.swift", status: "??")
         ])
 
-        let mutations = GitRepositoryInspector.mutations(between: baseline, and: final)
+        let mutations = GitRepositoryInspector.mutations(
+            between: baseline, and: final, baselinePrecedesMutation: true)
 
         XCTAssertEqual(mutations.map(\.path), ["Created.swift", "RemovedLater.swift"])
         XCTAssertFalse(mutations.contains { $0.path == "Existing.swift" })
@@ -238,6 +239,32 @@ final class TurnJournalTests: XCTestCase {
 
         XCTAssertEqual(mutations.count, 1)
         XCTAssertEqual(mutations[0].attribution, .unknown)
+    }
+
+    func testMutationDetectsContentChangeWhenGitStatusIsUnchanged() {
+        let baseline = snapshot(files: [
+            GitFileState(path: "AlreadyDirty.swift", status: " M", contentFingerprint: "before")
+        ])
+        let final = snapshot(files: [
+            GitFileState(path: "AlreadyDirty.swift", status: " M", contentFingerprint: "after")
+        ])
+
+        let mutations = GitRepositoryInspector.mutations(
+            between: baseline, and: final, baselinePrecedesMutation: true)
+
+        XCTAssertEqual(mutations.map(\.path), ["AlreadyDirty.swift"])
+        XCTAssertEqual(mutations.first?.attribution, .inferred)
+    }
+
+    func testLateBaselineKeepsMutationAttributionUnknown() {
+        let baseline = snapshot(files: [])
+        let final = snapshot(files: [GitFileState(path: "Changed.swift", status: "??")])
+
+        let mutations = GitRepositoryInspector.mutations(
+            between: baseline, and: final, baselinePrecedesMutation: false)
+
+        XCTAssertEqual(mutations.first?.attribution, .unknown)
+        XCTAssertTrue(mutations.first?.evidence.contains("cannot prove") == true)
     }
 
     func testGitSnapshotCapturesRepositoryState() throws {
@@ -260,10 +287,9 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertFalse(snapshot.head?.isEmpty ?? true)
         XCTAssertEqual(URL(fileURLWithPath: snapshot.repositoryRoot).standardizedFileURL.path,
                        root.standardizedFileURL.path)
-        XCTAssertEqual(snapshot.files, [
-            GitFileState(path: "New.txt", status: "??"),
-            GitFileState(path: "Tracked.txt", status: " M")
-        ])
+        XCTAssertEqual(snapshot.files.map(\.path), ["New.txt", "Tracked.txt"])
+        XCTAssertEqual(snapshot.files.map(\.status), ["??", " M"])
+        XCTAssertTrue(snapshot.files.allSatisfy { $0.contentFingerprint != nil })
         XCTAssertTrue(snapshot.patch.contains("-baseline"))
         XCTAssertTrue(snapshot.patch.contains("+changed"))
     }
@@ -341,7 +367,7 @@ final class TurnJournalTests: XCTestCase {
         let journal = AgentTurnJournal(
             id: "session:turn", sessionId: "session", turnId: "turn", agent: "fixture",
             workspace: "/tmp/repository", startedAt: Date(), completedAt: Date(), status: .completed,
-            captureComplete: true, baseline: baseline, finalSnapshot: final,
+            captureComplete: true, baselinePrecedesMutation: true, baseline: baseline, finalSnapshot: final,
             mutations: GitRepositoryInspector.mutations(between: baseline, and: final),
             verificationRuns: [], toolCallIds: [])
 

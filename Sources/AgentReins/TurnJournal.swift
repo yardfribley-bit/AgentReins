@@ -19,6 +19,13 @@ enum EvidenceConfidence: String, Codable, Sendable, Equatable {
 struct GitFileState: Codable, Hashable, Sendable {
     let path: String
     let status: String
+    let contentFingerprint: String?
+
+    init(path: String, status: String, contentFingerprint: String? = nil) {
+        self.path = path
+        self.status = status
+        self.contentFingerprint = contentFingerprint
+    }
 }
 
 struct GitSnapshot: Codable, Sendable {
@@ -88,6 +95,9 @@ struct AgentTurnJournal: Identifiable, Codable, Sendable {
     var completedAt: Date?
     var status: TurnJournalStatus
     var captureComplete: Bool
+    /// True only when the snapshot was captured from a prompt before any observed tool activity.
+    /// Nil represents journals written by older AgentReins versions.
+    var baselinePrecedesMutation: Bool?
     var baseline: GitSnapshot?
     var finalSnapshot: GitSnapshot?
     var mutations: [FileMutation]
@@ -123,28 +133,54 @@ enum GitRepositoryInspector {
         let diffStat = gitOutput(["-C", root, "diff", "--stat", "HEAD"]) ?? ""
         let numStat = gitOutput(["-C", root, "diff", "--numstat", "HEAD"]) ?? ""
         let rawFiles = gitData(["-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all"]) ?? Data()
+        let files = parsePorcelainV1(rawFiles).map { state in
+            GitFileState(path: state.path, status: state.status,
+                         contentFingerprint: fingerprint(root: root, path: state.path))
+        }
 
         return GitSnapshot(capturedAt: date, repositoryRoot: root, head: head,
                            porcelainV2: porcelainV2, patch: patch, stagedPatch: stagedPatch,
                            diffStat: diffStat, numStat: numStat,
-                           files: parsePorcelainV1(rawFiles))
+                           files: files)
     }
 
-    static func mutations(between baseline: GitSnapshot?, and final: GitSnapshot?) -> [FileMutation] {
+    static func mutations(between baseline: GitSnapshot?, and final: GitSnapshot?,
+                          baselinePrecedesMutation: Bool? = nil) -> [FileMutation] {
         guard let final else { return [] }
-        let before = Dictionary(uniqueKeysWithValues: (baseline?.files ?? []).map { ($0.path, $0.status) })
-        let after = Dictionary(uniqueKeysWithValues: final.files.map { ($0.path, $0.status) })
+        let before = Dictionary(uniqueKeysWithValues: (baseline?.files ?? []).map { ($0.path, $0) })
+        let after = Dictionary(uniqueKeysWithValues: final.files.map { ($0.path, $0) })
         return Set(before.keys).union(after.keys).sorted().compactMap { path in
             let old = before[path]
             let new = after[path]
             guard old != new else { return nil }
-            let confidence: EvidenceConfidence = baseline == nil ? .unknown : .inferred
-            let evidence = baseline == nil
-                ? "No pre-turn Git baseline was captured."
-                : "The Git working-tree state changed between the turn snapshots."
-            return FileMutation(path: path, baselineStatus: old, finalStatus: new,
+            let confidence: EvidenceConfidence = baseline != nil && baselinePrecedesMutation == true ? .inferred : .unknown
+            let evidence: String
+            if baseline == nil {
+                evidence = "No pre-turn Git baseline was captured."
+            } else if baselinePrecedesMutation != true {
+                evidence = "A Git baseline exists, but AgentReins cannot prove it preceded the first mutation."
+            } else {
+                evidence = "The file content or Git state changed after the prompt baseline; attribution is temporal, not hook-confirmed."
+            }
+            return FileMutation(path: path, baselineStatus: old?.status, finalStatus: new?.status,
                                 attribution: confidence, evidence: evidence)
         }
+    }
+
+    private static func fingerprint(root: String, path: String) -> String? {
+        let rootURL = URL(fileURLWithPath: root).standardizedFileURL
+        let fileURL = rootURL.appendingPathComponent(path).standardizedFileURL
+        guard fileURL.path.hasPrefix(rootURL.path + "/"),
+              let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
+        defer { try? handle.close() }
+        var hash: UInt64 = 14_695_981_039_346_656_037
+        while let data = try? handle.read(upToCount: 64 * 1024), !data.isEmpty {
+            for byte in data {
+                hash ^= UInt64(byte)
+                hash = hash &* 1_099_511_628_211
+            }
+        }
+        return String(format: "%016llx", hash)
     }
 
     static func parsePorcelainV1(_ data: Data) -> [GitFileState] {
@@ -410,7 +446,8 @@ final class TurnJournalStore: ObservableObject {
             if let snapshot = outcome.1 {
                 journals[current].finalSnapshot = snapshot
                 journals[current].mutations = GitRepositoryInspector.mutations(
-                    between: journals[current].baseline, and: snapshot)
+                    between: journals[current].baseline, and: snapshot,
+                    baselinePrecedesMutation: journals[current].baselinePrecedesMutation)
             }
             save()
         }
@@ -419,16 +456,17 @@ final class TurnJournalStore: ObservableObject {
     private func create(_ event: GuardEvent, id: String, sessionId: String, turnId: String) {
         let workspace = normalizedWorkspace(event.path)
         let isPrompt = event.kind == "model" && event.op == "prompt"
+        let baseline = workspace.flatMap { GitRepositoryInspector.capture(workspace: $0, at: event.ts) }
         let journal = AgentTurnJournal(
             id: id, sessionId: sessionId, turnId: turnId,
             agent: event.agent ?? "Agent", workspace: workspace,
             startedAt: event.ts, completedAt: nil,
             status: status(for: event), captureComplete: isPrompt,
-            baseline: nil, finalSnapshot: nil, mutations: [], verificationRuns: [],
+            baselinePrecedesMutation: isPrompt && baseline != nil,
+            baseline: baseline, finalSnapshot: nil, mutations: [], verificationRuns: [],
             toolCallIds: event.toolCallId.map { [$0] } ?? [])
         journals.append(journal)
         journals.sort { $0.startedAt > $1.startedAt }
-        if let workspace { captureSnapshot(journalId: id, workspace: workspace, baseline: true) }
         if isTerminal(event), let index = journals.firstIndex(where: { $0.id == id }) {
             finish(&journals[index], with: event)
         }
@@ -437,7 +475,8 @@ final class TurnJournalStore: ObservableObject {
     private func update(_ event: GuardEvent, at index: Int) {
         if journals[index].workspace == nil, let workspace = normalizedWorkspace(event.path) {
             journals[index].workspace = workspace
-            captureSnapshot(journalId: journals[index].id, workspace: workspace, baseline: true)
+            journals[index].baseline = GitRepositoryInspector.capture(workspace: workspace, at: event.ts)
+            journals[index].baselinePrecedesMutation = event.kind == "model" && event.op == "prompt" && journals[index].baseline != nil
         }
         if event.kind == "model" && event.op == "prompt" {
             journals[index].captureComplete = true
@@ -464,7 +503,8 @@ final class TurnJournalStore: ObservableObject {
             if baseline, journals[index].baseline == nil { journals[index].baseline = snapshot }
             if !baseline { journals[index].finalSnapshot = snapshot }
             journals[index].mutations = GitRepositoryInspector.mutations(
-                between: journals[index].baseline, and: journals[index].finalSnapshot)
+                between: journals[index].baseline, and: journals[index].finalSnapshot,
+                baselinePrecedesMutation: journals[index].baselinePrecedesMutation)
             save()
         }
     }
