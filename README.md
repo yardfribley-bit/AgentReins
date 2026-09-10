@@ -78,6 +78,7 @@ These are active roadmap items, not shipping claims:
 - Reliable attribution from every file change to the responsible session, turn, tool call, and process.
 - Git-quality separation of pre-existing user work from agent-introduced changes.
 - Independent build and test verification.
+- Explicit `confirmed`, `inferred`, or `unknown` attribution for joined evidence.
 - Transactional preview and undo for a complete agent turn.
 - Native adapters for additional coding agents.
 - Actual network-destination and model-relay evidence.

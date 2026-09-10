@@ -35,6 +35,7 @@ struct AgentReinsApp: App {
     @StateObject private var semanticAnalyzer = SemanticAnalyzer()
     @StateObject private var memoryScan = MemoryScanManager()
     @StateObject private var memoryRuleStore = MemoryRuleStore()
+    @StateObject private var attributionResolver = EventAttributionResolver()
 
     var body: some Scene {
         WindowGroup("AgentReins", id: "security-center") {
@@ -54,19 +55,21 @@ struct AgentReinsApp: App {
                     processGuard.setRules(rules)
                 }
                 .task {
-                    fileGuard.onEvent = { eventStore.record($0) }
-                    processGuard.onEvent = { eventStore.record($0) }
+                    fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
+                    processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     memoryScan.onFindings = { findings, date in
                         eventStore.recordMemoryFindings(findings, scannedAt: date)
                     }
                     workBuddySight.onEvents = { events in
-                        let fresh = eventStore.unrecorded(events)
+                        let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
+                        attributionResolver.observe(fresh)
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh)
                     }
                     workBuddySight.start()
                     codexSight.onEvents = { events in
-                        let fresh = eventStore.unrecorded(events)
+                        let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
+                        attributionResolver.observe(fresh)
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh)
                     }

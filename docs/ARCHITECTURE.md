@@ -26,6 +26,7 @@ All production code lives in `Sources/AgentReins`.
 | Development story | `DevelopmentTrace.swift` | Aggregates raw events into Understand, Plan, Build, Test, and Deliver stages with layered drill-down evidence. |
 | Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift` | Read supported WorkBuddy evidence and compatible local Codex rollout records, then map them into normalized events. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
+| Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process and file observations to recent turns and records the evidence method and confidence. |
 | Process monitoring | `ProcessGuard.swift` | Observes relevant local processes. |
 | File protection | `FileGuard.swift`, `RuleStore.swift`, `NLParser.swift` | Watches protected paths, applies rules, and maintains recovery evidence. |
 | Code review | `CodeSecurityScanner.swift` | Scans agent-introduced lines for local security patterns. |
