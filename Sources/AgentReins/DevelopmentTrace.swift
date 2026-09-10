@@ -72,10 +72,12 @@ struct DevelopmentTaskTrace {
             context: field("Captured model context", prompt) + field("Model response", response) + field("Model", turn.modelNames) + field("Token usage", tokenSummary(turn)),
             tools: planCalls, evidence: field("Captured model context", prompt) + field("Recorded model response", response))
 
+        let mutationConfidence: EvidenceConfidence = mutations.contains { $0.attribution == .unknown }
+            ? .unknown : (mutations.contains { $0.attribution == .inferred } ? .inferred : .confirmed)
         let buildSummary = !mutations.isEmpty ? "\(mutations.count) workspace changes detected" : (!buildCalls.isEmpty ? "\(buildCalls.count) implementation actions observed" : "Waiting for implementation activity")
         let build = DevelopmentTraceNode(id: "build", kind: .build, title: "Build the feature", summary: buildSummary,
             status: buildCalls.contains { $0.completedAt == nil } ? .running : ((buildCalls.isEmpty && mutations.isEmpty) ? .pending : .completed),
-            confidence: !mutations.isEmpty ? .inferred : (!buildCalls.isEmpty ? .confirmed : .unknown), timestamp: buildCalls.first?.startedAt,
+            confidence: !mutations.isEmpty ? mutationConfidence : (!buildCalls.isEmpty ? .confirmed : .unknown), timestamp: buildCalls.first?.startedAt,
             activities: groupedActivities(buildCalls, purpose: "Implementation work") + mutations.map {
                 activity("mutation-\($0.id)", "Changed \($0.path)", "\($0.baselineStatus ?? "clean") → \($0.finalStatus ?? "clean")", journal?.finalSnapshot?.capturedAt, .completed)
             }, context: [], tools: buildCalls,
