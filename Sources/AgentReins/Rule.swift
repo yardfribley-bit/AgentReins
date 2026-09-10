@@ -67,6 +67,7 @@ struct GuardEvent: Identifiable, Codable {
     let localAddress: String?
     let remoteHost: String?
     let remotePort: Int?
+    let remoteDomain: String?
 
     init(id: UUID = UUID(), kind: String, ruleId: String, path: String,
          command: String?, agent: String?, op: String, severity: String,
@@ -80,7 +81,7 @@ struct GuardEvent: Identifiable, Codable {
          source: String? = nil, attributionConfidence: EvidenceConfidence? = nil,
          attributionMethod: String? = nil, processId: Int32? = nil,
          parentProcessId: Int32? = nil, localAddress: String? = nil,
-         remoteHost: String? = nil, remotePort: Int? = nil) {
+         remoteHost: String? = nil, remotePort: Int? = nil, remoteDomain: String? = nil) {
         self.id = id
         self.kind = kind
         self.ruleId = ruleId
@@ -118,9 +119,11 @@ struct GuardEvent: Identifiable, Codable {
         self.localAddress = localAddress
         self.remoteHost = remoteHost
         self.remotePort = remotePort
+        self.remoteDomain = remoteDomain
     }
 
     func attributed(sessionId: String, turnId: String, toolCallId: String?, toolName: String? = nil,
+                    remoteDomain: String? = nil,
                     confidence: EvidenceConfidence, method: String) -> GuardEvent {
         GuardEvent(id: id, kind: kind, ruleId: ruleId, path: path, command: command,
                    agent: agent, op: op, severity: severity, ts: ts, action: action,
@@ -135,7 +138,8 @@ struct GuardEvent: Identifiable, Codable {
                    source: source, attributionConfidence: confidence,
                    attributionMethod: method, processId: processId,
                    parentProcessId: parentProcessId, localAddress: localAddress,
-                   remoteHost: remoteHost, remotePort: remotePort)
+                   remoteHost: remoteHost, remotePort: remotePort,
+                   remoteDomain: remoteDomain ?? self.remoteDomain)
     }
 
     func redactingSensitiveCommandArguments() -> GuardEvent {
@@ -155,6 +159,7 @@ struct GuardEvent: Identifiable, Codable {
                           source: source, attributionConfidence: attributionConfidence,
                           attributionMethod: attributionMethod, processId: processId,
                           parentProcessId: parentProcessId, localAddress: localAddress,
-                          remoteHost: remoteHost, remotePort: remotePort)
+                          remoteHost: remoteHost, remotePort: remotePort,
+                          remoteDomain: remoteDomain)
     }
 }

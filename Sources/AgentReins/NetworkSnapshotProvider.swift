@@ -5,6 +5,16 @@ struct NetworkConnectionRecord: Sendable, Equatable {
     let localAddress: String
     let remoteHost: String
     let remotePort: Int
+    let route: String?
+
+    init(pid: String, localAddress: String, remoteHost: String, remotePort: Int,
+         route: String? = nil) {
+        self.pid = pid
+        self.localAddress = localAddress
+        self.remoteHost = remoteHost
+        self.remotePort = remotePort
+        self.route = route
+    }
 
     /// Local ephemeral ports change frequently for the same logical destination.
     /// Preserve them as evidence, but deduplicate on the owning process and remote endpoint.

@@ -35,28 +35,28 @@ final class EventStore: ObservableObject {
     func record(_ event: GuardEvent) {
         let safeEvent = event.redactingSensitiveCommandArguments()
         guard !events.contains(where: { $0.id == safeEvent.id }) else { return }
-        events.insert(safeEvent, at: 0)
-        trimAndSave()
+        commitEvents([safeEvent] + events)
     }
 
     func record(_ incoming: [GuardEvent]) {
         guard !incoming.isEmpty else { return }
-        var indexes = Dictionary(uniqueKeysWithValues: events.enumerated().map { ($0.element.id, $0.offset) })
+        var updatedEvents = events
+        var indexes = Dictionary(uniqueKeysWithValues: updatedEvents.enumerated().map { ($0.element.id, $0.offset) })
         var changed = false
         for unsafeEvent in incoming {
             let event = unsafeEvent.redactingSensitiveCommandArguments()
             if let index = indexes[event.id] {
                 // 原生会话源可能后来补齐模型响应/上下文字段，允许富化已有事件。
-                events[index] = event
+                updatedEvents[index] = event
                 changed = true
             } else {
-                indexes[event.id] = events.count
-                events.append(event)
+                indexes[event.id] = updatedEvents.count
+                updatedEvents.append(event)
                 changed = true
             }
         }
         guard changed else { return }
-        trimAndSave()
+        commitEvents(updatedEvents)
     }
 
     func unrecorded(_ incoming: [GuardEvent]) -> [GuardEvent] {
@@ -79,12 +79,12 @@ final class EventStore: ObservableObject {
 
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {
         guard !findings.isEmpty else { return }
-        for finding in findings {
-            events.append(GuardEvent(kind: "memory", ruleId: finding.ruleId,
+        let newEvents = findings.map { finding in
+            GuardEvent(kind: "memory", ruleId: finding.ruleId,
                 path: finding.src, command: nil, agent: nil, op: "scan",
-                severity: finding.severity, ts: scannedAt, action: "seen"))
+                severity: finding.severity, ts: scannedAt, action: "seen")
         }
-        trimAndSave()
+        commitEvents(events + newEvents)
     }
 
     private func load() {
@@ -99,8 +99,16 @@ final class EventStore: ObservableObject {
     }
 
     private func trimAndSave() {
-        events.sort { $0.ts > $1.ts }
-        if events.count > maximumEvents { events.removeLast(events.count - maximumEvents) }
+        commitEvents(events)
+    }
+
+    /// Publish one coherent snapshot per ingest batch. Mutating the @Published
+    /// array once per event made SwiftUI rebuild the entire dashboard hundreds
+    /// of times while a live session was being tailed.
+    private func commitEvents(_ incoming: [GuardEvent]) {
+        var snapshot = incoming.sorted { $0.ts > $1.ts }
+        if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
+        events = snapshot
         rebuildViews()
         guard let data = try? encoder.encode(events) else { return }
         try? data.write(to: fileURL, options: .atomic)

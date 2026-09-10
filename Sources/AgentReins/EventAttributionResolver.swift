@@ -11,6 +11,7 @@ final class EventAttributionResolver: ObservableObject {
         let toolName: String?
         let kind: String
         let op: String
+        let command: String?
         let agent: String?
         let workspace: String?
         let timestamp: Date
@@ -46,7 +47,8 @@ final class EventAttributionResolver: ObservableObject {
             guard let sessionId = event.sessionId, let turnId = event.turnId else { continue }
             contexts.append(Context(sessionId: sessionId, turnId: turnId,
                                     toolCallId: event.toolCallId, toolName: event.toolName,
-                                    kind: event.kind, op: event.op, agent: event.agent?.lowercased(),
+                                    kind: event.kind, op: event.op, command: event.command,
+                                    agent: event.agent?.lowercased(),
                                     workspace: normalizedWorkspace(event.path), timestamp: event.ts))
         }
         contexts.removeAll { now.timeIntervalSince($0.timestamp) > max(window * 4, 180) }
@@ -66,6 +68,7 @@ final class EventAttributionResolver: ObservableObject {
             let previous = event.attributionMethod.map { $0 + " + " } ?? ""
             return event.attributed(sessionId: sessionId, turnId: turnId,
                                     toolCallId: tool.toolCallId, toolName: tool.toolName,
+                                    remoteDomain: requestedDomain(in: tool.command),
                                     confidence: .inferred,
                                     method: previous + "single active tool call (late correlation)")
         }
@@ -91,6 +94,7 @@ final class EventAttributionResolver: ObservableObject {
         let resolvedToolCallId = event.kind == "network" ? tool?.toolCallId : best.toolCallId
         return event.attributed(sessionId: best.sessionId, turnId: best.turnId,
                                 toolCallId: resolvedToolCallId, toolName: tool?.toolName,
+                                remoteDomain: tool.flatMap { requestedDomain(in: $0.command) },
                                 confidence: .inferred,
                                 method: reasons.joined(separator: " + "))
     }
@@ -110,6 +114,17 @@ final class EventAttributionResolver: ObservableObject {
         let byCall = Dictionary(grouping: tools, by: { $0.toolCallId! })
         guard byCall.count == 1, let group = byCall.values.first else { return nil }
         return group.max(by: { $0.timestamp < $1.timestamp })
+    }
+
+    private func requestedDomain(in command: String?) -> String? {
+        guard let command else { return nil }
+        let expression = try! NSRegularExpression(pattern: #"https?://[^\s\"'<>)}\]]+"#,
+                                                  options: .caseInsensitive)
+        let range = NSRange(command.startIndex..., in: command)
+        guard let match = expression.firstMatch(in: command, range: range),
+              let valueRange = Range(match.range, in: command),
+              let host = URL(string: String(command[valueRange]))?.host else { return nil }
+        return host.lowercased()
     }
 
     private func agentMatches(_ eventAgent: String?, _ contextAgent: String?) -> Bool {

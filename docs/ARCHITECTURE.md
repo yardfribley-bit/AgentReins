@@ -30,6 +30,8 @@ All production code lives in `Sources/AgentReins`.
 | System evidence boundary | `SystemEvidenceProvider.swift` | Keeps entitlement-free polling providers behind the same interface reserved for future ESF and ETW sources. |
 | Process monitoring | `ProcessGuard.swift`, `ProcessSnapshotProvider.swift` | Uses entitlement-free macOS libproc identity and parent lineage, with `ps` only as a fallback. |
 | Network monitoring | `NetworkSnapshotProvider.swift` | Uses `lsof` to capture outbound TCP endpoints owned by an observed agent process tree; payload contents remain unavailable. |
+| Proxy destination recovery | `ProxyDestinationProvider.swift` | Joins an agent's loopback client port to V2rayU destination-only access metadata, revealing the requested domain without collecting HTTP content. |
+| Destination security | `NetworkDestinationSecurity.swift` | Separates model infrastructure from untrusted external content, developer sources, telemetry, and unresolved IP destinations so poisoning-relevant websites receive priority. |
 | File protection | `FileGuard.swift`, `RuleStore.swift`, `NLParser.swift` | Watches protected paths, applies rules, and maintains recovery evidence. |
 | Code review | `CodeSecurityScanner.swift` | Scans agent-introduced lines for local security patterns. |
 | Memory safety | `MemoryFile.swift`, `MemoryRule.swift`, `MemoryRuleStore.swift`, `MemoryScanManager.swift` | Discovers memory files and reports sensitive retrieval or persistence signals. |

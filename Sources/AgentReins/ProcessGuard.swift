@@ -22,11 +22,13 @@ final class ProcessGuard: ObservableObject {
     private var timer: Timer?
     private var snapshotInFlight = false
     private var seen: Set<String> = []
-    private var seenConnections: Set<String> = []
+    private var seenConnections: [String: Date] = [:]
     private var currentCmdRules: [CmdRule] = []
     private let agentMarkers = ["codex", "kiro", "cursor", "workbuddy", "claude", "aider", "windsurf", "trae"]
     private let snapshotProvider: any ProcessSnapshotting
     private let networkProvider: any NetworkSnapshotting
+    private let proxyDestinationProvider: any ProxyDestinationSnapshotting
+    private var recentProxyDestinations: [Int: ProxyDestinationRecord] = [:]
 
     /// 内置默认高危命令监测集（对齐 agentguard/rules.json 的命令层规则）。
     static let builtin: [CmdRule] = {
@@ -46,10 +48,12 @@ final class ProcessGuard: ObservableObject {
     }()
 
     init(snapshotProvider: (any ProcessSnapshotting)? = nil,
-         networkProvider: (any NetworkSnapshotting)? = nil) {
+         networkProvider: (any NetworkSnapshotting)? = nil,
+         proxyDestinationProvider: (any ProxyDestinationSnapshotting)? = nil) {
         currentCmdRules = ProcessGuard.builtin
         self.snapshotProvider = snapshotProvider ?? ResilientProcessSnapshotProvider(agentMarkers: agentMarkers)
         self.networkProvider = networkProvider ?? LsofNetworkSnapshotProvider()
+        self.proxyDestinationProvider = proxyDestinationProvider ?? V2rayUProxyDestinationProvider()
     }
 
     /// 规则变化时由 UI 同步进来：内置集 + 用户在 App 里配置的 cmd 类规则。
@@ -77,8 +81,10 @@ final class ProcessGuard: ObservableObject {
                 DispatchQueue.global(qos: .utility).async {
                     let procs = self.getProcs()
                     let connections = self.networkProvider.snapshot()
+                    let proxyDestinations = self.proxyDestinationProvider.snapshot()
                     Task { @MainActor in
-                        self.process(procs: procs, connections: connections)
+                        self.process(procs: procs, connections: connections,
+                                     proxyDestinations: proxyDestinations)
                         self.snapshotInFlight = false
                     }
                 }
@@ -97,7 +103,8 @@ final class ProcessGuard: ObservableObject {
 
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
     private func process(procs: [(pid: String, ppid: String, cmd: String)],
-                         connections: [NetworkConnectionRecord]) {
+                         connections: [NetworkConnectionRecord],
+                         proxyDestinations: [ProxyDestinationRecord]) {
         let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
         let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
         let detectedAgents = Array(Set(attributions.values.compactMap { $0 })).sorted()
@@ -118,10 +125,21 @@ final class ProcessGuard: ObservableObject {
                 emitActivity(command: p.cmd, agent: agent, pid: p.pid, ppid: p.ppid)
             }
         }
-        let agentConnections = connections.filter { (attributions[$0.pid] ?? nil) != nil }
-        seenConnections.formIntersection(Set(agentConnections.map(\.identity)))
+        for destination in proxyDestinations {
+            if let existing = recentProxyDestinations[destination.clientPort],
+               existing.timestamp >= destination.timestamp { continue }
+            recentProxyDestinations[destination.clientPort] = destination
+        }
+        let cutoff = Date().addingTimeInterval(-300)
+        recentProxyDestinations = recentProxyDestinations.filter { $0.value.timestamp >= cutoff }
+        let agentConnections = connections
+            .filter { (attributions[$0.pid] ?? nil) != nil }
+            .compactMap(resolveProxyDestination)
+        let connectionCutoff = Date().addingTimeInterval(-300)
+        seenConnections = seenConnections.filter { $0.value >= connectionCutoff }
         var networkEvents: [GuardEvent] = []
-        for connection in agentConnections where seenConnections.insert(connection.identity).inserted {
+        for connection in agentConnections where seenConnections[connection.identity] == nil {
+            seenConnections[connection.identity] = Date()
             if let agent = attributions[connection.pid] ?? nil {
                 networkEvents.append(makeNetworkEvent(connection, agent: agent))
             }
@@ -182,14 +200,38 @@ final class ProcessGuard: ObservableObject {
     }
 
     private func makeNetworkEvent(_ connection: NetworkConnectionRecord, agent: String) -> GuardEvent {
-        GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
-                   command: nil, agent: agent, op: "connect", severity: "info",
+        let routeEvidence = connection.route.map { " + exact client-port join via \($0) access log" } ?? ""
+        let domain = connection.route == nil ? nil : connection.remoteHost
+        let destination = NetworkDestinationAssessment.assess(domain: domain, host: connection.remoteHost)
+        return GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                   command: nil, agent: agent, op: "connect",
+                   severity: destination.needsAttention ? "medium" : "info",
                    ts: Date(), action: "observed", source: networkProvider.sourceID,
                    attributionConfidence: .inferred,
-                   attributionMethod: "lsof socket owner + process-tree agent",
+                   attributionMethod: "lsof socket owner + process-tree agent\(routeEvidence)",
                    processId: Int32(connection.pid),
                    localAddress: connection.localAddress,
-                   remoteHost: connection.remoteHost, remotePort: connection.remotePort)
+                   remoteHost: connection.remoteHost, remotePort: connection.remotePort,
+                   remoteDomain: domain)
+    }
+
+    private func resolveProxyDestination(_ connection: NetworkConnectionRecord) -> NetworkConnectionRecord? {
+        guard isLoopback(connection.remoteHost) else { return connection }
+        guard let clientPort = endpointPort(connection.localAddress),
+              let destination = recentProxyDestinations[clientPort] else { return nil }
+        return NetworkConnectionRecord(pid: connection.pid, localAddress: connection.localAddress,
+                                       remoteHost: destination.remoteHost,
+                                       remotePort: destination.remotePort,
+                                       route: destination.proxyName)
+    }
+
+    private func isLoopback(_ host: String) -> Bool {
+        host == "127.0.0.1" || host == "::1" || host == "localhost"
+    }
+
+    private func endpointPort(_ endpoint: String) -> Int? {
+        guard let separator = endpoint.lastIndex(of: ":") else { return nil }
+        return Int(endpoint[endpoint.index(after: separator)...])
     }
 
     private func notify(title: String, body: String) {

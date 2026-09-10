@@ -105,7 +105,15 @@ enum ExternalContentSecurity {
     static func influenceChains(events: [GuardEvent]) -> [InfluenceChain] {
         let ordered = events.sorted { $0.ts < $1.ts }
         return ordered.enumerated().compactMap { index, event in
-            guard let source = assess(event), !source.findings.isEmpty else { return nil }
+            guard let assessed = assess(event), !assessed.findings.isEmpty else { return nil }
+            let website = ordered[..<index].reversed().first {
+                $0.kind == "network" && $0.toolCallId != nil && $0.toolCallId == event.toolCallId &&
+                $0.remoteDomain != nil
+            }?.remoteDomain
+            let source = ExternalContentAssessment(id: assessed.id, sourceKind: assessed.sourceKind,
+                sourceIdentity: website ?? assessed.sourceIdentity, trust: assessed.trust,
+                turnId: assessed.turnId, traceId: assessed.traceId, timestamp: assessed.timestamp,
+                findings: assessed.findings)
             let later = ordered.dropFirst(index + 1).first {
                 $0.op == "call" && $0.turnId == event.turnId
             }

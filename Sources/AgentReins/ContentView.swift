@@ -59,7 +59,9 @@ struct ContentView: View {
     private var sessions: [AgentSessionSnapshot] { eventStore.sessions }
     private var riskIncidents: [SecurityIncident] { incidents.filter { $0.severity != "info" } }
     private var activityIncidents: [SecurityIncident] { incidents.filter { $0.severity == "info" } }
-    private var todayIncidents: [SecurityIncident] { SecurityIncident.correlate(todayEvents) }
+    private var todayIncidents: [SecurityIncident] {
+        incidents.filter { Calendar.current.isDateInToday($0.lastTs) }
+    }
     private var attentionIncident: SecurityIncident? {
         riskIncidents.first { ($0.severity == "critical" || $0.severity == "high") && !dismissedEventIDs.contains($0.id) }
     }
@@ -1589,6 +1591,23 @@ struct ContentView: View {
                                 GridRow {
                                     Text("Remote endpoint").foregroundStyle(.secondary)
                                     Text("\(host):\(incident.primary.remotePort.map(String.init) ?? "?")").textSelection(.enabled)
+                                }
+                            }
+                            if let domain = incident.primary.remoteDomain {
+                                GridRow {
+                                    Text("Website").foregroundStyle(.secondary)
+                                    Text(domain).textSelection(.enabled)
+                                }
+                            }
+                            if incident.primary.kind == "network" {
+                                GridRow {
+                                    Text("Destination class").foregroundStyle(.secondary)
+                                    Text(incident.networkDestination.kind.rawValue)
+                                        .foregroundStyle(incident.networkDestination.needsAttention ? .orange : .secondary)
+                                }
+                                GridRow {
+                                    Text("Security focus").foregroundStyle(.secondary)
+                                    Text(incident.networkDestination.reason)
                                 }
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)

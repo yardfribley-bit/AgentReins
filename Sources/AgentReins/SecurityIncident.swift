@@ -32,6 +32,10 @@ struct SecurityIncident: Identifiable {
         }
         if primary.kind == "tool" { return "\((agent ?? "Agent").capitalized) 调用了 \(primary.toolName ?? "工具")" }
         if primary.kind == "activity" { return "\((agent ?? "Agent").capitalized) 正在执行任务" }
+        if primary.kind == "network", networkDestination.needsAttention,
+           let site = primary.remoteDomain ?? primary.remoteHost {
+            return "Untrusted website accessed · \(site)"
+        }
         if primary.kind == "network", let tool = primary.toolName {
             return "\((agent ?? "Agent").capitalized) · \(tool) accessed the network"
         }
@@ -45,13 +49,18 @@ struct SecurityIncident: Identifiable {
         return primary.kind == "cmd" ? "Agent 执行了高风险命令" : "Agent 改动了受保护文件"
     }
 
+    var networkDestination: NetworkDestinationAssessment {
+        NetworkDestinationAssessment.assess(domain: primary.remoteDomain, host: primary.remoteHost)
+    }
+
     var summary: String {
         if primary.kind == "model" { return primary.op == "prompt" ? "模型上下文 · 请求已发送" : "模型上下文 · 响应已收到" }
         if primary.kind == "tool" { return "AgentSight 实时活动 · \(primary.action) · 会话已关联。" }
         if primary.kind == "activity" { return "正常活动 · 已记录工具进程，未发现风险规则命中。" }
         if primary.kind == "network" {
             let tool = primary.toolName.map { " · Tool \($0)" } ?? ""
-            return "Network activity · \(primary.remoteHost ?? "Unknown host"):\(primary.remotePort.map(String.init) ?? "Unknown port") · PID \(primary.processId.map(String.init) ?? "Unknown")\(tool)."
+            let destination = primary.remoteDomain ?? primary.remoteHost ?? "Unknown host"
+            return "Network activity · \(destination):\(primary.remotePort.map(String.init) ?? "Unknown port") · PID \(primary.processId.map(String.init) ?? "Unknown")\(tool)."
         }
         let outcome = wasBlocked ? "操作已阻止。" : (wasRestored ? "文件已自动恢复。" : "操作已记录，但未在执行前阻止。")
         let evidence = events.count > 1 ? "同一次操作关联到 \(events.count) 条风险信号。" : "检测到 1 条风险信号。"
@@ -111,7 +120,7 @@ struct SecurityIncident: Identifiable {
     }
 
     private var dataFlowDescription: (value: String, evidence: String, captured: Bool) {
-        if primary.kind == "network", let host = primary.remoteHost {
+        if primary.kind == "network", let host = primary.remoteDomain ?? primary.remoteHost {
             return ("本机进程 → \(host):\(primary.remotePort.map(String.init) ?? "?")",
                     "来自 lsof socket owner；不包含 TLS 内容或传输载荷", true)
         }

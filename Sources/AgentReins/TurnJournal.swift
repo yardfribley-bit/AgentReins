@@ -364,6 +364,7 @@ final class TurnJournalStore: ObservableObject {
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private var scheduledSave: Task<Void, Never>?
 
     init(fileURL: URL = TurnJournalStore.defaultURL()) {
         self.fileURL = fileURL
@@ -387,7 +388,7 @@ final class TurnJournalStore: ObservableObject {
                 create(event, id: id, sessionId: sessionId, turnId: turnId)
             }
         }
-        save()
+        scheduleSave()
     }
 
     func runVerification(journalId: String) {
@@ -545,9 +546,22 @@ final class TurnJournalStore: ObservableObject {
     }
 
     private func save() {
+        scheduledSave?.cancel()
+        scheduledSave = nil
         if journals.count > 1_000 { journals.removeLast(journals.count - 1_000) }
         guard let data = try? encoder.encode(journals) else { return }
         try? data.write(to: fileURL, options: .atomic)
+    }
+
+    /// Live adapters may deliver several enrichment batches for the same turn.
+    /// Coalesce persistence so JSON encoding cannot monopolize the main actor.
+    private func scheduleSave() {
+        scheduledSave?.cancel()
+        scheduledSave = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            guard !Task.isCancelled else { return }
+            self?.save()
+        }
     }
 
     nonisolated static func defaultURL() -> URL {
