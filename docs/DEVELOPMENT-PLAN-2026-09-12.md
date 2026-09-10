@@ -80,6 +80,41 @@ Acceptance criteria:
 - Enrichment uses a bounded local cache and never blocks the live event path.
 - No URL path, header, body, cookie, or credential is sent to an intelligence provider.
 
+### 3A. Repository intake safety v1
+
+Treat every repository selected, downloaded, or cloned by an Agent as untrusted until inspected. This is a pre-execution gate, not a claim that static scanning can prove a repository safe.
+
+Record and inspect:
+
+- Repository URL, owner, visibility, requested ref, resolved commit SHA, and acquisition method.
+- Account/repository age, archived state, recent ownership or maintainer changes, release signing, commit-signature evidence, and OpenSSF Scorecard results where available.
+- Checked-in binaries, archives, executable files, symlinks, Git LFS pointers, submodules, and external submodule hosts.
+- Package lifecycle scripts such as `preinstall`, `postinstall`, setup/build hooks, Make targets, Gradle tasks, and shell bootstrap scripts.
+- `.github/workflows`, `.devcontainer`, editor tasks/settings, Copilot hooks, and other files that may execute after the repository is opened or pushed.
+- Dependency manifests and lockfiles for OSV-based vulnerability checks.
+- Static code, secret, malware/YARA, and generated artifact findings through provider interfaces.
+
+Safe acquisition sequence:
+
+```text
+Repository requested
+  -> metadata and immutable commit resolved
+  -> content downloaded into quarantine without execution
+  -> archive/path traversal and symlink validation
+  -> static, dependency, workflow, and malware scans
+  -> explicit trust result
+  -> open/install/build only after policy allows it
+```
+
+Acceptance criteria:
+
+- AgentReins records the exact commit that was inspected; a branch name alone is insufficient.
+- No package manager, build script, Git hook, editor task, dev container, or repository binary runs during inspection.
+- Submodules and LFS objects are listed before they are fetched.
+- Scanner failure or unavailable reputation is reported as `Unavailable`, never `Safe`.
+- High-confidence malware, unsafe lifecycle execution, path escape, or secret-exfiltration behavior blocks execution in protection mode.
+- The report distinguishes repository-maintenance posture, known vulnerabilities, suspicious code, confirmed malware signatures, and runtime behavior.
+
 ### 4. Context provenance and safety v1
 
 For every WorkBuddy model turn, record the context components visible in the local session evidence:
@@ -170,6 +205,12 @@ Acceptance criteria:
 - Preserve exact provenance for domain and socket evidence.
 - Add offline fixtures so tests do not depend on live intelligence services.
 
+### 12:30–13:00 — Repository intake design and fixture
+
+- Define the repository acquisition and immutable-commit evidence model.
+- Add one benign repository fixture and one harmless simulated malicious-repository fixture.
+- Detect lifecycle scripts, binaries, submodules, executable entry points, and auto-run configuration without executing them.
+
 ### 15:00–16:15 — Context provenance and safety
 
 - Normalize context-source events.
@@ -235,4 +276,3 @@ Run one WorkBuddy task that retrieves external content and generates code. Agent
 ## Release statement allowed after completion
 
 > AgentReins locally connects a WorkBuddy task to its recorded context, tools, external destinations, generated code, and independently verified outcomes, with explicit evidence confidence at every trust boundary.
-
