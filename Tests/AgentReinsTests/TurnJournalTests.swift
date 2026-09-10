@@ -73,6 +73,36 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(first.identity, second.identity)
     }
 
+    func testV2rayAccessLogParserCapturesClientPortAndDomainOnly() {
+        let fixture = """
+        2026/09/10 18:55:59.297258 from 127.0.0.1:53364 accepted //tcp:openrouter.ai:443 [proxy]
+        2026/09/10 18:55:59.297297 [Info] app/dispatcher: default route for tcp:openrouter.ai:443
+        2026/09/10 18:56:01.000000 from [::1]:53370 accepted //chatgpt.com:443 [proxy]
+        """
+
+        let records = V2rayUProxyDestinationProvider.parse(fixture)
+
+        XCTAssertEqual(records.count, 2)
+        XCTAssertEqual(records[0].clientPort, 53364)
+        XCTAssertEqual(records[0].remoteHost, "openrouter.ai")
+        XCTAssertEqual(records[0].remotePort, 443)
+        XCTAssertEqual(records[1].clientPort, 53370)
+        XCTAssertEqual(records[1].remoteHost, "chatgpt.com")
+    }
+
+    func testNetworkDestinationClassifierPrioritizesNonModelWebsites() {
+        let model = NetworkDestinationAssessment.assess(domain: "api.openai.com", host: nil)
+        let poisonedContentSurface = NetworkDestinationAssessment.assess(domain: "raw.githubusercontent.com", host: nil)
+        let external = NetworkDestinationAssessment.assess(domain: "untrusted-example.test", host: nil)
+
+        XCTAssertEqual(model.kind, .modelProvider)
+        XCTAssertFalse(model.needsAttention)
+        XCTAssertEqual(poisonedContentSurface.kind, .developerService)
+        XCTAssertTrue(poisonedContentSurface.needsAttention)
+        XCTAssertEqual(external.kind, .externalContent)
+        XCTAssertTrue(external.needsAttention)
+    }
+
     @MainActor
     func testAttributionResolverJoinsWorkspaceFileToRecentTurnAsInferred() {
         let resolver = EventAttributionResolver(window: 45)
@@ -136,6 +166,28 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(resolved.toolName, "mcp__github__get_issue")
         XCTAssertEqual(resolved.attributionConfidence, .inferred)
         XCTAssertTrue(resolved.attributionMethod?.contains("single active tool call") == true)
+    }
+
+    @MainActor
+    func testNetworkEvidenceUsesURLFromToolArgumentsWithoutAProxyAdapter() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        resolver.observe([
+            GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",
+                       command: #"{"url":"https://docs.example.com/api/search?q=private"}"#,
+                       agent: "workbuddy", op: "call", severity: "info", ts: now,
+                       action: "started", sessionId: "session-1", turnId: "turn-1",
+                       toolCallId: "call-web", toolName: "web_fetch")
+        ], now: now)
+        let network = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                                 command: nil, agent: "workbuddy", op: "connect", severity: "info",
+                                 ts: now.addingTimeInterval(1), action: "observed", processId: 42,
+                                 remoteHost: "203.0.113.20", remotePort: 443)
+
+        let resolved = resolver.resolve(network)
+
+        XCTAssertEqual(resolved.remoteHost, "203.0.113.20")
+        XCTAssertEqual(resolved.remoteDomain, "docs.example.com")
     }
 
     @MainActor
