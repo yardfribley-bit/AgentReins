@@ -21,7 +21,7 @@ enum CodeSecurityScanner {
 
     private static let sourceExtensions: Set<String> = [
         "c", "cc", "cpp", "cs", "go", "h", "hpp", "java", "js", "jsx", "kt", "kts",
-        "m", "mm", "php", "py", "rb", "rs", "sh", "sql", "swift", "ts", "tsx", "yaml", "yml"
+        "html", "htm", "m", "mm", "php", "py", "rb", "rs", "sh", "sql", "swift", "ts", "tsx", "yaml", "yml"
     ]
 
     private static let rules: [Rule] = [
@@ -42,7 +42,13 @@ enum CodeSecurityScanner {
         rule("weak-hash", "Weak cryptographic hash", "medium",
              #"(?i)\b(md5|sha1)\s*\("#),
         rule("world-writable", "World-writable permission", "high",
-             #"(?i)(chmod\s+(-R\s+)?777|permissions?\s*[:=]\s*["']?0777)"#)
+             #"(?i)(chmod\s+(-R\s+)?777|permissions?\s*[:=]\s*["']?0777)"#),
+        rule("remote-script", "Remote script executes inside generated UI", "medium",
+             #"(?i)<script[^>]+src\s*=\s*["']https?://"#),
+        rule("insecure-resource", "Generated UI loads an insecure HTTP resource", "high",
+             #"(?i)(src|href)\s*=\s*["']http://"#),
+        rule("dom-html-injection", "Dynamic HTML insertion may enable script injection", "high",
+             #"(?i)(\.innerHTML\s*=|document\.write\s*\()"#)
     ]
 
     static func scan(path: String, before: String?, after: String?) -> [CodeFinding] {
@@ -61,6 +67,33 @@ enum CodeSecurityScanner {
             }
         }
         return Array(findings.prefix(100))
+    }
+
+    /// Scan code carried inside a tool call even when it never becomes a file.
+    /// WorkBuddy widgets and shell heredocs are important generated-code assets,
+    /// not merely opaque tool arguments.
+    static func scanGenerated(toolName: String?, arguments: String?) -> [CodeFinding] {
+        guard let arguments, !arguments.isEmpty else { return [] }
+        let name = toolName?.lowercased() ?? ""
+        if let data = arguments.data(using: .utf8),
+           let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if let widget = object["widget_code"] as? String {
+                return scan(path: "generated-widget.html", before: nil, after: widget)
+            }
+            if let command = object["command"] as? String {
+                return scan(path: "generated-command.sh", before: nil, after: command)
+            }
+            for key in ["code", "content", "text"] {
+                if let code = object[key] as? String {
+                    let ext = name.contains("html") || code.localizedCaseInsensitiveContains("<script") ? "html" : "txt"
+                    return scan(path: "generated.\(ext)", before: nil, after: code)
+                }
+            }
+        }
+        if name.contains("bash") || name.contains("shell") {
+            return scan(path: "generated-command.sh", before: nil, after: arguments)
+        }
+        return []
     }
 
     private static func rule(_ id: String, _ title: String, _ severity: String, _ pattern: String) -> Rule {

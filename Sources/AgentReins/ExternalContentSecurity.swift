@@ -58,8 +58,10 @@ enum ExternalContentSecurity {
     static func assess(_ event: GuardEvent) -> ExternalContentAssessment? {
         guard event.op == "result", let content = event.modelResponse, !content.isEmpty else { return nil }
         let descriptor = "\(event.toolName ?? "") \(event.command ?? "")".lowercased()
+        let requestedDomain = ExternalURLEvidence.firstDomain(in: event.command)
         let source: ExternalSourceKind
-        if descriptor.contains("mcp__") || descriptor.contains("mcp-") { source = .mcp }
+        if requestedDomain != nil { source = .web }
+        else if descriptor.contains("mcp__") || descriptor.contains("mcp-") { source = .mcp }
         else if descriptor.contains("skill") || descriptor.contains("skill.md") { source = .skill }
         else if ["web", "fetch", "search", "browser", "http"].contains(where: descriptor.contains) { source = .web }
         else if ["memory", "retrieve", "knowledge"].contains(where: descriptor.contains) { source = .memory }
@@ -70,7 +72,7 @@ enum ExternalContentSecurity {
         let trust: ContentTrust = [.web, .mcp].contains(source) ? .untrusted :
             ([.localFile, .terminal, .memory, .skill].contains(source) ? .localUnknown : .unknown)
         return ExternalContentAssessment(id: event.id, sourceKind: source,
-            sourceIdentity: event.toolName ?? "Unknown source", trust: trust,
+            sourceIdentity: requestedDomain ?? event.toolName ?? "Unknown source", trust: trust,
             turnId: event.turnId, traceId: event.traceId, timestamp: event.ts,
             findings: scan(content))
     }

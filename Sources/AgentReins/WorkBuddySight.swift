@@ -152,6 +152,8 @@ final class WorkBuddySight: ObservableObject {
             let model = provider["requestModelName"] as? String ?? provider["model"] as? String
             let toolOutput = type == "function_call_result" ? recursiveText(row["output"] ?? provider["toolResult"]) : nil
             let command = type == "function_call" ? "\(name)(\(String((args ?? "").prefix(4_000))))" : nil
+            let generatedCodeFindings = type == "function_call"
+                ? CodeSecurityScanner.scanGenerated(toolName: name, arguments: args) : []
             result.append(GuardEvent(id: id, kind: "tool", ruleId: "agentsight_\(type)", path: row["cwd"] as? String ?? "-",
                 command: command, agent: agent, op: type == "function_call" ? "call" : "result", severity: "info",
                 ts: timestamp, action: status ?? (type == "function_call" ? "requested" : "completed"),
@@ -166,6 +168,7 @@ final class WorkBuddySight: ObservableObject {
                 cachedTokens: [intValue(usage["cached_tokens"]), intValue(usage["cache_read_input_tokens"]),
                                intValue((usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"])].compactMap { $0 }.max(),
                 reasoningTokens: intValue((usage["completion_tokens_details"] as? [String: Any])?["reasoning_tokens"] ?? usage["completion_thinking_tokens"]),
+                codeFindings: generatedCodeFindings.isEmpty ? nil : generatedCodeFindings,
                 source: "agentsight:workbuddy-local"))
         }
         return result

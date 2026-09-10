@@ -34,7 +34,12 @@ final class EventStore: ObservableObject {
 
     func record(_ event: GuardEvent) {
         let safeEvent = event.redactingSensitiveCommandArguments()
-        guard !events.contains(where: { $0.id == safeEvent.id }) else { return }
+        if let index = events.firstIndex(where: { $0.id == safeEvent.id }) {
+            var updatedEvents = events
+            updatedEvents[index] = safeEvent
+            commitEvents(updatedEvents)
+            return
+        }
         commitEvents([safeEvent] + events)
     }
 
@@ -60,8 +65,15 @@ final class EventStore: ObservableObject {
     }
 
     func unrecorded(_ incoming: [GuardEvent]) -> [GuardEvent] {
-        let existing = Set(events.map(\.id))
-        return incoming.filter { !existing.contains($0.id) }
+        let existing = Dictionary(uniqueKeysWithValues: events.map { ($0.id, $0) })
+        return incoming.filter { candidate in
+            guard let saved = existing[candidate.id] else { return true }
+            // Allow adapters to enrich a previously stored event when a newer
+            // scanner learns about inline code or a tool-provided website.
+            if saved.codeFindings == nil, candidate.codeFindings?.isEmpty == false { return true }
+            if saved.remoteDomain == nil, candidate.remoteDomain != nil { return true }
+            return false
+        }
     }
 
     func events(on date: Date, calendar: Calendar = .current) -> [GuardEvent] {
