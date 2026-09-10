@@ -30,8 +30,8 @@ extension ProcessGuard: SystemEvidenceProvider {
     var evidenceSource: SystemEvidenceSource {
         SystemEvidenceSource(
             id: "process-polling",
-            captureMethod: "process snapshot and parent lineage",
-            capabilities: [.processExecution, .processLineage],
+            captureMethod: "macOS libproc process identity and parent lineage with ps fallback",
+            capabilities: [.processExecution, .processLineage, .networkConnection],
             confidenceCeiling: .inferred,
             requiresRestrictedEntitlement: false)
     }

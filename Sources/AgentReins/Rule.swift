@@ -62,6 +62,11 @@ struct GuardEvent: Identifiable, Codable {
     let source: String?
     let attributionConfidence: EvidenceConfidence?
     let attributionMethod: String?
+    let processId: Int32?
+    let parentProcessId: Int32?
+    let localAddress: String?
+    let remoteHost: String?
+    let remotePort: Int?
 
     init(id: UUID = UUID(), kind: String, ruleId: String, path: String,
          command: String?, agent: String?, op: String, severity: String,
@@ -73,7 +78,9 @@ struct GuardEvent: Identifiable, Codable {
          beforeContent: String? = nil, afterContent: String? = nil, fileDiff: String? = nil,
          codeFindings: [CodeFinding]? = nil,
          source: String? = nil, attributionConfidence: EvidenceConfidence? = nil,
-         attributionMethod: String? = nil) {
+         attributionMethod: String? = nil, processId: Int32? = nil,
+         parentProcessId: Int32? = nil, localAddress: String? = nil,
+         remoteHost: String? = nil, remotePort: Int? = nil) {
         self.id = id
         self.kind = kind
         self.ruleId = ruleId
@@ -106,6 +113,11 @@ struct GuardEvent: Identifiable, Codable {
         self.source = source
         self.attributionConfidence = attributionConfidence
         self.attributionMethod = attributionMethod
+        self.processId = processId
+        self.parentProcessId = parentProcessId
+        self.localAddress = localAddress
+        self.remoteHost = remoteHost
+        self.remotePort = remotePort
     }
 
     func attributed(sessionId: String, turnId: String, toolCallId: String?,
@@ -121,6 +133,28 @@ struct GuardEvent: Identifiable, Codable {
                    reasoningTokens: reasoningTokens, beforeContent: beforeContent,
                    afterContent: afterContent, fileDiff: fileDiff, codeFindings: codeFindings,
                    source: source, attributionConfidence: confidence,
-                   attributionMethod: method)
+                   attributionMethod: method, processId: processId,
+                   parentProcessId: parentProcessId, localAddress: localAddress,
+                   remoteHost: remoteHost, remotePort: remotePort)
+    }
+
+    func redactingSensitiveCommandArguments() -> GuardEvent {
+        guard let command else { return self }
+        let redacted = ProcessArgumentRedactor.redact(command)
+        guard redacted != command else { return self }
+        return GuardEvent(id: id, kind: kind, ruleId: ruleId, path: path, command: redacted,
+                          agent: agent, op: op, severity: severity, ts: ts, action: action,
+                          sessionId: sessionId, traceId: traceId, turnId: turnId,
+                          toolCallId: toolCallId, userIntent: userIntent,
+                          modelDecision: modelDecision, modelReasoning: modelReasoning,
+                          modelPrompt: modelPrompt, modelResponse: modelResponse,
+                          toolName: toolName, model: model, inputTokens: inputTokens,
+                          outputTokens: outputTokens, cachedTokens: cachedTokens,
+                          reasoningTokens: reasoningTokens, beforeContent: beforeContent,
+                          afterContent: afterContent, fileDiff: fileDiff, codeFindings: codeFindings,
+                          source: source, attributionConfidence: attributionConfidence,
+                          attributionMethod: attributionMethod, processId: processId,
+                          parentProcessId: parentProcessId, localAddress: localAddress,
+                          remoteHost: remoteHost, remotePort: remotePort)
     }
 }
