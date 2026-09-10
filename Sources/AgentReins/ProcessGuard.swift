@@ -158,7 +158,9 @@ final class ProcessGuard: ObservableObject {
 
     private func emit(rule: CmdRule, command: String, agent: String?) {
         let ev = GuardEvent(kind: "cmd", ruleId: rule.id, path: "-", command: command, agent: agent,
-                            op: "exec", severity: rule.severity, ts: Date(), action: "seen")
+                            op: "exec", severity: rule.severity, ts: Date(), action: "seen",
+                            source: evidenceSource.id, attributionConfidence: .unknown,
+                            attributionMethod: "awaiting turn correlation")
         events.insert(ev, at: 0)
         if events.count > 300 { events.removeLast() }
         onEvent?(ev)
@@ -167,7 +169,9 @@ final class ProcessGuard: ObservableObject {
 
     private func emitActivity(command: String, agent: String) {
         let ev = GuardEvent(kind: "activity", ruleId: "activity_process", path: "-", command: command,
-                            agent: agent, op: "exec", severity: "info", ts: Date(), action: "observed")
+                            agent: agent, op: "exec", severity: "info", ts: Date(), action: "observed",
+                            source: evidenceSource.id, attributionConfidence: .unknown,
+                            attributionMethod: "awaiting turn correlation")
         events.insert(ev, at: 0)
         if events.count > 300 { events.removeLast() }
         onEvent?(ev)

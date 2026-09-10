@@ -46,6 +46,28 @@ final class TurnJournalTests: XCTestCase {
     }
 
     @MainActor
+    func testAttributionResolverRefusesAmbiguousParallelTurns() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        let turnIDs: [String] = ["turn-1", "turn-2"]
+        let contexts = turnIDs.map { turn in
+            GuardEvent(kind: "tool", ruleId: "tool", path: "/tmp/project",
+                       command: "edit", agent: "codex", op: "call", severity: "info",
+                       ts: now, action: "requested", sessionId: "session-1", turnId: turn,
+                       toolCallId: "call-\(turn)")
+        }
+        resolver.observe(contexts, now: now)
+
+        let file = GuardEvent(kind: "file", ruleId: "file", path: "/tmp/project/App.swift",
+                              command: nil, agent: nil, op: "modify", severity: "info",
+                              ts: now.addingTimeInterval(1), action: "observed")
+        let resolved = resolver.resolve(file)
+
+        XCTAssertNil(resolved.sessionId)
+        XCTAssertNil(resolved.turnId)
+    }
+
+    @MainActor
     func testCodexCompatibilityEvidenceIsNeverLabeledConfirmed() {
         let resolver = EventAttributionResolver()
         let event = GuardEvent(kind: "tool", ruleId: "codex_tool", path: "/tmp/project",
