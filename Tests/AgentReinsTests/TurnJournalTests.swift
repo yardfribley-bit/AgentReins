@@ -359,6 +359,46 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(findings.isEmpty)
     }
 
+    func testToolURLIsPromotedToExternalContentSourceWithoutSocketDomain() throws {
+        let result = GuardEvent(kind: "tool", ruleId: "result", path: "-",
+            command: #"Command: curl -s \"https://wttr.in/Shanghai?format=j1\""#,
+            agent: "workbuddy", op: "result", severity: "info", ts: Date(),
+            action: "completed", sessionId: "session", turnId: "turn",
+            toolCallId: "weather", modelResponse: "22C and light rain", toolName: "Bash")
+
+        let assessment = try XCTUnwrap(ExternalContentSecurity.assess(result))
+        XCTAssertEqual(assessment.sourceKind, .web)
+        XCTAssertEqual(assessment.sourceIdentity, "wttr.in")
+        XCTAssertEqual(assessment.trust, .untrusted)
+    }
+
+    func testGeneratedWidgetCodeIsScannedBeforeItBecomesAFile() {
+        let arguments = #"{"widget_code":"<script src=\"https://cdn.example/chart.js\"></script><div id=\"chart\"></div>"}"#
+        let findings = CodeSecurityScanner.scanGenerated(toolName: "show_widget", arguments: arguments)
+
+        XCTAssertEqual(findings.map(\.ruleId), ["remote-script"])
+    }
+
+    @MainActor
+    func testStoredToolEventCanBeEnrichedWithInlineCodeFindings() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let store = EventStore(fileURL: url)
+        let id = UUID()
+        let original = GuardEvent(id: id, kind: "tool", ruleId: "call", path: "-",
+            command: "show_widget", agent: "workbuddy", op: "call", severity: "info",
+            ts: Date(), action: "requested")
+        let finding = CodeFinding(ruleId: "remote-script", title: "Remote script", severity: "medium",
+                                  line: 1, evidence: "<script src=...>")
+        let enriched = GuardEvent(id: id, kind: "tool", ruleId: "call", path: "-",
+            command: "show_widget", agent: "workbuddy", op: "call", severity: "info",
+            ts: original.ts, action: "requested", codeFindings: [finding])
+
+        store.record(original)
+        XCTAssertEqual(store.unrecorded([enriched]).count, 1)
+        store.record(enriched)
+        XCTAssertEqual(store.events.first?.codeFindings, [finding])
+    }
+
     func testExternalProvenanceAndInfluenceRemainExplicitlyInferred() throws {
         let result = GuardEvent(kind: "tool", ruleId: "result", path: "-", command: nil,
             agent: "workbuddy", op: "result", severity: "info", ts: Date(timeIntervalSince1970: 1),

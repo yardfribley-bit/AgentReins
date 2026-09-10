@@ -1,5 +1,21 @@
 import Foundation
 
+/// Domain evidence taken directly from a tool argument. This proves what the
+/// agent requested, but does not claim that a particular socket carried it.
+enum ExternalURLEvidence {
+    static func firstDomain(in text: String?) -> String? {
+        guard let text, !text.isEmpty else { return nil }
+        let expression = try! NSRegularExpression(
+            pattern: #"https?://[^\s\\\"'<>)}\]]+"#,
+            options: .caseInsensitive)
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = expression.firstMatch(in: text, range: range),
+              let valueRange = Range(match.range, in: text),
+              let host = URL(string: String(text[valueRange]))?.host else { return nil }
+        return host.lowercased()
+    }
+}
+
 enum NetworkDestinationKind: String {
     case modelProvider = "Model provider"
     case externalContent = "External content"

@@ -117,14 +117,7 @@ final class EventAttributionResolver: ObservableObject {
     }
 
     private func requestedDomain(in command: String?) -> String? {
-        guard let command else { return nil }
-        let expression = try! NSRegularExpression(pattern: #"https?://[^\s\"'<>)}\]]+"#,
-                                                  options: .caseInsensitive)
-        let range = NSRange(command.startIndex..., in: command)
-        guard let match = expression.firstMatch(in: command, range: range),
-              let valueRange = Range(match.range, in: command),
-              let host = URL(string: String(command[valueRange]))?.host else { return nil }
-        return host.lowercased()
+        ExternalURLEvidence.firstDomain(in: command)
     }
 
     private func agentMatches(_ eventAgent: String?, _ contextAgent: String?) -> Bool {
