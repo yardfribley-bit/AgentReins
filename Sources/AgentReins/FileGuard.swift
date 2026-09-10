@@ -190,7 +190,8 @@ final class FileGuard: ObservableObject {
                             op: op, severity: sev, ts: Date(), action: action,
                             beforeContent: before, afterContent: after, fileDiff: diff,
                             codeFindings: findings,
-                            source: "fileguard")
+                            source: "file-polling", attributionConfidence: .unknown,
+                            attributionMethod: "awaiting turn correlation")
         events.insert(ev, at: 0)
         if events.count > 200 { events.removeLast() }
         onEvent?(ev)
