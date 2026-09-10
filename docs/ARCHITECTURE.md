@@ -28,7 +28,8 @@ All production code lives in `Sources/AgentReins`.
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
 | Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process and file observations to recent turns and records the evidence method and confidence. |
 | System evidence boundary | `SystemEvidenceProvider.swift` | Keeps entitlement-free polling providers behind the same interface reserved for future ESF and ETW sources. |
-| Process monitoring | `ProcessGuard.swift` | Observes relevant local processes. |
+| Process monitoring | `ProcessGuard.swift`, `ProcessSnapshotProvider.swift` | Uses entitlement-free macOS libproc identity and parent lineage, with `ps` only as a fallback. |
+| Network monitoring | `NetworkSnapshotProvider.swift` | Uses `lsof` to capture outbound TCP endpoints owned by an observed agent process tree; payload contents remain unavailable. |
 | File protection | `FileGuard.swift`, `RuleStore.swift`, `NLParser.swift` | Watches protected paths, applies rules, and maintains recovery evidence. |
 | Code review | `CodeSecurityScanner.swift` | Scans agent-introduced lines for local security patterns. |
 | Memory safety | `MemoryFile.swift`, `MemoryRule.swift`, `MemoryRuleStore.swift`, `MemoryScanManager.swift` | Discovers memory files and reports sensitive retrieval or persistence signals. |

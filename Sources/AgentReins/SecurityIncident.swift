@@ -32,6 +32,7 @@ struct SecurityIncident: Identifiable {
         }
         if primary.kind == "tool" { return "\((agent ?? "Agent").capitalized) 调用了 \(primary.toolName ?? "工具")" }
         if primary.kind == "activity" { return "\((agent ?? "Agent").capitalized) 正在执行任务" }
+        if primary.kind == "network" { return "\((agent ?? "Agent").capitalized) 建立了网络连接" }
         if primary.kind == "memory" { return "Agent 记忆中发现敏感信息" }
         if wasRestored { return "受保护文件已自动恢复" }
         if ruleIDs.contains(where: { $0.contains("curl") }) { return "Agent 下载并执行了远程脚本" }
@@ -45,6 +46,9 @@ struct SecurityIncident: Identifiable {
         if primary.kind == "model" { return primary.op == "prompt" ? "模型上下文 · 请求已发送" : "模型上下文 · 响应已收到" }
         if primary.kind == "tool" { return "AgentSight 实时活动 · \(primary.action) · 会话已关联。" }
         if primary.kind == "activity" { return "正常活动 · 已记录工具进程，未发现风险规则命中。" }
+        if primary.kind == "network" {
+            return "网络活动 · \(primary.remoteHost ?? "未知地址"):\(primary.remotePort.map(String.init) ?? "未知端口") · PID \(primary.processId.map(String.init) ?? "未知")。"
+        }
         let outcome = wasBlocked ? "操作已阻止。" : (wasRestored ? "文件已自动恢复。" : "操作已记录，但未在执行前阻止。")
         let evidence = events.count > 1 ? "同一次操作关联到 \(events.count) 条风险信号。" : "检测到 1 条风险信号。"
         return outcome + evidence
@@ -97,11 +101,16 @@ struct SecurityIncident: Identifiable {
 
     private var kernelDescription: String {
         if primary.kind == "file" { return "文件被\(primary.op == "delete" ? "删除" : "修改")" }
+        if primary.kind == "network" { return "PID \(primary.processId.map(String.init) ?? "未知") 建立 TCP 连接" }
         if command != nil { return "观察到相关进程启动；系统调用未采集" }
         return "未采集"
     }
 
     private var dataFlowDescription: (value: String, evidence: String, captured: Bool) {
+        if primary.kind == "network", let host = primary.remoteHost {
+            return ("本机进程 → \(host):\(primary.remotePort.map(String.init) ?? "?")",
+                    "来自 lsof socket owner；不包含 TLS 内容或传输载荷", true)
+        }
         let text = command?.lowercased() ?? ""
         if text.contains("curl ") || text.contains("wget ") {
             return ("外部网络 → 本机进程", "根据命令参数推断；网络字节流尚未采集", false)
@@ -134,6 +143,9 @@ struct SecurityIncident: Identifiable {
 
     private static func correlationKey(_ event: GuardEvent) -> String? {
         if let call = event.toolCallId { return "tool|\(event.sessionId ?? "")|\(call)" }
+        if event.kind == "network", let pid = event.processId, let host = event.remoteHost {
+            return "network|\(pid)|\(host)|\(event.remotePort ?? 0)"
+        }
         if event.path != "-" { return "file|\(event.kind)|\(event.path)" }
         if let command = event.command { return "cmd|\(event.kind)|\(command)" }
         return nil

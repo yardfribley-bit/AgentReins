@@ -21,8 +21,11 @@ final class ProcessGuard: ObservableObject {
     private var timer: Timer?
     private var snapshotInFlight = false
     private var seen: Set<String> = []
+    private var seenConnections: Set<String> = []
     private var currentCmdRules: [CmdRule] = []
     private let agentMarkers = ["codex", "kiro", "cursor", "workbuddy", "claude", "aider", "windsurf", "trae"]
+    private let snapshotProvider: any ProcessSnapshotting
+    private let networkProvider: any NetworkSnapshotting
 
     /// 内置默认高危命令监测集（对齐 agentguard/rules.json 的命令层规则）。
     static let builtin: [CmdRule] = {
@@ -41,7 +44,12 @@ final class ProcessGuard: ObservableObject {
         ]
     }()
 
-    init() { currentCmdRules = ProcessGuard.builtin }
+    init(snapshotProvider: (any ProcessSnapshotting)? = nil,
+         networkProvider: (any NetworkSnapshotting)? = nil) {
+        currentCmdRules = ProcessGuard.builtin
+        self.snapshotProvider = snapshotProvider ?? ResilientProcessSnapshotProvider(agentMarkers: agentMarkers)
+        self.networkProvider = networkProvider ?? LsofNetworkSnapshotProvider()
+    }
 
     /// 规则变化时由 UI 同步进来：内置集 + 用户在 App 里配置的 cmd 类规则。
     func setRules(_ rules: [Rule]) {
@@ -61,14 +69,15 @@ final class ProcessGuard: ObservableObject {
         // ps 的子进程调用放到后台线程，避免主线程阻塞（首次 ps 触发 TCC 时不会卡 UI）。
         // Native agent events provide the two-second live path. Process attribution
         // is a fallback and does not justify running a full ps snapshot that often.
-        timer = Timer.scheduledTimer(withTimeInterval: 5.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
                 guard let self, !self.snapshotInFlight else { return }
                 self.snapshotInFlight = true
                 DispatchQueue.global(qos: .utility).async {
                     let procs = self.getProcs()
+                    let connections = self.networkProvider.snapshot()
                     Task { @MainActor in
-                        self.process(procs: procs)
+                        self.process(procs: procs, connections: connections)
                         self.snapshotInFlight = false
                     }
                 }
@@ -86,25 +95,35 @@ final class ProcessGuard: ObservableObject {
     // MARK: - 内部
 
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
-    private func process(procs: [(pid: String, ppid: String, cmd: String)]) {
+    private func process(procs: [(pid: String, ppid: String, cmd: String)],
+                         connections: [NetworkConnectionRecord]) {
         let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
         let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
         let detectedAgents = Array(Set(attributions.values.compactMap { $0 })).sorted()
         if detectedAgents != activeAgents { activeAgents = detectedAgents }
+        let liveKeys = Set(procs.map { "\($0.pid)|\($0.cmd)" })
+        seen.formIntersection(liveKeys)
         for p in procs {
-            if seen.contains(p.cmd) { continue }
-            seen.insert(p.cmd)
+            let processKey = "\(p.pid)|\(p.cmd)"
+            if seen.contains(processKey) { continue }
+            seen.insert(processKey)
             let agent = attributions[p.pid] ?? nil
             let matched = currentCmdRules.filter { $0.regex.firstMatch(in: p.cmd,
                 range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil }
             for r in matched {
-                emit(rule: r, command: p.cmd, agent: agent)
+                emit(rule: r, command: p.cmd, agent: agent, pid: p.pid, ppid: p.ppid)
             }
             if matched.isEmpty, let agent, isUserActivity(p.cmd) {
-                emitActivity(command: p.cmd, agent: agent)
+                emitActivity(command: p.cmd, agent: agent, pid: p.pid, ppid: p.ppid)
             }
         }
-        if seen.count > 5000 { seen.removeAll() }
+        let agentConnections = connections.filter { (attributions[$0.pid] ?? nil) != nil }
+        seenConnections.formIntersection(Set(agentConnections.map(\.identity)))
+        for connection in agentConnections where seenConnections.insert(connection.identity).inserted {
+            if let agent = attributions[connection.pid] ?? nil {
+                emitNetwork(connection, agent: agent)
+            }
+        }
     }
 
     /// 过滤 Agent 自身常驻服务，只保留能帮助用户理解“它正在做什么”的短生命周期命令。
@@ -117,30 +136,7 @@ final class ProcessGuard: ObservableObject {
     }
 
     private nonisolated func getProcs() -> [(pid: String, ppid: String, cmd: String)] {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: "/bin/ps")
-        proc.arguments = ["-axo", "pid=,ppid=,command="]
-        let pipe = Pipe()
-        proc.standardOutput = pipe
-        do {
-            try proc.run()
-        } catch {
-            return []
-        }
-        // Drain stdout while ps is running. Waiting first can deadlock once verbose
-        // agent command lines fill the pipe buffer.
-        let data = pipe.fileHandleForReading.readDataToEndOfFile()
-        proc.waitUntilExit()
-        guard let out = String(data: data, encoding: .utf8) else { return [] }
-        var result: [(pid: String, ppid: String, cmd: String)] = []
-        for line in out.split(whereSeparator: \.isNewline) {
-            let parts = line.split(separator: " ", omittingEmptySubsequences: true)
-            guard parts.count >= 3 else { continue }
-            let pid = String(parts[0]); let ppid = String(parts[1])
-            let cmd = parts[2...].joined(separator: " ")
-            result.append((pid: pid, ppid: ppid, cmd: cmd))
-        }
-        return result
+        snapshotProvider.snapshot().map { ($0.pid, $0.ppid, $0.command) }
     }
 
     /// 沿进程树向上回溯，找到包含 agent marker 的祖先进程，即命令的归属 agent。
@@ -156,25 +152,41 @@ final class ProcessGuard: ObservableObject {
         return nil
     }
 
-    private func emit(rule: CmdRule, command: String, agent: String?) {
+    private func emit(rule: CmdRule, command: String, agent: String?, pid: String, ppid: String) {
         let ev = GuardEvent(kind: "cmd", ruleId: rule.id, path: "-", command: command, agent: agent,
                             op: "exec", severity: rule.severity, ts: Date(), action: "seen",
                             source: evidenceSource.id, attributionConfidence: .unknown,
-                            attributionMethod: "awaiting turn correlation")
+                            attributionMethod: "awaiting turn correlation",
+                            processId: Int32(pid), parentProcessId: Int32(ppid))
         events.insert(ev, at: 0)
         if events.count > 300 { events.removeLast() }
         onEvent?(ev)
         notify(title: "AgentReins 监测到命令", body: "\(rule.message) · \(command)")
     }
 
-    private func emitActivity(command: String, agent: String) {
+    private func emitActivity(command: String, agent: String, pid: String, ppid: String) {
         let ev = GuardEvent(kind: "activity", ruleId: "activity_process", path: "-", command: command,
                             agent: agent, op: "exec", severity: "info", ts: Date(), action: "observed",
                             source: evidenceSource.id, attributionConfidence: .unknown,
-                            attributionMethod: "awaiting turn correlation")
+                            attributionMethod: "awaiting turn correlation",
+                            processId: Int32(pid), parentProcessId: Int32(ppid))
         events.insert(ev, at: 0)
         if events.count > 300 { events.removeLast() }
         onEvent?(ev)
+    }
+
+    private func emitNetwork(_ connection: NetworkConnectionRecord, agent: String) {
+        let event = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                               command: nil, agent: agent, op: "connect", severity: "info",
+                               ts: Date(), action: "observed", source: networkProvider.sourceID,
+                               attributionConfidence: .inferred,
+                               attributionMethod: "lsof socket owner + process-tree agent",
+                               processId: Int32(connection.pid),
+                               localAddress: connection.localAddress,
+                               remoteHost: connection.remoteHost, remotePort: connection.remotePort)
+        events.insert(event, at: 0)
+        if events.count > 300 { events.removeLast() }
+        onEvent?(event)
     }
 
     private func notify(title: String, body: String) {

@@ -1576,6 +1576,15 @@ struct ContentView: View {
                                     Text(method).textSelection(.enabled)
                                 }
                             }
+                            if let pid = incident.primary.processId {
+                                GridRow { Text("Process").foregroundStyle(.secondary); Text("PID \(pid)").textSelection(.enabled) }
+                            }
+                            if let host = incident.primary.remoteHost {
+                                GridRow {
+                                    Text("Remote endpoint").foregroundStyle(.secondary)
+                                    Text("\(host):\(incident.primary.remotePort.map(String.init) ?? "?")").textSelection(.enabled)
+                                }
+                            }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                     }
                     if let diff = incident.events.compactMap(\.fileDiff).first {

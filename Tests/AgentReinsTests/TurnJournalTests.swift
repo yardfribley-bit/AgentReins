@@ -3,6 +3,67 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
+        setenv("AGENTREINS_TEST_SECRET", "must-not-enter-process-evidence", 1)
+        defer { unsetenv("AGENTREINS_TEST_SECRET") }
+        let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["agentreinspackagetests"])
+
+        let snapshot = provider.snapshot()
+        let current = try XCTUnwrap(snapshot.first { $0.pid == String(getpid()) })
+
+        XCTAssertFalse(current.ppid.isEmpty)
+        XCTAssertFalse(current.command.isEmpty)
+        XCTAssertFalse(current.command.contains("must-not-enter-process-evidence"))
+    }
+
+    func testProcessArgumentRedactorRemovesAgentAndMCPCredentials() {
+        let command = #"agent --token abcdefghijklmnop --api-key=sk-secret {"Authorization":"Bearer mcp-secret-value"}"#
+
+        let redacted = ProcessArgumentRedactor.redact(command)
+
+        XCTAssertFalse(redacted.contains("abcdefghijklmnop"))
+        XCTAssertFalse(redacted.contains("sk-secret"))
+        XCTAssertFalse(redacted.contains("mcp-secret-value"))
+        XCTAssertTrue(redacted.contains("[REDACTED]"))
+    }
+
+    @MainActor
+    func testEventStoreSanitizesCommandsBeforePersistence() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-redaction-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let store = EventStore(fileURL: file)
+        store.record(GuardEvent(kind: "cmd", ruleId: "process", path: "-",
+                                command: "agent --token highly-sensitive-token", agent: "test",
+                                op: "exec", severity: "info", ts: Date(), action: "observed"))
+
+        let persisted = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertFalse(persisted.contains("highly-sensitive-token"))
+        XCTAssertTrue(persisted.contains("REDACTED"))
+    }
+
+    func testLsofParserCapturesOnlyOutboundTCPConnections() {
+        let fixture = """
+        p123
+        f7
+        n127.0.0.1:51000->34.120.10.2:443
+        f8
+        n*:8080
+        p456
+        f9
+        n[fe80::1]:53000->[2606:4700::1111]:443
+        """
+
+        let connections = LsofNetworkSnapshotProvider.parse(fixture)
+
+        XCTAssertEqual(connections, [
+            NetworkConnectionRecord(pid: "123", localAddress: "127.0.0.1:51000",
+                                    remoteHost: "34.120.10.2", remotePort: 443),
+            NetworkConnectionRecord(pid: "456", localAddress: "[fe80::1]:53000",
+                                    remoteHost: "2606:4700::1111", remotePort: 443)
+        ])
+    }
+
     @MainActor
     func testAttributionResolverJoinsWorkspaceFileToRecentTurnAsInferred() {
         let resolver = EventAttributionResolver(window: 45)

@@ -33,8 +33,9 @@ final class EventStore: ObservableObject {
     }
 
     func record(_ event: GuardEvent) {
-        guard !events.contains(where: { $0.id == event.id }) else { return }
-        events.insert(event, at: 0)
+        let safeEvent = event.redactingSensitiveCommandArguments()
+        guard !events.contains(where: { $0.id == safeEvent.id }) else { return }
+        events.insert(safeEvent, at: 0)
         trimAndSave()
     }
 
@@ -42,7 +43,8 @@ final class EventStore: ObservableObject {
         guard !incoming.isEmpty else { return }
         var indexes = Dictionary(uniqueKeysWithValues: events.enumerated().map { ($0.element.id, $0.offset) })
         var changed = false
-        for event in incoming {
+        for unsafeEvent in incoming {
+            let event = unsafeEvent.redactingSensitiveCommandArguments()
             if let index = indexes[event.id] {
                 // 原生会话源可能后来补齐模型响应/上下文字段，允许富化已有事件。
                 events[index] = event
@@ -88,7 +90,11 @@ final class EventStore: ObservableObject {
     private func load() {
         guard let data = try? Data(contentsOf: fileURL),
               let saved = try? decoder.decode([GuardEvent].self, from: data) else { return }
-        events = saved.sorted { $0.ts > $1.ts }
+        let sanitized = saved.map { $0.redactingSensitiveCommandArguments() }
+        events = sanitized.sorted { $0.ts > $1.ts }
+        if zip(saved, sanitized).contains(where: { $0.command != $1.command }) {
+            trimAndSave()
+        }
         rebuildViews()
     }
 
