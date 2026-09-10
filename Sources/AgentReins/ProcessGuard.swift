@@ -1,6 +1,17 @@
 import Foundation
 import SwiftUI
 
+struct CollectionHealth: Equatable {
+    var lastProcessSuccess: Date?
+    var lastNetworkSuccess: Date?
+    var lastProcessDurationMS: Double = 0
+    var lastNetworkDurationMS: Double = 0
+    var processFailures = 0
+    var networkFailures = 0
+    var skippedProcessSnapshots = 0
+    var skippedNetworkSnapshots = 0
+}
+
 /// 命令层监测规则（正则 + 严重级 + 说明）。
 struct CmdRule {
     let id: String
@@ -16,11 +27,15 @@ final class ProcessGuard: ObservableObject {
     @Published var events: [GuardEvent] = []
     @Published var running = false
     @Published private(set) var activeAgents: [String] = []
+    @Published private(set) var collectionHealth = CollectionHealth()
     var onEvent: ((GuardEvent) -> Void)?
     var onEvents: (([GuardEvent]) -> Void)?
 
-    private var timer: Timer?
-    private var snapshotInFlight = false
+    private var processTimer: Timer?
+    private var networkTimer: Timer?
+    private var processSnapshotInFlight = false
+    private var networkSnapshotInFlight = false
+    private var latestProcesses: [(pid: String, ppid: String, cmd: String)] = []
     private var seen: Set<String> = []
     private var seenConnections: [String: Date] = [:]
     private var currentCmdRules: [CmdRule] = []
@@ -71,46 +86,91 @@ final class ProcessGuard: ObservableObject {
     func start() {
         guard !running else { return }
         running = true
-        // ps 的子进程调用放到后台线程，避免主线程阻塞（首次 ps 触发 TCC 时不会卡 UI）。
-        // Native agent events provide the two-second live path. Process attribution
-        // is a fallback and does not justify running a full ps snapshot that often.
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // Process and network collection deliberately have different cadences.
+        // libproc is cheap enough to observe one-second children at 750 ms, while
+        // spawning lsof at that rate caused severe recurring CPU spikes.
+        processTimer = Timer.scheduledTimer(withTimeInterval: 0.75, repeats: true) { [weak self] _ in
             Task { @MainActor [weak self] in
-                guard let self, !self.snapshotInFlight else { return }
-                self.snapshotInFlight = true
-                DispatchQueue.global(qos: .utility).async {
-                    let procs = self.getProcs()
-                    let connections = self.networkProvider.snapshot()
-                    let proxyDestinations = self.proxyDestinationProvider.snapshot()
-                    Task { @MainActor in
-                        self.process(procs: procs, connections: connections,
-                                     proxyDestinations: proxyDestinations)
-                        self.snapshotInFlight = false
-                    }
+                self?.captureProcesses()
+            }
+        }
+        networkTimer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in
+                self?.captureNetwork()
+            }
+        }
+        processTimer?.fire()
+        networkTimer?.fire()
+    }
+
+    private func captureProcesses() {
+        guard running, !processSnapshotInFlight else {
+            if processSnapshotInFlight { collectionHealth.skippedProcessSnapshots += 1 }
+            return
+        }
+        processSnapshotInFlight = true
+        let started = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let procs = self.getProcs()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.processSnapshotInFlight = false
+                self.collectionHealth.lastProcessDurationMS = Date().timeIntervalSince(started) * 1_000
+                guard !procs.isEmpty else {
+                    self.collectionHealth.processFailures += 1
+                    return
                 }
+                self.collectionHealth.lastProcessSuccess = Date()
+                self.latestProcesses = procs
+                self.process(procs: procs)
+            }
+        }
+    }
+
+    private func captureNetwork() {
+        guard running, !networkSnapshotInFlight else {
+            if networkSnapshotInFlight { collectionHealth.skippedNetworkSnapshots += 1 }
+            return
+        }
+        networkSnapshotInFlight = true
+        let started = Date()
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            guard let self else { return }
+            let connections = self.networkProvider.snapshot()
+            let proxyDestinations = self.proxyDestinationProvider.snapshot()
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.networkSnapshotInFlight = false
+                self.collectionHealth.lastNetworkDurationMS = Date().timeIntervalSince(started) * 1_000
+                self.collectionHealth.lastNetworkSuccess = Date()
+                self.processNetwork(procs: self.latestProcesses, connections: connections,
+                                    proxyDestinations: proxyDestinations)
             }
         }
     }
 
     func stop() {
         running = false
-        timer?.invalidate()
-        timer = nil
-        snapshotInFlight = false
+        processTimer?.invalidate()
+        networkTimer?.invalidate()
+        processTimer = nil
+        networkTimer = nil
+        processSnapshotInFlight = false
+        networkSnapshotInFlight = false
     }
 
     // MARK: - 内部
 
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
-    private func process(procs: [(pid: String, ppid: String, cmd: String)],
-                         connections: [NetworkConnectionRecord],
-                         proxyDestinations: [ProxyDestinationRecord]) {
+    private func process(procs: [(pid: String, ppid: String, cmd: String)]) {
         let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
         let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
         let detectedAgents = Array(Set(attributions.values.compactMap { $0 })).sorted()
         if detectedAgents != activeAgents { activeAgents = detectedAgents }
         let liveKeys = Set(procs.map { "\($0.pid)|\($0.cmd)" })
         seen.formIntersection(liveKeys)
+        var newEvents: [GuardEvent] = []
         for p in procs {
             let processKey = "\(p.pid)|\(p.cmd)"
             if seen.contains(processKey) { continue }
@@ -119,12 +179,26 @@ final class ProcessGuard: ObservableObject {
             let matched = currentCmdRules.filter { $0.regex.firstMatch(in: p.cmd,
                 range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil }
             for r in matched {
-                emit(rule: r, command: p.cmd, agent: agent, pid: p.pid, ppid: p.ppid)
+                newEvents.append(makeEvent(rule: r, command: p.cmd, agent: agent,
+                                           pid: p.pid, ppid: p.ppid))
+                notify(title: "AgentReins observed a command", body: "\(r.message) · \(p.cmd)")
             }
             if matched.isEmpty, let agent, isUserActivity(p.cmd) {
-                emitActivity(command: p.cmd, agent: agent, pid: p.pid, ppid: p.ppid)
+                newEvents.append(makeActivityEvent(command: p.cmd, agent: agent,
+                                                   pid: p.pid, ppid: p.ppid))
             }
         }
+        guard !newEvents.isEmpty else { return }
+        events.insert(contentsOf: newEvents, at: 0)
+        if events.count > 300 { events.removeLast(events.count - 300) }
+        onEvents?(newEvents)
+    }
+
+    private func processNetwork(procs: [(pid: String, ppid: String, cmd: String)],
+                                connections: [NetworkConnectionRecord],
+                                proxyDestinations: [ProxyDestinationRecord]) {
+        let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
+        let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
         for destination in proxyDestinations {
             if let existing = recentProxyDestinations[destination.clientPort],
                existing.timestamp >= destination.timestamp { continue }
@@ -176,27 +250,20 @@ final class ProcessGuard: ObservableObject {
         return nil
     }
 
-    private func emit(rule: CmdRule, command: String, agent: String?, pid: String, ppid: String) {
-        let ev = GuardEvent(kind: "cmd", ruleId: rule.id, path: "-", command: command, agent: agent,
+    private func makeEvent(rule: CmdRule, command: String, agent: String?, pid: String, ppid: String) -> GuardEvent {
+        GuardEvent(kind: "cmd", ruleId: rule.id, path: "-", command: command, agent: agent,
                             op: "exec", severity: rule.severity, ts: Date(), action: "seen",
                             source: evidenceSource.id, attributionConfidence: .unknown,
                             attributionMethod: "awaiting turn correlation",
                             processId: Int32(pid), parentProcessId: Int32(ppid))
-        events.insert(ev, at: 0)
-        if events.count > 300 { events.removeLast() }
-        onEvent?(ev)
-        notify(title: "AgentReins 监测到命令", body: "\(rule.message) · \(command)")
     }
 
-    private func emitActivity(command: String, agent: String, pid: String, ppid: String) {
-        let ev = GuardEvent(kind: "activity", ruleId: "activity_process", path: "-", command: command,
+    private func makeActivityEvent(command: String, agent: String, pid: String, ppid: String) -> GuardEvent {
+        GuardEvent(kind: "activity", ruleId: "activity_process", path: "-", command: command,
                             agent: agent, op: "exec", severity: "info", ts: Date(), action: "observed",
                             source: evidenceSource.id, attributionConfidence: .unknown,
                             attributionMethod: "awaiting turn correlation",
                             processId: Int32(pid), parentProcessId: Int32(ppid))
-        events.insert(ev, at: 0)
-        if events.count > 300 { events.removeLast() }
-        onEvent?(ev)
     }
 
     private func makeNetworkEvent(_ connection: NetworkConnectionRecord, agent: String) -> GuardEvent {

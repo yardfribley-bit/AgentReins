@@ -140,6 +140,7 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 ```
 
 Read [Architecture](docs/ARCHITECTURE.md) for the runtime flow, trust model, source map, and adapter contract.
+See [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) for the evidence pipeline, the lightweight-native design decision, and why AgentReins adopts Beats-grade reliability patterns without embedding the full Beats stack.
 
 ## Privacy and trust model
 
@@ -156,6 +157,8 @@ Read [Architecture](docs/ARCHITECTURE.md) for the runtime flow, trust model, sou
 | Document | Purpose |
 | --- | --- |
 | [Architecture](docs/ARCHITECTURE.md) | Runtime flow, source map, trust model, and integration contract. |
+| [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) | Collection flow, reliability principles, and the native-versus-Beats architecture decision. |
+| [Collection Reliability Assessment](docs/COLLECTION-RELIABILITY-ASSESSMENT.md) | Measured gaps, honest product claims, and hardening acceptance gates. |
 | [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) | Prioritized engineering gaps and acceptance tests. |
 | [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md) | Relay detection, outbound exposure, and model-identity boundaries. |
 | [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md) | Positioning, launch demo, claims, and readiness checklist. |
