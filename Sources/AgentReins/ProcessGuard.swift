@@ -17,6 +17,7 @@ final class ProcessGuard: ObservableObject {
     @Published var running = false
     @Published private(set) var activeAgents: [String] = []
     var onEvent: ((GuardEvent) -> Void)?
+    var onEvents: (([GuardEvent]) -> Void)?
 
     private var timer: Timer?
     private var snapshotInFlight = false
@@ -119,11 +120,16 @@ final class ProcessGuard: ObservableObject {
         }
         let agentConnections = connections.filter { (attributions[$0.pid] ?? nil) != nil }
         seenConnections.formIntersection(Set(agentConnections.map(\.identity)))
+        var networkEvents: [GuardEvent] = []
         for connection in agentConnections where seenConnections.insert(connection.identity).inserted {
             if let agent = attributions[connection.pid] ?? nil {
-                emitNetwork(connection, agent: agent)
+                networkEvents.append(makeNetworkEvent(connection, agent: agent))
             }
         }
+        guard !networkEvents.isEmpty else { return }
+        events.insert(contentsOf: networkEvents, at: 0)
+        if events.count > 300 { events.removeLast(events.count - 300) }
+        onEvents?(networkEvents)
     }
 
     /// 过滤 Agent 自身常驻服务，只保留能帮助用户理解“它正在做什么”的短生命周期命令。
@@ -175,18 +181,15 @@ final class ProcessGuard: ObservableObject {
         onEvent?(ev)
     }
 
-    private func emitNetwork(_ connection: NetworkConnectionRecord, agent: String) {
-        let event = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
-                               command: nil, agent: agent, op: "connect", severity: "info",
-                               ts: Date(), action: "observed", source: networkProvider.sourceID,
-                               attributionConfidence: .inferred,
-                               attributionMethod: "lsof socket owner + process-tree agent",
-                               processId: Int32(connection.pid),
-                               localAddress: connection.localAddress,
-                               remoteHost: connection.remoteHost, remotePort: connection.remotePort)
-        events.insert(event, at: 0)
-        if events.count > 300 { events.removeLast() }
-        onEvent?(event)
+    private func makeNetworkEvent(_ connection: NetworkConnectionRecord, agent: String) -> GuardEvent {
+        GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+                   command: nil, agent: agent, op: "connect", severity: "info",
+                   ts: Date(), action: "observed", source: networkProvider.sourceID,
+                   attributionConfidence: .inferred,
+                   attributionMethod: "lsof socket owner + process-tree agent",
+                   processId: Int32(connection.pid),
+                   localAddress: connection.localAddress,
+                   remoteHost: connection.remoteHost, remotePort: connection.remotePort)
     }
 
     private func notify(title: String, body: String) {

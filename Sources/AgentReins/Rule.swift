@@ -120,7 +120,7 @@ struct GuardEvent: Identifiable, Codable {
         self.remotePort = remotePort
     }
 
-    func attributed(sessionId: String, turnId: String, toolCallId: String?,
+    func attributed(sessionId: String, turnId: String, toolCallId: String?, toolName: String? = nil,
                     confidence: EvidenceConfidence, method: String) -> GuardEvent {
         GuardEvent(id: id, kind: kind, ruleId: ruleId, path: path, command: command,
                    agent: agent, op: op, severity: severity, ts: ts, action: action,
@@ -128,7 +128,7 @@ struct GuardEvent: Identifiable, Codable {
                    toolCallId: toolCallId ?? self.toolCallId, userIntent: userIntent,
                    modelDecision: modelDecision, modelReasoning: modelReasoning,
                    modelPrompt: modelPrompt, modelResponse: modelResponse,
-                   toolName: toolName, model: model, inputTokens: inputTokens,
+                   toolName: toolName ?? self.toolName, model: model, inputTokens: inputTokens,
                    outputTokens: outputTokens, cachedTokens: cachedTokens,
                    reasoningTokens: reasoningTokens, beforeContent: beforeContent,
                    afterContent: afterContent, fileDiff: fileDiff, codeFindings: codeFindings,

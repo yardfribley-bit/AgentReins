@@ -32,7 +32,10 @@ struct SecurityIncident: Identifiable {
         }
         if primary.kind == "tool" { return "\((agent ?? "Agent").capitalized) 调用了 \(primary.toolName ?? "工具")" }
         if primary.kind == "activity" { return "\((agent ?? "Agent").capitalized) 正在执行任务" }
-        if primary.kind == "network" { return "\((agent ?? "Agent").capitalized) 建立了网络连接" }
+        if primary.kind == "network", let tool = primary.toolName {
+            return "\((agent ?? "Agent").capitalized) · \(tool) accessed the network"
+        }
+        if primary.kind == "network" { return "\((agent ?? "Agent").capitalized) established a network connection" }
         if primary.kind == "memory" { return "Agent 记忆中发现敏感信息" }
         if wasRestored { return "受保护文件已自动恢复" }
         if ruleIDs.contains(where: { $0.contains("curl") }) { return "Agent 下载并执行了远程脚本" }
@@ -47,7 +50,8 @@ struct SecurityIncident: Identifiable {
         if primary.kind == "tool" { return "AgentSight 实时活动 · \(primary.action) · 会话已关联。" }
         if primary.kind == "activity" { return "正常活动 · 已记录工具进程，未发现风险规则命中。" }
         if primary.kind == "network" {
-            return "网络活动 · \(primary.remoteHost ?? "未知地址"):\(primary.remotePort.map(String.init) ?? "未知端口") · PID \(primary.processId.map(String.init) ?? "未知")。"
+            let tool = primary.toolName.map { " · Tool \($0)" } ?? ""
+            return "Network activity · \(primary.remoteHost ?? "Unknown host"):\(primary.remotePort.map(String.init) ?? "Unknown port") · PID \(primary.processId.map(String.init) ?? "Unknown")\(tool)."
         }
         let outcome = wasBlocked ? "操作已阻止。" : (wasRestored ? "文件已自动恢复。" : "操作已记录，但未在执行前阻止。")
         let evidence = events.count > 1 ? "同一次操作关联到 \(events.count) 条风险信号。" : "检测到 1 条风险信号。"
