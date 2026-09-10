@@ -1566,6 +1566,16 @@ struct ContentView: View {
                             GridRow { Text("Agent").foregroundStyle(.secondary); Text(incident.agent?.capitalized ?? "未识别") }
                             GridRow { Text("结果").foregroundStyle(.secondary); Text(incident.wasBlocked ? "已阻止" : (incident.wasRestored ? "已恢复" : "仅记录")) }
                             GridRow { Text("关联规则").foregroundStyle(.secondary); Text(incident.ruleIDs.joined(separator: "、")).textSelection(.enabled) }
+                            GridRow {
+                                Text("Attribution").foregroundStyle(.secondary)
+                                Text(incident.primary.attributionConfidence?.rawValue.capitalized ?? "Unknown")
+                            }
+                            if let method = incident.primary.attributionMethod {
+                                GridRow {
+                                    Text("Attribution evidence").foregroundStyle(.secondary)
+                                    Text(method).textSelection(.enabled)
+                                }
+                            }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(.vertical, 6)
                     }
                     if let diff = incident.events.compactMap(\.fileDiff).first {

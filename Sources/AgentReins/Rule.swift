@@ -60,6 +60,8 @@ struct GuardEvent: Identifiable, Codable {
     let fileDiff: String?
     let codeFindings: [CodeFinding]?
     let source: String?
+    let attributionConfidence: EvidenceConfidence?
+    let attributionMethod: String?
 
     init(id: UUID = UUID(), kind: String, ruleId: String, path: String,
          command: String?, agent: String?, op: String, severity: String,
@@ -70,7 +72,8 @@ struct GuardEvent: Identifiable, Codable {
          outputTokens: Int? = nil, cachedTokens: Int? = nil, reasoningTokens: Int? = nil,
          beforeContent: String? = nil, afterContent: String? = nil, fileDiff: String? = nil,
          codeFindings: [CodeFinding]? = nil,
-         source: String? = nil) {
+         source: String? = nil, attributionConfidence: EvidenceConfidence? = nil,
+         attributionMethod: String? = nil) {
         self.id = id
         self.kind = kind
         self.ruleId = ruleId
@@ -101,5 +104,23 @@ struct GuardEvent: Identifiable, Codable {
         self.fileDiff = fileDiff
         self.codeFindings = codeFindings
         self.source = source
+        self.attributionConfidence = attributionConfidence
+        self.attributionMethod = attributionMethod
+    }
+
+    func attributed(sessionId: String, turnId: String, toolCallId: String?,
+                    confidence: EvidenceConfidence, method: String) -> GuardEvent {
+        GuardEvent(id: id, kind: kind, ruleId: ruleId, path: path, command: command,
+                   agent: agent, op: op, severity: severity, ts: ts, action: action,
+                   sessionId: sessionId, traceId: traceId, turnId: turnId,
+                   toolCallId: toolCallId ?? self.toolCallId, userIntent: userIntent,
+                   modelDecision: modelDecision, modelReasoning: modelReasoning,
+                   modelPrompt: modelPrompt, modelResponse: modelResponse,
+                   toolName: toolName, model: model, inputTokens: inputTokens,
+                   outputTokens: outputTokens, cachedTokens: cachedTokens,
+                   reasoningTokens: reasoningTokens, beforeContent: beforeContent,
+                   afterContent: afterContent, fileDiff: fileDiff, codeFindings: codeFindings,
+                   source: source, attributionConfidence: confidence,
+                   attributionMethod: method)
     }
 }

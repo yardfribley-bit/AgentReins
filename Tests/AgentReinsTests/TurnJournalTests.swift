@@ -3,6 +3,62 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    @MainActor
+    func testAttributionResolverJoinsWorkspaceFileToRecentTurnAsInferred() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project",
+                                command: nil, agent: "codex", op: "prompt", severity: "info",
+                                ts: now, action: "sent", sessionId: "session-1", turnId: "turn-1",
+                                toolCallId: "call-1")
+        resolver.observe([prompt], now: now)
+
+        let file = GuardEvent(kind: "file", ruleId: "file", path: "/tmp/project/Sources/App.swift",
+                              command: nil, agent: nil, op: "modify", severity: "info",
+                              ts: now.addingTimeInterval(2), action: "observed")
+        let resolved = resolver.resolve(file)
+
+        XCTAssertEqual(resolved.sessionId, "session-1")
+        XCTAssertEqual(resolved.turnId, "turn-1")
+        XCTAssertEqual(resolved.toolCallId, "call-1")
+        XCTAssertEqual(resolved.attributionConfidence, .inferred)
+        XCTAssertTrue(resolved.attributionMethod?.contains("workspace path") == true)
+    }
+
+    @MainActor
+    func testAttributionResolverRefusesTimestampOnlyGuess() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        resolver.observe([
+            GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project",
+                       command: nil, agent: "codex", op: "prompt", severity: "info",
+                       ts: now, action: "sent", sessionId: "session-1", turnId: "turn-1")
+        ], now: now)
+
+        let anonymousProcess = GuardEvent(kind: "cmd", ruleId: "cmd", path: "-",
+                                          command: "python script.py", agent: nil, op: "exec",
+                                          severity: "info", ts: now, action: "observed")
+        let resolved = resolver.resolve(anonymousProcess)
+
+        XCTAssertNil(resolved.sessionId)
+        XCTAssertNil(resolved.turnId)
+        XCTAssertNil(resolved.attributionConfidence)
+    }
+
+    @MainActor
+    func testCodexCompatibilityEvidenceIsNeverLabeledConfirmed() {
+        let resolver = EventAttributionResolver()
+        let event = GuardEvent(kind: "tool", ruleId: "codex_tool", path: "/tmp/project",
+                               command: "swift test", agent: "codex", op: "call", severity: "info",
+                               ts: Date(), action: "requested", sessionId: "session-1", turnId: "turn-1",
+                               toolCallId: "call-1", source: "agentsight:codex-local-compat")
+
+        let labeled = resolver.labelNative([event])[0]
+
+        XCTAssertEqual(labeled.attributionConfidence, .inferred)
+        XCTAssertEqual(labeled.attributionMethod, "Codex rollout compatibility record")
+    }
+
     func testCodexAdapterCapturesTurnToolResultAndUsage() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("codex-\(UUID().uuidString).jsonl")
         defer { try? FileManager.default.removeItem(at: url) }
