@@ -20,6 +20,7 @@ final class WorkBuddySight: ObservableObject {
     private let evidenceDatabase = try? EvidenceDatabase()
     private var lastHealthPersist = Date.distantPast
     private var acceptedEvents = 0
+    private var collectionFailures = 0
     private let queue = DispatchQueue(label: "com.agentspec.workbuddysight", qos: .utility)
 
     func start() {
@@ -74,7 +75,9 @@ final class WorkBuddySight: ObservableObject {
                 self.connected = FileManager.default.fileExists(atPath: root)
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
-                try? self.evidenceDatabase?.appendRaw(batch.raw)
+                self.collectionFailures += batch.rawFailures
+                do { try self.evidenceDatabase?.appendRaw(batch.raw) }
+                catch { self.collectionFailures += 1 }
                 self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
@@ -89,11 +92,11 @@ final class WorkBuddySight: ObservableObject {
                 }
                 if Date().timeIntervalSince(self.lastHealthPersist) >= 10 || !self.connected {
                     self.lastHealthPersist = Date()
-                    let state: CollectorHealthRecord.State = self.connected ? .healthy : .failed
+                    let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures > 0 ? .degraded : .healthy
                     try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                         source: "workbuddy", state: state, lastSuccess: self.connected ? Date() : nil,
-                        lagSeconds: nil, accepted: self.acceptedEvents, malformed: 0, dropped: 0,
-                        detail: self.connected ? nil : "WorkBuddy session directory is unavailable"))
+                        lagSeconds: nil, accepted: self.acceptedEvents, malformed: self.collectionFailures, dropped: 0,
+                        detail: !self.connected ? "WorkBuddy session directory is unavailable" : self.collectionFailures > 0 ? "One or more raw source reads or writes failed" : nil))
                 }
             }
         }
@@ -101,10 +104,10 @@ final class WorkBuddySight: ObservableObject {
 
     private nonisolated static func readRecentEvents(root: String, changedAfter: Date,
                                                      previousSizes: [String: UInt64])
-        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord]) {
+        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], []) }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
@@ -118,7 +121,8 @@ final class WorkBuddySight: ObservableObject {
         let selected = files.sorted { $0.1 > $1.1 }.prefix(4)
         let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy", previousOffset: previousSizes[$0.0.path]) }
         return (selected.flatMap { parseSession($0.0) },
-                Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) }), raw)
+                Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) }), raw,
+                max(0, selected.count - raw.count))
     }
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {

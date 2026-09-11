@@ -50,6 +50,10 @@ final class TurnJournalTests: XCTestCase {
             offsetEnd: 8, fingerprint: "inode-1", observedAt: Date(), payload: Data("raw-line".utf8))
         try database.appendRaw([record, record])
         XCTAssertEqual(try database.rawRecordCount(), 1)
+        XCTAssertTrue(try database.verifyIntegrity())
+        let backupURL = root.appendingPathComponent("evidence.backup.sqlite3")
+        try database.backup(to: backupURL)
+        XCTAssertEqual(try EvidenceDatabase(url: backupURL).rawRecordCount(), 1)
     }
 
     func testRawLogCaptureRestartsAtZeroAfterTruncation() throws {

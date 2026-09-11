@@ -75,8 +75,11 @@ final class EvidenceDatabase: @unchecked Sendable {
               evidence_key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL,
               offset_start INTEGER NOT NULL, offset_end INTEGER NOT NULL, fingerprint TEXT,
               observed_at REAL NOT NULL, payload BLOB NOT NULL, payload_sha256 TEXT NOT NULL
+              , previous_hash TEXT, record_hash TEXT
             ) WITHOUT ROWID
             """)
+        try addColumnIfMissing(table: "raw_evidence", column: "previous_hash", definition: "TEXT")
+        try addColumnIfMissing(table: "raw_evidence", column: "record_hash", definition: "TEXT")
         try execute("""
             CREATE TABLE IF NOT EXISTS source_checkpoints (
               source TEXT NOT NULL,
@@ -146,12 +149,15 @@ final class EvidenceDatabase: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("BEGIN IMMEDIATE")
         do {
-            let sql = "INSERT OR IGNORE INTO raw_evidence VALUES(?,?,?,?,?,?,?,?,?)"
+            let sql = "INSERT OR IGNORE INTO raw_evidence(evidence_key,source,stream,offset_start,offset_end,fingerprint,observed_at,payload,payload_sha256,previous_hash,record_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare raw") }
             defer { sqlite3_finalize(statement) }
+            var previousHash = try lastRawHashUnlocked()
             for record in records {
                 let digest = SHA256.hash(data: record.payload).map { String(format: "%02x", $0) }.joined()
+                let chainMaterial = "\(previousHash ?? "GENESIS")|\(record.source)|\(record.stream)|\(record.offsetStart)|\(record.offsetEnd)|\(digest)"
+                let recordHash = SHA256.hash(data: Data(chainMaterial.utf8)).map { String(format: "%02x", $0) }.joined()
                 bind("\(record.source):\(record.stream):\(record.offsetStart):\(record.offsetEnd):\(digest)", at: 1, to: statement)
                 bind(record.source, at: 2, to: statement); bind(record.stream, at: 3, to: statement)
                 sqlite3_bind_int64(statement, 4, record.offsetStart); sqlite3_bind_int64(statement, 5, record.offsetEnd)
@@ -159,7 +165,9 @@ final class EvidenceDatabase: @unchecked Sendable {
                 sqlite3_bind_double(statement, 7, record.observedAt.timeIntervalSince1970)
                 _ = record.payload.withUnsafeBytes { sqlite3_bind_blob(statement, 8, $0.baseAddress, Int32(record.payload.count), SQLITE_TRANSIENT) }
                 bind(digest, at: 9, to: statement)
+                bindOptional(previousHash, at: 10, to: statement); bind(recordHash, at: 11, to: statement)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append raw") }
+                if sqlite3_changes(handle) > 0 { previousHash = recordHash }
                 sqlite3_reset(statement); sqlite3_clear_bindings(statement)
             }
             try executeUnlocked("COMMIT")
@@ -173,6 +181,42 @@ final class EvidenceDatabase: @unchecked Sendable {
               sqlite3_step(statement) == SQLITE_ROW else { throw failure("raw count") }
         defer { sqlite3_finalize(statement) }
         return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    func verifyIntegrity() throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "SELECT source,stream,offset_start,offset_end,payload_sha256,previous_hash,record_hash FROM raw_evidence WHERE record_hash IS NOT NULL ORDER BY observed_at,evidence_key"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("integrity prepare") }
+        defer { sqlite3_finalize(statement) }
+        var hashes = Set<String>()
+        var links: [String: String] = [:]
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let source = text(statement, 0), let stream = text(statement, 1),
+                  let digest = text(statement, 4), let storedHash = text(statement, 6) else { return false }
+            let storedPrevious = text(statement, 5)
+            let material = "\(storedPrevious ?? "GENESIS")|\(source)|\(stream)|\(sqlite3_column_int64(statement, 2))|\(sqlite3_column_int64(statement, 3))|\(digest)"
+            let computed = SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
+            guard computed == storedHash else { return false }
+            guard hashes.insert(storedHash).inserted else { return false }
+            let key = storedPrevious ?? "GENESIS"
+            guard links[key] == nil else { return false }
+            links[key] = storedHash
+        }
+        if hashes.isEmpty { return true }
+        var visited = Set<String>(), cursor = links["GENESIS"]
+        while let hash = cursor, visited.insert(hash).inserted { cursor = links[hash] }
+        return visited == hashes
+    }
+
+    func backup(to destination: URL) throws {
+        lock.lock(); defer { lock.unlock() }
+        var target: OpaquePointer?
+        guard sqlite3_open(destination.path, &target) == SQLITE_OK else { throw failure("backup open") }
+        defer { sqlite3_close(target) }
+        guard let backup = sqlite3_backup_init(target, "main", handle, "main") else { throw failure("backup init") }
+        defer { sqlite3_backup_finish(backup) }
+        guard sqlite3_backup_step(backup, -1) == SQLITE_DONE else { throw failure("backup") }
     }
 
     func recent(limit: Int) throws -> [GuardEvent] {
@@ -290,6 +334,21 @@ final class EvidenceDatabase: @unchecked Sendable {
     private func execute(_ sql: String) throws { lock.lock(); defer { lock.unlock() }; try executeUnlocked(sql) }
     private func executeUnlocked(_ sql: String) throws {
         guard sqlite3_exec(handle, sql, nil, nil, nil) == SQLITE_OK else { throw failure(sql) }
+    }
+    private func lastRawHashUnlocked() throws -> String? {
+        var statement: OpaquePointer?
+        let sql = "SELECT r.record_hash FROM raw_evidence r LEFT JOIN raw_evidence n ON n.previous_hash=r.record_hash WHERE r.record_hash IS NOT NULL AND n.record_hash IS NULL LIMIT 1"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("last hash") }
+        defer { sqlite3_finalize(statement) }
+        return sqlite3_step(statement) == SQLITE_ROW ? text(statement, 0) : nil
+    }
+    private func addColumnIfMissing(table: String, column: String, definition: String) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "PRAGMA table_info(\(table))", -1, &statement, nil) == SQLITE_OK else { throw failure("table info") }
+        var found = false
+        while sqlite3_step(statement) == SQLITE_ROW { if text(statement, 1) == column { found = true } }
+        sqlite3_finalize(statement)
+        if !found { try execute("ALTER TABLE \(table) ADD COLUMN \(column) \(definition)") }
     }
     private func bind(_ value: String, at index: Int32, to statement: OpaquePointer?) {
         sqlite3_bind_text(statement, index, value, -1, SQLITE_TRANSIENT)

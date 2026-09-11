@@ -19,6 +19,7 @@ final class CodexSight: ObservableObject {
     private var fileSizes: [String: UInt64] = [:]
     private let evidenceDatabase = try? EvidenceDatabase()
     private var acceptedEvents = 0
+    private var collectionFailures = 0
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
     func start() {
@@ -69,7 +70,9 @@ final class CodexSight: ObservableObject {
                 self.connected = FileManager.default.fileExists(atPath: root)
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
-                try? self.evidenceDatabase?.appendRaw(batch.raw)
+                self.collectionFailures += batch.rawFailures
+                do { try self.evidenceDatabase?.appendRaw(batch.raw) }
+                catch { self.collectionFailures += 1 }
                 self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
@@ -82,20 +85,20 @@ final class CodexSight: ObservableObject {
                         source: "codex", stream: stream, offset: Int64(offset),
                         fingerprint: nil, updatedAt: Date()))
                 }
-                let state: CollectorHealthRecord.State = self.connected ? .healthy : .failed
+                let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures > 0 ? .degraded : .healthy
                 try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                     source: "codex", state: state, lastSuccess: self.connected ? Date() : nil,
-                    lagSeconds: nil, accepted: self.acceptedEvents, malformed: 0, dropped: 0,
-                    detail: self.connected ? nil : "Codex session directory is unavailable"))
+                    lagSeconds: nil, accepted: self.acceptedEvents, malformed: self.collectionFailures, dropped: 0,
+                    detail: !self.connected ? "Codex session directory is unavailable" : self.collectionFailures > 0 ? "One or more raw source reads or writes failed" : nil))
             }
         }
     }
 
     private nonisolated static func readLiveEvents(root: String, previousSizes: [String: UInt64])
-        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord]) {
+        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], []) }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
@@ -115,7 +118,7 @@ final class CodexSight: ObservableObject {
                 ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)
             return parseSession(url, liveStartOffset: start)
         }
-        return (events, sizes, raw)
+        return (events, sizes, raw, max(0, sizes.count - raw.count))
     }
 
     private nonisolated static func sessionFiles(root: String) -> [URL] {
