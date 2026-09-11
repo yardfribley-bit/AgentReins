@@ -1,6 +1,11 @@
 import Foundation
 
 enum RawLogCapture {
+    static func safeCheckpoint(for record: RawEvidenceRecord) -> UInt64 {
+        guard let newline = record.payload.lastIndex(of: 0x0A) else { return UInt64(record.offsetStart) }
+        return UInt64(record.offsetStart) + UInt64(record.payload.distance(from: record.payload.startIndex, to: newline) + 1)
+    }
+
     static func capture(url: URL, source: String, previousOffset: UInt64?, maximumInitialBytes: UInt64 = 512 * 1_024)
         -> RawEvidenceRecord? {
         guard let handle = try? FileHandle(forReadingFrom: url),

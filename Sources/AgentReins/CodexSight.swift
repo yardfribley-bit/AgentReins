@@ -20,6 +20,8 @@ final class CodexSight: ObservableObject {
     private let evidenceDatabase = try? EvidenceDatabase()
     private var acceptedEvents = 0
     private var collectionFailures = 0
+    private var malformedRows = 0
+    private var partialRows = 0
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
     func start() {
@@ -71,6 +73,8 @@ final class CodexSight: ObservableObject {
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 self.collectionFailures += batch.rawFailures
+                self.malformedRows += batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
+                self.partialRows += batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
                 do { try self.evidenceDatabase?.appendRaw(batch.raw) }
                 catch { self.collectionFailures += 1 }
                 self.acceptedEvents += fresh.count
@@ -85,11 +89,12 @@ final class CodexSight: ObservableObject {
                         source: "codex", stream: stream, offset: Int64(offset),
                         fingerprint: nil, updatedAt: Date()))
                 }
-                let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures > 0 ? .degraded : .healthy
+                let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures + self.malformedRows > 0 ? .degraded : .healthy
                 try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                     source: "codex", state: state, lastSuccess: self.connected ? Date() : nil,
-                    lagSeconds: nil, accepted: self.acceptedEvents, malformed: self.collectionFailures, dropped: 0,
-                    detail: !self.connected ? "Codex session directory is unavailable" : self.collectionFailures > 0 ? "One or more raw source reads or writes failed" : nil))
+                    lagSeconds: nil, accepted: self.acceptedEvents,
+                    malformed: self.collectionFailures + self.malformedRows, dropped: self.partialRows,
+                    detail: !self.connected ? "Codex session directory is unavailable" : self.collectionFailures > 0 || self.malformedRows > 0 ? "Raw read/write or malformed JSONL evidence detected" : self.partialRows > 0 ? "A trailing partial row is buffered for the next poll" : nil))
             }
         }
     }
@@ -111,9 +116,10 @@ final class CodexSight: ObservableObject {
         var raw: [RawEvidenceRecord] = []
         let events = files.sorted { $0.1 > $1.1 }.prefix(2).flatMap { item -> [GuardEvent] in
             let (url, _, size) = item
-            sizes[url.path] = size
             let previous = previousSizes[url.path]
-            if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous) { raw.append(record) }
+            if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous) {
+                raw.append(record); sizes[url.path] = RawLogCapture.safeCheckpoint(for: record)
+            } else { sizes[url.path] = size }
             let start = previous.map { min($0, size) > 64 * 1_024 ? min($0, size) - 64 * 1_024 : 0 }
                 ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)
             return parseSession(url, liveStartOffset: start)

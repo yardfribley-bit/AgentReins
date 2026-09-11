@@ -26,9 +26,11 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
 struct AgentReinsApp: App {
     @NSApplicationDelegateAdaptor(AgentReinsAppDelegate.self) private var appDelegate
     @StateObject private var store = RuleStore()
+    // Open and verify the durable evidence spine before individual collectors
+    // create their own SQLite connections.
+    @StateObject private var eventStore = EventStore()
     @StateObject private var fileGuard = FileGuard()
     @StateObject private var processGuard = ProcessGuard()
-    @StateObject private var eventStore = EventStore()
     @StateObject private var turnJournalStore = TurnJournalStore()
     @StateObject private var workBuddySight = WorkBuddySight()
     @StateObject private var codexSight = CodexSight()

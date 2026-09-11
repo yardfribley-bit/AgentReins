@@ -25,7 +25,7 @@ final class EventStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         let databaseURL = fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
-        database = try? EvidenceDatabase(url: databaseURL)
+        database = try? EvidenceDatabase.openRecovering(url: databaseURL)
         load()
         rebuildAgentSightIndexOnce()
         importLegacyLogsOnce()

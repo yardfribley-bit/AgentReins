@@ -21,6 +21,8 @@ final class WorkBuddySight: ObservableObject {
     private var lastHealthPersist = Date.distantPast
     private var acceptedEvents = 0
     private var collectionFailures = 0
+    private var malformedRows = 0
+    private var partialRows = 0
     private let queue = DispatchQueue(label: "com.agentspec.workbuddysight", qos: .utility)
 
     func start() {
@@ -76,6 +78,8 @@ final class WorkBuddySight: ObservableObject {
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 self.collectionFailures += batch.rawFailures
+                self.malformedRows += batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
+                self.partialRows += batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
                 do { try self.evidenceDatabase?.appendRaw(batch.raw) }
                 catch { self.collectionFailures += 1 }
                 self.acceptedEvents += fresh.count
@@ -92,11 +96,12 @@ final class WorkBuddySight: ObservableObject {
                 }
                 if Date().timeIntervalSince(self.lastHealthPersist) >= 10 || !self.connected {
                     self.lastHealthPersist = Date()
-                    let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures > 0 ? .degraded : .healthy
+                    let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures + self.malformedRows > 0 ? .degraded : .healthy
                     try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                         source: "workbuddy", state: state, lastSuccess: self.connected ? Date() : nil,
-                        lagSeconds: nil, accepted: self.acceptedEvents, malformed: self.collectionFailures, dropped: 0,
-                        detail: !self.connected ? "WorkBuddy session directory is unavailable" : self.collectionFailures > 0 ? "One or more raw source reads or writes failed" : nil))
+                        lagSeconds: nil, accepted: self.acceptedEvents,
+                        malformed: self.collectionFailures + self.malformedRows, dropped: self.partialRows,
+                        detail: !self.connected ? "WorkBuddy session directory is unavailable" : self.collectionFailures > 0 || self.malformedRows > 0 ? "Raw read/write or malformed JSONL evidence detected" : self.partialRows > 0 ? "A trailing partial row is buffered for the next poll" : nil))
                 }
             }
         }
@@ -120,8 +125,10 @@ final class WorkBuddySight: ObservableObject {
         }
         let selected = files.sorted { $0.1 > $1.1 }.prefix(4)
         let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy", previousOffset: previousSizes[$0.0.path]) }
+        var sizes = Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) })
+        for record in raw { sizes[record.stream] = RawLogCapture.safeCheckpoint(for: record) }
         return (selected.flatMap { parseSession($0.0) },
-                Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) }), raw,
+                sizes, raw,
                 max(0, selected.count - raw.count))
     }
 

@@ -1,8 +1,14 @@
 import Foundation
+import SQLite3
 import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testJSONLDiagnosticsSeparatesMalformedAndPartialRows() {
+        let data = Data("{\"ok\":1}\nnot-json\n{\"partial\":".utf8)
+        XCTAssertEqual(JSONLDiagnostics.inspect(data),
+                       JSONLDiagnosticResult(completeRows: 2, malformedRows: 1, trailingPartialRows: 1))
+    }
     func testEvidenceDatabaseUsesWALAndIdempotentReplay() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -63,6 +69,35 @@ final class TurnJournalTests: XCTestCase {
         let record = try XCTUnwrap(RawLogCapture.capture(url: file, source: "workbuddy", previousOffset: 999))
         XCTAssertEqual(record.offsetStart, 0)
         XCTAssertEqual(String(data: record.payload, encoding: .utf8), "new\n")
+        XCTAssertEqual(RawLogCapture.safeCheckpoint(for: record), 4)
+    }
+
+    func testRawLogCheckpointDoesNotAcknowledgePartialJSONL() {
+        let record = RawEvidenceRecord(source: "codex", stream: "fixture", offsetStart: 100,
+            offsetEnd: 118, fingerprint: nil, observedAt: Date(),
+            payload: Data("{\"ok\":1}\n{\"partial".utf8))
+        XCTAssertEqual(RawLogCapture.safeCheckpoint(for: record), 109)
+    }
+
+    func testEvidenceDatabaseRecoversFromIntegrityFailure() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("evidence.sqlite3")
+        do {
+            let database = try EvidenceDatabase(url: url)
+            try database.appendRaw([RawEvidenceRecord(source: "codex", stream: "fixture", offsetStart: 0,
+                offsetEnd: 3, fingerprint: "1", observedAt: Date(), payload: Data("raw".utf8))])
+        }
+        _ = try EvidenceDatabase.openRecovering(url: url)
+        var handle: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &handle), SQLITE_OK)
+        XCTAssertEqual(sqlite3_exec(handle, "UPDATE raw_evidence SET record_hash='tampered'", nil, nil, nil), SQLITE_OK)
+        sqlite3_close(handle)
+
+        let recovered = try EvidenceDatabase.openRecovering(url: url)
+        XCTAssertTrue(try recovered.verifyIntegrity())
+        XCTAssertEqual(try recovered.rawRecordCount(), 1)
     }
 
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {

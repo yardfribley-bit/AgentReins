@@ -112,6 +112,30 @@ final class EvidenceDatabase: @unchecked Sendable {
         return base.appendingPathComponent("AgentGuard/evidence.sqlite3")
     }
 
+    static func openRecovering(url: URL = defaultURL()) throws -> EvidenceDatabase {
+        let backupURL = url.appendingPathExtension("backup")
+        do {
+            let database = try EvidenceDatabase(url: url)
+            guard try database.verifyIntegrity() else {
+                throw NSError(domain: "AgentReins.EvidenceDatabase", code: 2,
+                              userInfo: [NSLocalizedDescriptionKey: "Raw evidence integrity verification failed"])
+            }
+            let temporary = backupURL.appendingPathExtension("new")
+            try? FileManager.default.removeItem(at: temporary)
+            try database.backup(to: temporary)
+            if FileManager.default.fileExists(atPath: backupURL.path) { try FileManager.default.removeItem(at: backupURL) }
+            try FileManager.default.moveItem(at: temporary, to: backupURL)
+            return database
+        } catch {
+            guard FileManager.default.fileExists(atPath: backupURL.path) else { throw error }
+            let quarantined = url.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+            if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.moveItem(at: url, to: quarantined) }
+            for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: url.path + suffix) }
+            try FileManager.default.copyItem(at: backupURL, to: url)
+            return try EvidenceDatabase(url: url)
+        }
+    }
+
     func append(_ events: [GuardEvent]) throws {
         guard !events.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
