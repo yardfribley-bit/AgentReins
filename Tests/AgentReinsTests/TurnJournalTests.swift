@@ -25,6 +25,33 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(try database.recent(limit: 10).map(\.id), [event.id])
     }
 
+    func testEvidenceDatabaseAcceptsOneHundredThousandEventsWithinBudget() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("evidence.sqlite3")
+        let database = try EvidenceDatabase(url: url)
+        let started = Date()
+        let batchSize = 1_000
+
+        for batch in 0..<100 {
+            let events = (0..<batchSize).map { index in
+                GuardEvent(id: UUID(), kind: "activity", ruleId: "stress-fixture", path: "/tmp/workspace",
+                           command: "swift build --target fixture-\(batch)-\(index)", agent: "codex", op: "exec",
+                           severity: "info", ts: Date(), action: "observed", source: "stress-benchmark")
+            }
+            try database.append(events)
+        }
+
+        let elapsed = Date().timeIntervalSince(started)
+        let databaseBytes = (try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? NSNumber)?.int64Value ?? 0
+        let latest = try database.recent(limit: 100_000)
+        print("COLLECTION_BENCHMARK events=100000 elapsed_s=\(elapsed) database_mb=\(Double(databaseBytes) / 1_048_576)")
+        XCTAssertEqual(latest.count, 100_000)
+        XCTAssertLessThan(elapsed, 90, "100k event ingestion exceeded the acceptance budget")
+        XCTAssertTrue(try database.verifyIntegrity())
+    }
+
     func testEvidenceDatabasePersistsCheckpointAndCollectorHealth() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -77,6 +104,30 @@ final class TurnJournalTests: XCTestCase {
             offsetEnd: 118, fingerprint: nil, observedAt: Date(),
             payload: Data("{\"ok\":1}\n{\"partial".utf8))
         XCTAssertEqual(RawLogCapture.safeCheckpoint(for: record), 109)
+    }
+
+    @MainActor
+    func testFileCollectorObservesAChangeThatPersistsAcrossPollingWindow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let watched = root.appendingPathComponent("watched.swift")
+        let backups = root.appendingPathComponent("backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "let value = 1\n".write(to: watched, atomically: true, encoding: .utf8)
+        let guardrail = FileGuard(backupRoot: backups)
+        guardrail.setRules([Rule(id: "file-benchmark", kind: "file", watch: [watched.path], pattern: nil,
+                                 ops: ["modify"], severity: "high", action: "protect", restore: false,
+                                 message: "benchmark", naturalLanguage: nil)])
+        let observed = expectation(description: "persistent file modification observed")
+        guardrail.onEvent = { event in
+            if event.path == watched.path, event.op == "modify" { observed.fulfill() }
+        }
+        guardrail.start()
+        defer { guardrail.stop() }
+
+        try await Task.sleep(for: .milliseconds(400))
+        try "let value = 2\n".write(to: watched, atomically: true, encoding: .utf8)
+        await fulfillment(of: [observed], timeout: 2.5)
     }
 
     func testEvidenceDatabaseRecoversFromIntegrityFailure() throws {

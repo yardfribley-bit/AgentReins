@@ -159,6 +159,7 @@ See [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) for the
 | [Architecture](docs/ARCHITECTURE.md) | Runtime flow, source map, trust model, and integration contract. |
 | [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) | Collection flow, reliability principles, and the native-versus-Beats architecture decision. |
 | [Collection Reliability Assessment](docs/COLLECTION-RELIABILITY-ASSESSMENT.md) | Measured gaps, honest product claims, and hardening acceptance gates. |
+| [Collection Acceptance — 2026-09-11](docs/COLLECTION-ACCEPTANCE-2026-09-11.md) | Latest measured short-term results, failures, blind spots, and deferred soak test. |
 | [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) | Prioritized engineering gaps and acceptance tests. |
 | [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md) | Relay detection, outbound exposure, and model-identity boundaries. |
 | [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md) | Positioning, launch demo, claims, and readiness checklist. |

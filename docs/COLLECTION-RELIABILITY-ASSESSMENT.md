@@ -5,6 +5,11 @@ Scope: AgentReins macOS collection foundation, not UI or higher-level security a
 
 ## Hardening update
 
+The dated short-term acceptance result is published in
+[`COLLECTION-ACCEPTANCE-2026-09-11.md`](COLLECTION-ACCEPTANCE-2026-09-11.md).
+It supersedes the early implementation counts in this section while preserving
+this document as the original baseline and gate definition.
+
 The first P0 implementation landed after this baseline assessment:
 
 - SQLite WAL-backed immutable evidence records with SHA-256 payload identities;
