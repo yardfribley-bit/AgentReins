@@ -10,6 +10,16 @@ struct SourceCheckpoint: Equatable, Sendable {
     let updatedAt: Date
 }
 
+struct RawEvidenceRecord: Sendable {
+    let source: String
+    let stream: String
+    let offsetStart: Int64
+    let offsetEnd: Int64
+    let fingerprint: String?
+    let observedAt: Date
+    let payload: Data
+}
+
 struct CollectorHealthRecord: Equatable, Sendable {
     enum State: String, Sendable { case healthy, degraded, failed }
 
@@ -60,6 +70,13 @@ final class EvidenceDatabase: @unchecked Sendable {
             ) WITHOUT ROWID
             """)
         try execute("CREATE INDEX IF NOT EXISTS evidence_time ON evidence_records(observed_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS raw_evidence (
+              evidence_key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL,
+              offset_start INTEGER NOT NULL, offset_end INTEGER NOT NULL, fingerprint TEXT,
+              observed_at REAL NOT NULL, payload BLOB NOT NULL, payload_sha256 TEXT NOT NULL
+            ) WITHOUT ROWID
+            """)
         try execute("""
             CREATE TABLE IF NOT EXISTS source_checkpoints (
               source TEXT NOT NULL,
@@ -122,6 +139,40 @@ final class EvidenceDatabase: @unchecked Sendable {
             try? executeUnlocked("ROLLBACK")
             throw error
         }
+    }
+
+    func appendRaw(_ records: [RawEvidenceRecord]) throws {
+        guard !records.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            let sql = "INSERT OR IGNORE INTO raw_evidence VALUES(?,?,?,?,?,?,?,?,?)"
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare raw") }
+            defer { sqlite3_finalize(statement) }
+            for record in records {
+                let digest = SHA256.hash(data: record.payload).map { String(format: "%02x", $0) }.joined()
+                bind("\(record.source):\(record.stream):\(record.offsetStart):\(record.offsetEnd):\(digest)", at: 1, to: statement)
+                bind(record.source, at: 2, to: statement); bind(record.stream, at: 3, to: statement)
+                sqlite3_bind_int64(statement, 4, record.offsetStart); sqlite3_bind_int64(statement, 5, record.offsetEnd)
+                bindOptional(record.fingerprint, at: 6, to: statement)
+                sqlite3_bind_double(statement, 7, record.observedAt.timeIntervalSince1970)
+                _ = record.payload.withUnsafeBytes { sqlite3_bind_blob(statement, 8, $0.baseAddress, Int32(record.payload.count), SQLITE_TRANSIENT) }
+                bind(digest, at: 9, to: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append raw") }
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func rawRecordCount() throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT count(*) FROM raw_evidence", -1, &statement, nil) == SQLITE_OK,
+              sqlite3_step(statement) == SQLITE_ROW else { throw failure("raw count") }
+        defer { sqlite3_finalize(statement) }
+        return Int(sqlite3_column_int64(statement, 0))
     }
 
     func recent(limit: Int) throws -> [GuardEvent] {

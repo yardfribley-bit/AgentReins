@@ -74,6 +74,7 @@ final class WorkBuddySight: ObservableObject {
                 self.connected = FileManager.default.fileExists(atPath: root)
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                try? self.evidenceDatabase?.appendRaw(batch.raw)
                 self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
@@ -100,10 +101,10 @@ final class WorkBuddySight: ObservableObject {
 
     private nonisolated static func readRecentEvents(root: String, changedAfter: Date,
                                                      previousSizes: [String: UInt64])
-        -> (events: [GuardEvent], sizes: [String: UInt64]) {
+        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord]) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:]) }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], []) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
@@ -115,8 +116,9 @@ final class WorkBuddySight: ObservableObject {
             }
         }
         let selected = files.sorted { $0.1 > $1.1 }.prefix(4)
+        let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy", previousOffset: previousSizes[$0.0.path]) }
         return (selected.flatMap { parseSession($0.0) },
-                Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) }))
+                Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) }), raw)
     }
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {

@@ -41,6 +41,26 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(try reopened.healthRecords().first?.malformed, 1)
     }
 
+    func testRawEvidenceIsImmutableAndIdempotent() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let record = RawEvidenceRecord(source: "codex", stream: "fixture.jsonl", offsetStart: 0,
+            offsetEnd: 8, fingerprint: "inode-1", observedAt: Date(), payload: Data("raw-line".utf8))
+        try database.appendRaw([record, record])
+        XCTAssertEqual(try database.rawRecordCount(), 1)
+    }
+
+    func testRawLogCaptureRestartsAtZeroAfterTruncation() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: file) }
+        try "new\n".write(to: file, atomically: true, encoding: .utf8)
+        let record = try XCTUnwrap(RawLogCapture.capture(url: file, source: "workbuddy", previousOffset: 999))
+        XCTAssertEqual(record.offsetStart, 0)
+        XCTAssertEqual(String(data: record.payload, encoding: .utf8), "new\n")
+    }
+
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
         setenv("AGENTREINS_TEST_SECRET", "must-not-enter-process-evidence", 1)
         defer { unsetenv("AGENTREINS_TEST_SECRET") }

@@ -69,6 +69,7 @@ final class CodexSight: ObservableObject {
                 self.connected = FileManager.default.fileExists(atPath: root)
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                try? self.evidenceDatabase?.appendRaw(batch.raw)
                 self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
@@ -91,10 +92,10 @@ final class CodexSight: ObservableObject {
     }
 
     private nonisolated static func readLiveEvents(root: String, previousSizes: [String: UInt64])
-        -> (events: [GuardEvent], sizes: [String: UInt64]) {
+        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord]) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:]) }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], []) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
@@ -104,15 +105,17 @@ final class CodexSight: ObservableObject {
             if mtime >= cutoff, previousSizes[url.path] != size { files.append((url, mtime, size)) }
         }
         var sizes: [String: UInt64] = [:]
+        var raw: [RawEvidenceRecord] = []
         let events = files.sorted { $0.1 > $1.1 }.prefix(2).flatMap { item -> [GuardEvent] in
             let (url, _, size) = item
             sizes[url.path] = size
             let previous = previousSizes[url.path]
+            if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous) { raw.append(record) }
             let start = previous.map { min($0, size) > 64 * 1_024 ? min($0, size) - 64 * 1_024 : 0 }
                 ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)
             return parseSession(url, liveStartOffset: start)
         }
-        return (events, sizes)
+        return (events, sizes, raw)
     }
 
     private nonisolated static func sessionFiles(root: String) -> [URL] {
