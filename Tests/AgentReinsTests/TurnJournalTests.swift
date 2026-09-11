@@ -3,6 +3,44 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testEvidenceDatabaseUsesWALAndIdempotentReplay() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("evidence.sqlite3")
+        let database = try EvidenceDatabase(url: url)
+        let event = GuardEvent(id: UUID(), kind: "activity", ruleId: "fixture", path: "-",
+                               command: "sleep 1", agent: "codex", op: "exec", severity: "info",
+                               ts: Date(), action: "observed", source: "benchmark")
+        try database.append([event])
+        try database.append([event])
+
+        XCTAssertEqual(try database.journalMode().lowercased(), "wal")
+        XCTAssertEqual(try database.recent(limit: 10).map(\.id), [event.id])
+    }
+
+    func testEvidenceDatabasePersistsCheckpointAndCollectorHealth() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let url = root.appendingPathComponent("evidence.sqlite3")
+        let updatedAt = Date(timeIntervalSince1970: 1_700_000_000)
+        do {
+            let database = try EvidenceDatabase(url: url)
+            try database.saveCheckpoint(SourceCheckpoint(source: "codex", stream: "session.jsonl",
+                                                         offset: 4_096, fingerprint: "fixture", updatedAt: updatedAt))
+            try database.updateHealth(CollectorHealthRecord(source: "codex", state: .degraded,
+                lastSuccess: updatedAt, lagSeconds: 2, accepted: 8, malformed: 1, dropped: 0,
+                detail: "one malformed row"))
+        }
+        let reopened = try EvidenceDatabase(url: url)
+        XCTAssertEqual(try reopened.checkpoint(source: "codex", stream: "session.jsonl"),
+                       SourceCheckpoint(source: "codex", stream: "session.jsonl", offset: 4_096,
+                                        fingerprint: "fixture", updatedAt: updatedAt))
+        XCTAssertEqual(try reopened.healthRecords().first?.state, .degraded)
+        XCTAssertEqual(try reopened.healthRecords().first?.malformed, 1)
+    }
+
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
         setenv("AGENTREINS_TEST_SECRET", "must-not-enter-process-evidence", 1)
         defer { unsetenv("AGENTREINS_TEST_SECRET") }
@@ -14,6 +52,39 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertFalse(current.ppid.isEmpty)
         XCTAssertFalse(current.command.isEmpty)
         XCTAssertFalse(current.command.contains("must-not-enter-process-evidence"))
+    }
+
+    func testLibprocRecallForOneSecondProcesses() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let executable = root.appendingPathComponent("codex-collection-benchmark")
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+
+        let processes: [Process] = try (0..<20).map { _ in
+            let process = Process()
+            process.executableURL = executable
+            process.arguments = ["1"]
+            try process.run()
+            return process
+        }
+        let expected = Set(processes.map { String($0.processIdentifier) })
+        let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["codex-collection-benchmark"])
+        var observed = Set<String>()
+        var snapshotDurations: [TimeInterval] = []
+        let deadline = Date().addingTimeInterval(1.2)
+        repeat {
+            let started = Date()
+            observed.formUnion(provider.snapshot().map(\.pid).filter(expected.contains))
+            snapshotDurations.append(Date().timeIntervalSince(started))
+            Thread.sleep(forTimeInterval: 0.1)
+        } while Date() < deadline
+        processes.forEach { $0.waitUntilExit() }
+
+        let recall = Double(observed.count) / Double(expected.count)
+        print("COLLECTION_BENCHMARK one_second_recall=\(recall) max_snapshot_ms=\((snapshotDurations.max() ?? 0) * 1_000)")
+        XCTAssertGreaterThanOrEqual(recall, 0.99, "one-second process recall was \(recall)")
     }
 
     func testProcessArgumentRedactorRemovesAgentAndMCPCredentials() {
@@ -28,18 +99,21 @@ final class TurnJournalTests: XCTestCase {
     }
 
     @MainActor
-    func testEventStoreSanitizesCommandsBeforePersistence() throws {
+    func testEventStorePreservesCompleteLocalEvidence() throws {
         let file = FileManager.default.temporaryDirectory
-            .appendingPathComponent("agentreins-redaction-\(UUID().uuidString).json")
-        defer { try? FileManager.default.removeItem(at: file) }
+            .appendingPathComponent("agentreins-local-evidence-\(UUID().uuidString).json")
+        defer {
+            try? FileManager.default.removeItem(at: file)
+            try? FileManager.default.removeItem(at: file.appendingPathExtension("sqlite3"))
+        }
         let store = EventStore(fileURL: file)
         store.record(GuardEvent(kind: "cmd", ruleId: "process", path: "-",
                                 command: "agent --token highly-sensitive-token", agent: "test",
                                 op: "exec", severity: "info", ts: Date(), action: "observed"))
 
-        let persisted = try String(contentsOf: file, encoding: .utf8)
-        XCTAssertFalse(persisted.contains("highly-sensitive-token"))
-        XCTAssertTrue(persisted.contains("REDACTED"))
+        let database = try EvidenceDatabase(url: file.appendingPathExtension("sqlite3"))
+        XCTAssertEqual(try database.recent(limit: 1).first?.command,
+                       "agent --token highly-sensitive-token")
     }
 
     func testLsofParserCapturesOnlyOutboundTCPConnections() {

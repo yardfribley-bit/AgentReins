@@ -3,6 +3,19 @@
 Date: 2026-09-11  
 Scope: AgentReins macOS collection foundation, not UI or higher-level security analysis
 
+## Hardening update
+
+The first P0 implementation landed after this baseline assessment:
+
+- SQLite WAL-backed immutable evidence records with SHA-256 payload identities;
+- durable per-stream checkpoints for Codex and WorkBuddy, advanced only after event delivery;
+- persisted collector-health records for agent, process, network, and file sources;
+- an Overview health strip exposing accepted, skipped, and failed counts;
+- independent 750 ms process and 10 second network schedules with batched process-event ingestion;
+- a repeatable one-second process benchmark. The first local run observed 20/20 processes with a maximum snapshot duration below 100 ms.
+
+This is progress toward the gates below, not proof that the foundation is complete. Raw source-line preservation, rotation fingerprints, malformed-row accounting, file/network recall workloads, crash injection, and long-running performance tests remain open.
+
 ## Executive decision
 
 **AgentReins is not yet a security-grade evidence collector.** It is useful as a beta observability prototype and can reconstruct meaningful parts of Codex and WorkBuddy activity, but it cannot currently guarantee completeness, causal attribution, crash-safe delivery, tamper-evident evidence, or low operational overhead.

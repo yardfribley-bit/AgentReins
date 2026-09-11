@@ -8,10 +8,13 @@ final class EventStore: ObservableObject {
     @Published private(set) var sessions: [AgentSessionSnapshot] = []
     @Published private(set) var influenceChains: [InfluenceChain] = []
     @Published private(set) var historyLoaded = false
+    @Published private(set) var persistenceError: String?
+    @Published private(set) var collectorHealth: [CollectorHealthRecord] = []
 
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    private let database: EvidenceDatabase?
     private var maximumEvents: Int { historyLoaded ? 10_000 : 500 }
 
     init(fileURL: URL = EventStore.defaultURL()) {
@@ -20,9 +23,13 @@ final class EventStore: ObservableObject {
         encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
+        let databaseURL = fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL
+            ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
+        database = try? EvidenceDatabase(url: databaseURL)
         load()
         rebuildAgentSightIndexOnce()
         importLegacyLogsOnce()
+        refreshCollectorHealth()
     }
 
     nonisolated static func defaultURL() -> URL {
@@ -33,14 +40,13 @@ final class EventStore: ObservableObject {
     }
 
     func record(_ event: GuardEvent) {
-        let safeEvent = event.redactingSensitiveCommandArguments()
-        if let index = events.firstIndex(where: { $0.id == safeEvent.id }) {
+        if let index = events.firstIndex(where: { $0.id == event.id }) {
             var updatedEvents = events
-            updatedEvents[index] = safeEvent
-            commitEvents(updatedEvents)
+            updatedEvents[index] = event
+            commitEvents(updatedEvents, evidence: [event])
             return
         }
-        commitEvents([safeEvent] + events)
+        commitEvents([event] + events, evidence: [event])
     }
 
     func record(_ incoming: [GuardEvent]) {
@@ -48,8 +54,7 @@ final class EventStore: ObservableObject {
         var updatedEvents = events
         var indexes = Dictionary(uniqueKeysWithValues: updatedEvents.enumerated().map { ($0.element.id, $0.offset) })
         var changed = false
-        for unsafeEvent in incoming {
-            let event = unsafeEvent.redactingSensitiveCommandArguments()
+        for event in incoming {
             if let index = indexes[event.id] {
                 // 原生会话源可能后来补齐模型响应/上下文字段，允许富化已有事件。
                 updatedEvents[index] = event
@@ -61,7 +66,7 @@ final class EventStore: ObservableObject {
             }
         }
         guard changed else { return }
-        commitEvents(updatedEvents)
+        commitEvents(updatedEvents, evidence: incoming)
     }
 
     func unrecorded(_ incoming: [GuardEvent]) -> [GuardEvent] {
@@ -96,34 +101,54 @@ final class EventStore: ObservableObject {
                 path: finding.src, command: nil, agent: nil, op: "scan",
                 severity: finding.severity, ts: scannedAt, action: "seen")
         }
-        commitEvents(events + newEvents)
+        commitEvents(events + newEvents, evidence: newEvents)
     }
 
     private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let saved = try? decoder.decode([GuardEvent].self, from: data) else { return }
-        let sanitized = saved.map { $0.redactingSensitiveCommandArguments() }
-        events = sanitized.sorted { $0.ts > $1.ts }
-        if zip(saved, sanitized).contains(where: { $0.command != $1.command }) {
-            trimAndSave()
+        let durable = (try? database?.recent(limit: 10_000)) ?? []
+        let legacy: [GuardEvent]
+        if let data = try? Data(contentsOf: fileURL),
+           let saved = try? decoder.decode([GuardEvent].self, from: data) {
+            legacy = saved
+            do { try database?.append(saved) } catch { persistenceError = error.localizedDescription }
+        } else {
+            legacy = []
         }
+        var byID = Dictionary(uniqueKeysWithValues: legacy.map { ($0.id, $0) })
+        for event in durable { byID[event.id] = event }
+        events = byID.values.sorted { $0.ts > $1.ts }
         rebuildViews()
     }
 
     private func trimAndSave() {
-        commitEvents(events)
+        commitEvents(events, evidence: [])
     }
 
     /// Publish one coherent snapshot per ingest batch. Mutating the @Published
     /// array once per event made SwiftUI rebuild the entire dashboard hundreds
     /// of times while a live session was being tailed.
-    private func commitEvents(_ incoming: [GuardEvent]) {
+    private func commitEvents(_ incoming: [GuardEvent], evidence: [GuardEvent]) {
         var snapshot = incoming.sorted { $0.ts > $1.ts }
         if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
         events = snapshot
         rebuildViews()
-        guard let data = try? encoder.encode(events) else { return }
-        try? data.write(to: fileURL, options: .atomic)
+        if let database {
+            do {
+                try database.append(evidence)
+                persistenceError = nil
+                refreshCollectorHealth()
+            } catch {
+                persistenceError = error.localizedDescription
+            }
+        } else {
+            persistenceError = "SQLite evidence database is unavailable"
+        }
+    }
+
+    func refreshCollectorHealth() {
+        guard let database else { return }
+        do { collectorHealth = try database.healthRecords() }
+        catch { persistenceError = error.localizedDescription }
     }
 
     private func rebuildViews() {

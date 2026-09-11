@@ -17,10 +17,15 @@ final class CodexSight: ObservableObject {
     private var timer: Timer?
     private var seen = Set<UUID>()
     private var fileSizes: [String: UInt64] = [:]
+    private let evidenceDatabase = try? EvidenceDatabase()
+    private var acceptedEvents = 0
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
     func start() {
         guard timer == nil else { return }
+        if fileSizes.isEmpty, let saved = try? evidenceDatabase?.checkpoints(source: "codex") {
+            fileSizes = saved
+        }
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -64,10 +69,23 @@ final class CodexSight: ObservableObject {
                 self.connected = FileManager.default.fileExists(atPath: root)
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
                     self.lastUpdate = Date()
                 }
+                // Advance only after delivery. A crash between delivery and this
+                // checkpoint causes a safe idempotent replay, never silent loss.
+                for (stream, offset) in batch.sizes {
+                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
+                        source: "codex", stream: stream, offset: Int64(offset),
+                        fingerprint: nil, updatedAt: Date()))
+                }
+                let state: CollectorHealthRecord.State = self.connected ? .healthy : .failed
+                try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                    source: "codex", state: state, lastSuccess: self.connected ? Date() : nil,
+                    lagSeconds: nil, accepted: self.acceptedEvents, malformed: 0, dropped: 0,
+                    detail: self.connected ? nil : "Codex session directory is unavailable"))
             }
         }
     }

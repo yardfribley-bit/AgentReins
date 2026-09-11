@@ -50,6 +50,7 @@ struct ContentView: View {
     @State private var openRouterKey = ""
     @State private var analysisModel = "openai/gpt-4o-mini"
     @State private var modelFeedback = ""
+    private let collectorHealthTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
 
     private var events: [GuardEvent] {
         eventStore.events
@@ -101,6 +102,7 @@ struct ContentView: View {
         )) { onboarding }
         .sheet(item: $selectedIncident) { incident in incidentDetail(incident) }
         .sheet(item: $selectedSession) { session in sessionDetail(session) }
+        .onReceive(collectorHealthTimer) { _ in eventStore.refreshCollectorHealth() }
         .confirmationDialog("Restore the clean Git baseline?", isPresented: Binding(
             get: { recoveryCandidate != nil },
             set: { if !$0 { recoveryCandidate = nil } }
@@ -132,6 +134,7 @@ struct ContentView: View {
             VStack(alignment: .leading, spacing: 24) {
                 header(l("Your coding agent, under control", "你的编程 Agent，尽在掌控"), subtitle: l("See what it is doing now, verify what it changed, and recover when something goes wrong.", "实时了解它正在做什么、验证代码更改，并在出现问题时恢复。"))
                 activeTaskCard
+                collectorHealthStrip
                 productValueStrip
                 safetyHero
                 recentSessions
@@ -145,6 +148,46 @@ struct ContentView: View {
             }
             .padding(32).frame(maxWidth: 980, alignment: .leading)
         }
+    }
+
+    private var collectorHealthStrip: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label("Collection health", systemImage: "waveform.path.ecg")
+                    .font(.headline)
+                Spacer()
+                if let error = eventStore.persistenceError {
+                    Text("EVIDENCE STORE FAILED").font(.caption2.bold()).foregroundStyle(.red)
+                        .help(error)
+                } else {
+                    Text("LOCAL EVIDENCE PIPELINE").font(.caption2.bold()).foregroundStyle(.secondary)
+                }
+            }
+            if eventStore.collectorHealth.isEmpty {
+                Text("Collectors are starting. No health checkpoint has been recorded yet.")
+                    .font(.callout).foregroundStyle(.secondary)
+            } else {
+                HStack(spacing: 10) {
+                    ForEach(eventStore.collectorHealth, id: \.source) { health in
+                        VStack(alignment: .leading, spacing: 4) {
+                            HStack(spacing: 6) {
+                                Circle().fill(health.state == .healthy ? Color.green : health.state == .degraded ? Color.orange : Color.red)
+                                    .frame(width: 7, height: 7)
+                                Text(health.source.capitalized).font(.callout.bold())
+                            }
+                            Text("\(health.accepted) accepted · \(health.dropped) skipped · \(health.malformed) failed")
+                                .font(.caption2).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                        .padding(10)
+                        .background(RoundedRectangle(cornerRadius: 10).fill(Color.secondary.opacity(0.06)))
+                        .help(health.detail ?? "Collector is healthy")
+                    }
+                }
+            }
+        }
+        .padding(14)
+        .background(RoundedRectangle(cornerRadius: 14).stroke(Color.secondary.opacity(0.18)))
     }
 
     private var liveContextEvents: [GuardEvent] {

@@ -19,6 +19,9 @@ final class FileGuard: ObservableObject {
     private var lastMtime: [String: Date] = [:]
     private var lastContent: [String: String] = [:]
     private let lock = NSLock()
+    private let evidenceDatabase = try? EvidenceDatabase()
+    private var acceptedEvents = 0
+    private var lastHealthPersist = Date.distantPast
 
     static func defaultBackupRoot() -> URL {
         let appSup = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
@@ -138,12 +141,20 @@ final class FileGuard: ObservableObject {
             }
         }
         if !pending.isEmpty {
+            acceptedEvents += pending.count
             DispatchQueue.main.async {
                 for item in pending {
                     self.emit(rule: item.rule, path: item.path, op: item.op, action: item.action,
                               before: item.before, after: item.after, diff: item.diff, findings: item.findings)
                 }
             }
+        }
+        if Date().timeIntervalSince(lastHealthPersist) >= 10 {
+            lastHealthPersist = Date()
+            try? evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                source: "file", state: .healthy, lastSuccess: Date(), lagSeconds: nil,
+                accepted: acceptedEvents, malformed: 0, dropped: 0,
+                detail: "Only explicitly protected paths are observed; rapid intermediate writes may be missed"))
         }
     }
 

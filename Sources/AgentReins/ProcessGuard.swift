@@ -10,6 +10,8 @@ struct CollectionHealth: Equatable {
     var networkFailures = 0
     var skippedProcessSnapshots = 0
     var skippedNetworkSnapshots = 0
+    var acceptedProcessEvents = 0
+    var acceptedNetworkEvents = 0
 }
 
 /// 命令层监测规则（正则 + 严重级 + 说明）。
@@ -44,6 +46,8 @@ final class ProcessGuard: ObservableObject {
     private let networkProvider: any NetworkSnapshotting
     private let proxyDestinationProvider: any ProxyDestinationSnapshotting
     private var recentProxyDestinations: [Int: ProxyDestinationRecord] = [:]
+    private let evidenceDatabase = try? EvidenceDatabase()
+    private var lastHealthPersist: [String: Date] = [:]
 
     /// 内置默认高危命令监测集（对齐 agentguard/rules.json 的命令层规则）。
     static let builtin: [CmdRule] = {
@@ -119,11 +123,14 @@ final class ProcessGuard: ObservableObject {
                 self.collectionHealth.lastProcessDurationMS = Date().timeIntervalSince(started) * 1_000
                 guard !procs.isEmpty else {
                     self.collectionHealth.processFailures += 1
+                    self.persistHealth(source: "process", state: .failed,
+                                       detail: "The process provider returned an empty snapshot")
                     return
                 }
                 self.collectionHealth.lastProcessSuccess = Date()
                 self.latestProcesses = procs
                 self.process(procs: procs)
+                self.persistHealth(source: "process", state: .healthy, detail: nil)
             }
         }
     }
@@ -146,6 +153,8 @@ final class ProcessGuard: ObservableObject {
                 self.collectionHealth.lastNetworkSuccess = Date()
                 self.processNetwork(procs: self.latestProcesses, connections: connections,
                                     proxyDestinations: proxyDestinations)
+                self.persistHealth(source: "network", state: .healthy,
+                                   detail: "Socket evidence is sampled and may miss short connections")
             }
         }
     }
@@ -189,6 +198,7 @@ final class ProcessGuard: ObservableObject {
             }
         }
         guard !newEvents.isEmpty else { return }
+        collectionHealth.acceptedProcessEvents += newEvents.count
         events.insert(contentsOf: newEvents, at: 0)
         if events.count > 300 { events.removeLast(events.count - 300) }
         onEvents?(newEvents)
@@ -219,6 +229,7 @@ final class ProcessGuard: ObservableObject {
             }
         }
         guard !networkEvents.isEmpty else { return }
+        collectionHealth.acceptedNetworkEvents += networkEvents.count
         events.insert(contentsOf: networkEvents, at: 0)
         if events.count > 300 { events.removeLast(events.count - 300) }
         onEvents?(networkEvents)
@@ -303,5 +314,20 @@ final class ProcessGuard: ObservableObject {
 
     private func notify(title: String, body: String) {
         AppNotifier.send(title: title, body: body)
+    }
+
+    private func persistHealth(source: String, state: CollectorHealthRecord.State, detail: String?) {
+        let now = Date()
+        if state != .failed, let last = lastHealthPersist[source], now.timeIntervalSince(last) < 10 { return }
+        lastHealthPersist[source] = now
+        let isProcess = source == "process"
+        try? evidenceDatabase?.updateHealth(CollectorHealthRecord(
+            source: source, state: state,
+            lastSuccess: isProcess ? collectionHealth.lastProcessSuccess : collectionHealth.lastNetworkSuccess,
+            lagSeconds: nil,
+            accepted: isProcess ? collectionHealth.acceptedProcessEvents : collectionHealth.acceptedNetworkEvents,
+            malformed: isProcess ? collectionHealth.processFailures : collectionHealth.networkFailures,
+            dropped: isProcess ? collectionHealth.skippedProcessSnapshots : collectionHealth.skippedNetworkSnapshots,
+            detail: detail))
     }
 }

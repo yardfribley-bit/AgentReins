@@ -16,10 +16,17 @@ final class WorkBuddySight: ObservableObject {
     private var timer: Timer?
     private var seen = Set<UUID>()
     private var lastPoll = Date.distantPast
+    private var fileSizes: [String: UInt64] = [:]
+    private let evidenceDatabase = try? EvidenceDatabase()
+    private var lastHealthPersist = Date.distantPast
+    private var acceptedEvents = 0
     private let queue = DispatchQueue(label: "com.agentspec.workbuddysight", qos: .utility)
 
     func start() {
         guard timer == nil else { return }
+        if fileSizes.isEmpty, let saved = try? evidenceDatabase?.checkpoints(source: "workbuddy") {
+            fileSizes = saved
+        }
         poll()
         // Keep the live monitor responsive while avoiding a permanent busy loop.
         timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
@@ -57,31 +64,59 @@ final class WorkBuddySight: ObservableObject {
     private func poll() {
         let root = ("~/.workbuddy/projects" as NSString).expandingTildeInPath
         let changedAfter = lastPoll
+        let previousSizes = fileSizes
         lastPoll = Date()
         queue.async { [weak self] in
-            let events = Self.readRecentEvents(root: root, changedAfter: changedAfter)
+            let batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
+                                              previousSizes: previousSizes)
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.connected = FileManager.default.fileExists(atPath: root)
-                let fresh = events.filter { self.seen.insert($0.id).inserted }
+                self.fileSizes.merge(batch.sizes) { _, new in new }
+                let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
                     self.lastUpdate = Date()
+                }
+                // Delivery precedes checkpointing so interruption can only
+                // replay stable IDs; it cannot acknowledge unseen evidence.
+                for (stream, offset) in batch.sizes {
+                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
+                        source: "workbuddy", stream: stream, offset: Int64(offset),
+                        fingerprint: nil, updatedAt: Date()))
+                }
+                if Date().timeIntervalSince(self.lastHealthPersist) >= 10 || !self.connected {
+                    self.lastHealthPersist = Date()
+                    let state: CollectorHealthRecord.State = self.connected ? .healthy : .failed
+                    try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                        source: "workbuddy", state: state, lastSuccess: self.connected ? Date() : nil,
+                        lagSeconds: nil, accepted: self.acceptedEvents, malformed: 0, dropped: 0,
+                        detail: self.connected ? nil : "WorkBuddy session directory is unavailable"))
                 }
             }
         }
     }
 
-    private nonisolated static func readRecentEvents(root: String, changedAfter: Date) -> [GuardEvent] {
+    private nonisolated static func readRecentEvents(root: String, changedAfter: Date,
+                                                     previousSizes: [String: UInt64])
+        -> (events: [GuardEvent], sizes: [String: UInt64]) {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root), includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
+        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:]) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
-        var files: [(URL, Date)] = []
+        var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            let mtime = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            if mtime >= cutoff && mtime >= changedAfter { files.append((url, mtime)) }
+            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+            let mtime = values?.contentModificationDate ?? .distantPast
+            let size = UInt64(values?.fileSize ?? 0)
+            if mtime >= cutoff && (mtime >= changedAfter || previousSizes[url.path] != size) {
+                files.append((url, mtime, size))
+            }
         }
-        return files.sorted { $0.1 > $1.1 }.prefix(4).flatMap { parseSession($0.0) }
+        let selected = files.sorted { $0.1 > $1.1 }.prefix(4)
+        return (selected.flatMap { parseSession($0.0) },
+                Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) }))
     }
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {

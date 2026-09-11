@@ -67,8 +67,7 @@ struct DarwinLibprocSnapshotProvider: ProcessSnapshotting {
 
         return records.map { pid, value in
             let rawCommand = agentTree.contains(pid) ? (arguments(pid: pid) ?? value.executable) : value.executable
-            let command = ProcessArgumentRedactor.redact(rawCommand)
-            return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid), command: command)
+            return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid), command: rawCommand)
         }
     }
 
@@ -132,7 +131,7 @@ struct PsProcessSnapshotProvider: ProcessSnapshotting {
             let parts = line.split(separator: " ", omittingEmptySubsequences: true)
             guard parts.count >= 3 else { return nil }
             return ProcessSnapshotRecord(pid: String(parts[0]), ppid: String(parts[1]),
-                                         command: ProcessArgumentRedactor.redact(parts[2...].joined(separator: " ")))
+                                         command: parts[2...].joined(separator: " "))
         }
     }
 }
