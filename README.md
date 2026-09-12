@@ -3,7 +3,7 @@
 
   <h1>AgentReins</h1>
 
-  <p><strong>See what your AI agent changed. Verify it. Undo it.</strong></p>
+  <p><strong>Make every AI agent understandable, verifiable, and trustworthy.</strong></p>
 
   <p>A local-first safety and transparency companion for personal AI coding agents on macOS.</p>
 
@@ -27,9 +27,32 @@ Coding agents can edit files, run commands, call tools, read memory, and send pr
 - Where did my code and private data go?
 - Can I recover safely if the agent made a mistake?
 
-AgentReins turns that evidence into one understandable account of the task.
+AgentReins turns those disconnected signals into one understandable, evidence-backed account of the task. It is designed as an operations console—not another log viewer. A developer should be able to open the app and immediately answer: **Which agents are running? What task is each agent executing? Which internal component is active? What changed, where did data go, and has the result been independently verified?**
 
-The live view presents every active coding task as a five-stage development story—Understand, Plan, Build, Test, and Deliver. Each stage opens a layered inspector for readable activity, model context, tool and MCP calls, and the underlying raw evidence.
+## The live operations console
+
+The current interface is deliberately layered so that useful conclusions appear before raw telemetry:
+
+1. **Agent Fleet** — automatically discovered local agents, their live/idle state, process count, and current task summary.
+2. **Agent Internals** — a readable Runtime Map derived from real PID/PPID lineage. Runtime Profiles translate opaque processes into stable responsibilities such as Agent Core, MCP Tool Server, Node REPL/Sandbox, Code Execution Host, Storage Service, and Network Service.
+3. **Live Task** — a continuously updated task path from user request to context preparation, model response, MCP/Skill calls, Shell execution, file writes, build, test, agent-reported completion, and independent verification.
+4. **External Services** — model providers, relays, GitHub, SSH destinations, APIs, and external content observed during the active task.
+5. **Security Summary and Evidence Inspector** — the conclusion remains visible while any process, stage, file, tool, or destination can be opened for its complete evidence.
+
+Repeated leaf processes are aggregated only when they have the same parent, Runtime Profile component, and responsibility. A row such as `MCP Tool Server ×3` remains expandable to the individual PIDs. Processes with children are never merged, so execution boundaries remain visible.
+
+### Result semantics
+
+AgentReins intentionally separates activity from trust:
+
+| UI state | Meaning |
+| --- | --- |
+| **Running** | The process or task is active. It says nothing about safety. |
+| **Observed** | A collector recorded the activity. It has not necessarily been verified. |
+| **Agent reported complete** | The agent produced a completion response. The result may still be wrong. |
+| **Unverified** | Evidence exists, but success cannot be proven from the available result. |
+| **Verified** | An independent check—not the agent's own claim—confirmed the result. |
+| **Confirmed / Inferred / Unknown** | The strength of the evidence joining an activity to an agent, turn, or tool. |
 
 ## The product direction
 
@@ -43,48 +66,91 @@ The live view presents every active coding task as a five-stage development stor
 ```mermaid
 flowchart LR
     U[User request] --> A[Coding agent]
-    A --> M[Model exchange]
-    A --> T[Tools and MCP]
-    T --> S[Processes and files]
+    A --> C[Context and model exchange]
+    A --> T[Tools / MCP / Skills]
+    T --> P[Processes]
+    P --> N[Network sockets]
+    P --> F[Files and code]
 
-    M -. captured evidence .-> R[AgentReins]
-    T -. captured evidence .-> R
-    S -. local evidence .-> R
+    C -. native adapter evidence .-> E[Local evidence spine]
+    T -. tool intent and result .-> E
+    P -. PID / PPID snapshots .-> E
+    N -. socket evidence .-> E
+    F -. workspace and Git evidence .-> E
 
-    R --> O[Readable outcome]
-    O --> K[Keep changes]
-    O --> X[Review or recover]
+    E --> R[Runtime Map and Live Task]
+    R --> V[Independent verification]
+    V --> K[Trust, review, or recover]
 ```
 
-## What works today
+## Latest progress
 
 AgentReins is an early alpha. The repository is public so that the implementation and its limitations can be inspected directly.
 
-- Native macOS menu bar application and security center.
-- Native WorkBuddy evidence plus local compatibility adapters for Codex, Qoder, and Cursor conversations.
-- Cursor Composer correlation across user prompts, context-token composition, model responses, tool calls/results, and generated-file security scanning.
-- Live adapters read only the active session and latest model turn by default; full history is an explicit, throttled background operation.
-- A least-privilege Chrome/Edge adapter for confirmed Grok Imagine tab evidence.
-- Per-turn views of captured user intent, model context, model response, model name, token usage, tool calls, and tool results.
-- Fast active-task startup with explicit, on-demand reconstruction of historical WorkBuddy and Codex sessions.
-- Process snapshots and monitoring for explicitly protected files.
-- Before-and-after evidence and recovery records for protected text files.
-- Local scanning of newly changed code lines for common security patterns.
-- Discovery and scanning of supported local agent-memory files.
-- Natural-language protection rules.
-- Optional AI summaries through a user-supplied OpenRouter key and selected model.
+### Live task and runtime visibility
+
+- Native macOS menu bar application and industrial-style operations console.
+- Automatic discovery of supported local agents, including Codex, Cursor, WorkBuddy, and Qoder adapters, with additional installed-agent presence detection.
+- Agent-specific Runtime Profiles that preserve original process names while explaining each component's responsibility and security surface.
+- Real PID/PPID process lineage sampled every 750 ms, scoped to Agent process trees rather than the entire machine.
+- Live task reconstruction across user request, context, model, tools, MCP, Shell, file changes, build, test, reported completion, and independent verification.
+- Clicking a task stage highlights its associated process ancestry; clicking a process pauses live-follow mode and exposes technical evidence.
+- Startup loads live evidence and the latest active conversation only. Historical reconstruction is explicit and throttled.
+
+### Model and tool evidence
+
+- Per-turn user intent, model context, model response, model name, token usage, tool calls, tool arguments, and tool results when the local Agent records them.
+- Native WorkBuddy evidence plus local compatibility adapters for Codex, Qoder, and Cursor.
+- Cursor Composer correlation across prompts, context-token composition, model responses, tool calls/results, and generated-file security scanning.
+- Tool and MCP security classification based on capability: command execution, filesystem mutation, network access, credential exposure, and external content.
+- A least-privilege Chrome/Edge adapter for confirmed Grok Imagine prompt, upload, and result evidence.
+
+### Network activity
+
+AgentReins now combines two complementary sources instead of treating a periodic socket snapshot as complete truth:
+
+- **Network intent evidence** is produced immediately from native Agent tool arguments. It recognizes HTTP(S), `git push/fetch/pull/clone`, SSH, SCP, rsync, curl, and wget activity.
+- **Git remote resolution** reads the active workspace's `.git/config`, allowing a short `git push origin main` to be attributed to its configured host even when the socket closes between samples.
+- **Socket evidence** records the owning PID, local endpoint, remote IP/host, port, and Agent process-tree attribution.
+- **Proxy refinement** can replace a loopback proxy socket with the destination recorded by a supported local proxy access log.
+- Each projected activity can store requested, running, completed, failed, or unverified status together with start time, end time, and duration.
+- External destinations are classified as model provider, model relay, developer service, external content, telemetry, local infrastructure, or unknown.
+
+This allows the UI to explain flows such as:
+
+```text
+Codex → Shell → git push origin main → github.com:443 → result
+Codex → Shell → ssh deploy@example.com:22 → remote deployment → result
+```
+
+### File and generated-code activity
+
+- Tool-visible file activity is normalized as Create, Read, Update, Delete, or Rename.
+- File rows lead with a human-readable statement such as `Codex updated AgentOperationsCenterView.swift`, followed by a short description of the changed content.
+- Tool, time, result status, attribution confidence, complete path, rename destination, arguments, before/after content, and diff remain available in the evidence inspector.
+- Explicitly protected files are monitored in the background for modification or deletion, with optional restoration from a local backup.
+- Changed text and generated code can be scanned locally for common security patterns.
+- Git snapshots preserve repository head, staged and unstaged diff, file status, and verification context for recovery work.
+
+### Evidence reliability
+
+- SQLite WAL is the durable local evidence spine; live UI state is kept separate from historical reconstruction.
+- Stable evidence identifiers allow a tool request to be enriched with its later result without duplicating the live activity.
+- Raw evidence and derived assessments are separated, with collector health exposing failures, dropped samples, and blind spots.
+- Current regression coverage includes ambiguous-attribution rejection, idempotent persistence, WAL recovery, Runtime Profile classification, Git/SSH network projection, file lifecycle projection, and a 100,000-event storage benchmark.
 
 ## What is not finished yet
 
 These are active roadmap items, not shipping claims:
 
-- Reliable attribution from every file change to the responsible session, turn, tool call, and process.
+- Complete attribution from every operating-system file change to the responsible session, turn, tool call, and process.
 - Git-quality separation of pre-existing user work from agent-introduced changes.
 - Independent build and test verification.
-- Explicit `confirmed`, `inferred`, or `unknown` attribution for joined evidence.
 - Transactional preview and undo for a complete agent turn.
 - Native adapters for additional coding agents.
-- Actual network-destination and model-relay evidence.
+- Event-driven socket capture for every short-lived connection without requiring privileged Endpoint Security entitlements.
+- Cross-call terminal-session correlation when a long command continues through later polling calls.
+- Complete remote-host command and file evidence for SSH deployments; local socket evidence alone cannot observe the remote filesystem.
 - Universal pre-execution interception or kernel-level enforcement.
 - Signed and notarized public distribution.
 
@@ -132,7 +198,9 @@ The extension requests access only to `https://grok.com/*`. It records prompt su
 ├── Sources/AgentReins/
 │   ├── AgentGuardApp.swift       App lifecycle and menu bar entry
 │   ├── ContentView.swift         Main product interface
-│   ├── DevelopmentTrace.swift    Five-stage live task reconstruction
+│   ├── AgentOperationsCenterView.swift  Live operations console
+│   ├── DevelopmentTrace.swift    Task-stage reconstruction
+│   ├── AgentRuntimeProfile.swift Agent-specific process responsibilities
 │   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
 │   ├── CodexSight.swift          Codex local compatibility adapter
 │   ├── CursorSight.swift         Cursor Composer compatibility adapter
@@ -140,7 +208,10 @@ The extension requests access only to `https://grok.com/*`. It records prompt su
 │   ├── WebAgentSight.swift       Browser-extension evidence adapter
 │   ├── AgentSession.swift        Session and turn reconstruction
 │   ├── EventStore.swift          Local normalized event storage
+│   ├── EvidenceDatabase.swift    SQLite WAL evidence spine
 │   ├── ProcessGuard.swift        Process observation
+│   ├── NetworkSnapshotProvider.swift    PID-owned socket snapshots
+│   ├── ToolActivityEvidenceProjector.swift  Network/file intent projection
 │   ├── FileGuard.swift           Protected-file monitoring and recovery
 │   ├── CodeSecurityScanner.swift Changed-line security checks
 │   ├── MemoryScanManager.swift   Agent-memory discovery and scanning
