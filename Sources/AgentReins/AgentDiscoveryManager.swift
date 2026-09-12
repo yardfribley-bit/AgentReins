@@ -36,6 +36,7 @@ final class AgentDiscoveryManager: ObservableObject {
     private let queue = DispatchQueue(label: "com.agentspec.discovery", qos: .utility)
     private var timer: Timer?
     private var adapterHealth: [String: Bool] = [:]
+    private var lastPublishedObservation = Date.distantPast
 
     init(provider: (any ProcessSnapshotting)? = nil) {
         self.provider = provider ?? ResilientProcessSnapshotProvider(agentMarkers:
@@ -56,6 +57,7 @@ final class AgentDiscoveryManager: ObservableObject {
         guard !scanning else { return }
         scanning = true
         let provider = provider
+        let observation = Date()
         queue.async { [weak self] in
             let processes = provider.snapshot()
             let paths = AgentDiscoveryEngine.knownPaths.filter(FileManager.default.fileExists(atPath:))
@@ -63,16 +65,31 @@ final class AgentDiscoveryManager: ObservableObject {
             let result = AgentDiscoveryEngine.discover(processes: processes,
                                                        existingPaths: Set(paths), webEvidenceActive: webActive)
             DispatchQueue.main.async {
-                self?.agents = result
-                if let self {
-                    for (id, connected) in self.adapterHealth {
-                        self.applyAdapterState(id, connected: connected)
-                    }
-                }
-                self?.lastScan = Date()
+                self?.publish(result, observedAt: observation)
                 self?.scanning = false
             }
         }
+    }
+
+    /// ProcessGuard already maintains a low-cost live inventory. Feeding that
+    /// inventory into discovery removes the former 60-second false-negative
+    /// window when an Agent starts while AgentReins is already open.
+    func observe(processes: [ProcessSnapshotRecord], observedAt: Date = Date()) {
+        guard !processes.isEmpty else { return }
+        let paths = AgentDiscoveryEngine.knownPaths.filter(FileManager.default.fileExists(atPath:))
+        let result = AgentDiscoveryEngine.discover(processes: processes,
+            existingPaths: Set(paths), webEvidenceActive: AgentDiscoveryEngine.grokEvidenceIsActive(), now: observedAt)
+        publish(result, observedAt: observedAt)
+    }
+
+    private func publish(_ result: [DiscoveredAgent], observedAt: Date) {
+        guard observedAt >= lastPublishedObservation else { return }
+        lastPublishedObservation = observedAt
+        agents = result
+        for (id, connected) in adapterHealth {
+            applyAdapterState(id, connected: connected)
+        }
+        lastScan = observedAt
     }
 
     func setAdapterConnected(_ id: String, connected: Bool) {
