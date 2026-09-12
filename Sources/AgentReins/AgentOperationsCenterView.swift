@@ -2,6 +2,7 @@ import SwiftUI
 
 /// Live agent posture first; complete evidence appears only after node selection.
 struct AgentOperationsCenterView: View {
+    @EnvironmentObject private var webAgentSight: WebAgentSight
     let sessions: [AgentSessionSnapshot]
     let events: [GuardEvent]
     let incidents: [SecurityIncident]
@@ -22,6 +23,7 @@ struct AgentOperationsCenterView: View {
     @State private var didUserSelectAgent = false
     @State private var selectedStageID: String?
     @State private var followingLive = true
+    @State private var showingBrowserProtection = false
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -179,6 +181,9 @@ struct AgentOperationsCenterView: View {
         .onChange(of: discoveredAgents.map { "\($0.product):\($0.presence.rawValue)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
         }
+        .sheet(isPresented: $showingBrowserProtection) {
+            BrowserProtectionView(extensionConnected: webAgentSight.connected)
+        }
     }
 
     // MARK: - Chrome
@@ -205,6 +210,14 @@ struct AgentOperationsCenterView: View {
                 .font(.system(size: 9, weight: .bold)).foregroundStyle(observing ? green : amber)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background((observing ? green : amber).opacity(0.12), in: Capsule())
+            Button { showingBrowserProtection = true } label: {
+                Label(webAgentSight.connected ? "WEB PROTECTED" : "PROTECT WEB AI",
+                      systemImage: webAgentSight.connected ? "checkmark.shield.fill" : "shield.lefthalf.filled")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(webAgentSight.connected ? green : cyan)
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background((webAgentSight.connected ? green : cyan).opacity(0.12), in: Capsule())
+            }.buttonStyle(.plain)
         }
         .padding(.horizontal, 18).frame(height: 64).background(panel)
         .overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)

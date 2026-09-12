@@ -134,7 +134,7 @@ final class AgentDiscoveryManager: ObservableObject {
     }
 
     private func connectedState(for item: DiscoveredAgent) -> AgentConnectionState {
-        if item.id == "grok-web" { return .browser }
+        if item.id == "web-ai" { return .browser }
         // Claude Desktop cloud chat and Claude Code use different evidence
         // stores. A healthy Claude Code reader must not claim native coverage
         // for a Desktop-only process.
@@ -218,11 +218,11 @@ enum AgentDiscoveryEngine {
                 missing: missingCapabilities(coverage: coverage, running: running), lastSeen: now)
         }
         if webEvidenceActive {
-            result.append(DiscoveredAgent(id: "grok-web", product: "Grok Web", presence: .running,
+            result.append(DiscoveredAgent(id: "web-ai", product: "Web AI", presence: .running,
                 instances: ["Chrome browser session"], processIds: [], confidence: .confirmed,
-                identificationEvidence: ["recent authenticated Native Messaging evidence from grok.com"],
+                identificationEvidence: ["recent authenticated Native Messaging evidence from a supported AI website"],
                 connection: .browser, coverage: [.session, .prompt, .response, .browserContent],
-                adapter: "grok-browser-native", missing: ["tool process attribution", "complete network body"],
+                adapter: "web-ai-browser-native", missing: ["tool process attribution", "encrypted network body not rendered in the page"],
                 lastSeen: now))
         }
         return result.sorted { lhs, rhs in

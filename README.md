@@ -187,9 +187,9 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 1. Package AgentReins and move `AgentReins.app` into `/Applications`.
 2. Run `/Applications/AgentReins.app/Contents/Resources/BrowserExtension/install-native-host.sh`.
 3. Open `chrome://extensions` or `edge://extensions`, enable Developer mode, choose **Load unpacked**, and select `AgentReins.app/Contents/Resources/BrowserExtension`.
-4. Open `https://grok.com/imagine`. AgentReins will show `Grok Web` after the first local evidence message arrives.
+4. Open Gemini, ChatGPT, Claude, or Grok in Chrome. AgentReins will show `Web AI` after the first local evidence message arrives.
 
-The extension requests access only to `https://grok.com/*`. It records prompt submissions, file metadata and hashes, generation status, and discovered result media. Evidence is delivered through Native Messaging; AgentReins does not expose a localhost HTTP listener.
+The extension requests access only to `gemini.google.com`, `chatgpt.com`, `claude.ai`, and `grok.com`. It records prompt submissions, rendered model responses, user-visible reasoning/search progress, and uploaded file metadata and hashes. Evidence is delivered locally through Native Messaging; AgentReins does not expose a localhost HTTP listener. Server-side hidden reasoning that is never rendered in the browser is outside this evidence boundary.
 
 ## How the repository is organized
 

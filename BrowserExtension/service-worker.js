@@ -1,7 +1,17 @@
 const HOST = "com.agentspec.agentreins.web";
 
+const SUPPORTED_HOSTS = {
+  "grok.com": "grok",
+  "gemini.google.com": "gemini",
+  "chatgpt.com": "chatgpt",
+  "claude.ai": "claude-web"
+};
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (message?.source !== "agentreins-grok" || sender.tab?.url?.startsWith("https://grok.com/") !== true) {
+  let url;
+  try { url = new URL(sender.tab?.url || ""); } catch (_) { url = null; }
+  const provider = url ? SUPPORTED_HOSTS[url.hostname] : null;
+  if (message?.source !== "agentreins-web-ai" || !provider || message.event?.provider !== provider) {
     sendResponse({ ok: false, error: "untrusted_sender" });
     return false;
   }
@@ -9,7 +19,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     ...message.event,
     tabId: sender.tab.id,
     windowId: sender.tab.windowId,
-    sessionId: `grok:${sender.tab.windowId}:${sender.tab.id}`,
+    provider,
+    sessionId: `${provider}:${sender.tab.windowId}:${sender.tab.id}`,
     receivedAt: new Date().toISOString()
   };
   chrome.runtime.sendNativeMessage(HOST, enriched, response => {

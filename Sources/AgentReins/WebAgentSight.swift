@@ -6,6 +6,12 @@ import SwiftUI
 /// The extension confirms tab-level provenance; derived OS joins remain inferred.
 @MainActor
 final class WebAgentSight: ObservableObject {
+    private nonisolated static let providers: [String: (agent: String, model: String)] = [
+        "grok.com": ("grok", "Grok Web"),
+        "gemini.google.com": ("gemini", "Gemini Web"),
+        "chatgpt.com": ("chatgpt", "ChatGPT Web"),
+        "claude.ai": ("claude-web", "Claude Web")
+    ]
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
     var onEvents: (([GuardEvent]) -> Void)?
@@ -57,7 +63,7 @@ final class WebAgentSight: ObservableObject {
                         source: "web-agent", state: self.connected ? .healthy : .failed,
                         lastSuccess: self.connected ? Date() : nil, lagSeconds: nil,
                         accepted: 0, malformed: 0, dropped: 0,
-                        detail: self.connected ? nil : "No Grok browser heartbeat in the last 90 seconds"))
+                        detail: self.connected ? nil : "No supported Web AI browser heartbeat in the last 90 seconds"))
                     return
                 }
                 do {
@@ -70,7 +76,7 @@ final class WebAgentSight: ObservableObject {
                     try self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                         source: "web-agent", state: .healthy, lastSuccess: Date(), lagSeconds: 0,
                         accepted: events.count, malformed: 0, dropped: 0,
-                        detail: "Grok browser evidence connected through Native Messaging"))
+                        detail: "Web AI evidence connected through authenticated Native Messaging"))
                 } catch {
                     try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                         source: "web-agent", state: .degraded, lastSuccess: self.lastUpdate,
@@ -88,44 +94,52 @@ final class WebAgentSight: ObservableObject {
                   let eventType = object["eventType"] as? String,
                   let eventID = object["eventId"] as? String,
                   let url = object["url"] as? String,
-                  URL(string: url)?.host?.lowercased() == "grok.com" else { return nil }
+                  let host = URL(string: url)?.host?.lowercased(),
+                  let provider = providers[host],
+                  object["provider"] as? String == provider.agent else { return nil }
             let timestamp = (object["timestamp"] as? String).flatMap { ISO8601DateFormatter().date(from: $0) } ?? Date()
-            let session = object["sessionId"] as? String ?? "grok-web"
+            let session = object["sessionId"] as? String ?? "\(provider.agent)-web"
             let text = object["text"] as? String
-            let mode = object["mode"] as? String ?? "unknown"
             let tab = object["tabId"].map { String(describing: $0) } ?? "unknown"
             let id = deterministicUUID(eventID)
             switch eventType {
             case "heartbeat":
                 return nil
             case "prompt":
-                return GuardEvent(id: id, kind: "model", ruleId: "web_grok_prompt", path: url,
-                    command: nil, agent: "grok", op: "prompt", severity: "info", ts: timestamp,
+                return GuardEvent(id: id, kind: "model", ruleId: "web_\(provider.agent)_prompt", path: url,
+                    command: nil, agent: provider.agent, op: "prompt", severity: "info", ts: timestamp,
                     action: "sent", sessionId: session, turnId: eventID, userIntent: text,
-                    modelPrompt: text, model: "grok-imagine", source: "browser:grok-confirmed",
+                    modelPrompt: text, model: provider.model, source: "browser:\(provider.agent)-confirmed",
                     attributionConfidence: .confirmed, attributionMethod: "browser tab \(tab)",
-                    remoteDomain: "grok.com")
+                    remoteDomain: host)
             case "result", "response":
-                return GuardEvent(id: id, kind: "model", ruleId: "web_grok_result", path: url,
-                    command: nil, agent: "grok", op: "response", severity: "info", ts: timestamp,
+                return GuardEvent(id: id, kind: "model", ruleId: "web_\(provider.agent)_response", path: url,
+                    command: nil, agent: provider.agent, op: "response", severity: "info", ts: timestamp,
                     action: "received", sessionId: session, turnId: object["turnId"] as? String,
                     modelResponse: text,
-                    model: "grok-imagine", source: "browser:grok-confirmed",
+                    model: provider.model, source: "browser:\(provider.agent)-confirmed",
                     attributionConfidence: .confirmed, attributionMethod: "browser tab \(tab)",
-                    remoteDomain: "grok.com")
+                    remoteDomain: host)
+            case "reasoning":
+                return GuardEvent(id: id, kind: "model", ruleId: "web_\(provider.agent)_visible_reasoning", path: url,
+                    command: text, agent: provider.agent, op: "reasoning", severity: "info", ts: timestamp,
+                    action: "observed", sessionId: session, turnId: object["turnId"] as? String,
+                    modelDecision: text, model: provider.model, source: "browser:\(provider.agent)-confirmed",
+                    attributionConfidence: .confirmed,
+                    attributionMethod: "user-visible reasoning rendered in browser tab \(tab)", remoteDomain: host)
             case "upload":
-                return GuardEvent(id: id, kind: "tool", ruleId: "web_grok_upload", path: url,
-                    command: text, agent: "grok", op: "call", severity: "info", ts: timestamp,
+                return GuardEvent(id: id, kind: "tool", ruleId: "web_\(provider.agent)_upload", path: url,
+                    command: text, agent: provider.agent, op: "call", severity: "info", ts: timestamp,
                     action: "completed", sessionId: session, toolCallId: eventID,
                     modelDecision: "The web agent received local input files", toolName: "browser.upload",
-                    source: "browser:grok-confirmed", attributionConfidence: .confirmed,
-                    attributionMethod: "browser file input in tab \(tab)", remoteDomain: "grok.com")
+                    source: "browser:\(provider.agent)-confirmed", attributionConfidence: .confirmed,
+                    attributionMethod: "browser file input in tab \(tab)", remoteDomain: host)
             default:
-                return GuardEvent(id: id, kind: "activity", ruleId: "web_grok_\(eventType)", path: url,
-                    command: text ?? "Grok Imagine \(mode): \(eventType)", agent: "grok", op: eventType,
+                return GuardEvent(id: id, kind: "activity", ruleId: "web_\(provider.agent)_\(eventType)", path: url,
+                    command: text ?? "\(provider.model): \(eventType)", agent: provider.agent, op: eventType,
                     severity: "info", ts: timestamp, action: "observed", sessionId: session,
-                    source: "browser:grok-confirmed", attributionConfidence: .confirmed,
-                    attributionMethod: "browser tab \(tab)", remoteDomain: "grok.com")
+                    source: "browser:\(provider.agent)-confirmed", attributionConfidence: .confirmed,
+                    attributionMethod: "browser tab \(tab)", remoteDomain: host)
             }
         }
     }

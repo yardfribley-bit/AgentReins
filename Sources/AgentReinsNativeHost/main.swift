@@ -3,6 +3,7 @@ import Darwin
 
 private let maximumMessageBytes = 4 * 1_024 * 1_024
 private let allowedExtensionOrigin = "chrome-extension://hcmoeaheokpfbbggdmkdeaiokakiampk/"
+private let allowedWebAIHosts: Set<String> = ["grok.com", "gemini.google.com", "chatgpt.com", "claude.ai"]
 private let isTestOutput = CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--output"
 
 private func readExactly(_ count: Int, from input: FileHandle) throws -> Data? {
@@ -24,7 +25,8 @@ private func writeMessage(_ object: [String: Any], to output: FileHandle) throws
 
 private func appendEvidence(_ object: [String: Any]) throws -> Bool {
     guard JSONSerialization.isValidJSONObject(object), object["schemaVersion"] as? Int == 1,
-          let value = object["url"] as? String, URL(string: value)?.host?.lowercased() == "grok.com",
+          let value = object["url"] as? String,
+          let host = URL(string: value)?.host?.lowercased(), allowedWebAIHosts.contains(host),
           object["eventId"] is String, object["eventType"] is String else { return false }
     let destination: URL
     if isTestOutput {

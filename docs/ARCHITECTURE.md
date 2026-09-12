@@ -25,7 +25,7 @@ All production code lives in `Sources/AgentReins`.
 | Session model | `AgentSession.swift`, `Rule.swift`, `SecurityIncident.swift` | Turns, model exchanges, tool activity, and readable incident summaries. |
 | Development story | `DevelopmentTrace.swift` | Aggregates raw events into Understand, Plan, Build, Test, and Deliver stages with layered drill-down evidence. |
 | Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift`, `CursorSight.swift`, `QoderSight.swift`, `WebAgentSight.swift` | Read supported WorkBuddy, compatible local Codex/Cursor/Qoder records, and confirmed browser-extension evidence, then map them into normalized events. |
-| Browser bridge | `BrowserExtension/`, `AgentReinsNativeHost` | Captures Grok Imagine tab evidence with a `grok.com`-only extension and transfers it locally through Chrome/Edge Native Messaging. |
+| Browser bridge | `BrowserExtension/`, `AgentReinsNativeHost` | Captures Gemini, ChatGPT, Claude, and Grok tab evidence and transfers it locally through Chrome/Edge Native Messaging. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
 | Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process, file, and network observations to recent turns. A network endpoint is linked to a Tool/MCP call only when one unambiguous call exists in a tight time window; every join records its evidence method and remains inferred. |
 | System evidence boundary | `SystemEvidenceProvider.swift` | Keeps entitlement-free polling providers behind the same interface reserved for future ESF and ETW sources. |
@@ -42,7 +42,7 @@ All production code lives in `Sources/AgentReins`.
 ## Runtime flow
 
 1. An adapter discovers supported agent sessions and emits normalized `GuardEvent` records.
-   Grok browser events arrive through a fixed-ID extension and an origin-validating Native Messaging host.
+   Supported Web AI events arrive through a fixed-ID extension and an origin- and host-validating Native Messaging host.
 2. `EventStore` persists evidence locally.
 3. Session-building code groups events into sessions, turns, and model exchanges.
 4. Process, file, code, and memory monitors add computer-side evidence.

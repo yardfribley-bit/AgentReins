@@ -1,18 +1,28 @@
 {
   "manifest_version": 3,
-  "name": "AgentReins for Grok",
-  "version": "0.1.0",
-  "description": "Records a local, user-visible evidence trail for Grok Imagine sessions.",
+  "name": "AgentReins Web AI Monitor",
+  "version": "0.2.0",
+  "description": "Records a local, user-visible evidence trail for supported Web AI sessions.",
   "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAmAaP5lwHWCCNXKiRB7IT2HlNJwjSpsx/UFCzBffmWZYBMgYl5mm8kRRGiCI1LZNqi89sB7D43yN4ujmoe1iO5U4dAxo7NMEnfBxtI3uTrcwofSzzVCjkPcq6ScaZp1idepgLyH5xBMxi8D8ZTfZ5O1cX1qrv/OkNiTcPpZszHAnoSmlXbd8zuD2kgLwSG/OLZzwe9Tpb9RKwf821AyK0+gWOUjqDX05anIqljj44ct8rVo2sbMexCGSJOV2RUdtF0eUO0d/zvZEL00UnPYRQCOxIzAzQT3b7+JIyMO9YyektHdBYTDRj1/0tjf55jl5Z27wtURZx7DSTq0c+3a24cwIDAQAB",
   "permissions": ["nativeMessaging", "storage"],
-  "host_permissions": ["https://grok.com/*"],
+  "host_permissions": [
+    "https://grok.com/*",
+    "https://gemini.google.com/*",
+    "https://chatgpt.com/*",
+    "https://claude.ai/*"
+  ],
   "background": { "service_worker": "service-worker.js" },
   "content_scripts": [{
-    "matches": ["https://grok.com/*"],
-    "js": ["grok-content.js"],
+    "matches": [
+      "https://grok.com/*",
+      "https://gemini.google.com/*",
+      "https://chatgpt.com/*",
+      "https://claude.ai/*"
+    ],
+    "js": ["web-agent-content.js"],
     "run_at": "document_idle"
   }],
   "action": {
-    "default_title": "AgentReins for Grok"
+    "default_title": "AgentReins Web AI Monitor"
   }
 }
