@@ -128,6 +128,37 @@ final class TurnJournalTests: XCTestCase {
                                                     webEvidenceActive: false).isEmpty)
     }
 
+    func testRuntimeProfilesMapAgentSpecificComponentsToSecurityCapabilities() {
+        let storage = ProcessSnapshotRecord(pid: "101", ppid: "100",
+            command: "/Applications/WorkBuddy.app/Contents/Frameworks/Storage Service --type=utility")
+        let sandbox = ProcessSnapshotRecord(pid: "102", ppid: "100",
+            command: "/Applications/WorkBuddy.app/Contents/Resources/sandbox-center")
+        let codex = ProcessSnapshotRecord(pid: "201", ppid: "200",
+            command: "/Applications/ChatGPT.app/Contents/Resources/codex app-server")
+        let cursor = ProcessSnapshotRecord(pid: "301", ppid: "300",
+            command: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper --type=pty-host")
+
+        let memoryRole = AgentRuntimeProfileRegistry.classify(storage, agentHint: "WorkBuddy")
+        XCTAssertEqual(memoryRole.profileId, "workbuddy-macos")
+        XCTAssertEqual(memoryRole.capability, .memory)
+        XCTAssertTrue(memoryRole.securitySurface.contains("Memory commits"))
+
+        let sandboxRole = AgentRuntimeProfileRegistry.classify(sandbox, agentHint: "WorkBuddy")
+        XCTAssertEqual(sandboxRole.capability, .sandbox)
+        XCTAssertTrue(sandboxRole.securitySurface.contains("Downloaded artifact execution"))
+
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codex, agentHint: "Codex").capability, .agentCore)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursor, agentHint: "Cursor").capability, .toolRuntime)
+    }
+
+    func testRuntimeProfileKeepsUnknownResponsibilityExplicit() {
+        let process = ProcessSnapshotRecord(pid: "9", ppid: "1", command: "/tmp/unmapped-worker --serve")
+        let result = AgentRuntimeProfileRegistry.classify(process, agentHint: "Codex")
+        XCTAssertEqual(result.capability, .unknown)
+        XCTAssertEqual(result.confidence, .unknown)
+        XCTAssertFalse(result.matchedEvidence.isEmpty)
+    }
+
     func testQoderAdapterCapturesConversationToolsReasoningAndAttachments() throws {
         let fixture = """
         {"type":"runtime-config","sessionId":"qs","timestamp":1000,"model":"qoder-model","contextWindow":200000}

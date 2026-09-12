@@ -355,10 +355,10 @@ struct AgentOperationsCenterView: View {
                                 activeTurn?.finalResponse != nil || verificationEvent != nil, resultColor)
                 }
             }
+            processPanel.frame(maxWidth: .infinity)
             HStack(alignment: .top, spacing: 12) {
-                processPanel.frame(maxWidth: .infinity)
                 journeyPanel.frame(maxWidth: .infinity)
-                networkPanel.frame(width: 228)
+                networkPanel.frame(maxWidth: .infinity)
             }
         }
     }
@@ -390,7 +390,7 @@ struct AgentOperationsCenterView: View {
     // MARK: - Panels
 
     private var processPanel: some View {
-        posturePanel("AGENT INTERNALS", "Observed process lineage") {
+        posturePanel("AGENT RUNTIME MAP", "Real PID lineage · Runtime Profile responsibilities · security surfaces") {
             VStack(alignment: .leading, spacing: 0) {
                 if processTree.isEmpty {
                     empty("No live process tree")
@@ -409,7 +409,9 @@ struct AgentOperationsCenterView: View {
 
     private func treeRow(_ node: TreeNode) -> some View {
         let selected = selectedProcess?.pid == node.process.pid
-        let info = role(node.process)
+        let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
+        let active = scopedEvents.contains { $0.processId == Int32(node.process.pid) }
+        let tint = capabilityColor(info.capability)
         return Button {
             selectedProcess = node.process
             selectedEvent = nil
@@ -434,36 +436,53 @@ struct AgentOperationsCenterView: View {
                                 path.move(to: CGPoint(x: x, y: 0))
                                 path.addLine(to: CGPoint(x: x, y: size.height))
                             }
-                            context.stroke(path, with: .color(border), lineWidth: 1)
+                            context.stroke(path, with: .color(cyan.opacity(0.55)), lineWidth: 1.5)
                         }
-                        .frame(width: 18, height: 44)
+                        .frame(width: 24, height: node.depth == 0 ? 74 : 64)
                     }
                 }
                 HStack(spacing: 9) {
                     Image(systemName: info.icon)
-                        .font(.system(size: 11, weight: .semibold))
-                        .foregroundStyle(cyan)
-                        .frame(width: 28, height: 28)
-                        .background(cyan.opacity(0.10), in: RoundedRectangle(cornerRadius: 7))
+                        .font(.system(size: node.depth == 0 ? 16 : 12, weight: .semibold))
+                        .foregroundStyle(tint)
+                        .frame(width: node.depth == 0 ? 38 : 32, height: node.depth == 0 ? 38 : 32)
+                        .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
                     VStack(alignment: .leading, spacing: 2) {
-                        Text(info.name).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                        HStack(spacing: 7) {
+                            Text(info.displayName).font(.system(size: node.depth == 0 ? 13 : 11, weight: .bold)).lineLimit(1)
+                            Text(info.capability.rawValue.uppercased())
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(tint)
+                                .padding(.horizontal, 5).padding(.vertical, 2)
+                                .background(tint.opacity(0.12), in: Capsule())
+                        }
+                        Text(info.responsibility)
+                            .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
                         HStack(spacing: 5) {
                             Text("PID \(node.process.pid)").mono()
-                            Text("ROLE INFERRED")
+                            Text(info.confidence.rawValue.uppercased())
                                 .font(.system(size: 7, weight: .bold))
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(confidenceColor(info.confidence))
                         }
                     }
                     Spacer(minLength: 4)
-                    Circle()
-                        .fill(node.depth == 0 ? green : .blue)
-                        .frame(width: 7, height: 7)
+                    VStack(spacing: 4) {
+                        Circle().fill(active ? green : tint).frame(width: active ? 10 : 7, height: active ? 10 : 7)
+                            .shadow(color: active ? green.opacity(0.9) : .clear, radius: 5)
+                        Text(active ? "ACTIVE" : "LIVE").font(.system(size: 6, weight: .bold))
+                            .foregroundStyle(active ? green : .secondary)
+                    }
                 }
-                .padding(.horizontal, 10).padding(.vertical, 8)
-                .background(selected ? cyan.opacity(0.14) : raised, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? cyan : border))
+                .padding(.horizontal, 12).padding(.vertical, 9)
+                .frame(minHeight: node.depth == 0 ? 68 : 58)
+                .background(
+                    LinearGradient(colors: [selected ? tint.opacity(0.25) : raised,
+                                            panel.opacity(0.92)], startPoint: .topLeading, endPoint: .bottomTrailing),
+                    in: RoundedRectangle(cornerRadius: 10))
+                .overlay(RoundedRectangle(cornerRadius: 10).stroke(selected ? tint : border, lineWidth: selected ? 1.8 : 1))
+                .shadow(color: tint.opacity(node.depth == 0 ? 0.18 : 0.08), radius: node.depth == 0 ? 10 : 5, x: 0, y: 3)
             }
-            .padding(.vertical, 3)
+            .padding(.vertical, 4)
         }.buttonStyle(.plain)
     }
 
@@ -642,8 +661,9 @@ struct AgentOperationsCenterView: View {
     }
 
     private func processResponsibility(_ p: ProcessSnapshotRecord) -> some View {
-        let info = role(p)
+        let info = runtimeComponent(p)
         let linked = processes.contains { $0.pid == p.ppid }
+        let processEvents = scopedEvents.filter { $0.processId == Int32(p.pid) }
         return VStack(alignment: .leading, spacing: 12) {
             Text("PROCESS RESPONSIBILITY").micro(.secondary)
             HStack(spacing: 8) {
@@ -651,20 +671,41 @@ struct AgentOperationsCenterView: View {
                     .frame(width: 30, height: 30)
                     .background(cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(info.name).font(.system(size: 15, weight: .bold))
+                    Text(info.displayName).font(.system(size: 15, weight: .bold))
                     Text("PID \(p.pid)").mono()
                 }
             }
             Text(info.responsibility)
                 .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            labelChip("Responsibility inferred from executable and arguments", color: .blue)
+            labelChip("\(info.capability.rawValue) · \(info.confidence.rawValue.capitalized)",
+                      color: confidenceColor(info.confidence))
+            if !info.securitySurface.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text("SECURITY SURFACE").micro(.secondary)
+                    ForEach(info.securitySurface, id: \.self) { item in
+                        Label(item, systemImage: "shield.lefthalf.filled")
+                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                    }
+                }
+            }
+            if let latest = processEvents.first {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("LATEST OBSERVED ACTIVITY").micro(.secondary)
+                    Text(eventTitle(latest)).font(.system(size: 10, weight: .semibold))
+                    Text("\(latest.kind) / \(latest.op) · \(clock(latest.ts))")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                }
+            }
             VStack(alignment: .leading, spacing: 8) {
                 Text("TECHNICAL EVIDENCE").micro(.secondary)
                 field("PPID", p.ppid)
                 field("Executable", executable(p.command))
                 field("Command", p.command)
                 field("Relationship", linked ? "Observed PID/PPID child relationship" : "Agent root or external parent")
-                field("Responsibility confidence", "Inferred from process name and command arguments")
+                field("Runtime Profile", "\(info.profileId) v\(info.profileVersion)")
+                field("Capability", info.capability.rawValue)
+                field("Responsibility confidence", info.confidence.rawValue.capitalized)
+                field("Profile evidence", info.matchedEvidence.joined(separator: "; "))
                 field("Attribution", "Observed inside \(activeSession?.agent.capitalized ?? selectedAgent) process tree")
             }
             .padding(11)
@@ -907,6 +948,20 @@ struct AgentOperationsCenterView: View {
         v == .confirmed ? green : (v == .inferred ? .blue : .gray)
     }
 
+    private func capabilityColor(_ capability: RuntimeCapability) -> Color {
+        switch capability {
+        case .agentCore: return cyan
+        case .context, .modelConnection: return .purple
+        case .memory, .storage: return .indigo
+        case .toolRuntime, .mcp: return amber
+        case .sandbox: return .orange
+        case .network: return .blue
+        case .sourceControl: return green
+        case .interface: return .teal
+        case .unknown: return .gray
+        }
+    }
+
     private func eventTitle(_ e: GuardEvent) -> String {
         e.toolName ?? e.remoteDomain ?? e.remoteHost ?? (e.path == "-" ? e.ruleId : URL(fileURLWithPath: e.path).lastPathComponent)
     }
@@ -941,44 +996,21 @@ struct AgentOperationsCenterView: View {
         }
     }
 
-    private func role(_ p: ProcessSnapshotRecord) -> (name: String, responsibility: String, icon: String) {
-        let t = p.command.lowercased()
-        if t.contains("network.mojom.networkservice") {
-            return ("Network Service", "Owns Chromium network connections for the agent UI.", "network")
+    private func runtimeComponent(_ process: ProcessSnapshotRecord) -> RuntimeComponentClassification {
+        AgentRuntimeProfileRegistry.classify(process, agentHint: runtimeAgent(for: process))
+    }
+
+    private func runtimeAgent(for process: ProcessSnapshotRecord) -> String? {
+        let byPID = Dictionary(uniqueKeysWithValues: processInventory.map { ($0.pid, $0) })
+        var current: ProcessSnapshotRecord? = process
+        var visited = Set<String>()
+        while let node = current, visited.insert(node.pid).inserted {
+            if let profile = AgentRuntimeProfileRegistry.profile(agentHint: nil, command: node.command) {
+                return profile.agent
+            }
+            current = byPID[node.ppid]
         }
-        if t.contains("mcp-process") || t.contains("mcp-server") || (t.contains("mcp") && t.contains("server")) {
-            return ("MCP Server", "Loads tools across an MCP trust boundary.", "shippingbox")
-        }
-        if t.contains("conversation-search") {
-            return ("Conversation Search", "Indexes and retrieves local conversation records.", "text.magnifyingglass")
-        }
-        if t.contains("filewatcher") || t.contains("storage") {
-            return ("Storage Service", "Stores local agent state, cache, and conversation artifacts.", "internaldrive")
-        }
-        if t.contains("extension-host") {
-            return ("Extension Host", "Runs editor extensions and agent integrations.", "puzzlepiece.extension")
-        }
-        if t.contains("pty-host") || t.contains("/bin/zsh") || t.contains("/bin/bash") || t.contains("/bin/sh") {
-            return ("Shell", "Executes shell commands requested by the agent tool path.", "terminal")
-        }
-        if t.contains("renderer") {
-            return ("Renderer", "Displays the agent UI or a webview.", "macwindow")
-        }
-        if t.contains("gpu-process") {
-            return ("GPU Process", "Renders accelerated application content.", "square.3.layers.3d")
-        }
-        if t.contains("node") || t.contains("helper") {
-            return ("NodePeer", "Hosts agent runtime helpers and child services.", "cpu")
-        }
-        if t.contains("gitworker") || t.contains(" git ") {
-            return ("Git Worker", "Reads repository state and performs Git actions.", "arrow.triangle.branch")
-        }
-        if t.contains("python") {
-            return ("Python Tool", "Provides Python execution or language intelligence.", "chevron.left.forwardslash.chevron.right")
-        }
-        return (URL(fileURLWithPath: executable(p.command)).lastPathComponent,
-                "Responsibility is not identified by native evidence yet.",
-                "gearshape")
+        return selectedAgent == "All agents" ? activeSession?.agent : selectedAgent
     }
 
     private var statusBar: some View {
@@ -1005,6 +1037,7 @@ struct AgentOperationsCenterView: View {
         let process: ProcessSnapshotRecord
         let depth: Int
         let guides: [Bool]
+        let agentHint: String?
     }
 
     private static func buildTree(_ processes: [ProcessSnapshotRecord]) -> [TreeNode] {
@@ -1014,19 +1047,21 @@ struct AgentOperationsCenterView: View {
         let roots = processes.filter { !ids.contains($0.ppid) }
             .sorted { (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0) }
         var result: [TreeNode] = []
-        func walk(_ process: ProcessSnapshotRecord, depth: Int, ancestorOpen: [Bool]) {
-            result.append(TreeNode(id: "\(process.pid)-\(depth)", process: process, depth: depth, guides: ancestorOpen))
+        func walk(_ process: ProcessSnapshotRecord, depth: Int, ancestorOpen: [Bool], inheritedAgent: String?) {
+            let agent = AgentRuntimeProfileRegistry.profile(agentHint: nil, command: process.command)?.agent ?? inheritedAgent
+            result.append(TreeNode(id: "\(process.pid)-\(depth)", process: process, depth: depth,
+                                   guides: ancestorOpen, agentHint: agent))
             let children = (byParent[process.pid] ?? [])
                 .sorted { (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0) }
             for (index, child) in children.enumerated() {
                 let hasMoreSiblings = index < children.count - 1
-                walk(child, depth: depth + 1, ancestorOpen: ancestorOpen + [hasMoreSiblings])
+                walk(child, depth: depth + 1, ancestorOpen: ancestorOpen + [hasMoreSiblings], inheritedAgent: agent)
             }
         }
         let seed = roots.isEmpty
             ? Array(processes.sorted { (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0) }.prefix(1))
             : roots
-        for root in seed { walk(root, depth: 0, ancestorOpen: []) }
+        for root in seed { walk(root, depth: 0, ancestorOpen: [], inheritedAgent: nil) }
         return result
     }
 }
