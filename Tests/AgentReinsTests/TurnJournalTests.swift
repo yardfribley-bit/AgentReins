@@ -184,6 +184,66 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertFalse(result.matchedEvidence.isEmpty)
     }
 
+    @MainActor
+    func testToolActivityProjectsGitRemoteAndFileLifecycleWithTiming() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("agentreins-activity-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".git"), withIntermediateDirectories: true)
+        try "[remote \"origin\"]\nurl = git@github.com:yardfribley-bit/AgentReins.git\n"
+            .write(to: root.appendingPathComponent(".git/config"), atomically: true, encoding: .utf8)
+        let started = Date(timeIntervalSince1970: 100)
+        let call = GuardEvent(kind: "tool", ruleId: "codex_call", path: root.path,
+            command: "git push origin main\n*** Update File: Sources/App.swift\n", agent: "codex",
+            op: "call", severity: "info", ts: started, action: "requested",
+            sessionId: "s1", turnId: "t1", toolCallId: "c1", toolName: "exec_command")
+        let result = GuardEvent(kind: "tool", ruleId: "codex_result", path: root.path,
+            command: nil, agent: "codex", op: "result", severity: "info",
+            ts: started.addingTimeInterval(1.25), action: "completed",
+            sessionId: "s1", turnId: "t1", toolCallId: "c1",
+            modelResponse: "Process exited with code 0", toolName: "exec_command")
+
+        let projected = ToolActivityEvidenceProjector().project([call, result])
+        let network = try XCTUnwrap(projected.last { $0.kind == "network" })
+        XCTAssertEqual(network.remoteDomain, "github.com")
+        XCTAssertEqual(network.remotePort, 22)
+        XCTAssertEqual(network.action, "completed")
+        XCTAssertEqual(try XCTUnwrap(network.durationMS), 1_250, accuracy: 0.01)
+        let file = try XCTUnwrap(projected.last { $0.kind == "file" })
+        XCTAssertEqual(file.op, "update")
+        XCTAssertTrue(file.path.hasSuffix("Sources/App.swift"))
+        XCTAssertEqual(file.action, "completed")
+        XCTAssertEqual(file.attributionConfidence, .confirmed)
+    }
+
+    @MainActor
+    func testToolActivityProjectsSSHAndExplicitFileRead() throws {
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",
+            command: #"ssh -p 2222 deploy@example.com && {"filePath":"README.md"}"#,
+            agent: "codex", op: "call", severity: "info", ts: Date(), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "ssh", toolName: "read_file")
+        let projected = ToolActivityEvidenceProjector().project([call])
+        let network = try XCTUnwrap(projected.first { $0.kind == "network" })
+        XCTAssertEqual(network.remoteDomain, "example.com")
+        XCTAssertEqual(network.remotePort, 2222)
+        XCTAssertEqual(projected.first { $0.kind == "file" }?.op, "read")
+    }
+
+    @MainActor
+    func testToolActivityDoesNotClaimUnknownShellResultOrUnresolvedPath() throws {
+        let started = Date(timeIntervalSince1970: 100)
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",
+            command: "git push https://github.com/example/repo.git main; mkdir -p \"$APP/Contents/MacOS\"", agent: "codex",
+            op: "call", severity: "info", ts: started, action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "exec_command")
+        let result = GuardEvent(kind: "tool", ruleId: "result", path: "/tmp/project",
+            command: nil, agent: "codex", op: "result", severity: "info",
+            ts: started.addingTimeInterval(30), action: "completed",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "exec_command")
+        let projected = ToolActivityEvidenceProjector().project([call, result])
+        XCTAssertEqual(projected.last { $0.kind == "network" }?.action, "unverified")
+        XCTAssertFalse(projected.contains { $0.kind == "file" })
+    }
+
     func testQoderAdapterCapturesConversationToolsReasoningAndAttachments() throws {
         let fixture = """
         {"type":"runtime-config","sessionId":"qs","timestamp":1000,"model":"qoder-model","contextWindow":200000}

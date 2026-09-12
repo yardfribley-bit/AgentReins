@@ -332,20 +332,35 @@ struct AgentOperationsCenterView: View {
         case .network:
             networkPanel
         case .files:
-            listPanel("FILES", "Observed file activity") {
+            listPanel("FILE ACTIVITY", "What the Agent read or changed in this task") {
                 let files = scopedEvents.filter { $0.kind == "file" }
-                if files.isEmpty { empty("No file events in this window") }
+                if files.isEmpty { empty("No file activity observed in this task") }
+                if !files.isEmpty {
+                    HStack(spacing: 6) {
+                        fileCountChip("READ", files.filter { $0.op == "read" }.count, cyan)
+                        fileCountChip("CREATED", files.filter { $0.op == "create" }.count, green)
+                        fileCountChip("UPDATED", files.filter { ["update", "modify"].contains($0.op) }.count, .blue)
+                        fileCountChip("DELETED", files.filter { $0.op == "delete" }.count, amber)
+                    }.padding(.bottom, 6)
+                }
                 ForEach(Array(files)) { event in
                     Button { selectedEvent = event; selectedProcess = nil; selectedProcessGroup = [] } label: {
-                        HStack {
-                            Image(systemName: "doc").foregroundStyle(cyan)
+                        HStack(spacing: 9) {
+                            Image(systemName: fileOperationIcon(event.op)).foregroundStyle(fileOperationColor(event))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(URL(fileURLWithPath: event.path).lastPathComponent)
-                                    .font(.system(size: 11, weight: .semibold))
-                                Text(event.path).font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                                Text(fileActivitySentence(event)).font(.system(size: 11, weight: .semibold))
+                                Text(fileChangeDescription(event))
+                                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+                                Text("\(event.toolName ?? "AgentReins observation") · \(fileResultLabel(event)) · \(clock(event.startedAt ?? event.ts))")
+                                    .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             Spacer()
-                            Text(clock(event.ts)).mono()
+                            VStack(alignment: .trailing, spacing: 2) {
+                                Text((event.attributionConfidence?.rawValue ?? "unknown").uppercased())
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundStyle(confidenceColor(event.attributionConfidence))
+                                Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
+                            }
                         }.node(selectedEvent?.id == event.id)
                     }.buttonStyle(.plain)
                 }
@@ -763,6 +778,16 @@ struct AgentOperationsCenterView: View {
                                 Spacer(minLength: 0)
                             }
                             Text(item.host).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                            if let event = item.event {
+                                HStack {
+                                    Text(event.action.uppercased())
+                                    Spacer()
+                                    Text(clock(event.startedAt ?? event.ts))
+                                    if let duration = event.durationMS { Text("· \(formatDuration(duration))") }
+                                }
+                                .font(.system(size: 7, weight: .bold, design: .monospaced))
+                                .foregroundStyle(event.action == "failed" ? Color.red : Color.secondary)
+                            }
                             if assessment.needsAttention {
                                 Text("Needs review")
                                     .font(.system(size: 8, weight: .bold))
@@ -969,6 +994,10 @@ struct AgentOperationsCenterView: View {
             Text("NODE DETAILS").micro(.secondary)
             Text(eventTitle(e)).font(.headline)
             field("Observed", e.ts.formatted(date: .abbreviated, time: .standard))
+            if let started = e.startedAt { field("Started", started.formatted(date: .abbreviated, time: .standard)) }
+            if let ended = e.endedAt { field("Ended", ended.formatted(date: .abbreviated, time: .standard)) }
+            if let duration = e.durationMS { field("Duration", formatDuration(duration)) }
+            field("Result status", e.action.capitalized)
             field("Agent / operation", "\(e.agent ?? "Unknown") · \(e.kind)/\(e.op)")
             field("Evidence confidence", e.attributionConfidence?.rawValue ?? "unknown")
             field("Why linked", e.attributionMethod ?? "No attribution method")
@@ -977,12 +1006,88 @@ struct AgentOperationsCenterView: View {
             if let v = e.modelResponse { field("Result / response", v) }
             if let v = e.command { field("Arguments / command", v) }
             if e.path != "-" { field("File", e.path) }
+            if let related = e.relatedPath { field("Destination file", related) }
             if let host = e.remoteDomain ?? e.remoteHost {
                 let assessment = NetworkDestinationAssessment.assess(domain: host, host: host)
                 field("Destination class", assessment.kind.rawValue)
                 field("Review reason", assessment.reason)
             }
         }
+    }
+
+    private func fileOperationIcon(_ operation: String) -> String {
+        switch operation {
+        case "create": return "doc.badge.plus"
+        case "read": return "doc.text.magnifyingglass"
+        case "delete": return "trash"
+        case "rename": return "arrow.right.doc.on.clipboard"
+        default: return "doc.badge.gearshape"
+        }
+    }
+
+    private func fileOperationColor(_ event: GuardEvent) -> Color {
+        if event.action == "failed" { return .red }
+        return event.op == "delete" ? amber : cyan
+    }
+
+    private func fileCountChip(_ label: String, _ count: Int, _ color: Color) -> some View {
+        HStack(spacing: 4) {
+            Text("\(count)").font(.system(size: 10, weight: .bold))
+            Text(label).font(.system(size: 6.5, weight: .bold))
+        }
+        .foregroundStyle(color)
+        .padding(.horizontal, 7).padding(.vertical, 5)
+        .background(color.opacity(0.1), in: RoundedRectangle(cornerRadius: 6))
+    }
+
+    private func fileActivitySentence(_ event: GuardEvent) -> String {
+        let agent = event.agent?.capitalized ?? "Agent"
+        let file = URL(fileURLWithPath: event.path).lastPathComponent
+        let verb: String
+        switch event.op {
+        case "create": verb = "created"
+        case "read": verb = "read"
+        case "delete": verb = "deleted"
+        case "rename": verb = "renamed"
+        default: verb = "updated"
+        }
+        return "\(agent) \(verb) \(file)"
+    }
+
+    private func fileChangeDescription(_ event: GuardEvent) -> String {
+        if event.op == "read" { return "Read the file contents for task context." }
+        if event.op == "delete" { return "Removed the file from the workspace." }
+        if event.op == "rename", let destination = event.relatedPath {
+            return "Renamed it to \(URL(fileURLWithPath: destination).lastPathComponent)."
+        }
+        let patch = event.fileDiff ?? event.command ?? ""
+        let lines = patch.components(separatedBy: .newlines)
+        let additions = lines.filter { $0.hasPrefix("+") && !$0.hasPrefix("+++") }
+        let removals = lines.filter { $0.hasPrefix("-") && !$0.hasPrefix("---") }
+        if !additions.isEmpty || !removals.isEmpty {
+            var counts: [String] = []
+            if !additions.isEmpty { counts.append("added \(additions.count) line\(additions.count == 1 ? "" : "s")") }
+            if !removals.isEmpty { counts.append("removed \(removals.count) line\(removals.count == 1 ? "" : "s")") }
+            let sample = additions.first.map { String($0.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            let readable = sample.flatMap { $0.isEmpty ? nil : String($0.prefix(90)) }
+            return counts.joined(separator: ", ").capitalized + (readable.map { " · \($0)" } ?? ".")
+        }
+        return event.op == "create" ? "Created a new file for this task." : "Changed the file through the Agent tool path."
+    }
+
+    private func fileResultLabel(_ event: GuardEvent) -> String {
+        switch event.action {
+        case "completed": return "Completed"
+        case "failed": return "Failed"
+        case "running": return "In progress"
+        case "unverified": return "Result unverified"
+        case "requested": return "Requested"
+        default: return event.action.capitalized
+        }
+    }
+
+    private func formatDuration(_ milliseconds: Double) -> String {
+        milliseconds < 1_000 ? "\(Int(milliseconds)) ms" : String(format: "%.1f s", milliseconds / 1_000)
     }
 
     // MARK: - Task stages

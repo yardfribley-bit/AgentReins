@@ -382,7 +382,7 @@ final class ProcessGuard: ObservableObject {
                    processId: Int32(connection.pid),
                    localAddress: connection.localAddress,
                    remoteHost: connection.remoteHost, remotePort: connection.remotePort,
-                   remoteDomain: domain)
+                   remoteDomain: domain, startedAt: Date())
     }
 
     private func resolveProxyDestination(_ connection: NetworkConnectionRecord) -> NetworkConnectionRecord? {

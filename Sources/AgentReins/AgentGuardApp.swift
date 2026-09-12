@@ -42,6 +42,7 @@ struct AgentReinsApp: App {
     @StateObject private var memoryScan = MemoryScanManager()
     @StateObject private var memoryRuleStore = MemoryRuleStore()
     @StateObject private var attributionResolver = EventAttributionResolver()
+    @StateObject private var activityProjector = ToolActivityEvidenceProjector()
 
     var body: some Scene {
         WindowGroup("AgentReins", id: "security-center") {
@@ -80,34 +81,38 @@ struct AgentReinsApp: App {
                     }
                     workBuddySight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
-                        attributionResolver.observe(fresh)
+                        let projected = activityProjector.project(fresh)
+                        attributionResolver.observe(fresh + projected)
                         refineRecentNetworkEvents()
                         turnJournalStore.ingest(journalEvents(from: fresh))
-                        eventStore.record(fresh)
+                        eventStore.record(fresh + projected)
                     }
                     workBuddySight.start()
                     codexSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
-                        attributionResolver.observe(fresh)
+                        let projected = activityProjector.project(fresh)
+                        attributionResolver.observe(fresh + projected)
                         refineRecentNetworkEvents()
                         turnJournalStore.ingest(journalEvents(from: fresh))
-                        eventStore.record(fresh)
+                        eventStore.record(fresh + projected)
                     }
                     codexSight.start()
                     qoderSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
-                        attributionResolver.observe(fresh)
+                        let projected = activityProjector.project(fresh)
+                        attributionResolver.observe(fresh + projected)
                         refineRecentNetworkEvents()
                         turnJournalStore.ingest(journalEvents(from: fresh))
-                        eventStore.record(fresh)
+                        eventStore.record(fresh + projected)
                     }
                     qoderSight.start()
                     cursorSight.onEvents = { events in
                         let fresh = eventStore.unrecorded(events)
-                        attributionResolver.observe(fresh)
+                        let projected = activityProjector.project(fresh)
+                        attributionResolver.observe(fresh + projected)
                         refineRecentNetworkEvents()
                         turnJournalStore.ingest(journalEvents(from: fresh))
-                        eventStore.record(fresh)
+                        eventStore.record(fresh + projected)
                     }
                     cursorSight.start()
                     webAgentSight.onEvents = { events in
