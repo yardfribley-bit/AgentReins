@@ -15,9 +15,13 @@ struct AgentOperationsCenterView: View {
     @State private var selectedAgent = "All agents"
     @State private var selectedEvent: GuardEvent?
     @State private var selectedProcess: ProcessSnapshotRecord?
+    @State private var selectedProcessGroup: [ProcessSnapshotRecord] = []
     @State private var centerTab: CenterTab = .overview
     @State private var query = ""
     @State private var didSelectInitialAgent = false
+    @State private var didUserSelectAgent = false
+    @State private var selectedStageID: String?
+    @State private var followingLive = true
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -80,6 +84,29 @@ struct AgentOperationsCenterView: View {
         }
     }
     private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
+    private var focusedTaskEvent: GuardEvent? {
+        followingLive ? currentTaskStage?.event : selectedEvent
+    }
+    private var focusedProcessIDs: Set<String> {
+        let rawPIDs: [String]
+        if followingLive {
+            rawPIDs = focusedTaskEvent?.processId.map { [String($0)] } ?? []
+        } else if !selectedProcessGroup.isEmpty {
+            rawPIDs = selectedProcessGroup.map(\.pid)
+        } else {
+            rawPIDs = selectedProcess.map { [$0.pid] } ??
+                (focusedTaskEvent?.processId.map { [String($0)] } ?? [])
+        }
+        let byPID = Dictionary(uniqueKeysWithValues: processInventory.map { ($0.pid, $0) })
+        var result = Set<String>()
+        for rawPID in rawPIDs {
+            var current = rawPID
+            while let process = byPID[current], result.insert(current).inserted {
+                current = process.ppid
+            }
+        }
+        return result
+    }
     private var evidenceCoverage: String {
         let confirmed = scopedEvents.filter { $0.attributionConfidence == .confirmed }.count
         guard !scopedEvents.isEmpty else { return "—" }
@@ -93,15 +120,24 @@ struct AgentOperationsCenterView: View {
     }
 
     private func selectInitialAgentIfNeeded() {
-        guard !didSelectInitialAgent,
-              let latest = sessions.max(by: { $0.lastActivityAt < $1.lastActivityAt }) else { return }
-        selectedAgent = latest.agent.capitalized
+        guard !didUserSelectAgent else { return }
+        let running = Set(discoveredAgents.filter { $0.presence == .running }.map { $0.product.lowercased() })
+        guard !running.isEmpty else { return }
+        if didSelectInitialAgent && running.contains(selectedAgent.lowercased()) { return }
+        if let latest = sessions.filter({ running.contains($0.agent.lowercased()) })
+            .max(by: { $0.lastActivityAt < $1.lastActivityAt }) {
+            selectedAgent = latest.agent.capitalized
+        } else if let first = discoveredAgents.first(where: { $0.presence == .running }) {
+            selectedAgent = first.product
+        } else {
+            return
+        }
         didSelectInitialAgent = true
     }
 
     private func readableActivity(_ turn: AgentTurn?) -> String {
         guard let turn else { return "Monitoring runtime" }
-        if let call = turn.toolCalls.last {
+        if let call = turn.toolCalls.last(where: { $0.completedAt == nil }) {
             let name = call.name.lowercased()
             if name.contains("exec") || name.contains("terminal") || name == "bash" || name == "shell" {
                 return "Running a terminal command"
@@ -111,6 +147,8 @@ struct AgentOperationsCenterView: View {
             if name.contains("mcp") { return "Using MCP · \(call.friendlyName)" }
             return "Using tool · \(call.friendlyName)"
         }
+        if turn.finalResponse != nil { return "Reported complete · awaiting verification" }
+        if let call = turn.toolCalls.last { return "Last action · \(call.friendlyName)" }
         if let input = turn.userInput, !input.isEmpty { return String(input.prefix(52)) }
         return "Processing the current task"
     }
@@ -137,6 +175,10 @@ struct AgentOperationsCenterView: View {
         .background(canvas).environment(\.colorScheme, .dark)
         .onAppear { selectInitialAgentIfNeeded() }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
+        .onChange(of: discoveredAgents.count) { _ in selectInitialAgentIfNeeded() }
+        .onChange(of: discoveredAgents.map { "\($0.product):\($0.presence.rawValue)" }.joined(separator: "|")) { _ in
+            selectInitialAgentIfNeeded()
+        }
     }
 
     // MARK: - Chrome
@@ -200,9 +242,13 @@ struct AgentOperationsCenterView: View {
     private func fleetRow(name: String, title: String, detail: String, live: Bool) -> some View {
         let selected = selectedAgent.caseInsensitiveCompare(name) == .orderedSame
         return Button {
+            didUserSelectAgent = true
             selectedAgent = name
             selectedEvent = nil
             selectedProcess = nil
+            selectedProcessGroup = []
+            selectedStageID = nil
+            followingLive = true
             centerTab = .overview
         } label: {
             HStack(spacing: 11) {
@@ -290,7 +336,7 @@ struct AgentOperationsCenterView: View {
                 let files = scopedEvents.filter { $0.kind == "file" }
                 if files.isEmpty { empty("No file events in this window") }
                 ForEach(Array(files)) { event in
-                    Button { selectedEvent = event; selectedProcess = nil } label: {
+                    Button { selectedEvent = event; selectedProcess = nil; selectedProcessGroup = [] } label: {
                         HStack {
                             Image(systemName: "doc").foregroundStyle(cyan)
                             VStack(alignment: .leading, spacing: 2) {
@@ -330,7 +376,7 @@ struct AgentOperationsCenterView: View {
                     let related = activeSession?.events.last {
                         $0.kind == "tool" && ($0.toolCallId == call.id || $0.toolName == call.name)
                     }
-                    Button { selectedEvent = related; selectedProcess = nil } label: { HStack(spacing: 8) {
+                    Button { selectedEvent = related; selectedProcess = nil; selectedProcessGroup = [] } label: { HStack(spacing: 8) {
                         Image(systemName: "terminal").foregroundStyle(cyan)
                         VStack(alignment: .leading, spacing: 2) {
                             Text(call.friendlyName).font(.system(size: 11, weight: .semibold))
@@ -368,7 +414,7 @@ struct AgentOperationsCenterView: View {
                 if processTree.isEmpty {
                     empty("Waiting for the live Agent process tree")
                 } else {
-                    let overviewNodes = processTree.filter { !isOverviewInfrastructureNoise($0.process) }
+                    let overviewNodes = overviewProcessGroups
                     let limit = 8
                     ForEach(Array(overviewNodes.prefix(limit))) { node in compactTreeRow(node) }
                     if processTree.count > overviewNodes.prefix(limit).count {
@@ -419,14 +465,19 @@ struct AgentOperationsCenterView: View {
         }
     }
 
-    private func compactTreeRow(_ node: TreeNode) -> some View {
-        let selected = selectedProcess?.pid == node.process.pid
+    private func compactTreeRow(_ group: OverviewProcessGroup) -> some View {
+        let node = group.node
+        let selected = selectedProcessGroup.map(\.pid) == group.processes.map(\.pid) ||
+            (group.processes.count == 1 && selectedProcess?.pid == node.process.pid)
         let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
-        let active = scopedEvents.contains { $0.processId == Int32(node.process.pid) }
+        let active = group.processes.contains { focusedProcessIDs.contains($0.pid) }
         let tint = capabilityColor(info.capability)
         return Button {
             selectedProcess = node.process
+            selectedProcessGroup = group.processes
             selectedEvent = nil
+            selectedStageID = nil
+            followingLive = false
         } label: {
             HStack(spacing: 0) {
                 HStack(spacing: 0) {
@@ -459,9 +510,10 @@ struct AgentOperationsCenterView: View {
                         .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 6))
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
-                            Text(info.displayName).font(.system(size: 10, weight: .bold)).lineLimit(1)
+                            Text(info.displayName + (group.processes.count > 1 ? " ×\(group.processes.count)" : ""))
+                                .font(.system(size: 10, weight: .bold)).lineLimit(1)
                             Spacer(minLength: 2)
-                            Text("PID \(node.process.pid)").mono()
+                            Text(group.processes.count > 1 ? "\(group.processes.count) PIDS" : "PID \(node.process.pid)").mono()
                         }
                         Text(info.responsibility).font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
                         Text("\(info.capability.rawValue.uppercased()) · \(info.confidence.rawValue.uppercased())")
@@ -484,14 +536,54 @@ struct AgentOperationsCenterView: View {
             .contains(where: command.contains)
     }
 
+    private func isOverviewCoreComponent(_ node: TreeNode) -> Bool {
+        let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
+        if node.depth == 0 { return true }
+        if info.componentId == "codex-node-repl",
+           let parent = processInventory.first(where: { $0.pid == node.process.ppid }),
+           AgentRuntimeProfileRegistry.classify(parent, agentHint: node.agentHint).componentId == "codex-computer-use-runtime" {
+            return false
+        }
+        let coreCapabilities: Set<RuntimeCapability> = [
+            .agentCore, .memory, .modelConnection, .mcp, .sandbox, .storage, .network
+        ]
+        if coreCapabilities.contains(info.capability) { return true }
+        return ["codex-code-mode-host", "workbuddy-host"]
+            .contains(info.componentId)
+    }
+
+    private var overviewProcessGroups: [OverviewProcessGroup] {
+        let visible = processTree.filter {
+            !isOverviewInfrastructureNoise($0.process) && isOverviewCoreComponent($0)
+        }
+        let parents = Set(processTree.map { $0.process.ppid })
+        var groups: [OverviewProcessGroup] = []
+        var indexByKey: [String: Int] = [:]
+        for node in visible {
+            let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
+            let isLeaf = !parents.contains(node.process.pid)
+            let key = isLeaf ? "\(node.process.ppid)|\(info.componentId)" : "pid|\(node.process.pid)"
+            if let index = indexByKey[key] {
+                groups[index].processes.append(node.process)
+            } else {
+                indexByKey[key] = groups.count
+                groups.append(OverviewProcessGroup(id: key, node: node, processes: [node.process]))
+            }
+        }
+        return groups
+    }
+
     private func treeRow(_ node: TreeNode) -> some View {
         let selected = selectedProcess?.pid == node.process.pid
         let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
-        let active = scopedEvents.contains { $0.processId == Int32(node.process.pid) }
+        let active = focusedProcessIDs.contains(node.process.pid)
         let tint = capabilityColor(info.capability)
         return Button {
             selectedProcess = node.process
+            selectedProcessGroup = []
             selectedEvent = nil
+            selectedStageID = nil
+            followingLive = false
         } label: {
             HStack(spacing: 0) {
                 HStack(spacing: 0) {
@@ -567,6 +659,20 @@ struct AgentOperationsCenterView: View {
         posturePanel("LIVE TASK", "Request → context → model → tools → result") {
             VStack(alignment: .leading, spacing: 0) {
                 let stages = taskStages
+                HStack(spacing: 7) {
+                    Circle().fill(currentTaskStage == nil ? Color.gray : green).frame(width: 7, height: 7)
+                    Text(liveTaskStateHeadline)
+                        .font(.system(size: 8, weight: .bold)).foregroundStyle(liveTaskStateColor)
+                    Spacer()
+                    if !followingLive {
+                        Button("Return to live") {
+                            followingLive = true
+                            selectedStageID = currentTaskStage?.id
+                            selectedEvent = currentTaskStage?.event
+                            selectedProcessGroup = []
+                        }.buttonStyle(.plain).font(.system(size: 8, weight: .semibold)).foregroundStyle(cyan)
+                    }
+                }.padding(.bottom, 10)
                 if stages.isEmpty {
                     empty("Waiting for task evidence")
                 } else {
@@ -579,16 +685,24 @@ struct AgentOperationsCenterView: View {
     }
 
     private func timelineRow(_ stage: TaskStage, isLast: Bool) -> some View {
-        let selected = selectedEvent?.id == stage.event?.id && stage.event != nil
+        let selected = selectedStageID == stage.id ||
+            (selectedStageID == nil && selectedEvent?.id == stage.event?.id && stage.event != nil)
+        let isCurrent = currentTaskStage?.id == stage.id
+        let stageColor = stage.status == .failed ? Color.red :
+            (isCurrent ? green : (stage.status == .completed ? confidenceColor(stage.event?.attributionConfidence) : Color.gray))
         return Button {
+            selectedStageID = stage.id
+            followingLive = false
             selectedEvent = stage.event
             selectedProcess = nil
+            selectedProcessGroup = []
         } label: {
             HStack(alignment: .top, spacing: 10) {
                 VStack(spacing: 0) {
                     Circle()
-                        .fill(stage.complete ? confidenceColor(stage.event?.attributionConfidence) : Color.gray.opacity(0.5))
-                        .frame(width: 9, height: 9)
+                        .fill(stageColor.opacity(stage.status == .pending ? 0.45 : 1))
+                        .frame(width: isCurrent ? 11 : 9, height: isCurrent ? 11 : 9)
+                        .shadow(color: isCurrent ? green.opacity(0.9) : .clear, radius: 5)
                         .padding(.top, 5)
                     if !isLast {
                         Rectangle().fill(border).frame(width: 1).frame(maxHeight: .infinity)
@@ -599,6 +713,8 @@ struct AgentOperationsCenterView: View {
                     HStack {
                         Text(stage.title).font(.system(size: 11, weight: .semibold))
                         Spacer()
+                        Text(stage.status.label.uppercased())
+                            .font(.system(size: 6.5, weight: .bold)).foregroundStyle(stageColor)
                         if let ts = stage.timestamp {
                             Text(clock(ts)).mono()
                         }
@@ -606,15 +722,15 @@ struct AgentOperationsCenterView: View {
                     Text(stage.detail)
                         .font(.system(size: stage.monospace ? 9 : 10,
                                       design: stage.monospace ? .monospaced : .default))
-                        .foregroundStyle(stage.complete ? Color.secondary : Color.gray)
+                        .foregroundStyle(stage.status == .pending ? Color.gray : Color.secondary)
                         .lineLimit(3)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 }
-                .padding(10)
-                .background(selected ? cyan.opacity(0.14) : raised, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected ? cyan : border))
+                .padding(8)
+                .background((selected || isCurrent) ? stageColor.opacity(0.14) : raised, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected || isCurrent ? stageColor : border))
             }
-            .padding(.bottom, isLast ? 0 : 8)
+            .padding(.bottom, isLast ? 0 : 5)
         }.buttonStyle(.plain)
     }
 
@@ -629,6 +745,9 @@ struct AgentOperationsCenterView: View {
                     Button {
                         selectedEvent = item.event
                         selectedProcess = nil
+                        selectedProcessGroup = []
+                        selectedStageID = nil
+                        followingLive = false
                     } label: {
                         VStack(alignment: .leading, spacing: 7) {
                             HStack(spacing: 8) {
@@ -652,7 +771,7 @@ struct AgentOperationsCenterView: View {
                                     .background(amber.opacity(0.12), in: Capsule())
                             }
                         }
-                        .node(selectedEvent?.id == item.event?.id)
+                        .node(focusedTaskEvent?.id == item.event?.id && item.event != nil)
                     }.buttonStyle(.plain)
                 }
             }
@@ -703,7 +822,9 @@ struct AgentOperationsCenterView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     securitySummary
                     Divider().overlay(border)
-                    if let p = selectedProcess {
+                    if selectedProcessGroup.count > 1 {
+                        processGroupResponsibility(selectedProcessGroup)
+                    } else if let p = selectedProcess {
                         processResponsibility(p)
                     } else if let e = selectedEvent {
                         eventDetail(e)
@@ -793,6 +914,39 @@ struct AgentOperationsCenterView: View {
         }
     }
 
+    private func processGroupResponsibility(_ group: [ProcessSnapshotRecord]) -> some View {
+        let representative = group[0]
+        let info = runtimeComponent(representative)
+        let pids = group.map(\.pid).sorted { (Int($0) ?? 0) < (Int($1) ?? 0) }
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("PROCESS GROUP RESPONSIBILITY").micro(.secondary)
+            HStack(spacing: 8) {
+                Image(systemName: info.icon).foregroundStyle(cyan)
+                    .frame(width: 30, height: 30)
+                    .background(cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(info.displayName) ×\(group.count)").font(.system(size: 15, weight: .bold))
+                    Text("\(group.count) observed leaf processes").mono()
+                }
+            }
+            Text(info.responsibility)
+                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+            labelChip("\(info.capability.rawValue) · \(info.confidence.rawValue.capitalized)",
+                      color: confidenceColor(info.confidence))
+            VStack(alignment: .leading, spacing: 8) {
+                Text("TECHNICAL EVIDENCE").micro(.secondary)
+                field("PIDs", pids.joined(separator: ", "))
+                field("Parent PID", representative.ppid)
+                field("Runtime Profile", "\(info.profileId) v\(info.profileVersion)")
+                field("Aggregation", "Same parent, component, responsibility, and leaf status")
+                field("Attribution", "Observed inside \(activeSession?.agent.capitalized ?? selectedAgent) process tree")
+            }
+            .padding(11)
+            .background(raised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
+        }
+    }
+
     private var defaultDetail: some View {
         VStack(alignment: .leading, spacing: 8) {
             Text("SELECT A NODE").micro(.secondary)
@@ -833,13 +987,44 @@ struct AgentOperationsCenterView: View {
 
     // MARK: - Task stages
 
-    private struct TaskStage {
+    private enum TaskStageStatus {
+        case pending, active, completed, failed
+        var label: String {
+            switch self {
+            case .pending: return "Pending"
+            case .active: return "Active"
+            case .completed: return "Observed"
+            case .failed: return "Failed"
+            }
+        }
+    }
+
+    private struct TaskStage: Identifiable {
+        let id: String
         let title: String
         let detail: String
         let timestamp: Date?
         let event: GuardEvent?
-        let complete: Bool
+        let status: TaskStageStatus
         let monospace: Bool
+    }
+
+    private var currentTaskStage: TaskStage? {
+        taskStages.last { $0.status == .active }
+    }
+
+    private var liveTaskStateHeadline: String {
+        if let currentTaskStage { return "CURRENT · \(currentTaskStage.title.uppercased())" }
+        if verificationEvent != nil { return "INDEPENDENTLY VERIFIED" }
+        if activeTurn?.finalResponse != nil { return "AGENT REPORTED COMPLETE · AWAITING VERIFICATION" }
+        if activeTurn != nil { return "WAITING FOR THE NEXT OBSERVED ACTION" }
+        return "WAITING FOR LIVE EVIDENCE"
+    }
+
+    private var liveTaskStateColor: Color {
+        if currentTaskStage != nil || verificationEvent != nil { return green }
+        if activeTurn?.finalResponse != nil { return amber }
+        return .secondary
     }
 
     private var taskStages: [TaskStage] {
@@ -848,63 +1033,101 @@ struct AgentOperationsCenterView: View {
         let responseEvent = activeSession?.events.last { $0.kind == "model" && $0.op == "response" }
         let contextEvent = activeSession?.events.last { $0.kind == "context" }
         let verificationEvent = activeSession?.events.last { $0.kind == "verification" }
+        let tools = activeTurn?.toolCalls ?? []
+        let mcpCalls = tools.filter { toolKind($0) == "mcp" }
+        let shellCalls = tools.filter { toolKind($0) == "shell" }
+        let writeCalls = tools.filter { toolKind($0) == "write" }
+        let buildCalls = tools.filter { toolKind($0) == "build" }
+        let testCalls = tools.filter { toolKind($0) == "test" }
 
         stages.append(TaskStage(
+            id: "request",
             title: "User request",
             detail: activeTurn?.userInput ?? "Waiting for a user request",
             timestamp: promptEvent?.ts ?? activeTurn?.startedAt,
             event: promptEvent,
-            complete: activeTurn?.userInput != nil,
+            status: activeTurn?.userInput == nil ? .pending : .completed,
             monospace: false))
 
         stages.append(TaskStage(
+            id: "context",
             title: "Context prepared",
             detail: contextDetail ?? "Waiting for context evidence",
             timestamp: contextEvent?.ts ?? promptEvent?.ts,
             event: contextEvent ?? promptEvent,
-            complete: contextDetail != nil,
+            status: contextDetail != nil ? .completed : (activeTurn?.userInput != nil ? .active : .pending),
             monospace: false))
 
         stages.append(TaskStage(
-            title: "Model response",
-            detail: activeTurn?.finalResponse.map { String($0.prefix(160)) } ?? "Waiting for model output",
+            id: "model",
+            title: responseEvent == nil && promptEvent != nil ? "Requesting model" : "Model response",
+            detail: activeTurn?.finalResponse.map { String($0.prefix(160)) } ??
+                (activeSession?.model.map { "Waiting for \($0)" } ?? "Waiting for model output"),
             timestamp: responseEvent?.ts,
             event: responseEvent,
-            complete: activeTurn?.finalResponse != nil,
+            status: responseEvent != nil ? .completed : (promptEvent != nil ? .active : .pending),
             monospace: false))
 
-        let tools = activeTurn?.toolCalls ?? []
-        if tools.isEmpty {
-            stages.append(TaskStage(
-                title: "Tool & MCP activity",
-                detail: "Waiting for tool evidence",
-                timestamp: nil,
-                event: nil,
-                complete: false,
-                monospace: false))
-        } else {
-            for call in tools.prefix(4) {
-                let related = activeSession?.events.last {
-                    $0.kind == "tool" && ($0.toolCallId == call.id || $0.toolName == call.name)
-                }
-                stages.append(TaskStage(
-                    title: call.friendlyName,
-                    detail: String((call.arguments ?? call.name).prefix(140)),
-                    timestamp: call.startedAt,
-                    event: related,
-                    complete: true,
-                    monospace: true))
-            }
-        }
+        stages.append(toolStage(id: "mcp", title: "MCP / Skill", calls: mcpCalls,
+                                pending: "No MCP or Skill call observed"))
+        stages.append(toolStage(id: "shell", title: "Shell execution", calls: shellCalls,
+                                pending: "No shell command observed"))
+        stages.append(toolStage(id: "write", title: "Writing code", calls: writeCalls,
+                                pending: "No file write observed"))
+        stages.append(toolStage(id: "build", title: "Build", calls: buildCalls,
+                                pending: "No build process observed"))
+        stages.append(toolStage(id: "test", title: "Testing", calls: testCalls,
+                                pending: "No test process observed"))
 
         stages.append(TaskStage(
-            title: verificationEvent == nil ? "Verified" : "Verified",
+            id: "reported",
+            title: "Agent reported completion",
+            detail: activeTurn?.finalResponse.map { String($0.prefix(160)) } ?? "Agent has not reported completion",
+            timestamp: responseEvent?.ts,
+            event: responseEvent,
+            status: activeTurn?.finalResponse == nil ? .pending : .completed,
+            monospace: false))
+
+        stages.append(TaskStage(
+            id: "verified",
+            title: "Independent verification",
             detail: verificationDetail ?? "Not independently verified",
-            timestamp: verificationEvent?.ts ?? responseEvent?.ts,
-            event: verificationEvent ?? responseEvent,
-            complete: verificationEvent != nil || activeTurn?.finalResponse != nil,
+            timestamp: verificationEvent?.ts,
+            event: verificationEvent,
+            status: verificationEvent == nil ? .pending :
+                (verificationEvent?.action.lowercased().contains("fail") == true ? .failed : .completed),
             monospace: false))
         return stages
+    }
+
+    private func toolStage(id: String, title: String, calls: [AgentToolCall], pending: String) -> TaskStage {
+        guard let call = calls.last else {
+            return TaskStage(id: id, title: title, detail: pending, timestamp: nil,
+                             event: nil, status: .pending, monospace: false)
+        }
+        let event = activeSession?.events.last {
+            $0.kind == "tool" && ($0.toolCallId == call.id || $0.toolName == call.name)
+        }
+        let failed = call.status.lowercased().contains("fail") || call.status.lowercased().contains("error")
+        return TaskStage(id: id, title: title,
+                         detail: String((call.arguments ?? call.name).prefix(160)),
+                         timestamp: call.startedAt, event: event,
+                         status: failed ? .failed : (call.completedAt == nil ? .active : .completed),
+                         monospace: true)
+    }
+
+    private func toolKind(_ call: AgentToolCall) -> String {
+        let value = "\(call.name) \(call.arguments ?? "")".lowercased()
+        if value.contains("mcp") || value.contains("skill") { return "mcp" }
+        if ["swift test", "npm test", "pytest", "cargo test", "go test", "xcodebuild test", " test "]
+            .contains(where: value.contains) { return "test" }
+        if ["swift build", "npm run build", "cargo build", "xcodebuild", " gcc ", " clang ", "compile"]
+            .contains(where: value.contains) { return "build" }
+        if ["apply_patch", "write", "edit", "create_file", "delete_file", "rename"]
+            .contains(where: value.contains) { return "write" }
+        if ["exec", "shell", "bash", "/bin/zsh", "/bin/sh", "terminal"]
+            .contains(where: value.contains) { return "shell" }
+        return "mcp"
     }
 
     // MARK: - Helpers
@@ -1117,6 +1340,12 @@ struct AgentOperationsCenterView: View {
         let depth: Int
         let guides: [Bool]
         let agentHint: String?
+    }
+
+    private struct OverviewProcessGroup: Identifiable {
+        let id: String
+        let node: TreeNode
+        var processes: [ProcessSnapshotRecord]
     }
 
     private static func buildTree(_ processes: [ProcessSnapshotRecord]) -> [TreeNode] {

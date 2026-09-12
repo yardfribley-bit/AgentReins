@@ -150,6 +150,8 @@ final class TurnJournalTests: XCTestCase {
             command: "/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host")
         let mcp = ProcessSnapshotRecord(pid: "203", ppid: "201",
             command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs")
+        let repl = ProcessSnapshotRecord(pid: "204", ppid: "201",
+            command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl")
         let cursor = ProcessSnapshotRecord(pid: "301", ppid: "300",
             command: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper --type=pty-host")
 
@@ -169,6 +171,8 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codex, agentHint: "Codex").capability, .agentCore)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codeMode, agentHint: "Codex").displayName, "Code Execution Host")
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(mcp, agentHint: "Codex").capability, .mcp)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(repl, agentHint: "Codex").displayName, "Node REPL")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(repl, agentHint: "Codex").capability, .sandbox)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursor, agentHint: "Cursor").capability, .toolRuntime)
     }
 
