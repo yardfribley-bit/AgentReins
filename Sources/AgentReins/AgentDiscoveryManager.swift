@@ -85,11 +85,33 @@ final class AgentDiscoveryManager: ObservableObject {
     private func publish(_ result: [DiscoveredAgent], observedAt: Date) {
         guard observedAt >= lastPublishedObservation else { return }
         lastPublishedObservation = observedAt
-        agents = result
-        for (id, connected) in adapterHealth {
-            applyAdapterState(id, connected: connected)
+        let prepared = result.map { item -> DiscoveredAgent in
+            guard let connected = adapterHealth[item.id] else { return item }
+            let expected = connectedState(for: item)
+            let fallback: AgentConnectionState = item.presence == .running ?
+                (item.adapter == nil ? .processOnly : .partial) : .installed
+            return DiscoveredAgent(id: item.id, product: item.product, presence: item.presence,
+                instances: item.instances, processIds: item.processIds, confidence: item.confidence,
+                identificationEvidence: item.identificationEvidence,
+                connection: connected ? expected : fallback, coverage: item.coverage,
+                adapter: item.adapter, missing: item.missing, lastSeen: item.lastSeen)
         }
+        // `lastSeen` advances on every process snapshot. Publishing for that
+        // timestamp alone invalidates the complete SwiftUI operations center.
+        guard !sameDiscoveryState(prepared, agents) else { return }
+        agents = prepared
         lastScan = observedAt
+    }
+
+    private func sameDiscoveryState(_ lhs: [DiscoveredAgent], _ rhs: [DiscoveredAgent]) -> Bool {
+        guard lhs.count == rhs.count else { return false }
+        return zip(lhs, rhs).allSatisfy { a, b in
+            a.id == b.id && a.product == b.product && a.presence == b.presence &&
+                a.instances == b.instances && a.processIds == b.processIds &&
+                a.confidence == b.confidence && a.identificationEvidence == b.identificationEvidence &&
+                a.connection == b.connection && a.coverage == b.coverage &&
+                a.adapter == b.adapter && a.missing == b.missing
+        }
     }
 
     func setAdapterConnected(_ id: String, connected: Bool) {
@@ -100,7 +122,7 @@ final class AgentDiscoveryManager: ObservableObject {
     private func applyAdapterState(_ id: String, connected: Bool) {
         guard let index = agents.firstIndex(where: { $0.id == id }) else { return }
         let item = agents[index]
-        let expected: AgentConnectionState = id == "grok-web" ? .browser : .native
+        let expected = connectedState(for: item)
         let fallback: AgentConnectionState = item.presence == .running ?
             (item.adapter == nil ? .processOnly : .partial) : .installed
         let next = connected ? expected : fallback
@@ -109,6 +131,15 @@ final class AgentDiscoveryManager: ObservableObject {
             instances: item.instances, processIds: item.processIds, confidence: item.confidence,
             identificationEvidence: item.identificationEvidence, connection: next,
             coverage: item.coverage, adapter: item.adapter, missing: item.missing, lastSeen: item.lastSeen)
+    }
+
+    private func connectedState(for item: DiscoveredAgent) -> AgentConnectionState {
+        if item.id == "grok-web" { return .browser }
+        // Claude Desktop cloud chat and Claude Code use different evidence
+        // stores. A healthy Claude Code reader must not claim native coverage
+        // for a Desktop-only process.
+        if item.id == "claude" && !item.instances.contains("CLI / background service") { return .partial }
+        return .native
     }
 }
 
@@ -136,7 +167,8 @@ enum AgentDiscoveryEngine {
             dataPath: "\(home)/.qoder/projects", adapter: "qoder-native"),
         Signature(id: "claude", product: "Claude",
             appPaths: ["/Applications/Claude.app", "\(home)/Applications/Claude Code URL Handler.app"],
-            markers: ["/claude.app/", "/claude-code", "/claude "], dataPath: "\(home)/.claude", adapter: nil),
+            markers: ["/claude.app/", "/claude-code", "/claude "], dataPath: "\(home)/.claude/projects",
+            adapter: "claude-code-native"),
         Signature(id: "cursor", product: "Cursor", appPaths: ["/Applications/Cursor.app"],
             markers: ["/cursor.app/", "/.cursor/"],
             dataPath: "\(home)/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
@@ -164,7 +196,10 @@ enum AgentDiscoveryEngine {
                 signature.dataPath.map(existingPaths.contains) == true
             guard installed || !matches.isEmpty else { return nil }
             let running = !matches.isEmpty
-            let hasNativeData = signature.dataPath.map(existingPaths.contains) == true && signature.adapter != nil
+            let adapterMatchesRunningProduct = signature.id != "claude" ||
+                matches.contains { !$0.command.lowercased().contains("/claude.app/") }
+            let hasNativeData = signature.dataPath.map(existingPaths.contains) == true &&
+                signature.adapter != nil && (!running || adapterMatchesRunningProduct)
             var coverage: Set<AgentCoverage> = running ? [.process, .network] : []
             if hasNativeData { coverage.formUnion([.session, .prompt, .response, .tools]) }
             // A directory proves adapter availability, not a healthy connection.

@@ -128,6 +128,19 @@ final class TurnJournalTests: XCTestCase {
                                                     webEvidenceActive: false).isEmpty)
     }
 
+    func testClaudeDesktopDoesNotClaimClaudeCodeNativeCoverage() throws {
+        let processes = [ProcessSnapshotRecord(pid: "40", ppid: "1",
+            command: "/Applications/Claude.app/Contents/MacOS/Claude")]
+        let paths: Set<String> = ["/Applications/Claude.app", AgentDiscoveryEngine.home + "/.claude/projects"]
+        let claude = try XCTUnwrap(AgentDiscoveryEngine.discover(processes: processes,
+            existingPaths: paths, webEvidenceActive: false).first { $0.id == "claude" })
+
+        XCTAssertEqual(claude.presence, .running)
+        XCTAssertEqual(claude.connection, .partial)
+        XCTAssertFalse(claude.coverage.contains(.prompt))
+        XCTAssertEqual(claude.instances, ["Desktop"])
+    }
+
     func testAgentRootDiscoveryRejectsProductNamesInsideUserProjectPaths() {
         let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["chatgpt", "codex", "workbuddy", "cursor"])
         XCTAssertTrue(provider.isAgentRootExecutable("/Applications/WorkBuddy.app/Contents/MacOS/Electron"))
@@ -1395,6 +1408,26 @@ final class TurnJournalTests: XCTestCase {
         try process.run()
         process.waitUntilExit()
         XCTAssertEqual(process.terminationStatus, 0, "git \(arguments.joined(separator: " ")) failed")
+    }
+
+    func testClaudeAdapterCapturesTurnModelToolsUsageAndPermissions() throws {
+        let rows = [
+            #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"turn-1","timestamp":"2026-09-13T00:00:00Z","cwd":"/tmp/project","message":{"role":"user","content":"Build a safe parser"}}"#,
+            #"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s1","timestamp":"2026-09-13T00:00:01Z","cwd":"/tmp/project","message":{"id":"msg-1","model":"claude-sonnet-4-5","stop_reason":"tool_use","usage":{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900},"content":[{"type":"thinking","thinking":"private chain"},{"type":"text","text":"I will inspect it."},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"Parser.swift"}}]}}"#,
+            #"{"type":"user","uuid":"u2","parentUuid":"a1","sessionId":"s1","timestamp":"2026-09-13T00:00:02Z","cwd":"/tmp/project","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"source","is_error":false}]}}"#,
+            #"{"type":"permission-mode","sessionId":"s1","permissionMode":"acceptEdits","timestamp":"2026-09-13T00:00:03Z"}"#
+        ]
+        let parsed = ClaudeSight.parse(Data(rows.joined(separator: "\n").utf8))
+
+        XCTAssertEqual(parsed.malformed, 0)
+        XCTAssertEqual(parsed.events.first { $0.op == "prompt" }?.userIntent, "Build a safe parser")
+        XCTAssertEqual(parsed.events.first { $0.op == "response" }?.model, "claude-sonnet-4-5")
+        XCTAssertEqual(parsed.events.first { $0.op == "response" }?.inputTokens, 1200)
+        XCTAssertEqual(parsed.events.first { $0.op == "response" }?.cachedTokens, 900)
+        XCTAssertEqual(parsed.events.first { $0.op == "call" }?.toolName, "Read")
+        XCTAssertEqual(parsed.events.first { $0.op == "result" }?.modelResponse, "source")
+        XCTAssertTrue(parsed.events.first { $0.op == "turn_context" }?.command?.contains("acceptEdits") == true)
+        XCTAssertNil(parsed.events.first { $0.op == "reasoning_observed" }?.modelReasoning)
     }
 
     private func gitOutput(_ arguments: [String], at root: URL) throws -> String {
