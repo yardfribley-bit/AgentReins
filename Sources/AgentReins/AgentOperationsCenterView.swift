@@ -849,6 +849,8 @@ struct AgentOperationsCenterView: View {
                     Divider().overlay(border)
                     if selectedStageID == "context" {
                         contextPreparedDetail
+                    } else if selectedStageID == "model" {
+                        modelRequestDetail
                     } else if selectedProcessGroup.count > 1 {
                         processGroupResponsibility(selectedProcessGroup)
                     } else if let p = selectedProcess {
@@ -1017,6 +1019,103 @@ struct AgentOperationsCenterView: View {
         }
     }
 
+    private var activeTurnEvidenceEvents: [GuardEvent] {
+        guard let session = activeSession else { return [] }
+        let turnID = activeTurn?.id
+        return session.events.filter { event in
+            if turnID == "unattributed" { return event.turnId == nil }
+            return event.turnId == turnID || (event.turnId == nil && event.kind == "context")
+        }
+    }
+
+    private var modelRequestDetail: some View {
+        let rows = activeTurnEvidenceEvents
+        let economics = ModelEconomicsReport.build(events: rows)
+        let exposure = ContextExposureReport.build(events: rows)
+        let traffic = AgentTrafficAnalyzer.build(events: rows)
+        let knownRoute = traffic.first { $0.classification == .modelRelay || $0.classification == .modelProvider }
+        let routeStatus = knownRoute.map { $0.classification.rawValue } ?? "Unknown"
+        let routeColor = knownRoute?.classification == .modelProvider ? green : amber
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("MODEL REQUEST FORENSICS").micro(cyan)
+            Text("What was sent, where it went, and what was reported")
+                .font(.system(size: 15, weight: .bold))
+            HStack(spacing: 7) {
+                contextMetric("REPORTED MODEL", activeTurn?.modelNames ?? "Not captured")
+                contextMetric("ROUTE", routeStatus)
+            }
+            HStack(spacing: 7) {
+                contextMetric("REQUESTS", economics.map { $0.requestCount.formatted() } ?? "Not reported")
+                contextMetric("COST", economics.flatMap { $0.totalCostUSD > 0 ? String(format: "$%.6f", $0.totalCostUSD) : nil }
+                    ?? "Not reported")
+            }
+
+            HStack(spacing: 7) {
+                Circle().fill(routeColor).frame(width: 7, height: 7)
+                Text(knownRoute == nil ? "The actual model endpoint was not identified" :
+                    "Destination classified as \(routeStatus.lowercased())")
+                    .font(.system(size: 10, weight: .semibold))
+            }
+            Text(knownRoute == nil
+                 ? "Socket candidates were observed, but no hostname or configured endpoint evidence proves which connection carried this model request."
+                 : "Classification is based on recorded destination evidence; a relay can still misreport its upstream model.")
+                .font(.system(size: 9)).foregroundStyle(.secondary)
+
+            if let economics {
+                Divider().overlay(border)
+                Text("TOKEN AND COST EVIDENCE").micro(.secondary)
+                field("Input", "\(economics.cumulativeInputTokens.formatted()) tokens")
+                field("Cached", "\(economics.cumulativeCachedTokens.formatted()) tokens")
+                field("Output", "\(economics.cumulativeOutputTokens.formatted()) tokens")
+                field("Reasoning", "\(economics.cumulativeReasoningTokens.formatted()) tokens")
+                field("Repeated input load", "\(economics.subsequentRequestInputLoad.formatted()) tokens")
+                Text("Token and cost values are provider-reported. A zero or absent cost is displayed as not reported, not free.")
+                    .font(.system(size: 8)).foregroundStyle(.tertiary)
+            }
+
+            if let exposure {
+                Divider().overlay(border)
+                Text("DATA EXPOSED TO THE MODEL ROUTE").micro(.secondary)
+                field("Captured prompt", formatBytes(exposure.capturedPromptBytes))
+                ForEach(exposure.items.filter(\.present), id: \.category.rawValue) { item in
+                    HStack(alignment: .top, spacing: 7) {
+                        Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(item.category.rawValue).font(.system(size: 9, weight: .semibold))
+                            if !item.evidence.isEmpty {
+                                Text(item.evidence.joined(separator: " · ")).mono()
+                            }
+                        }
+                    }
+                }
+            }
+
+            Divider().overlay(border)
+            Text("OBSERVED NETWORK CANDIDATES").micro(.secondary)
+            if traffic.isEmpty {
+                Text("No turn-linked destination evidence was captured.")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            } else {
+                ForEach(traffic, id: \.destination) { destination in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(destination.destination).font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            Spacer()
+                            Text(destination.classification.rawValue.uppercased())
+                                .font(.system(size: 7, weight: .bold)).foregroundStyle(
+                                    destination.classification == .modelProvider ? green : amber)
+                        }
+                        Text("\(destination.confidence.rawValue.capitalized) · PID " +
+                             (destination.processIds.isEmpty ? "not captured" : destination.processIds.map(String.init).joined(separator: ", ")))
+                            .font(.system(size: 8)).foregroundStyle(.secondary)
+                    }
+                    .padding(8).background(raised, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(border))
+                }
+            }
+        }
+    }
+
     private struct ContextInspectorItem: Identifiable {
         let id: String
         let title: String
@@ -1027,12 +1126,7 @@ struct AgentOperationsCenterView: View {
     }
 
     private var contextEvidenceEvents: [GuardEvent] {
-        guard let session = activeSession else { return [] }
-        let turnID = activeTurn?.id
-        return session.events.filter { event in
-            if turnID == "unattributed" { return event.turnId == nil }
-            return event.turnId == turnID || (event.turnId == nil && event.kind == "context")
-        }
+        activeTurnEvidenceEvents
     }
 
     private var contextPreparedDetail: some View {
