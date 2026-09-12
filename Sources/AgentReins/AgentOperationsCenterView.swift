@@ -847,7 +847,9 @@ struct AgentOperationsCenterView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     securitySummary
                     Divider().overlay(border)
-                    if selectedProcessGroup.count > 1 {
+                    if selectedStageID == "context" {
+                        contextPreparedDetail
+                    } else if selectedProcessGroup.count > 1 {
                         processGroupResponsibility(selectedProcessGroup)
                     } else if let p = selectedProcess {
                         processResponsibility(p)
@@ -1013,6 +1015,158 @@ struct AgentOperationsCenterView: View {
                 field("Review reason", assessment.reason)
             }
         }
+    }
+
+    private struct ContextInspectorItem: Identifiable {
+        let id: String
+        let title: String
+        let source: String
+        let status: String
+        let detail: String
+        let confirmed: Bool
+    }
+
+    private var contextEvidenceEvents: [GuardEvent] {
+        guard let session = activeSession else { return [] }
+        let turnID = activeTurn?.id
+        return session.events.filter { event in
+            if turnID == "unattributed" { return event.turnId == nil }
+            return event.turnId == turnID || (event.turnId == nil && event.kind == "context")
+        }
+    }
+
+    private var contextPreparedDetail: some View {
+        let rows = contextInspectorItems
+        let captured = rows.filter { $0.status != "Not observed" }.count
+        let report = ContextExposureReport.build(events: contextEvidenceEvents)
+        return VStack(alignment: .leading, spacing: 12) {
+            Text("CONTEXT PREPARED").micro(cyan)
+            Text("What the Agent assembled before asking the model")
+                .font(.system(size: 15, weight: .bold))
+            Text("This view shows recorded input evidence. It does not claim access to hidden model reasoning.")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+
+            HStack(spacing: 7) {
+                contextMetric("MODEL", activeTurn?.modelNames ?? activeSession?.model ?? "Not captured")
+                contextMetric("INPUT", activeTurn?.inputTokens.map { "\($0.formatted()) tokens" }
+                    ?? formatBytes(report?.capturedPromptBytes ?? activeTurn?.contextBytes ?? 0))
+            }
+            HStack(spacing: 7) {
+                contextMetric("LAYERS", "\(captured) / \(rows.count) observed")
+                contextMetric("EVIDENCE", report == nil ? "Partial" : "Recorded")
+            }
+
+            Divider().overlay(border)
+            Text("CONTEXT COMPOSITION").micro(.secondary)
+            ForEach(rows) { row in
+                contextInspectorRow(row)
+            }
+
+            if let growth = activeTurn?.contextGrowth {
+                Divider().overlay(border)
+                Text("CONTEXT GROWTH").micro(.secondary)
+                field("Latest request", "\(growth.latestInputTokens.formatted()) input tokens")
+                field("Growth this turn", "\(growth.growthTokens.formatted()) tokens")
+                field("Repeated input load", "\(growth.cumulativeInputTokens.formatted()) cumulative tokens")
+            }
+        }
+    }
+
+    private func contextMetric(_ label: String, _ value: String) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).micro(.secondary)
+            Text(value).font(.system(size: 9, weight: .semibold)).lineLimit(2)
+        }
+        .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        .background(raised, in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(border))
+    }
+
+    private func contextInspectorRow(_ row: ContextInspectorItem) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack(alignment: .firstTextBaseline) {
+                Circle().fill(row.status == "Not observed" ? Color.gray : (row.confirmed ? green : amber))
+                    .frame(width: 6, height: 6)
+                Text(row.title).font(.system(size: 11, weight: .semibold))
+                Spacer()
+                Text(row.status).font(.system(size: 8, weight: .bold))
+                    .foregroundStyle(row.status == "Not observed" ? .secondary : (row.confirmed ? green : amber))
+            }
+            if row.status != "Not observed" {
+                Text(row.detail).font(.system(size: 9, design: .monospaced))
+                    .foregroundStyle(.secondary).textSelection(.enabled)
+                    .fixedSize(horizontal: false, vertical: true)
+                Text("Source · \(row.source)").font(.system(size: 8)).foregroundStyle(.tertiary)
+            }
+        }
+        .padding(9)
+        .background(raised.opacity(row.status == "Not observed" ? 0.45 : 1), in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(border.opacity(row.status == "Not observed" ? 0.55 : 1)))
+    }
+
+    private var contextInspectorItems: [ContextInspectorItem] {
+        let rows = contextEvidenceEvents
+        let prompts = rows.compactMap(\.modelPrompt)
+        let joined = prompts.joined(separator: "\n")
+        let lower = joined.lowercased()
+        let user = activeTurn?.userInput ?? rows.compactMap(\.userIntent).last
+        let base = rows.first { $0.op == "base_instructions" }?.modelPrompt
+        let developer = rows.filter { $0.op == "developer_instructions" }.compactMap(\.modelPrompt).joined(separator: "\n")
+        let turnContext = rows.last { $0.op == "turn_context" }?.command
+        let attachments = rows.filter { $0.op == "attachment" }.compactMap(\.command).joined(separator: "\n")
+        let compacted = rows.last { $0.op == "context_compaction" }?.command
+        let toolResults = rows.filter { $0.kind == "tool" && $0.op == "result" }.compactMap(\.modelResponse).joined(separator: "\n")
+
+        func direct(_ id: String, _ title: String, _ value: String?, source: String) -> ContextInspectorItem {
+            let clean = value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            return ContextInspectorItem(id: id, title: title, source: source,
+                status: clean?.isEmpty == false ? "Captured" : "Not observed",
+                detail: contextPreview(clean ?? ""), confirmed: true)
+        }
+        func detected(_ id: String, _ title: String, needles: [String], source: String) -> ContextInspectorItem {
+            guard let needle = needles.first(where: { lower.contains($0.lowercased()) }) else {
+                return ContextInspectorItem(id: id, title: title, source: source,
+                    status: "Not observed", detail: "", confirmed: false)
+            }
+            return ContextInspectorItem(id: id, title: title, source: source,
+                status: "Detected", detail: contextExcerpt(joined, around: needle), confirmed: false)
+        }
+        return [
+            direct("user", "User request", user, source: "turn prompt"),
+            direct("base", "Base / system instructions", base, source: "session metadata"),
+            direct("developer", "Developer instructions", developer.isEmpty ? nil : developer,
+                   source: "developer message"),
+            detected("project", "Project and workspace context",
+                     needles: ["<project_context", "<project_layout", "workspace folder"], source: "model prompt"),
+            detected("memory", "Memory and identity", needles: ["USER.md", "IDENTITY.md", "SOUL.md", "memory"],
+                     source: "model prompt"),
+            detected("skills", "Skills and Agent policy", needles: ["SKILL.md", "skills", "agent policy"],
+                     source: "model prompt"),
+            detected("mcp", "MCP and connectors", needles: ["connector-status", "serverNames", "MCP"],
+                     source: "model prompt"),
+            direct("permissions", "Runtime permissions", turnContext, source: "turn context"),
+            direct("attachments", "Images and attachments", attachments.isEmpty ? nil : attachments,
+                   source: "attachment events"),
+            direct("history", "Tool results in context", toolResults.isEmpty ? nil : toolResults,
+                   source: "tool result events"),
+            direct("compaction", "Compacted conversation history", compacted,
+                   source: "context compaction event")
+        ]
+    }
+
+    private func contextPreview(_ value: String, limit: Int = 280) -> String {
+        let compact = value.replacingOccurrences(of: "\\s+", with: " ", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return compact.count > limit ? String(compact.prefix(limit)) + "…" : compact
+    }
+
+    private func contextExcerpt(_ text: String, around needle: String) -> String {
+        guard let range = text.range(of: needle, options: .caseInsensitive) else { return contextPreview(text) }
+        let start = text.index(range.lowerBound, offsetBy: -90, limitedBy: text.startIndex) ?? text.startIndex
+        let end = text.index(range.upperBound, offsetBy: 190, limitedBy: text.endIndex) ?? text.endIndex
+        let prefix = start == text.startIndex ? "" : "…"
+        let suffix = end == text.endIndex ? "" : "…"
+        return prefix + contextPreview(String(text[start..<end]), limit: 300) + suffix
     }
 
     private func fileOperationIcon(_ operation: String) -> String {
