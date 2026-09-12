@@ -4,6 +4,7 @@ import SwiftUI
 final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppNotifier.requestAuthorization()
+        BrowserProtectionInstaller.installBundledAssets()
         if let url = Bundle.main.url(forResource: "AgentReins", withExtension: "icns"),
            let icon = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = icon

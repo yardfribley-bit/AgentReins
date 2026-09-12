@@ -2,6 +2,55 @@ import AppKit
 import Foundation
 import SwiftUI
 
+enum BrowserProtectionInstaller {
+    static let extensionID = "hcmoeaheokpfbbggdmkdeaiokakiampk"
+    static let stagedExtensionURL = FileManager.default.urls(for: .applicationSupportDirectory,
+        in: .userDomainMask)[0].appendingPathComponent("AgentReins/BrowserExtension")
+
+    /// Chrome must never point inside a replaceable `.app` bundle. The app
+    /// owns a stable staged copy and refreshes it whenever AgentReins launches.
+    static func installBundledAssets() {
+        stageExtension()
+        installNativeHostManifests()
+    }
+
+    static func stageExtension() {
+        guard let bundled = Bundle.main.resourceURL?.appendingPathComponent("BrowserExtension"),
+              FileManager.default.fileExists(atPath: bundled.path) else { return }
+        let fm = FileManager.default
+        try? fm.createDirectory(at: stagedExtensionURL, withIntermediateDirectories: true)
+        let names = ["manifest.json", "service-worker.js", "web-agent-content.js"]
+        for name in names {
+            let source = bundled.appendingPathComponent(name)
+            let destination = stagedExtensionURL.appendingPathComponent(name)
+            guard fm.fileExists(atPath: source.path) else { continue }
+            try? fm.removeItem(at: destination)
+            try? fm.copyItem(at: source, to: destination)
+        }
+        try? fm.removeItem(at: stagedExtensionURL.appendingPathComponent("grok-content.js"))
+    }
+
+    static func installNativeHostManifests() {
+        guard let executable = Bundle.main.executableURL?.deletingLastPathComponent()
+                .appendingPathComponent("AgentReinsNativeHost"),
+              FileManager.default.isExecutableFile(atPath: executable.path) else { return }
+        let body: [String: Any] = [
+            "name": "com.agentspec.agentreins.web",
+            "description": "AgentReins local Web AI evidence bridge",
+            "path": executable.path,
+            "type": "stdio",
+            "allowed_origins": ["chrome-extension://\(extensionID)/"]
+        ]
+        guard let data = try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys]) else { return }
+        let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+        for relative in ["Google/Chrome/NativeMessagingHosts", "Microsoft Edge/NativeMessagingHosts"] {
+            let directory = support.appendingPathComponent(relative)
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try? data.write(to: directory.appendingPathComponent("com.agentspec.agentreins.web.json"), options: .atomic)
+        }
+    }
+}
+
 struct BrowserProtectionView: View {
     let extensionConnected: Bool
     @Environment(\.dismiss) private var dismiss
@@ -156,6 +205,7 @@ struct BrowserProtectionView: View {
     }
 
     private func revealExtension() {
+        BrowserProtectionInstaller.stageExtension()
         NSWorkspace.shared.activateFileViewerSelecting([BrowserProtectionStatus.extensionURL])
     }
 
@@ -166,10 +216,9 @@ struct BrowserProtectionView: View {
 }
 
 private struct BrowserProtectionStatus {
-    static let extensionID = "hcmoeaheokpfbbggdmkdeaiokakiampk"
+    static let extensionID = BrowserProtectionInstaller.extensionID
     static var extensionURL: URL {
-        Bundle.main.resourceURL?.appendingPathComponent("BrowserExtension") ??
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath).appendingPathComponent("BrowserExtension")
+        BrowserProtectionInstaller.stagedExtensionURL
     }
 
     let chromeInstalled: Bool
@@ -182,6 +231,7 @@ private struct BrowserProtectionStatus {
     }
 
     static func inspect() -> BrowserProtectionStatus {
+        BrowserProtectionInstaller.installBundledAssets()
         let fm = FileManager.default
         let support = fm.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/Google/Chrome")
         let profiles = (try? fm.contentsOfDirectory(at: support, includingPropertiesForKeys: nil)) ?? []

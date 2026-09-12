@@ -125,10 +125,17 @@ struct AgentOperationsCenterView: View {
         guard !didUserSelectAgent else { return }
         let running = Set(discoveredAgents.filter { $0.presence == .running }.map { $0.product.lowercased() })
         guard !running.isEmpty else { return }
-        if didSelectInitialAgent && running.contains(selectedAgent.lowercased()) { return }
         if let latest = sessions.filter({ running.contains($0.agent.lowercased()) })
             .max(by: { $0.lastActivityAt < $1.lastActivityAt }) {
-            selectedAgent = latest.agent.capitalized
+            let next = latest.agent.capitalized
+            if selectedAgent.caseInsensitiveCompare(next) != .orderedSame {
+                selectedAgent = next
+                selectedEvent = nil
+                selectedProcess = nil
+                selectedProcessGroup = []
+                selectedStageID = nil
+                followingLive = true
+            }
         } else if let first = discoveredAgents.first(where: { $0.presence == .running }) {
             selectedAgent = first.product
         } else {
@@ -177,6 +184,9 @@ struct AgentOperationsCenterView: View {
         .background(canvas).environment(\.colorScheme, .dark)
         .onAppear { selectInitialAgentIfNeeded() }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
+        .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
+            selectInitialAgentIfNeeded()
+        }
         .onChange(of: discoveredAgents.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: discoveredAgents.map { "\($0.product):\($0.presence.rawValue)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
