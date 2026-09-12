@@ -39,10 +39,14 @@ struct RuntimeComponentRule: Sendable {
     let responsibility: String
     let icon: String
     let securitySurface: [String]
+    let executableNames: [String]
 
     func matches(_ command: String) -> Bool {
         let text = command.lowercased()
-        return (any.isEmpty || any.contains(where: text.contains)) && all.allSatisfy(text.contains)
+        let executable = command.split(separator: " ").first.map(String.init) ?? command
+        let executableName = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
+        return (executableNames.isEmpty || executableNames.contains(executableName)) &&
+            (any.isEmpty || any.contains(where: text.contains)) && all.allSatisfy(text.contains)
     }
 
     func evidence(in command: String) -> [String] {
@@ -106,6 +110,12 @@ enum AgentRuntimeProfileRegistry {
         id: "workbuddy-macos", agent: "WorkBuddy", version: 1,
         aliases: ["workbuddy.app", "/.workbuddy/"],
         rules: [
+            rule("workbuddy-host", ["workbuddy.app/contents/macos/electron"], "WorkBuddy Desktop Host", .interface,
+                 "Hosts the WorkBuddy interface and launches its native agent services.",
+                 "macwindow", ["Agent lifecycle", "User interaction", "Runtime launch"]),
+            rule("workbuddy-codebuddy", ["cli/bin/codebuddy"], "WorkBuddy Agent Core", .agentCore,
+                 "Orchestrates the active coding session, model requests, tools, and child processes.",
+                 "brain.head.profile", ["Prompt assembly", "Tool dispatch", "MCP authority", "Session state"]),
             rule("memory-storage", ["storage service", "storage-service"], "Memory & State Storage", .memory,
                  "Persists conversation state, indexes, cache, and potential long-term memory artifacts.",
                  "externaldrive.badge.timemachine", ["Memory retrieval", "Memory commits", "Conversation retention", "Sensitive local data"]),
@@ -115,7 +125,7 @@ enum AgentRuntimeProfileRegistry {
             rule("node-peer", ["nodepeer", "node-peer"], "NodePeer", .agentCore,
                  "Coordinates WorkBuddy runtime messages and supporting services.",
                  "point.3.connected.trianglepath.dotted", ["Cross-component messages", "Tool dispatch", "Context propagation"]),
-            rule("workbuddy-core", ["/contents/macos/workbuddy"], "WorkBuddy Core", .agentCore,
+            rootRule("workbuddy-core", "workbuddy", "WorkBuddy Core", .agentCore,
                  "Owns the WorkBuddy agent instance and its child-process lifecycle.",
                  "brain.head.profile", ["Task orchestration", "Child process authority", "Session lifecycle"])
         ])
@@ -130,7 +140,7 @@ enum AgentRuntimeProfileRegistry {
             rule("codex-extension", ["openai.chatgpt-"], "Codex Editor Extension", .context,
                  "Bridges editor context, selections, workspace state, and Codex runtime requests.",
                  "puzzlepiece.extension", ["Workspace context exposure", "Editor data", "Permission propagation"]),
-            rule("chatgpt-shell", ["/contents/macos/chatgpt"], "Codex Desktop Host", .interface,
+            rootRule("chatgpt-shell", "chatgpt", "Codex Desktop Host", .interface,
                  "Hosts the desktop interface and the Codex runtime process tree.",
                  "macwindow", ["Agent lifecycle", "User interaction", "Runtime launch"])
         ])
@@ -148,7 +158,7 @@ enum AgentRuntimeProfileRegistry {
             rule("cursor-file-watcher", ["filewatcher", "file-watcher"], "Workspace File Watcher", .storage,
                  "Observes workspace changes used to refresh editor and agent context.",
                  "doc.badge.ellipsis", ["Source-code observation", "Context expansion", "Generated-file detection"]),
-            rule("cursor-core", ["/contents/macos/cursor"], "Cursor Core", .agentCore,
+            rootRule("cursor-core", "cursor", "Cursor Core", .agentCore,
                  "Owns the Cursor editor instance and coordinates its supporting process tree.",
                  "brain.head.profile", ["Agent lifecycle", "Editor authority", "Child process creation"])
         ])
@@ -189,6 +199,15 @@ enum AgentRuntimeProfileRegistry {
                              _ capability: RuntimeCapability, _ responsibility: String,
                              _ icon: String, _ securitySurface: [String]) -> RuntimeComponentRule {
         RuntimeComponentRule(id: id, any: any, all: [], name: name, capability: capability,
-            responsibility: responsibility, icon: icon, securitySurface: securitySurface)
+            responsibility: responsibility, icon: icon, securitySurface: securitySurface,
+            executableNames: [])
+    }
+
+    private static func rootRule(_ id: String, _ executableName: String, _ name: String,
+                                 _ capability: RuntimeCapability, _ responsibility: String,
+                                 _ icon: String, _ securitySurface: [String]) -> RuntimeComponentRule {
+        RuntimeComponentRule(id: id, any: [], all: [], name: name, capability: capability,
+            responsibility: responsibility, icon: icon, securitySurface: securitySurface,
+            executableNames: [executableName])
     }
 }

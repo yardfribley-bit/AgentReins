@@ -17,6 +17,7 @@ struct AgentOperationsCenterView: View {
     @State private var selectedProcess: ProcessSnapshotRecord?
     @State private var centerTab: CenterTab = .overview
     @State private var query = ""
+    @State private var didSelectInitialAgent = false
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -53,10 +54,12 @@ struct AgentOperationsCenterView: View {
         }
     }
     private var processes: [ProcessSnapshotRecord] {
-        let markers = selectedAgent == "All agents"
-            ? discoveredAgents.filter { $0.presence == .running }.map { $0.product.lowercased() }
-            : [selectedAgent.lowercased()]
-        let roots = Set(processInventory.filter { p in markers.contains { p.command.lowercased().contains($0) } }.map(\.pid))
+        let agents = selectedAgent == "All agents"
+            ? discoveredAgents.filter { $0.presence == .running }.map(\.product)
+            : [selectedAgent]
+        let roots = Set(processInventory.filter { process in
+            agents.contains { isRootProcess(process, for: $0) }
+        }.map(\.pid))
         var ids = roots
         for _ in 0..<8 { for p in processInventory where ids.contains(p.ppid) { ids.insert(p.pid) } }
         let list = processInventory.filter { ids.contains($0.pid) }
@@ -66,13 +69,25 @@ struct AgentOperationsCenterView: View {
     }
     private var processTree: [TreeNode] { Self.buildTree(processes) }
     private var activeProcessTree: [TreeNode] {
-        guard let agent = activeSession?.agent.lowercased() else { return processTree }
-        let roots = Set(processInventory.filter { $0.command.lowercased().contains(agent) }.map(\.pid))
+        guard let agent = activeSession?.agent else { return processTree }
+        let roots = Set(processInventory.filter { isRootProcess($0, for: agent) }.map(\.pid))
         var ids = roots
         for _ in 0..<8 {
             for process in processInventory where ids.contains(process.ppid) { ids.insert(process.pid) }
         }
         return Self.buildTree(processInventory.filter { ids.contains($0.pid) })
+    }
+
+    private func isRootProcess(_ process: ProcessSnapshotRecord, for agent: String) -> Bool {
+        let executable = process.command.split(separator: " ").first.map(String.init) ?? process.command
+        let name = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
+        let path = executable.lowercased()
+        switch agent.lowercased() {
+        case "codex": return name == "chatgpt" || path.contains("/applications/chatgpt.app/")
+        case "cursor": return name == "cursor" || path.contains("/applications/cursor.app/")
+        case "workbuddy": return name == "workbuddy" || path.contains("/applications/workbuddy.app/")
+        default: return name == agent.lowercased()
+        }
     }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted()
@@ -100,6 +115,29 @@ struct AgentOperationsCenterView: View {
         return activeTurn?.userInput ?? "Waiting for the next live task"
     }
 
+    private func selectInitialAgentIfNeeded() {
+        guard !didSelectInitialAgent,
+              let latest = sessions.max(by: { $0.lastActivityAt < $1.lastActivityAt }) else { return }
+        selectedAgent = latest.agent.capitalized
+        didSelectInitialAgent = true
+    }
+
+    private func readableActivity(_ turn: AgentTurn?) -> String {
+        guard let turn else { return "Monitoring runtime" }
+        if let call = turn.toolCalls.last {
+            let name = call.name.lowercased()
+            if name.contains("exec") || name.contains("terminal") || name == "bash" || name == "shell" {
+                return "Running a terminal command"
+            }
+            if name.contains("read") || name.contains("search") { return "Reading project context" }
+            if name.contains("write") || name.contains("edit") || name.contains("patch") { return "Editing project files" }
+            if name.contains("mcp") { return "Using MCP · \(call.friendlyName)" }
+            return "Using tool · \(call.friendlyName)"
+        }
+        if let input = turn.userInput, !input.isEmpty { return String(input.prefix(52)) }
+        return "Processing the current task"
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             header
@@ -118,7 +156,10 @@ struct AgentOperationsCenterView: View {
                 inspector.frame(width: 318)
             }
             statusBar
-        }.background(canvas).environment(\.colorScheme, .dark)
+        }
+        .background(canvas).environment(\.colorScheme, .dark)
+        .onAppear { selectInitialAgentIfNeeded() }
+        .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
     }
 
     // MARK: - Chrome
@@ -167,7 +208,7 @@ struct AgentOperationsCenterView: View {
                 let turn = session?.turns.last
                 let running = item.presence == .running
                 fleetRow(name: item.product,
-                         title: running ? (turn?.toolCalls.last.map(\.friendlyName) ?? "Running") : "Idle",
+                         title: running ? readableActivity(turn) : "Idle",
                          detail: "\(item.processIds.count) processes · \(item.connection.rawValue)",
                          live: running)
             }
@@ -368,13 +409,18 @@ struct AgentOperationsCenterView: View {
                              _ complete: Bool, _ tint: Color) -> some View {
         Button { selectedProcess = process; selectedEvent = event } label: {
             VStack(alignment: .leading, spacing: 7) {
-                HStack { Image(systemName: icon).foregroundStyle(tint); Text(title.uppercased()).micro(.secondary); Spacer(); Circle().fill(complete ? tint : Color.gray).frame(width: 7, height: 7) }
+                HStack(spacing: 5) {
+                    Image(systemName: icon).foregroundStyle(tint)
+                    Text(title.uppercased()).micro(.secondary).lineLimit(1).minimumScaleFactor(0.72)
+                    Spacer(minLength: 2)
+                    Circle().fill(complete ? tint : Color.gray).frame(width: 7, height: 7)
+                }
                 Text(value).font(.system(size: 12, weight: .bold)).lineLimit(2)
                 Text(detail ?? "Waiting for evidence").font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(2)
                 Text(event?.attributionConfidence?.rawValue.uppercased() ?? (process == nil ? "UNKNOWN" : "CONFIRMED PID"))
                     .font(.system(size: 7, weight: .bold)).foregroundStyle(event.map { confidenceColor($0.attributionConfidence) } ?? tint)
             }
-            .padding(10).frame(maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
+            .padding(10).frame(minWidth: 118, maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
             .background(raised, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke((selectedEvent?.id == event?.id && event != nil) || selectedProcess?.pid == process?.pid ? tint : border))
         }.buttonStyle(.plain)
@@ -395,12 +441,23 @@ struct AgentOperationsCenterView: View {
                 if processTree.isEmpty {
                     empty("No live process tree")
                 } else {
-                    ForEach(Array(processTree.prefix(centerTab == .processes ? processTree.count : 14))) { node in
+                    let limit = centerTab == .processes ? processTree.count : 9
+                    ForEach(Array(processTree.prefix(limit))) { node in
+                        if node.depth == 0 {
+                            HStack(spacing: 7) {
+                                Image(systemName: "circle.hexagongrid.fill").foregroundStyle(cyan)
+                                Text((node.agentHint ?? "Agent") + " RUNTIME")
+                                    .font(.system(size: 9, weight: .bold)).foregroundStyle(cyan)
+                                Rectangle().fill(border).frame(height: 1)
+                            }.padding(.top, 6).padding(.bottom, 2)
+                        }
                         treeRow(node)
                     }
-                    if centerTab != .processes && processTree.count > 14 {
-                        Text("+ \(processTree.count - 14) additional child processes")
-                            .font(.caption2).foregroundStyle(.secondary).padding(.top, 8)
+                    if centerTab != .processes && processTree.count > limit {
+                        Button { centerTab = .processes } label: {
+                            Text("Open complete process tree · \(processTree.count - limit) more processes")
+                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
+                        }.buttonStyle(.plain).padding(.top, 8)
                     }
                 }
             }
@@ -589,7 +646,7 @@ struct AgentOperationsCenterView: View {
                 metric("Response", activeTurn.map { formatBytes($0.responseCharacters) } ?? "—", "text.bubble")
                 metric("Commands", "\(activeTurn?.toolCalls.count ?? 0)", "terminal")
                 metric("Files", "\(scopedEvents.filter { $0.kind == "file" }.count)", "doc.badge.gearshape")
-                metric("Code scan", findingCount == 0 ? "Passed" : "\(findingCount)", "checkmark.shield",
+                metric("Code findings", findingCount == 0 ? "None observed" : "\(findingCount)", "checkmark.shield",
                        tint: findingCount == 0 ? green : amber)
             }
         }
@@ -642,13 +699,15 @@ struct AgentOperationsCenterView: View {
 
     private var securitySummary: some View {
         VStack(alignment: .leading, spacing: 10) {
-            summaryRow(green, "Execution safe", scopedEvents.isEmpty ? "Waiting" : "Observed")
-            summaryRow(incidents.isEmpty ? green : amber,
-                       incidents.isEmpty ? "No open reviews" : "Relay / items to review",
-                       incidents.isEmpty ? "Clear" : "\(incidents.count)")
-            summaryRow(findingCount == 0 ? green : amber,
-                       "Code scan \(findingCount == 0 ? "passed" : "findings")",
-                       findingCount == 0 ? "Passed" : "\(findingCount)")
+            summaryRow(verificationEvent == nil ? amber : resultColor,
+                       verificationEvent == nil ? "Execution not independently verified" : "Execution verification",
+                       verificationEvent == nil ? "Unknown" : resultHeadline)
+            summaryRow(incidents.isEmpty ? cyan : amber,
+                       incidents.isEmpty ? "No alerts observed" : "Relay / items to review",
+                       incidents.isEmpty ? "Observed only" : "\(incidents.count)")
+            summaryRow(findingCount == 0 ? cyan : amber,
+                       findingCount == 0 ? "No code findings observed" : "Code findings",
+                       findingCount == 0 ? "Not a pass" : "\(findingCount)")
             summaryRow(cyan, "Evidence coverage", evidenceCoverage)
             if !incidents.isEmpty {
                 Button { onIncident(incidents[0]) } label: {
