@@ -3,21 +3,24 @@ import Foundation
 /// 所有安全信号的统一、本地事件仓库。事件跨 App 重启保留，不上传网络。
 @MainActor
 final class EventStore: ObservableObject {
-    @Published private(set) var events: [GuardEvent] = []
-    @Published private(set) var incidents: [SecurityIncident] = []
-    @Published private(set) var sessions: [AgentSessionSnapshot] = []
-    @Published private(set) var influenceChains: [InfluenceChain] = []
-    @Published private(set) var webResourceChains: [WebResourceChain] = []
-    @Published private(set) var externalResources: [ExternalResource] = []
-    @Published private(set) var historyLoaded = false
-    @Published private(set) var persistenceError: String?
-    @Published private(set) var collectorHealth: [CollectorHealthRecord] = []
+    /// A single revision publishes a coherent evidence snapshot. Publishing
+    /// each derived array separately caused 4-7 full dashboard redraws for one
+    /// collector batch.
+    @Published private(set) var revision: UInt64 = 0
+    private(set) var events: [GuardEvent] = []
+    private(set) var incidents: [SecurityIncident] = []
+    private(set) var sessions: [AgentSessionSnapshot] = []
+    private(set) var influenceChains: [InfluenceChain] = []
+    private(set) var webResourceChains: [WebResourceChain] = []
+    private(set) var externalResources: [ExternalResource] = []
+    private(set) var persistenceError: String?
+    private(set) var collectorHealth: [CollectorHealthRecord] = []
 
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let database: EvidenceDatabase?
-    private var maximumEvents: Int { historyLoaded ? 10_000 : 500 }
+    private let maximumEvents = 500
 
     init(fileURL: URL = EventStore.defaultURL()) {
         self.fileURL = fileURL
@@ -29,8 +32,6 @@ final class EventStore: ObservableObject {
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
         database = try? EvidenceDatabase.openRecovering(url: databaseURL)
         load()
-        rebuildAgentSightIndexOnce()
-        importLegacyLogsOnce()
         refreshCollectorHealth()
     }
 
@@ -84,6 +85,7 @@ final class EventStore: ObservableObject {
             if saved.costUSD == nil, candidate.costUSD != nil { return true }
             if saved.action != candidate.action { return true }
             if saved.modelResponse == nil, candidate.modelResponse != nil { return true }
+            if saved.modelResponse != candidate.modelResponse, candidate.kind == "verification" { return true }
             if saved.afterContent == nil, candidate.afterContent != nil { return true }
             return false
         }
@@ -91,17 +93,6 @@ final class EventStore: ObservableObject {
 
     func events(on date: Date, calendar: Calendar = .current) -> [GuardEvent] {
         events.filter { calendar.isDate($0.ts, inSameDayAs: date) }
-    }
-
-    /// Historical session reconstruction is intentionally opt-in. The overview
-    /// only needs the active task and must not pay the cost of rebuilding every
-    /// archived session during application launch.
-    func loadHistory() {
-        guard !historyLoaded else { return }
-        historyLoaded = true
-        rebuildViews()
-        do { try database?.upsertAssessments(ForensicAssessmentRecord.build(events: events)) }
-        catch { persistenceError = error.localizedDescription }
     }
 
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {
@@ -115,23 +106,11 @@ final class EventStore: ObservableObject {
     }
 
     private func load() {
-        let durable = (try? database?.recent(limit: 10_000)) ?? []
-        let legacy: [GuardEvent]
-        if let data = try? Data(contentsOf: fileURL),
-           let saved = try? decoder.decode([GuardEvent].self, from: data) {
-            legacy = saved
-            do { try database?.append(saved) } catch { persistenceError = error.localizedDescription }
-        } else {
-            legacy = []
-        }
-        var byID = Dictionary(uniqueKeysWithValues: legacy.map { ($0.id, $0) })
-        for event in durable { byID[event.id] = event }
-        events = byID.values.sorted { $0.ts > $1.ts }
+        // Historical evidence remains queryable in SQLite but is never loaded
+        // into the live product. Native adapters provide exactly their latest
+        // conversation, followed only by incremental changes.
+        events = []
         rebuildViews()
-        // Backfill only the active window during startup. Full historical
-        // reconstruction remains explicitly user-triggered to protect launch performance.
-        do { try database?.upsertAssessments(ForensicAssessmentRecord.build(events: liveSessionEvents())) }
-        catch { persistenceError = error.localizedDescription }
     }
 
     private func trimAndSave() {
@@ -151,13 +130,14 @@ final class EventStore: ObservableObject {
                 try database.append(evidence)
                 try database.upsertAssessments(ForensicAssessmentRecord.build(events: evidenceForAffectedTurns(evidence)))
                 persistenceError = nil
-                refreshCollectorHealth()
+                refreshCollectorHealth(publish: false)
             } catch {
                 persistenceError = error.localizedDescription
             }
         } else {
             persistenceError = "SQLite evidence database is unavailable"
         }
+        revision &+= 1
     }
 
     private func evidenceForAffectedTurns(_ incoming: [GuardEvent]) -> [GuardEvent] {
@@ -172,19 +152,25 @@ final class EventStore: ObservableObject {
         }
     }
 
-    func refreshCollectorHealth() {
+    func refreshCollectorHealth(publish: Bool = true) {
         guard let database else { return }
-        do { collectorHealth = try database.healthRecords() }
+        do {
+            let snapshot = try database.healthRecords()
+            if snapshot != collectorHealth {
+                collectorHealth = snapshot
+                if publish { revision &+= 1 }
+            }
+        }
         catch { persistenceError = error.localizedDescription }
     }
 
     private func rebuildViews() {
         // 首页/时间线只物化最近窗口，完整原始记录仍保留在本地事件库。
-        incidents = SecurityIncident.correlate(Array(events.prefix(historyLoaded ? 1_200 : 400)))
-        sessions = AgentSessionSnapshot.build(from: historyLoaded ? events : liveSessionEvents())
-        influenceChains = ExternalContentSecurity.influenceChains(events: Array(events.prefix(historyLoaded ? 500 : 300)))
-        webResourceChains = WebResourceSecurity.build(events: Array(events.prefix(historyLoaded ? 1_200 : 400)))
-        externalResources = ExternalResourceCatalog.build(events: Array(events.prefix(historyLoaded ? 1_200 : 400)))
+        incidents = SecurityIncident.correlate(Array(events.prefix(400)))
+        sessions = AgentSessionSnapshot.build(from: liveSessionEvents())
+        influenceChains = []
+        webResourceChains = []
+        externalResources = []
     }
 
     private func liveSessionEvents() -> [GuardEvent] {

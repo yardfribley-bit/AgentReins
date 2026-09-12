@@ -9,9 +9,6 @@ import CryptoKit
 final class CodexSight: ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
-    @Published private(set) var historyRestoring = false
-    @Published private(set) var historyProgress = 0.0
-    @Published private(set) var historyFileCount = 0
     var onEvents: (([GuardEvent]) -> Void)?
 
     private var timer: Timer?
@@ -37,46 +34,26 @@ final class CodexSight: ObservableObject {
 
     func stop() { timer?.invalidate(); timer = nil }
 
-    func restoreHistory() {
-        guard !historyRestoring else { return }
-        let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
-        historyRestoring = true
-        historyProgress = 0
-        queue.async { [weak self] in
-            let files = Self.sessionFiles(root: root)
-            var restored: [GuardEvent] = []
-            for (index, url) in files.enumerated() {
-                restored.append(contentsOf: Self.parseSession(url, fullHistory: true))
-                DispatchQueue.main.async {
-                    self?.historyProgress = files.isEmpty ? 1 : Double(index + 1) / Double(files.count)
-                }
-            }
-            DispatchQueue.main.async {
-                guard let self else { return }
-                let fresh = restored.filter { self.seen.insert($0.id).inserted }
-                self.onEvents?(fresh)
-                self.historyFileCount = files.count
-                self.historyRestoring = false
-                self.historyProgress = 1
-            }
-        }
-    }
-
     private func poll() {
         let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
         let previousSizes = fileSizes
+        let database = evidenceDatabase
         queue.async { [weak self] in
             let batch = Self.readLiveEvents(root: root, previousSizes: previousSizes)
+            let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
+            let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
+            var rawWriteFailed = false
+            do { try database?.appendRaw(batch.raw) } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.connected = FileManager.default.fileExists(atPath: root)
+                let isConnected = FileManager.default.fileExists(atPath: root)
+                if self.connected != isConnected { self.connected = isConnected }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 self.collectionFailures += batch.rawFailures
-                self.malformedRows += batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
-                self.partialRows += batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
-                do { try self.evidenceDatabase?.appendRaw(batch.raw) }
-                catch { self.collectionFailures += 1 }
+                self.malformedRows += malformed
+                self.partialRows += partial
+                if rawWriteFailed { self.collectionFailures += 1 }
                 self.acceptedEvents += fresh.count
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
@@ -114,7 +91,8 @@ final class CodexSight: ObservableObject {
         }
         var sizes: [String: UInt64] = [:]
         var raw: [RawEvidenceRecord] = []
-        let events = files.sorted { $0.1 > $1.1 }.prefix(2).flatMap { item -> [GuardEvent] in
+        // One latest rollout at startup, then byte-level increments only.
+        let events = files.sorted { $0.1 > $1.1 }.prefix(1).flatMap { item -> [GuardEvent] in
             let (url, _, size) = item
             let previous = previousSizes[url.path]
             if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous) {
@@ -125,18 +103,6 @@ final class CodexSight: ObservableObject {
             return parseSession(url, liveStartOffset: start)
         }
         return (events, sizes, raw, max(0, sizes.count - raw.count))
-    }
-
-    private nonisolated static func sessionFiles(root: String) -> [URL] {
-        let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
-        var files: [(URL, Date)] = []
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            let date = (try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            files.append((url, date))
-        }
-        return files.sorted { $0.1 > $1.1 }.map(\.0)
     }
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {

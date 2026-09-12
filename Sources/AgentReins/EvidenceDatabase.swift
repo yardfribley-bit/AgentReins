@@ -78,6 +78,11 @@ final class EvidenceDatabase: @unchecked Sendable {
               , previous_hash TEXT, record_hash TEXT
             ) WITHOUT ROWID
             """)
+        // Hash-chain tail lookup happens on every raw append. Without these
+        // indexes the self-join scanned the complete raw table and blocked the
+        // UI once the local evidence store reached hundreds of megabytes.
+        try execute("CREATE INDEX IF NOT EXISTS raw_evidence_previous_hash ON raw_evidence(previous_hash)")
+        try execute("CREATE INDEX IF NOT EXISTS raw_evidence_record_hash ON raw_evidence(record_hash)")
         try addColumnIfMissing(table: "raw_evidence", column: "previous_hash", definition: "TEXT")
         try addColumnIfMissing(table: "raw_evidence", column: "record_hash", definition: "TEXT")
         try execute("""
@@ -132,15 +137,7 @@ final class EvidenceDatabase: @unchecked Sendable {
         let backupURL = url.appendingPathExtension("backup")
         do {
             let database = try EvidenceDatabase(url: url)
-            guard try database.verifyIntegrity() else {
-                throw NSError(domain: "AgentReins.EvidenceDatabase", code: 2,
-                              userInfo: [NSLocalizedDescriptionKey: "Raw evidence integrity verification failed"])
-            }
-            let temporary = backupURL.appendingPathExtension("new")
-            try? FileManager.default.removeItem(at: temporary)
-            try database.backup(to: temporary)
-            if FileManager.default.fileExists(atPath: backupURL.path) { try FileManager.default.removeItem(at: backupURL) }
-            try FileManager.default.moveItem(at: temporary, to: backupURL)
+            scheduleMaintenance(database: database, backupURL: backupURL)
             return database
         } catch {
             guard FileManager.default.fileExists(atPath: backupURL.path) else { throw error }
@@ -149,6 +146,24 @@ final class EvidenceDatabase: @unchecked Sendable {
             for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: url.path + suffix) }
             try FileManager.default.copyItem(at: backupURL, to: url)
             return try EvidenceDatabase(url: url)
+        }
+    }
+
+    /// Full hash-chain verification and a 100+ MB SQLite backup are important
+    /// maintenance operations, not launch work. Run them at most weekly and
+    /// only after the app has been idle long enough to establish live capture.
+    private static func scheduleMaintenance(database: EvidenceDatabase, backupURL: URL) {
+        let modified = (try? backupURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        guard modified.map({ Date().timeIntervalSince($0) > 7 * 86_400 }) ?? true else { return }
+        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 300) {
+            guard (try? database.verifyIntegrity()) == true else { return }
+            let temporary = backupURL.appendingPathExtension("new")
+            try? FileManager.default.removeItem(at: temporary)
+            guard (try? database.backup(to: temporary)) != nil else { return }
+            if FileManager.default.fileExists(atPath: backupURL.path) {
+                try? FileManager.default.removeItem(at: backupURL)
+            }
+            try? FileManager.default.moveItem(at: temporary, to: backupURL)
         }
     }
 

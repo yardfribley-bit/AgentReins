@@ -31,15 +31,32 @@ protocol ProcessSnapshotting: Sendable {
 /// Entitlement-free macOS process inventory. libproc supplies durable PID/PPID
 /// identity; KERN_PROCARGS2 is read only for agent process trees to limit cost
 /// and avoid collecting unrelated users' command arguments.
-struct DarwinLibprocSnapshotProvider: ProcessSnapshotting {
+final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Sendable {
     let sourceID = "darwin-libproc"
     let agentMarkers: [String]
+    private let stateLock = NSLock()
+    private var knownRoots = Set<pid_t>()
+    private var lastRootDiscovery = Date.distantPast
+    private var cachedAgentRecords: [pid_t: ProcessSnapshotRecord] = [:]
+    // New agent roots may appear at human timescale; their short-lived child
+    // tools do not. Discover roots infrequently, then sample known subtrees at
+    // high frequency so we catch one-second commands without rescanning the OS.
+    private let rootDiscoveryInterval: TimeInterval = 30
 
     init(agentMarkers: [String]) {
         self.agentMarkers = agentMarkers.map { $0.lowercased() }
     }
 
     func snapshot() -> [ProcessSnapshotRecord] {
+        stateLock.lock()
+        let discoverRoots = Date().timeIntervalSince(lastRootDiscovery) >= rootDiscoveryInterval || knownRoots.isEmpty
+        let rootsSnapshot = knownRoots
+        stateLock.unlock()
+
+        if !discoverRoots {
+            return snapshotAgentTrees(roots: rootsSnapshot)
+        }
+
         let capacity = max(Int(proc_listallpids(nil, 0)) * 2, 256)
         var pids = [pid_t](repeating: 0, count: capacity)
         let byteCount = Int32(pids.count * MemoryLayout<pid_t>.size)
@@ -57,6 +74,10 @@ struct DarwinLibprocSnapshotProvider: ProcessSnapshotting {
         let roots = records.compactMap { pid, value in
             agentMarkers.contains(where: value.executable.lowercased().contains) ? pid : nil
         }
+        stateLock.lock()
+        knownRoots = Set(roots)
+        lastRootDiscovery = Date()
+        stateLock.unlock()
         var agentTree = Set(roots)
         var queue = roots
         while let parent = queue.popLast() {
@@ -65,10 +86,64 @@ struct DarwinLibprocSnapshotProvider: ProcessSnapshotting {
             }
         }
 
-        return records.map { pid, value in
-            let rawCommand = agentTree.contains(pid) ? (arguments(pid: pid) ?? value.executable) : value.executable
+        // The all-PID map above is ephemeral and exists only to reconstruct
+        // parent/child edges. Do not return unrelated machine processes to any
+        // collector, store, or UI consumer.
+        let result = agentTree.compactMap { pid -> ProcessSnapshotRecord? in
+            guard let value = records[pid] else { return nil }
+            let rawCommand = arguments(pid: pid) ?? value.executable
             return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid), command: rawCommand)
         }
+        stateLock.lock()
+        cachedAgentRecords = Dictionary(uniqueKeysWithValues: result.compactMap {
+            guard let pid = pid_t($0.pid) else { return nil }
+            return (pid, $0)
+        })
+        stateLock.unlock()
+        return result
+    }
+
+    /// Between low-frequency root discovery passes, enumerate only descendants
+    /// of known AI agents. This is the hot path used to catch short-lived tools.
+    private func snapshotAgentTrees(roots: Set<pid_t>) -> [ProcessSnapshotRecord] {
+        stateLock.lock()
+        let cache = cachedAgentRecords
+        stateLock.unlock()
+        var pending = Array(roots)
+        var visited = Set<pid_t>()
+        var result: [ProcessSnapshotRecord] = []
+        while let pid = pending.popLast() {
+            guard visited.insert(pid).inserted else { continue }
+            if let cached = cache[pid] {
+                result.append(cached)
+            } else if let value = identity(pid: pid) {
+                result.append(ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
+                    command: arguments(pid: pid) ?? value.executable))
+            } else {
+                continue
+            }
+            pending.append(contentsOf: childPIDs(of: pid))
+        }
+        stateLock.lock()
+        cachedAgentRecords = Dictionary(uniqueKeysWithValues: result.compactMap {
+            guard let pid = pid_t($0.pid) else { return nil }
+            return (pid, $0)
+        })
+        stateLock.unlock()
+        return result
+    }
+
+    private func childPIDs(of parent: pid_t) -> [pid_t] {
+        let requiredBytes = proc_listchildpids(parent, nil, 0)
+        guard requiredBytes > 0 else { return [] }
+        let count = max(Int(requiredBytes) / MemoryLayout<pid_t>.size, 1)
+        var pids = [pid_t](repeating: 0, count: count + 8)
+        let capacity = Int32(pids.count * MemoryLayout<pid_t>.size)
+        let bytes = pids.withUnsafeMutableBytes {
+            proc_listchildpids(parent, $0.baseAddress, capacity)
+        }
+        guard bytes > 0 else { return [] }
+        return Array(pids.prefix(Int(bytes) / MemoryLayout<pid_t>.size).filter { $0 > 0 })
     }
 
     private func identity(pid: pid_t) -> (ppid: pid_t, executable: String)? {

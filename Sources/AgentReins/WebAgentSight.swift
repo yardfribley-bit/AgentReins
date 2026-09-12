@@ -38,6 +38,7 @@ final class WebAgentSight: ObservableObject {
     private func poll() {
         let previousOffset = offset
         let url = sourceURL
+        let database = evidenceDatabase
         queue.async { [weak self] in
             guard let self else { return }
             let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
@@ -45,8 +46,12 @@ final class WebAgentSight: ObservableObject {
             let record = RawLogCapture.capture(url: url, source: "web-agent", previousOffset: previousOffset)
             let events = record.map { Self.parse($0.payload) } ?? []
             let checkpoint = record.map(RawLogCapture.safeCheckpoint)
+            var rawWriteFailed = false
+            if let record {
+                do { try database?.appendRaw([record]) } catch { rawWriteFailed = true }
+            }
             DispatchQueue.main.async {
-                self.connected = extensionActive
+                if self.connected != extensionActive { self.connected = extensionActive }
                 guard let record, let checkpoint else {
                     try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                         source: "web-agent", state: self.connected ? .healthy : .failed,
@@ -56,7 +61,7 @@ final class WebAgentSight: ObservableObject {
                     return
                 }
                 do {
-                    try self.evidenceDatabase?.appendRaw([record])
+                    if rawWriteFailed { throw NSError(domain: "AgentReins.WebAgentSight", code: 1) }
                     if !events.isEmpty { self.onEvents?(events); self.lastUpdate = Date() }
                     self.offset = checkpoint
                     try self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(

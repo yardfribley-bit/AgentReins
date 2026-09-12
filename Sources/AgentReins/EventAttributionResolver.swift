@@ -112,7 +112,16 @@ final class EventAttributionResolver: ObservableObject {
             abs(event.ts.timeIntervalSince($0.timestamp)) <= toolWindow
         }
         let byCall = Dictionary(grouping: tools, by: { $0.toolCallId! })
-        guard byCall.count == 1, let group = byCall.values.first else { return nil }
+        if byCall.count > 1 {
+            // When several tools start together, a single tool containing an
+            // explicit URL is the only defensible candidate for a web socket.
+            // Generic MCP and filesystem calls remain ambiguous.
+            let networkTools = tools.filter { requestedDomain(in: $0.command) != nil }
+            let networkByCall = Dictionary(grouping: networkTools, by: { $0.toolCallId! })
+            guard networkByCall.count == 1, let group = networkByCall.values.first else { return nil }
+            return group.max(by: { $0.timestamp < $1.timestamp })
+        }
+        guard let group = byCall.values.first else { return nil }
         return group.max(by: { $0.timestamp < $1.timestamp })
     }
 

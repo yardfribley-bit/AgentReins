@@ -9,7 +9,9 @@ import SwiftUI
 /// 保护的目录时，macOS 弹权限窗会让主线程挂起，导致整个 App 转圈圈卡死。
 /// UI 相关的 @Published 属性只在主线程写回。
 final class FileGuard: ObservableObject {
-    @Published var events: [GuardEvent] = []
+    // EventStore is the single published UI stream; this local buffer exists
+    // only for diagnostics and must not trigger a duplicate full-screen redraw.
+    private(set) var events: [GuardEvent] = []
     @Published var running = false
     var currentRules: [Rule] = []
     var onEvent: ((GuardEvent) -> Void)?

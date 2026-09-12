@@ -18,6 +18,7 @@ final class CursorSight: ObservableObject {
     private let evidenceDatabase = try? EvidenceDatabase()
     private var accepted = 0
     private var malformed = 0
+    private var databaseFingerprint: String?
 
     static var databaseURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -36,15 +37,26 @@ final class CursorSight: ObservableObject {
 
     private func poll() {
         let url = Self.databaseURL
+        let database = evidenceDatabase
+        let previousFingerprint = databaseFingerprint
         queue.async { [weak self] in
+            let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let fingerprint = values.map {
+                "\($0.fileSize ?? -1):\($0.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+            }
+            if fingerprint == previousFingerprint { return }
             let snapshots = Self.readLatest(url: url)
+            let raw = (snapshots ?? []).map(\.rawEvidence)
+            var rawWriteFailed = false
+            do { try database?.appendRaw(raw) } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.connected = FileManager.default.fileExists(atPath: url.path)
+                self.databaseFingerprint = fingerprint
+                let isConnected = FileManager.default.fileExists(atPath: url.path)
+                if self.connected != isConnected { self.connected = isConnected }
                 if snapshots == nil { self.malformed += 1 }
                 let values = snapshots ?? []
-                let raw = values.map(\.rawEvidence)
-                do { try self.evidenceDatabase?.appendRaw(raw) } catch { self.malformed += 1 }
+                if rawWriteFailed { self.malformed += 1 }
                 let fresh = values.flatMap(\.events).filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
@@ -63,15 +75,18 @@ final class CursorSight: ObservableObject {
     }
 
     nonisolated static func readLatest(url: URL) -> [Snapshot]? {
+        read(url: url, offset: 0, latestTurnOnly: true)
+    }
+
+    private nonisolated static func read(url: URL, offset: Int, latestTurnOnly: Bool) -> [Snapshot]? {
         var db: OpaquePointer?
         guard sqlite3_open_v2(url.path, &db, SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK,
               let db else { return nil }
         defer { sqlite3_close(db) }
         sqlite3_busy_timeout(db, 1_000)
-        // `isDraft` lives inside the JSON header in current Cursor builds; it is
-        // not a composerHeaders column. Keep SQL limited to stable columns and
-        // apply the draft check after decoding the compatibility payload.
-        let headers = rows(db, sql: "SELECT composerId,lastUpdatedAt,value FROM composerHeaders WHERE isArchived=0 ORDER BY lastUpdatedAt DESC LIMIT 8")
+        // Live mode reads exactly one non-draft Composer. Historical records are
+        // requested separately, one Composer per low-priority batch.
+        let headers = rows(db, sql: "SELECT composerId,lastUpdatedAt,value FROM composerHeaders WHERE isArchived=0 AND COALESCE(json_extract(value,'$.isDraft'),0)=0 ORDER BY lastUpdatedAt DESC LIMIT 1 OFFSET \(max(0, offset))")
         return headers.compactMap { row in
             guard let id = row[0], let updatedText = row[1], let updated = Int64(updatedText),
                   let header = row[2], let headerData = header.data(using: .utf8),
@@ -79,7 +94,19 @@ final class CursorSight: ObservableObject {
                   (headerObject["isDraft"] as? Bool) != true else { return nil }
             let composerText = scalar(db, sql: "SELECT value FROM cursorDiskKV WHERE key=? LIMIT 1", bind: "composerData:\(id)") ?? header
             let composer = dictionary(composerText) ?? headerObject
-            let bubbleRows = rows(db, sql: "SELECT key,value FROM cursorDiskKV WHERE key GLOB ? ORDER BY rowid", bind: "bubbleId:\(id):*")
+            let pattern = "bubbleId:\(id):*"
+            let bubbleRows: [[String?]]
+            if latestTurnOnly {
+                bubbleRows = rows(db, sql: """
+                    SELECT key,value FROM cursorDiskKV
+                    WHERE key GLOB ? AND json_extract(value,'$.createdAt') >= COALESCE(
+                      (SELECT MAX(json_extract(value,'$.createdAt')) FROM cursorDiskKV
+                       WHERE key GLOB ? AND json_extract(value,'$.type')=1), '')
+                    ORDER BY json_extract(value,'$.createdAt')
+                    """, binds: [pattern, pattern])
+            } else {
+                bubbleRows = rows(db, sql: "SELECT key,value FROM cursorDiskKV WHERE key GLOB ? ORDER BY json_extract(value,'$.createdAt')", bind: pattern)
+            }
             let bubbles: [(String, [String: Any])] = bubbleRows.compactMap { item in
                 guard let key = item[0], let value = item[1], let object = dictionary(value) else { return nil }
                 return (key, object)
@@ -150,6 +177,13 @@ final class CursorSight: ObservableObject {
                     ts: timestamp, session: composerId, turn: turn, workspace: workspace,
                     response: result, model: configuredModel, toolCallId: callID, toolName: name))
 
+                if name == "run_terminal_command_v2", let params {
+                    events.append(contentsOf: terminalEvidence(bubbleID: bubbleID, callID: callID,
+                        timestamp: timestamp, session: composerId, turn: turn, workspace: workspace,
+                        intent: intent, model: configuredModel, status: status, result: result,
+                        parameters: params))
+                }
+
                 if name.lowercased().contains("edit"), let result, let resultObject = dictionary(result),
                    let afterID = resultObject["afterContentId"] as? String {
                     let before = (resultObject["beforeContentId"] as? String).flatMap { content[$0] }
@@ -175,7 +209,72 @@ final class CursorSight: ObservableObject {
                     workspace: workspace, reasoning: thinking, model: configuredModel))
             }
         }
+        events.append(contentsOf: RequirementCompletionAnalyzer.cursorAssessments(
+            composerId: composerId, workspace: workspace, events: events))
         return events
+    }
+
+    /// Cursor can create files through a terminal redirect instead of its native
+    /// edit tool. In that case the Composer record proves the requested command,
+    /// while a bounded read inside the workspace independently proves the file
+    /// that exists now. The association remains inferred because no OS hook
+    /// observed the write itself.
+    private nonisolated static func terminalEvidence(bubbleID: String, callID: String,
+        timestamp: Date, session: String, turn: String?, workspace: String, intent: String?,
+        model: String?, status: String, result: String?, parameters: String) -> [GuardEvent] {
+        guard let object = dictionary(parameters) else { return [] }
+        let targets = terminalOutputTargets(object, workspace: workspace)
+        var projected: [GuardEvent] = targets.compactMap { path in
+            guard let content = boundedWorkspaceFile(path: path, workspace: workspace) else { return nil }
+            return event(id: "\(bubbleID):terminal-file:\(path)", kind: "file", op: "create_or_modify",
+                action: "independently_observed", ts: timestamp, session: session, turn: turn,
+                workspace: path, intent: intent, after: content, model: model,
+                toolCallId: callID, toolName: "run_terminal_command_v2",
+                codeFindings: CodeSecurityScanner.scan(path: path, before: nil, after: content),
+                confidence: .inferred,
+                method: "Cursor terminal redirect target + current workspace file observation")
+        }
+        let terminalFinished = ["completed", "success", "ok"].contains(status.lowercased()) && result != nil
+        let verificationAction = terminalFinished ? "verified" : (!projected.isEmpty ? "partial" : "unverified")
+        let detail: [String: Any] = [
+            "cursorStatus": status,
+            "toolResultCaptured": result != nil,
+            "observedOutputFiles": projected.map(\.path),
+            "note": terminalFinished ? "Cursor recorded a completed terminal result." :
+                "Filesystem effects were observed, but the terminal result was not captured as completed."
+        ]
+        projected.append(event(id: "\(bubbleID):terminal-verification", kind: "verification",
+            op: "terminal_result", action: verificationAction, ts: timestamp, session: session,
+            turn: turn, workspace: workspace, intent: intent, response: json(detail), model: model,
+            toolCallId: callID, toolName: "run_terminal_command_v2",
+            confidence: terminalFinished ? .confirmed : .inferred,
+            method: terminalFinished ? "Cursor native completed Tool Result" :
+                "Cursor Tool Call correlated with independently observed workspace effects"))
+        return projected
+    }
+
+    private nonisolated static func terminalOutputTargets(_ parameters: [String: Any], workspace: String) -> [String] {
+        guard let parsing = parameters["parsingResult"] as? [String: Any],
+              let redirects = parsing["redirects"] as? [[String: Any]] else { return [] }
+        let root = URL(fileURLWithPath: workspace).standardizedFileURL
+        return Array(Set(redirects.compactMap { redirect -> String? in
+            guard let raw = redirect["targetText"] as? String, !raw.isEmpty,
+                  raw != "/dev/null" else { return nil }
+            let expanded = NSString(string: raw).expandingTildeInPath
+            let candidate = URL(fileURLWithPath: expanded, relativeTo: root).standardizedFileURL
+            guard candidate.path.hasPrefix(root.path + "/") else { return nil }
+            return candidate.path
+        })).sorted()
+    }
+
+    private nonisolated static func boundedWorkspaceFile(path: String, workspace: String) -> String? {
+        let root = URL(fileURLWithPath: workspace).standardizedFileURL
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard url.path.hasPrefix(root.path + "/"),
+              let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber, size.intValue <= 1_048_576,
+              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]) else { return nil }
+        return String(data: data, encoding: .utf8)
     }
 
     private nonisolated static func event(id: String, kind: String, op: String, action: String,
@@ -183,7 +282,8 @@ final class CursorSight: ObservableObject {
         command: String? = nil, prompt: String? = nil, reasoning: String? = nil, response: String? = nil,
         before: String? = nil, after: String? = nil, model: String? = nil, trace: String? = nil,
         inputTokens: Int? = nil, toolCallId: String? = nil, toolName: String? = nil,
-        codeFindings: [CodeFinding] = []) -> GuardEvent {
+        codeFindings: [CodeFinding] = [], confidence: EvidenceConfidence = .confirmed,
+        method: String = "Cursor native Composer ID, Bubble ID, Request ID, and Tool Call ID") -> GuardEvent {
         GuardEvent(id: uuid(id), kind: kind, ruleId: "cursor_\(op)", path: workspace,
             command: command, agent: "cursor", op: op,
             severity: codeFindings.contains { $0.severity == "critical" || $0.severity == "high" } ? "high" : "info",
@@ -192,15 +292,21 @@ final class CursorSight: ObservableObject {
             modelResponse: response, toolName: toolName, model: model,
             inputTokens: inputTokens, beforeContent: before, afterContent: after,
             codeFindings: codeFindings.isEmpty ? nil : codeFindings,
-            source: "agentsight:cursor-state-v3", attributionConfidence: .confirmed,
-            attributionMethod: "Cursor native Composer ID, Bubble ID, Request ID, and Tool Call ID")
+            source: "agentsight:cursor-state-v3", attributionConfidence: confidence,
+            attributionMethod: method)
     }
 
     private nonisolated static func rows(_ db: OpaquePointer, sql: String, bind: String? = nil) -> [[String?]] {
+        rows(db, sql: sql, binds: bind.map { [$0] } ?? [])
+    }
+    private nonisolated static func rows(_ db: OpaquePointer, sql: String, binds: [String]) -> [[String?]] {
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(db, sql, -1, &statement, nil) == SQLITE_OK else { return [] }
         defer { sqlite3_finalize(statement) }
-        if let bind { sqlite3_bind_text(statement, 1, bind, -1, unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        for (offset, bind) in binds.enumerated() {
+            sqlite3_bind_text(statement, Int32(offset + 1), bind, -1,
+                              unsafeBitCast(-1, to: sqlite3_destructor_type.self))
+        }
         var result: [[String?]] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             result.append((0..<sqlite3_column_count(statement)).map { index in

@@ -1165,7 +1165,77 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(events.first { $0.kind == "file" }?.path, "/tmp/cursor-project/index.html")
         XCTAssertFalse(events.first { $0.kind == "file" }?.codeFindings?.isEmpty ?? true)
         XCTAssertEqual(events.first { $0.op == "response" }?.modelResponse, "Created index.html")
-        XCTAssertTrue(events.allSatisfy { $0.attributionConfidence == .confirmed })
+        XCTAssertTrue(events.filter { $0.kind != "verification" }
+            .allSatisfy { $0.attributionConfidence == .confirmed })
+        XCTAssertEqual(events.first { $0.op == "requirement_completion" }?.action, "partial")
+    }
+
+    func testCursorTerminalRedirectProducesIndependentFileEvidenceAndPartialVerification() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let output = root.appendingPathComponent("unsafe.py")
+        try "eval(input())\n".write(to: output, atomically: true, encoding: .utf8)
+        let params: [String: Any] = [
+            "command": "printf code > \(output.path)",
+            "parsingResult": ["redirects": [["operator": ">", "targetText": output.path]]]
+        ]
+        let paramsData = try JSONSerialization.data(withJSONObject: params)
+        let user: [String: Any] = ["type": 1, "bubbleId": "user-terminal",
+            "text": "1. Create unsafe.py\n2. Run it", "createdAt": "2026-09-12T09:27:04Z"]
+        let tool: [String: Any] = ["type": 2, "bubbleId": "tool-terminal",
+            "createdAt": "2026-09-12T09:27:21Z", "toolFormerData": [
+                "name": "run_terminal_command_v2", "toolCallId": "terminal-call", "status": "loading",
+                "params": String(data: paramsData, encoding: .utf8)!]]
+        let composer: [String: Any] = ["workspaceIdentifier": ["uri": ["fsPath": root.path]]]
+
+        let events = CursorSight.project(composerId: "composer-terminal", composer: composer,
+            bubbles: [("user", user), ("tool", tool)], content: [:])
+        let file = try XCTUnwrap(events.first { $0.kind == "file" })
+        XCTAssertEqual(file.path, output.path)
+        XCTAssertEqual(file.action, "independently_observed")
+        XCTAssertEqual(file.attributionConfidence, .inferred)
+        XCTAssertEqual(file.codeFindings?.first?.ruleId, "dynamic-eval")
+        XCTAssertEqual(events.first { $0.op == "terminal_result" }?.action, "partial")
+        XCTAssertEqual(events.first { $0.op == "requirement_completion" }?.action, "partial")
+    }
+
+    func testRequirementCompletionDoesNotTrustAgentClaimWithoutArtifacts() {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let prompt = "1. Create README.md\n2. Visit https://example.com\n3. Tell me the tool results"
+        let response = GuardEvent(kind: "model", ruleId: "response", path: root.path, command: nil,
+            agent: "cursor", op: "response", severity: "info", ts: Date(), action: "received",
+            sessionId: "s", turnId: "t", modelResponse: "Everything was completed")
+        let checks = RequirementCompletionAnalyzer.assess(intent: prompt, workspace: root.path, events: [response])
+
+        XCTAssertEqual(checks.count, 3)
+        XCTAssertTrue(checks.allSatisfy { $0.state == "failed" })
+    }
+
+    @MainActor
+    func testNetworkEvidenceSelectsOnlyExplicitURLToolAmongParallelCalls() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        let web = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",
+            command: #"{"url":"https://example.com"}"#, agent: "cursor", op: "call",
+            severity: "info", ts: now, action: "requested", sessionId: "s", turnId: "t",
+            toolCallId: "web-call", toolName: "web_fetch")
+        let mcp = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",
+            command: "{}", agent: "cursor", op: "call", severity: "info", ts: now,
+            action: "requested", sessionId: "s", turnId: "t", toolCallId: "mcp-call",
+            toolName: "get_mcp_tools")
+        resolver.observe([web, mcp], now: now)
+        let socket = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "cursor", op: "connect", severity: "info", ts: now, action: "observed",
+            sessionId: "s", turnId: "t")
+
+        let resolved = resolver.resolve(socket)
+        XCTAssertEqual(resolved.toolCallId, "web-call")
+        XCTAssertEqual(resolved.toolName, "web_fetch")
+        XCTAssertEqual(resolved.remoteDomain, "example.com")
+        XCTAssertEqual(resolved.attributionConfidence, .inferred)
     }
 
     func testRecoveryEligibilityRejectsPreExistingChanges() {

@@ -26,14 +26,20 @@ struct CmdRule {
 /// 本类只做「可视化」（看到 agent 在跑什么命令），不拦截；硬拦截见 agentguard-esf 的 ESF。
 @MainActor
 final class ProcessGuard: ObservableObject {
-    @Published var events: [GuardEvent] = []
+    // Internal bounded diagnostic buffer. The product UI consumes the unified
+    // EventStore, so publishing this duplicate buffer only invalidates the
+    // entire dashboard a second time for every process event.
+    private(set) var events: [GuardEvent] = []
     @Published var running = false
-    @Published private(set) var activeAgents: [String] = []
+    private(set) var activeAgents: [String] = []
     /// Complete live process inventory. This is intentionally separate from
     /// `events`: long-running helpers (Storage Service, NodePeer, MCP servers,
     /// renderers) are evidence even when they are not risky or user actions.
     @Published private(set) var processInventory: [ProcessSnapshotRecord] = []
-    @Published private(set) var collectionHealth = CollectionHealth()
+    // Persisted for Collector Health diagnostics. It is deliberately not
+    // published: no live view consumes this value, and duration changes every
+    // five seconds previously invalidated the entire situation-awareness UI.
+    private(set) var collectionHealth = CollectionHealth()
     var onEvent: ((GuardEvent) -> Void)?
     var onEvents: (([GuardEvent]) -> Void)?
 
@@ -54,6 +60,7 @@ final class ProcessGuard: ObservableObject {
     private var lastHealthPersist: [String: Date] = [:]
     private var workingCollectionHealth = CollectionHealth()
     private var lastHealthPublish = Date.distantPast
+    private var lastInventoryPublish = Date.distantPast
 
     /// 内置默认高危命令监测集（对齐 agentguard/rules.json 的命令层规则）。
     static let builtin: [CmdRule] = {
@@ -125,7 +132,7 @@ final class ProcessGuard: ObservableObject {
         let started = Date()
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let procs = self.getProcs()
+            let procs = self.excludingCollectorTree(self.getProcs())
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.processSnapshotInFlight = false
@@ -139,10 +146,23 @@ final class ProcessGuard: ObservableObject {
                 }
                 self.workingCollectionHealth.lastProcessSuccess = Date()
                 self.latestProcesses = procs
-                self.processInventory = procs.map {
+                let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
+                let attributions = self.attributions(byPid: byPid)
+                let inventory = procs.filter { attributions[$0.pid] != nil }.map {
                     ProcessSnapshotRecord(pid: $0.pid, ppid: $0.ppid, command: $0.cmd)
+                }.sorted { lhs, rhs in
+                    (Int(lhs.pid) ?? 0) < (Int(rhs.pid) ?? 0)
                 }
-                self.process(procs: procs)
+                // A process snapshot arrives every 750 ms so short-lived tools
+                // are observable. Publishing an identical 500-process array at
+                // that cadence forced SwiftUI to rebuild the entire posture
+                // screen continuously and pinned a CPU core.
+                if inventory != self.processInventory,
+                   Date().timeIntervalSince(self.lastInventoryPublish) >= 2 {
+                    self.processInventory = inventory
+                    self.lastInventoryPublish = Date()
+                }
+                self.process(procs: procs, attributions: attributions)
                 self.persistHealth(source: "process", state: .healthy, detail: nil)
                 self.publishHealthIfNeeded()
             }
@@ -189,20 +209,38 @@ final class ProcessGuard: ObservableObject {
 
     // MARK: - 内部
 
+    /// AgentReins may be launched from an agent-owned terminal during
+    /// development. Without this boundary the collector, its `lsof` helper and
+    /// scanner children are attributed back to that agent, creating both false
+    /// process lineage and a self-observation redraw loop.
+    nonisolated private func excludingCollectorTree(
+        _ processes: [(pid: String, ppid: String, cmd: String)]
+    ) -> [(pid: String, ppid: String, cmd: String)] {
+        var excluded: Set<String> = [String(ProcessInfo.processInfo.processIdentifier)]
+        var changed = true
+        while changed {
+            changed = false
+            for process in processes where excluded.contains(process.ppid) {
+                if excluded.insert(process.pid).inserted { changed = true }
+            }
+        }
+        return processes.filter { !excluded.contains($0.pid) }
+    }
+
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
-    private func process(procs: [(pid: String, ppid: String, cmd: String)]) {
-        let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
-        let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
-        let detectedAgents = Array(Set(attributions.values.compactMap { $0 })).sorted()
+    private func process(procs: [(pid: String, ppid: String, cmd: String)],
+                         attributions: [String: String]) {
+        let detectedAgents = Array(Set(attributions.values)).sorted()
         if detectedAgents != activeAgents { activeAgents = detectedAgents }
-        let liveKeys = Set(procs.map { "\($0.pid)|\($0.cmd)" })
+        let agentProcesses = procs.filter { attributions[$0.pid] != nil }
+        let liveKeys = Set(agentProcesses.map { "\($0.pid)|\($0.cmd)" })
         seen.formIntersection(liveKeys)
         var newEvents: [GuardEvent] = []
-        for p in procs {
+        for p in agentProcesses {
             let processKey = "\(p.pid)|\(p.cmd)"
             if seen.contains(processKey) { continue }
             seen.insert(processKey)
-            let agent = attributions[p.pid] ?? nil
+            let agent = attributions[p.pid]
             let matched = currentCmdRules.filter { $0.regex.firstMatch(in: p.cmd,
                 range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil }
             for r in matched {
@@ -226,7 +264,7 @@ final class ProcessGuard: ObservableObject {
                                 connections: [NetworkConnectionRecord],
                                 proxyDestinations: [ProxyDestinationRecord]) {
         let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
-        let attributions = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, attribute(byPid: byPid, pid: $0.pid)) })
+        let attributions = attributions(byPid: byPid)
         for destination in proxyDestinations {
             if let existing = recentProxyDestinations[destination.clientPort],
                existing.timestamp >= destination.timestamp { continue }
@@ -235,14 +273,14 @@ final class ProcessGuard: ObservableObject {
         let cutoff = Date().addingTimeInterval(-300)
         recentProxyDestinations = recentProxyDestinations.filter { $0.value.timestamp >= cutoff }
         let agentConnections = connections
-            .filter { (attributions[$0.pid] ?? nil) != nil }
+            .filter { attributions[$0.pid] != nil }
             .compactMap(resolveProxyDestination)
         let connectionCutoff = Date().addingTimeInterval(-300)
         seenConnections = seenConnections.filter { $0.value >= connectionCutoff }
         var networkEvents: [GuardEvent] = []
         for connection in agentConnections where seenConnections[connection.identity] == nil {
             seenConnections[connection.identity] = Date()
-            if let agent = attributions[connection.pid] ?? nil {
+            if let agent = attributions[connection.pid] {
                 networkEvents.append(makeNetworkEvent(connection, agent: agent))
             }
         }
@@ -266,17 +304,32 @@ final class ProcessGuard: ObservableObject {
         snapshotProvider.snapshot().map { ($0.pid, $0.ppid, $0.command) }
     }
 
-    /// 沿进程树向上回溯，找到包含 agent marker 的祖先进程，即命令的归属 agent。
-    private func attribute(byPid: [String: (ppid: String, cmd: String)], pid: String) -> String? {
-        var visited = Set<String>()
-        var cur = pid
-        while let node = byPid[cur], !visited.contains(cur) {
-            visited.insert(cur)
-            let cl = node.cmd.lowercased()
-            for m in agentMarkers where cl.contains(m) { return m }
-            cur = node.ppid
+    /// The OS snapshot is only a transient discovery index. Find explicit
+    /// agent roots first, then walk downward through their children. Unrelated
+    /// machine processes are neither attributed, retained, nor published.
+    private func attributions(byPid: [String: (ppid: String, cmd: String)]) -> [String: String] {
+        var children: [String: [String]] = [:]
+        for (pid, node) in byPid { children[node.ppid, default: []].append(pid) }
+
+        var result: [String: String] = [:]
+        var queue: [(pid: String, owner: String)] = []
+        for (pid, node) in byPid {
+            let command = node.cmd.lowercased()
+            if let marker = agentMarkers.first(where: command.contains) {
+                result[pid] = marker
+                queue.append((pid, marker))
+            }
         }
-        return nil
+        var index = 0
+        while index < queue.count {
+            let current = queue[index]
+            index += 1
+            for child in children[current.pid] ?? [] where result[child] == nil {
+                result[child] = current.owner
+                queue.append((child, current.owner))
+            }
+        }
+        return result
     }
 
     private func makeEvent(rule: CmdRule, command: String, agent: String?, pid: String, ppid: String) -> GuardEvent {

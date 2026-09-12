@@ -128,12 +128,14 @@ enum GitRepositoryInspector {
 
         let head = gitOutput(["-C", root, "rev-parse", "HEAD"])?.trimmed.nilIfEmpty
         let porcelainV2 = gitOutput(["-C", root, "status", "--porcelain=v2", "--untracked-files=all"]) ?? ""
-        let patch = gitOutput(["-C", root, "diff", "--no-ext-diff", "--binary"]) ?? ""
-        let stagedPatch = gitOutput(["-C", root, "diff", "--cached", "--no-ext-diff", "--binary"]) ?? ""
+        // Text diffs only: --binary on image/artifact trees can pin a core for minutes
+        // and inflate turn-journals.json into tens of megabytes.
+        let patch = gitOutput(["-C", root, "diff", "--no-ext-diff"]) ?? ""
+        let stagedPatch = gitOutput(["-C", root, "diff", "--cached", "--no-ext-diff"]) ?? ""
         let diffStat = gitOutput(["-C", root, "diff", "--stat", "HEAD"]) ?? ""
         let numStat = gitOutput(["-C", root, "diff", "--numstat", "HEAD"]) ?? ""
         let rawFiles = gitData(["-C", root, "status", "--porcelain=v1", "-z", "--untracked-files=all"]) ?? Data()
-        let files = parsePorcelainV1(rawFiles).map { state in
+        let files = parsePorcelainV1(rawFiles).prefix(400).map { state in
             GitFileState(path: state.path, status: state.status,
                          contentFingerprint: fingerprint(root: root, path: state.path))
         }
@@ -171,6 +173,9 @@ enum GitRepositoryInspector {
         let rootURL = URL(fileURLWithPath: root).standardizedFileURL
         let fileURL = rootURL.appendingPathComponent(path).standardizedFileURL
         guard fileURL.path.hasPrefix(rootURL.path + "/"),
+              let attrs = try? FileManager.default.attributesOfItem(atPath: fileURL.path),
+              let size = attrs[.size] as? NSNumber,
+              size.intValue <= 1_048_576,
               let handle = try? FileHandle(forReadingFrom: fileURL) else { return nil }
         defer { try? handle.close() }
         var hash: UInt64 = 14_695_981_039_346_656_037
@@ -205,7 +210,7 @@ enum GitRepositoryInspector {
         return String(data: data, encoding: .utf8)
     }
 
-    private static func gitData(_ arguments: [String]) -> Data? {
+    private static func gitData(_ arguments: [String], timeout: TimeInterval = 4) -> Data? {
         let process = Process()
         let output = Pipe()
         let error = Pipe()
@@ -215,7 +220,16 @@ enum GitRepositoryInspector {
         process.standardError = error
         do {
             try process.run()
-            process.waitUntilExit()
+            let deadline = Date().addingTimeInterval(timeout)
+            while process.isRunning && Date() < deadline {
+                Thread.sleep(forTimeInterval: 0.05)
+            }
+            if process.isRunning {
+                process.terminate()
+                process.waitUntilExit()
+                _ = try? output.fileHandleForReading.readToEnd()
+                return nil
+            }
             guard process.terminationStatus == 0 else { return nil }
             return output.fileHandleForReading.readDataToEndOfFile()
         } catch {
@@ -363,7 +377,6 @@ final class TurnJournalStore: ObservableObject {
 
     private let fileURL: URL
     private let encoder: JSONEncoder
-    private let decoder: JSONDecoder
     private var scheduledSave: Task<Void, Never>?
 
     init(fileURL: URL = TurnJournalStore.defaultURL()) {
@@ -371,10 +384,10 @@ final class TurnJournalStore: ObservableObject {
         encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
-        decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        load()
-        recoverInterruptedJournals()
+        // The live product deliberately starts empty. The journal file is an
+        // evidence artifact, not startup state: loading and re-encoding a
+        // multi-megabyte historical journal made every launch progressively
+        // slower and violated the latest-turn-only contract.
     }
 
     func ingest(_ incoming: [GuardEvent]) {
@@ -457,17 +470,21 @@ final class TurnJournalStore: ObservableObject {
     private func create(_ event: GuardEvent, id: String, sessionId: String, turnId: String) {
         let workspace = normalizedWorkspace(event.path)
         let isPrompt = event.kind == "model" && event.op == "prompt"
-        let baseline = workspace.flatMap { GitRepositoryInspector.capture(workspace: $0, at: event.ts) }
+        // Never capture Git on the main actor. A dirty workspace with binary
+        // artifacts previously blocked the UI for minutes during Cursor ingest.
         let journal = AgentTurnJournal(
             id: id, sessionId: sessionId, turnId: turnId,
             agent: event.agent ?? "Agent", workspace: workspace,
             startedAt: event.ts, completedAt: nil,
             status: status(for: event), captureComplete: isPrompt,
-            baselinePrecedesMutation: isPrompt && baseline != nil,
-            baseline: baseline, finalSnapshot: nil, mutations: [], verificationRuns: [],
+            baselinePrecedesMutation: nil,
+            baseline: nil, finalSnapshot: nil, mutations: [], verificationRuns: [],
             toolCallIds: event.toolCallId.map { [$0] } ?? [])
         journals.append(journal)
         journals.sort { $0.startedAt > $1.startedAt }
+        if let workspace {
+            captureSnapshot(journalId: id, workspace: workspace, baseline: true, at: event.ts)
+        }
         if isTerminal(event), let index = journals.firstIndex(where: { $0.id == id }) {
             finish(&journals[index], with: event)
         }
@@ -476,8 +493,7 @@ final class TurnJournalStore: ObservableObject {
     private func update(_ event: GuardEvent, at index: Int) {
         if journals[index].workspace == nil, let workspace = normalizedWorkspace(event.path) {
             journals[index].workspace = workspace
-            journals[index].baseline = GitRepositoryInspector.capture(workspace: workspace, at: event.ts)
-            journals[index].baselinePrecedesMutation = event.kind == "model" && event.op == "prompt" && journals[index].baseline != nil
+            captureSnapshot(journalId: journals[index].id, workspace: workspace, baseline: true, at: event.ts)
         }
         if event.kind == "model" && event.op == "prompt" {
             journals[index].captureComplete = true
@@ -493,20 +509,27 @@ final class TurnJournalStore: ObservableObject {
         journal.completedAt = event.ts
         journal.status = status(for: event)
         if let workspace = journal.workspace {
-            captureSnapshot(journalId: journal.id, workspace: workspace, baseline: false)
+            captureSnapshot(journalId: journal.id, workspace: workspace, baseline: false, at: event.ts)
         }
     }
 
-    private func captureSnapshot(journalId: String, workspace: String, baseline: Bool) {
+    private func captureSnapshot(journalId: String, workspace: String, baseline: Bool, at date: Date = Date()) {
         Task {
-            let snapshot = await Task.detached { GitRepositoryInspector.capture(workspace: workspace) }.value
+            let snapshot = await Task.detached(priority: .utility) {
+                GitRepositoryInspector.capture(workspace: workspace, at: date)
+            }.value
             guard let index = journals.firstIndex(where: { $0.id == journalId }) else { return }
-            if baseline, journals[index].baseline == nil { journals[index].baseline = snapshot }
+            if baseline, journals[index].baseline == nil {
+                journals[index].baseline = snapshot
+                if journals[index].captureComplete {
+                    journals[index].baselinePrecedesMutation = snapshot != nil
+                }
+            }
             if !baseline { journals[index].finalSnapshot = snapshot }
             journals[index].mutations = GitRepositoryInspector.mutations(
                 between: journals[index].baseline, and: journals[index].finalSnapshot,
                 baselinePrecedesMutation: journals[index].baselinePrecedesMutation)
-            save()
+            scheduleSave()
         }
     }
 
@@ -530,25 +553,10 @@ final class TurnJournalStore: ObservableObject {
         return path
     }
 
-    private func recoverInterruptedJournals() {
-        var changed = false
-        for index in journals.indices where journals[index].completedAt == nil {
-            journals[index].status = .stuck
-            changed = true
-        }
-        if changed { save() }
-    }
-
-    private func load() {
-        guard let data = try? Data(contentsOf: fileURL),
-              let saved = try? decoder.decode([AgentTurnJournal].self, from: data) else { return }
-        journals = saved.sorted { $0.startedAt > $1.startedAt }
-    }
-
     private func save() {
         scheduledSave?.cancel()
         scheduledSave = nil
-        if journals.count > 1_000 { journals.removeLast(journals.count - 1_000) }
+        if journals.count > 100 { journals.removeLast(journals.count - 100) }
         guard let data = try? encoder.encode(journals) else { return }
         try? data.write(to: fileURL, options: .atomic)
     }
@@ -568,7 +576,9 @@ final class TurnJournalStore: ObservableObject {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         let directory = base.appendingPathComponent("AgentGuard", isDirectory: true)
         try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        return directory.appendingPathComponent("turn-journals.json")
+        // Keep the live bounded journal separate from legacy history. This
+        // preserves old evidence on disk without ever reading it at startup.
+        return directory.appendingPathComponent("turn-journals-live.json")
     }
 
     nonisolated static func journalId(sessionId: String, turnId: String) -> String {

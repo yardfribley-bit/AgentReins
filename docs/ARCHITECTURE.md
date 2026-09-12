@@ -49,7 +49,7 @@ All production code lives in `Sources/AgentReins`.
 5. The UI presents a concise outcome first and keeps raw evidence behind expandable details.
 6. Optional semantic analysis runs only after local redaction and only when the user configures it.
 
-Historical session reconstruction is opt-in. Startup restores only the active session window; the History view scans older local evidence in the background when the user requests it.
+Historical session reconstruction is opt-in. Startup restores only the active session window; the History view scans older local evidence in the background when the user requests it. Cursor's three-second live poll selects one non-draft Composer and only bubbles at or after its latest user request. Full Cursor history is read one Composer at a time on a utility-priority task with a one-second yield between records.
 
 ## Trust model
 

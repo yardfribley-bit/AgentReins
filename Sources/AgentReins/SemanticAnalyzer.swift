@@ -20,13 +20,19 @@ final class SemanticAnalyzer: ObservableObject {
     @Published private(set) var usage: [String: AnalysisUsage] = [:]
     @Published private(set) var analyzing = Set<String>()
     @Published var lastError: String?
-    @Published private(set) var configured = KeychainStore.openRouterKey() != nil
+    // Never touch Keychain from a SwiftUI/StateObject initializer. SwiftUI may
+    // evaluate the initializer expression more than once while rebuilding its
+    // graph, and SecItemCopyMatching can block for seconds on macOS. Persist
+    // only the non-sensitive presence flag here; the secret itself is read
+    // solely after an explicit Analyze action.
+    @Published private(set) var configured: Bool
     @Published var model: String {
         didSet { UserDefaults.standard.set(model, forKey: "agr_openrouter_model") }
     }
 
     init() {
         model = UserDefaults.standard.string(forKey: "agr_openrouter_model") ?? "openai/gpt-4o-mini"
+        configured = UserDefaults.standard.bool(forKey: "agr_openrouter_configured")
     }
 
     func configure(key: String, model: String) -> Bool {
@@ -38,6 +44,7 @@ final class SemanticAnalyzer: ObservableObject {
         }
         self.model = cleanModel
         configured = true
+        UserDefaults.standard.set(true, forKey: "agr_openrouter_configured")
         lastError = nil
         return true
     }
@@ -45,6 +52,7 @@ final class SemanticAnalyzer: ObservableObject {
     func removeConfiguration() {
         KeychainStore.deleteOpenRouterKey()
         configured = false
+        UserDefaults.standard.set(false, forKey: "agr_openrouter_configured")
     }
 
     func analyze(_ turn: AgentTurn) async {

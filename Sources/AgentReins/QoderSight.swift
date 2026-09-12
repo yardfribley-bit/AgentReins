@@ -32,12 +32,16 @@ final class QoderSight: ObservableObject {
     private func poll() {
         let root = ("~/.qoder/projects" as NSString).expandingTildeInPath
         let previous = fileSizes
+        let database = self.database
         queue.async { [weak self] in
             let batch = Self.readRecent(root: root, previousSizes: previous)
+            var rawWriteFailed = false
+            do { try database?.appendRaw(batch.raw) } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.connected = FileManager.default.fileExists(atPath: root)
-                do { try self.database?.appendRaw(batch.raw) } catch { self.malformed += 1 }
+                let isConnected = FileManager.default.fileExists(atPath: root)
+                if self.connected != isConnected { self.connected = isConnected }
+                if rawWriteFailed { self.malformed += 1 }
                 self.malformed += batch.malformed
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
@@ -71,7 +75,7 @@ final class QoderSight: ObservableObject {
         }
         var events: [GuardEvent] = [], sizes: [String: UInt64] = [:], raw: [RawEvidenceRecord] = []
         var bad = 0
-        for (url, _, size) in files.sorted(by: { $0.1 > $1.1 }).prefix(3) {
+        for (url, _, size) in files.sorted(by: { $0.1 > $1.1 }).prefix(1) {
             let previous = previousSizes[url.path]
             guard let record = RawLogCapture.capture(url: url, source: "qoder", previousOffset: previous) else {
                 sizes[url.path] = size; continue
