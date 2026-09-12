@@ -64,7 +64,7 @@ struct AgentRuntimeProfile: Sendable {
 }
 
 enum AgentRuntimeProfileRegistry {
-    static let profiles: [AgentRuntimeProfile] = [workBuddy, codex, cursor]
+    static let profiles: [AgentRuntimeProfile] = [workBuddy, codex, claude, cursor]
 
     static func classify(_ process: ProcessSnapshotRecord, agentHint: String? = nil)
         -> RuntimeComponentClassification {
@@ -107,12 +107,33 @@ enum AgentRuntimeProfileRegistry {
     }
 
     private static let workBuddy = AgentRuntimeProfile(
-        id: "workbuddy-macos", agent: "WorkBuddy", version: 1,
+        id: "workbuddy-macos", agent: "WorkBuddy", version: 2,
         aliases: ["workbuddy.app", "/.workbuddy/"],
         rules: [
-            rule("workbuddy-codebuddy", ["cli/bin/codebuddy"], "WorkBuddy Agent Core", .agentCore,
-                 "Orchestrates the active coding session, model requests, tools, and child processes.",
+            rule("workbuddy-active-agent", ["cli/bin/codebuddy --serve"], "Active Agent Runtime", .agentCore,
+                 "Runs the active coding-agent service created by WorkBuddy's sidecar broker.",
                  "brain.head.profile", ["Prompt assembly", "Tool dispatch", "MCP authority", "Session state"]),
+            rule("workbuddy-prewarm-pool", ["cli/bin/codebuddy --prewarm"], "Prewarm Agent Pool", .agentCore,
+                 "Keeps a reusable coding-agent runtime ready and owns its configured MCP children.",
+                 "bolt.horizontal.circle", ["Dormant agent authority", "MCP lifecycle", "Plugin loading"]),
+            rule("workbuddy-sidecar", ["main/sidecar-entry.js"], "Sidecar Broker", .agentCore,
+                 "Controls a headless WorkBuddy agent service outside the visible desktop process tree.",
+                 "point.3.connected.trianglepath.dotted", ["Agent launch token", "Control pipe", "Runtime authority"]),
+            rule("workbuddy-daemon", ["main/daemon-app-server-entry.js"], "Desktop Agent Server", .agentCore,
+                 "Bridges the WorkBuddy desktop interface to agent, editor-context, and integration services.",
+                 "server.rack", ["Task dispatch", "Editor context", "Integration lifecycle"]),
+            rule("workbuddy-mcp-weixin", ["weixinpay", "mcp-server.mjs"], "Weixin Pay MCP Server", .mcp,
+                 "Exposes the installed Weixin Pay plugin across WorkBuddy's MCP trust boundary.",
+                 "shippingbox", ["MCP supply chain", "Tool arguments", "External service access"]),
+            rule("workbuddy-mcp-sheet", ["sheetagent", "/mcp/start.mjs"], "Sheet Agent MCP Server", .mcp,
+                 "Exposes spreadsheet capabilities through WorkBuddy's MCP trust boundary.",
+                 "shippingbox", ["MCP supply chain", "Document access", "Tool results"]),
+            rule("workbuddy-editor-sdk", ["tencent-docs-ai-engine", "editor_sdk"], "Editor Context Engine", .context,
+                 "Collects and serves editor context to the WorkBuddy desktop agent over a local port.",
+                 "doc.text.magnifyingglass", ["Workspace context", "Local API", "Prompt expansion"]),
+            rule("workbuddy-edge-sync", ["edge-sync/server/index.cjs"], "Edge Sync Service", .storage,
+                 "Synchronizes WorkBuddy integration state for the desktop agent runtime.",
+                 "arrow.triangle.2.circlepath", ["Persistent state", "Remote synchronization", "Account context"]),
             rule("workbuddy-host", ["workbuddy.app/contents/macos/electron"], "WorkBuddy Desktop Host", .interface,
                  "Hosts the WorkBuddy interface and launches its native agent services.",
                  "macwindow", ["Agent lifecycle", "User interaction", "Runtime launch"]),
@@ -120,7 +141,7 @@ enum AgentRuntimeProfileRegistry {
                  "Persists conversation state, indexes, cache, and potential long-term memory artifacts.",
                  "externaldrive.badge.timemachine", ["Memory retrieval", "Memory commits", "Conversation retention", "Sensitive local data"]),
             rule("sandbox", ["sandbox-center", "sandbox center"], "Sandbox Center", .sandbox,
-                 "Creates an isolated execution boundary for agent-generated commands and artifacts.",
+                 "Runs as an independently launched isolation boundary for agent-generated commands and artifacts.",
                  "shippingbox.and.arrow.backward", ["Downloaded artifact execution", "Filesystem mounts", "Network access", "Sandbox escape"]),
             rule("node-peer", ["nodepeer", "node-peer"], "NodePeer", .agentCore,
                  "Coordinates WorkBuddy runtime messages and supporting services.",
@@ -155,6 +176,27 @@ enum AgentRuntimeProfileRegistry {
             rootRule("chatgpt-shell", "chatgpt", "Codex Desktop Host", .interface,
                  "Hosts the desktop interface and the Codex runtime process tree.",
                  "macwindow", ["Agent lifecycle", "User interaction", "Runtime launch"])
+        ])
+
+    private static let claude = AgentRuntimeProfile(
+        id: "claude-macos", agent: "Claude", version: 1,
+        aliases: ["claude-code", "/claude.app/", "/usr/local/bin/claude"],
+        rules: [
+            rule("claude-code-cli", ["claude-code/bin/claude", "/usr/local/bin/claude"], "Claude Code Agent", .agentCore,
+                 "Runs the Claude Code session, prepares model context, and dispatches tools from the terminal.",
+                 "brain.head.profile", ["Prompt assembly", "Tool authorization", "Session state", "Model interaction"]),
+            rule("claude-desktop-network", ["network.mojom.networkservice"], "Claude Network Service", .network,
+                 "Owns Claude Desktop network sockets; it is not a Claude Code CLI process.",
+                 "network", ["Anthropic endpoints", "External websites", "Uploaded context"]),
+            rule("claude-desktop-renderer", ["claude helper (renderer)"], "Claude Desktop Renderer", .interface,
+                 "Renders Claude Desktop and Cowork content; it does not prove Claude Code tool execution.",
+                 "macwindow", ["Rendered external content", "Desktop webview isolation"]),
+            rule("claude-desktop-updater", ["claudefordesktop.shipit"], "Claude Desktop Updater", .unknown,
+                 "Updates the Claude Desktop application and is unrelated to an active coding task.",
+                 "arrow.down.app", ["Application update supply chain"]),
+            rootRule("claude-desktop-host", "claude", "Claude Desktop Host", .interface,
+                 "Hosts Claude Desktop and Cowork. Claude Code CLI sessions are represented separately.",
+                 "macwindow", ["Desktop session lifecycle", "User interaction"])
         ])
 
     private static let cursor = AgentRuntimeProfile(

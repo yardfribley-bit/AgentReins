@@ -72,6 +72,7 @@ struct AgentOperationsCenterView: View {
         return list.filter { $0.command.lowercased().contains(q) || $0.pid.contains(q) }
     }
     private var processTree: [TreeNode] { Self.buildTree(processes) }
+    private var runtimeGraph: AgentRuntimeGraph { AgentRuntimeGraph.build(processes: processes, agent: selectedAgent) }
     private var activeProcessTree: [TreeNode] {
         guard let agent = activeSession?.agent else { return processTree }
         return Self.buildTree(processInventory.filter {
@@ -434,73 +435,183 @@ struct AgentOperationsCenterView: View {
 
     private var missionOverview: some View {
         VStack(spacing: 12) {
+            overviewProcessPanel
+                .frame(maxWidth: .infinity, minHeight: 390, alignment: .top)
             HStack(alignment: .top, spacing: 10) {
-                overviewProcessPanel
-                    .frame(minWidth: 330, maxWidth: .infinity, minHeight: 520, alignment: .top)
                 journeyPanel
-                    .frame(minWidth: 300, maxWidth: .infinity, minHeight: 520, alignment: .top)
+                    .frame(minWidth: 440, maxWidth: .infinity, minHeight: 430, alignment: .top)
                 networkPanel
-                    .frame(width: 230)
-                    .frame(minHeight: 520, alignment: .top)
+                    .frame(minWidth: 280, maxWidth: 360)
+                    .frame(minHeight: 430, alignment: .top)
             }
         }
     }
 
     private var overviewProcessPanel: some View {
-        posturePanel("AGENT INTERNALS", "Real process lineage and component responsibilities") {
-            VStack(alignment: .leading, spacing: 0) {
-                if processTree.isEmpty {
-                    empty("Waiting for the live Agent process tree")
-                } else {
-                    let overviewNodes = overviewProcessGroups
-                    let limit = 8
-                    ForEach(Array(overviewNodes.prefix(limit))) { node in compactTreeRow(node) }
-                    if processTree.count > overviewNodes.prefix(limit).count {
-                        Button { centerTab = .processes } label: {
-                            HStack {
-                                Text("View complete process tree")
-                                Spacer()
-                                Text("+\(processTree.count - overviewNodes.prefix(limit).count)")
-                                Image(systemName: "arrow.right")
-                            }
-                            .font(.system(size: 9, weight: .semibold)).foregroundStyle(cyan)
-                            .padding(.top, 8)
-                        }.buttonStyle(.plain)
-                    }
-                }
+        posturePanel("AGENT RUNTIME GRAPH", "Grouped responsibilities · solid = real PPID · dashed = verified or inferred runtime relationship") {
+            if processTree.isEmpty {
+                empty("Waiting for the live Agent runtime")
+            } else {
+                runtimeGraphView(height: 320)
             }
         }
+    }
+
+    private func runtimeRelationshipRow(_ edge: RuntimeRelationship) -> some View {
+        let source = processes.first { $0.pid == edge.sourcePID }
+        let target = processes.first { $0.pid == edge.targetPID }
+        let sourceName = source.map { runtimeComponent($0).displayName } ?? "PID \(edge.sourcePID)"
+        let targetName = target.map { runtimeComponent($0).displayName } ?? "PID \(edge.targetPID)"
+        return Button {
+            selectedProcess = target
+            selectedProcessGroup = target.map { [$0] } ?? []
+            followingLive = false
+        } label: {
+            HStack(spacing: 8) {
+                Image(systemName: "point.3.connected.trianglepath.dotted").foregroundStyle(.blue)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("\(sourceName) ↝ \(targetName)").font(.system(size: 9, weight: .semibold))
+                    Text("\(edge.kind.rawValue) · \(edge.confidence.rawValue) · no PPID relationship claimed")
+                        .font(.system(size: 7.5)).foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+            }.padding(.vertical, 5)
+        }.buttonStyle(.plain).help(edge.evidence)
     }
 
     // MARK: - Panels
 
     private var processPanel: some View {
-        posturePanel("AGENT RUNTIME MAP", "Real PID lineage · Runtime Profile responsibilities · security surfaces") {
-            VStack(alignment: .leading, spacing: 0) {
-                if processTree.isEmpty {
-                    empty("No live process tree")
-                } else {
-                    let limit = centerTab == .processes ? processTree.count : 9
-                    ForEach(Array(processTree.prefix(limit))) { node in
-                        if node.depth == 0 {
-                            HStack(spacing: 7) {
-                                Image(systemName: "circle.hexagongrid.fill").foregroundStyle(cyan)
-                                Text((node.agentHint ?? "Agent") + " RUNTIME")
-                                    .font(.system(size: 9, weight: .bold)).foregroundStyle(cyan)
-                                Rectangle().fill(border).frame(height: 1)
-                            }.padding(.top, 6).padding(.bottom, 2)
-                        }
-                        treeRow(node)
-                    }
-                    if centerTab != .processes && processTree.count > limit {
-                        Button { centerTab = .processes } label: {
-                            Text("Open complete process tree · \(processTree.count - limit) more processes")
-                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
-                        }.buttonStyle(.plain).padding(.top, 8)
-                    }
-                }
+        posturePanel("AGENT RUNTIME GRAPH", "Role topology with evidence-backed relationships; raw PID and PPID remain in node details") {
+            if processTree.isEmpty { empty("No live Agent runtime") }
+            else { runtimeGraphView(height: 560) }
+        }
+    }
+
+    private var graphProcessGroups: [OverviewProcessGroup] {
+        let visible = processTree.filter { !isOverviewInfrastructureNoise($0.process) }
+        var groups: [OverviewProcessGroup] = []
+        var indexes: [String: Int] = [:]
+        for node in visible {
+            let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
+            let executable = URL(fileURLWithPath: node.process.command.split(separator: " ").first.map(String.init) ?? node.process.command).lastPathComponent
+            let key = info.componentId == "unknown" ? "unknown:\(executable)" : info.componentId
+            if let index = indexes[key] { groups[index].processes.append(node.process) }
+            else {
+                indexes[key] = groups.count
+                groups.append(OverviewProcessGroup(id: key, node: node, processes: [node.process]))
             }
         }
+        return groups.sorted { graphLane($0) == graphLane($1) ? $0.id < $1.id : graphLane($0) < graphLane($1) }
+    }
+
+    private struct RuntimeDisplayEdge: Identifiable {
+        let id: String
+        let source: String
+        let target: String
+        let kind: RuntimeRelationshipKind
+        let confidence: EvidenceConfidence
+    }
+
+    private var graphDisplayEdges: [RuntimeDisplayEdge] {
+        let pidGroup = Dictionary(uniqueKeysWithValues: graphProcessGroups.flatMap { group in
+            group.processes.map { ($0.pid, group.id) }
+        })
+        var seen = Set<String>()
+        return runtimeGraph.relationships.compactMap { edge in
+            guard let source = pidGroup[edge.sourcePID], let target = pidGroup[edge.targetPID], source != target else { return nil }
+            let id = "\(edge.kind.rawValue):\(source):\(target)"
+            guard seen.insert(id).inserted else { return nil }
+            return RuntimeDisplayEdge(id: id, source: source, target: target,
+                                      kind: edge.kind, confidence: edge.confidence)
+        }
+    }
+
+    private func graphLane(_ group: OverviewProcessGroup) -> Int {
+        switch AgentRuntimeProfileRegistry.classify(group.node.process, agentHint: group.node.agentHint).capability {
+        case .interface, .agentCore: return 0
+        case .context, .memory, .storage: return 1
+        case .modelConnection, .mcp, .toolRuntime, .sandbox, .sourceControl: return 2
+        case .network, .unknown: return 3
+        }
+    }
+
+    private func graphPositions(_ groups: [OverviewProcessGroup], size: CGSize) -> [String: CGPoint] {
+        let columns = 4
+        let columnWidth = size.width / CGFloat(columns)
+        var indexes = Array(repeating: 0, count: columns)
+        var positions: [String: CGPoint] = [:]
+        for group in groups {
+            let lane = graphLane(group)
+            let y = CGFloat(indexes[lane]) * 76 + 42
+            positions[group.id] = CGPoint(x: columnWidth * (CGFloat(lane) + 0.5), y: y)
+            indexes[lane] += 1
+        }
+        return positions
+    }
+
+    private func runtimeGraphView(height: CGFloat) -> some View {
+        let groups = graphProcessGroups
+        let edges = graphDisplayEdges
+        return GeometryReader { geometry in
+            let positions = graphPositions(groups, size: geometry.size)
+            ZStack {
+                Canvas { context, _ in
+                    for edge in edges {
+                        guard let start = positions[edge.source], let end = positions[edge.target] else { continue }
+                        var path = Path()
+                        path.move(to: CGPoint(x: start.x + 68, y: start.y))
+                        let destination = CGPoint(x: end.x - 68, y: end.y)
+                        let middle = (start.x + destination.x) / 2
+                        path.addCurve(to: destination,
+                                      control1: CGPoint(x: middle, y: start.y),
+                                      control2: CGPoint(x: middle, y: destination.y))
+                        let color = edge.kind == .processParent ? cyan.opacity(0.75) : Color.blue.opacity(0.8)
+                        context.stroke(path, with: .color(color),
+                                       style: StrokeStyle(lineWidth: edge.kind == .processParent ? 1.5 : 1.2,
+                                                          dash: edge.kind == .processParent ? [] : [5, 4]))
+                    }
+                }
+                ForEach(groups) { group in
+                    graphNode(group)
+                        .frame(width: 136, height: 62)
+                        .position(positions[group.id] ?? .zero)
+                }
+            }
+        }.frame(height: height)
+    }
+
+    private func graphNode(_ group: OverviewProcessGroup) -> some View {
+        let info = AgentRuntimeProfileRegistry.classify(group.node.process, agentHint: group.node.agentHint)
+        let tint = capabilityColor(info.capability)
+        let active = group.processes.contains { focusedProcessIDs.contains($0.pid) }
+        let selected = selectedProcessGroup.map(\.pid) == group.processes.map(\.pid)
+        return Button {
+            selectedProcess = group.node.process
+            selectedProcessGroup = group.processes
+            selectedEvent = nil
+            selectedStageID = nil
+            followingLive = false
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 5) {
+                    Image(systemName: info.icon).foregroundStyle(tint)
+                    Text(info.displayName).font(.system(size: 9, weight: .bold)).lineLimit(1)
+                    Spacer(minLength: 2)
+                    if group.processes.count > 1 { Text("×\(group.processes.count)").mono() }
+                }
+                Text(info.responsibility).font(.system(size: 7.5)).foregroundStyle(.secondary).lineLimit(2)
+                HStack {
+                    Text(info.capability.rawValue.uppercased()).font(.system(size: 6.5, weight: .bold)).foregroundStyle(tint)
+                    Spacer()
+                    Circle().fill(active ? green : confidenceColor(info.confidence)).frame(width: active ? 8 : 6, height: active ? 8 : 6)
+                }
+            }
+            .padding(8).frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .leading)
+            .background(active ? tint.opacity(0.20) : raised, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected || active ? tint : border, lineWidth: active ? 1.8 : 1))
+            .shadow(color: active ? tint.opacity(0.35) : .clear, radius: 7)
+        }.buttonStyle(.plain)
     }
 
     private func compactTreeRow(_ group: OverviewProcessGroup) -> some View {

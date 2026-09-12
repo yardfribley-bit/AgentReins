@@ -177,6 +177,14 @@ final class TurnJournalTests: XCTestCase {
             command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node_repl")
         let cursor = ProcessSnapshotRecord(pid: "301", ppid: "300",
             command: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper --type=pty-host")
+        let workBuddySidecar = ProcessSnapshotRecord(pid: "104", ppid: "1",
+            command: "/Applications/WorkBuddy.app/Contents/MacOS/Electron app.asar/main/sidecar-entry.js --control-pipe-uuid x")
+        let workBuddyMCP = ProcessSnapshotRecord(pid: "105", ppid: "103",
+            command: "node ~/.workbuddy/plugins/cache/workbuddy-builtin/sheetagent/1/mcp/start.mjs")
+        let claudeCode = ProcessSnapshotRecord(pid: "401", ppid: "400",
+            command: "/usr/local/lib/node_modules/@anthropic-ai/claude-code/bin/claude.exe")
+        let claudeRenderer = ProcessSnapshotRecord(pid: "402", ppid: "1",
+            command: "/Applications/Claude.app/Contents/Frameworks/Claude Helper (Renderer).app/Contents/MacOS/Claude Helper (Renderer) --type=renderer")
 
         let memoryRole = AgentRuntimeProfileRegistry.classify(storage, agentHint: "WorkBuddy")
         XCTAssertEqual(memoryRole.profileId, "workbuddy-macos")
@@ -188,8 +196,10 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(sandboxRole.securitySurface.contains("Downloaded artifact execution"))
 
         let coreRole = AgentRuntimeProfileRegistry.classify(workBuddyCore, agentHint: "WorkBuddy")
-        XCTAssertEqual(coreRole.displayName, "WorkBuddy Agent Core")
+        XCTAssertEqual(coreRole.displayName, "Active Agent Runtime")
         XCTAssertEqual(coreRole.capability, .agentCore)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddySidecar, agentHint: "WorkBuddy").displayName, "Sidecar Broker")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddyMCP, agentHint: "WorkBuddy").capability, .mcp)
 
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codex, agentHint: "Codex").capability, .agentCore)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codeMode, agentHint: "Codex").displayName, "Code Execution Host")
@@ -197,6 +207,9 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(repl, agentHint: "Codex").displayName, "Node REPL")
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(repl, agentHint: "Codex").capability, .sandbox)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursor, agentHint: "Cursor").capability, .toolRuntime)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude").displayName, "Claude Code Agent")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude").capability, .agentCore)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeRenderer, agentHint: "Claude").capability, .interface)
     }
 
     func testRuntimeProfileKeepsUnknownResponsibilityExplicit() {
@@ -205,6 +218,23 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(result.capability, .unknown)
         XCTAssertEqual(result.confidence, .unknown)
         XCTAssertFalse(result.matchedEvidence.isEmpty)
+    }
+
+    func testWorkBuddyRuntimeGraphPreservesPhysicalEdgesAndLabelsLogicalSandboxAssociation() throws {
+        let processes = [
+            ProcessSnapshotRecord(pid: "10", ppid: "1", command: "/Applications/WorkBuddy.app/Contents/MacOS/Electron /app/main/sidecar-entry.js"),
+            ProcessSnapshotRecord(pid: "11", ppid: "10", command: "/Applications/WorkBuddy.app/Contents/MacOS/Electron /cli/bin/codebuddy --serve"),
+            ProcessSnapshotRecord(pid: "20", ppid: "1", command: "/Applications/WorkBuddy.app/Contents/Resources/sandbox-center --app_home /Users/me/.workbuddy")
+        ]
+        let graph = AgentRuntimeGraph.build(processes: processes, agent: "WorkBuddy")
+        let physical = try XCTUnwrap(graph.relationships.first { $0.kind == .processParent })
+        XCTAssertEqual(physical.sourcePID, "10")
+        XCTAssertEqual(physical.targetPID, "11")
+        XCTAssertEqual(physical.confidence, .confirmed)
+        let logical = try XCTUnwrap(graph.relationships.first { $0.kind == .sharedRuntime })
+        XCTAssertEqual(logical.targetPID, "20")
+        XCTAssertEqual(logical.confidence, .inferred)
+        XCTAssertTrue(logical.evidence.contains("no PPID relationship"))
     }
 
     @MainActor
