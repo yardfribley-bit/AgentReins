@@ -128,13 +128,28 @@ final class TurnJournalTests: XCTestCase {
                                                     webEvidenceActive: false).isEmpty)
     }
 
+    func testAgentRootDiscoveryRejectsProductNamesInsideUserProjectPaths() {
+        let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["chatgpt", "codex", "workbuddy", "cursor"])
+        XCTAssertTrue(provider.isAgentRootExecutable("/Applications/WorkBuddy.app/Contents/MacOS/Electron"))
+        XCTAssertTrue(provider.isAgentRootExecutable("/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"))
+        XCTAssertTrue(provider.isAgentRootExecutable("/Applications/Cursor.app/Contents/MacOS/Cursor"))
+        XCTAssertFalse(provider.isAgentRootExecutable("/Users/me/WorkBuddy/project/.venv/bin/python"))
+        XCTAssertFalse(provider.isAgentRootExecutable("/Users/me/codex-notes/build/tool"))
+    }
+
     func testRuntimeProfilesMapAgentSpecificComponentsToSecurityCapabilities() {
         let storage = ProcessSnapshotRecord(pid: "101", ppid: "100",
             command: "/Applications/WorkBuddy.app/Contents/Frameworks/Storage Service --type=utility")
         let sandbox = ProcessSnapshotRecord(pid: "102", ppid: "100",
             command: "/Applications/WorkBuddy.app/Contents/Resources/sandbox-center")
+        let workBuddyCore = ProcessSnapshotRecord(pid: "103", ppid: "1",
+            command: "/Applications/WorkBuddy.app/Contents/MacOS/Electron /Applications/WorkBuddy.app/Contents/Resources/app.asar.unpacked/cli/bin/codebuddy --serve")
         let codex = ProcessSnapshotRecord(pid: "201", ppid: "200",
             command: "/Applications/ChatGPT.app/Contents/Resources/codex app-server")
+        let codeMode = ProcessSnapshotRecord(pid: "202", ppid: "201",
+            command: "/Applications/ChatGPT.app/Contents/Resources/codex-code-mode-host")
+        let mcp = ProcessSnapshotRecord(pid: "203", ppid: "201",
+            command: "/Applications/ChatGPT.app/Contents/Resources/cua_node/bin/node ./server.mjs")
         let cursor = ProcessSnapshotRecord(pid: "301", ppid: "300",
             command: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper --type=pty-host")
 
@@ -147,7 +162,13 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(sandboxRole.capability, .sandbox)
         XCTAssertTrue(sandboxRole.securitySurface.contains("Downloaded artifact execution"))
 
+        let coreRole = AgentRuntimeProfileRegistry.classify(workBuddyCore, agentHint: "WorkBuddy")
+        XCTAssertEqual(coreRole.displayName, "WorkBuddy Agent Core")
+        XCTAssertEqual(coreRole.capability, .agentCore)
+
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codex, agentHint: "Codex").capability, .agentCore)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(codeMode, agentHint: "Codex").displayName, "Code Execution Host")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(mcp, agentHint: "Codex").capability, .mcp)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursor, agentHint: "Cursor").capability, .toolRuntime)
     }
 

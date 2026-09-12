@@ -25,7 +25,7 @@ struct ContentView: View {
             onSession: { selectedSession = $0 },
             onIncident: { selectedIncident = $0 }
         )
-        .frame(minWidth: 1180, minHeight: 720)
+        .frame(minWidth: 1500, minHeight: 780)
         .task {
             if !fileGuard.running { fileGuard.start() }
             if !processGuard.running { processGuard.start() }

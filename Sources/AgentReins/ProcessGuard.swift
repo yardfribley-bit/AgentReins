@@ -47,11 +47,14 @@ final class ProcessGuard: ObservableObject {
     private var networkTimer: Timer?
     private var processSnapshotInFlight = false
     private var networkSnapshotInFlight = false
-    private var latestProcesses: [(pid: String, ppid: String, cmd: String)] = []
+    private typealias SnapshotProcess = (pid: String, ppid: String, cmd: String, agent: String?)
+    private var latestProcesses: [SnapshotProcess] = []
     private var seen: Set<String> = []
     private var seenConnections: [String: Date] = [:]
     private var currentCmdRules: [CmdRule] = []
-    private let agentMarkers = ["codex", "kiro", "cursor", "workbuddy", "qoder", "claude", "aider", "windsurf", "trae"]
+    // ChatGPT is the macOS desktop host of the Codex runtime. Keeping the host
+    // root is required to preserve the real ChatGPT -> Codex services PID tree.
+    private let agentMarkers = ["chatgpt", "codex", "kiro", "cursor", "workbuddy", "qoder", "claude", "aider", "windsurf", "trae"]
     private let snapshotProvider: any ProcessSnapshotting
     private let networkProvider: any NetworkSnapshotting
     private let proxyDestinationProvider: any ProxyDestinationSnapshotting
@@ -146,10 +149,13 @@ final class ProcessGuard: ObservableObject {
                 }
                 self.workingCollectionHealth.lastProcessSuccess = Date()
                 self.latestProcesses = procs
-                let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
+                let byPid = Dictionary(uniqueKeysWithValues: procs.map {
+                    ($0.pid, (ppid: $0.ppid, cmd: $0.cmd, agent: $0.agent))
+                })
                 let attributions = self.attributions(byPid: byPid)
                 let inventory = procs.filter { attributions[$0.pid] != nil }.map {
-                    ProcessSnapshotRecord(pid: $0.pid, ppid: $0.ppid, command: $0.cmd)
+                    ProcessSnapshotRecord(pid: $0.pid, ppid: $0.ppid, command: $0.cmd,
+                        agent: self.canonicalAgent(attributions[$0.pid]))
                 }.sorted { lhs, rhs in
                     (Int(lhs.pid) ?? 0) < (Int(rhs.pid) ?? 0)
                 }
@@ -215,8 +221,8 @@ final class ProcessGuard: ObservableObject {
     /// scanner children are attributed back to that agent, creating both false
     /// process lineage and a self-observation redraw loop.
     nonisolated private func excludingCollectorTree(
-        _ processes: [(pid: String, ppid: String, cmd: String)]
-    ) -> [(pid: String, ppid: String, cmd: String)] {
+        _ processes: [SnapshotProcess]
+    ) -> [SnapshotProcess] {
         var excluded: Set<String> = [String(ProcessInfo.processInfo.processIdentifier)]
         var changed = true
         while changed {
@@ -229,7 +235,7 @@ final class ProcessGuard: ObservableObject {
     }
 
     /// 主线程执行：对后台取到的进程快照做匹配与事件上报（匹配很轻量，不会阻塞 UI）。
-    private func process(procs: [(pid: String, ppid: String, cmd: String)],
+    private func process(procs: [SnapshotProcess],
                          attributions: [String: String]) {
         let detectedAgents = Array(Set(attributions.values)).sorted()
         if detectedAgents != activeAgents { activeAgents = detectedAgents }
@@ -261,10 +267,12 @@ final class ProcessGuard: ObservableObject {
         onEvents?(newEvents)
     }
 
-    private func processNetwork(procs: [(pid: String, ppid: String, cmd: String)],
+    private func processNetwork(procs: [SnapshotProcess],
                                 connections: [NetworkConnectionRecord],
                                 proxyDestinations: [ProxyDestinationRecord]) {
-        let byPid = Dictionary(uniqueKeysWithValues: procs.map { ($0.pid, (ppid: $0.ppid, cmd: $0.cmd)) })
+        let byPid = Dictionary(uniqueKeysWithValues: procs.map {
+            ($0.pid, (ppid: $0.ppid, cmd: $0.cmd, agent: $0.agent))
+        })
         let attributions = attributions(byPid: byPid)
         for destination in proxyDestinations {
             if let existing = recentProxyDestinations[destination.clientPort],
@@ -301,20 +309,25 @@ final class ProcessGuard: ObservableObject {
         return activity.contains(where: text.contains)
     }
 
-    private nonisolated func getProcs() -> [(pid: String, ppid: String, cmd: String)] {
-        snapshotProvider.snapshot().map { ($0.pid, $0.ppid, $0.command) }
+    private nonisolated func getProcs() -> [SnapshotProcess] {
+        snapshotProvider.snapshot().map { ($0.pid, $0.ppid, $0.command, $0.agent) }
     }
 
     /// The OS snapshot is only a transient discovery index. Find explicit
     /// agent roots first, then walk downward through their children. Unrelated
     /// machine processes are neither attributed, retained, nor published.
-    private func attributions(byPid: [String: (ppid: String, cmd: String)]) -> [String: String] {
+    private func attributions(byPid: [String: (ppid: String, cmd: String, agent: String?)]) -> [String: String] {
         var children: [String: [String]] = [:]
         for (pid, node) in byPid { children[node.ppid, default: []].append(pid) }
 
         var result: [String: String] = [:]
         var queue: [(pid: String, owner: String)] = []
         for (pid, node) in byPid {
+            if let owner = node.agent {
+                result[pid] = owner
+                queue.append((pid, owner))
+                continue
+            }
             let command = node.cmd.lowercased()
             if let marker = agentMarkers.first(where: command.contains) {
                 result[pid] = marker
@@ -331,6 +344,13 @@ final class ProcessGuard: ObservableObject {
             }
         }
         return result
+    }
+
+    private func canonicalAgent(_ marker: String?) -> String? {
+        switch marker {
+        case "chatgpt", "codex": return "codex"
+        default: return marker
+        }
     }
 
     private func makeEvent(rule: CmdRule, command: String, agent: String?, pid: String, ppid: String) -> GuardEvent {

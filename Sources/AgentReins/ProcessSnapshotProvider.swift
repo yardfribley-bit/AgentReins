@@ -5,6 +5,14 @@ struct ProcessSnapshotRecord: Sendable, Equatable {
     let pid: String
     let ppid: String
     let command: String
+    let agent: String?
+
+    init(pid: String, ppid: String, command: String, agent: String? = nil) {
+        self.pid = pid
+        self.ppid = ppid
+        self.command = command
+        self.agent = agent
+    }
 }
 
 enum ProcessArgumentRedactor {
@@ -71,18 +79,22 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
 
         var children: [pid_t: [pid_t]] = [:]
         for (pid, value) in records { children[value.ppid, default: []].append(pid) }
-        let roots = records.compactMap { pid, value in
-            agentMarkers.contains(where: value.executable.lowercased().contains) ? pid : nil
-        }
+        let rootOwners = Dictionary(uniqueKeysWithValues: records.compactMap { pid, value in
+            agentOwner(for: value.executable).map { (pid, $0) }
+        })
+        let roots = Array(rootOwners.keys)
         stateLock.lock()
         knownRoots = Set(roots)
         lastRootDiscovery = Date()
         stateLock.unlock()
         var agentTree = Set(roots)
-        var queue = roots
-        while let parent = queue.popLast() {
+        var owners = rootOwners
+        var queue = rootOwners.map { (pid: $0.key, owner: $0.value) }
+        while let current = queue.popLast() {
+            let parent = current.pid
             for child in children[parent] ?? [] where agentTree.insert(child).inserted {
-                queue.append(child)
+                owners[child] = current.owner
+                queue.append((child, current.owner))
             }
         }
 
@@ -92,7 +104,8 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         let result = agentTree.compactMap { pid -> ProcessSnapshotRecord? in
             guard let value = records[pid] else { return nil }
             let rawCommand = arguments(pid: pid) ?? value.executable
-            return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid), command: rawCommand)
+            return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid), command: rawCommand,
+                agent: owners[pid])
         }
         stateLock.lock()
         cachedAgentRecords = Dictionary(uniqueKeysWithValues: result.compactMap {
@@ -103,26 +116,48 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         return result
     }
 
+    func isAgentRootExecutable(_ executable: String) -> Bool {
+        agentOwner(for: executable) != nil
+    }
+
+    private func agentOwner(for executable: String) -> String? {
+        let path = executable.lowercased()
+        if agentMarkers.contains("workbuddy"), path.contains("/applications/workbuddy.app/") { return "workbuddy" }
+        if agentMarkers.contains("chatgpt"), path.contains("/applications/chatgpt.app/") { return "codex" }
+        if agentMarkers.contains("cursor"), path.contains("/applications/cursor.app/") { return "cursor" }
+
+        // Product names that commonly appear in user project paths need an
+        // application-bundle identity above. Other adapters retain the generic
+        // executable marker until they gain an explicit Runtime Profile.
+        let bundleScoped = Set(["workbuddy", "chatgpt", "codex", "cursor"])
+        return agentMarkers.filter { !bundleScoped.contains($0) }.first(where: path.contains)
+    }
+
     /// Between low-frequency root discovery passes, enumerate only descendants
     /// of known AI agents. This is the hot path used to catch short-lived tools.
     private func snapshotAgentTrees(roots: Set<pid_t>) -> [ProcessSnapshotRecord] {
         stateLock.lock()
         let cache = cachedAgentRecords
         stateLock.unlock()
-        var pending = Array(roots)
+        var pending = roots.compactMap { root -> (pid_t, String)? in
+            guard let owner = cache[root]?.agent else { return nil }
+            return (root, owner)
+        }
         var visited = Set<pid_t>()
         var result: [ProcessSnapshotRecord] = []
-        while let pid = pending.popLast() {
+        while let current = pending.popLast() {
+            let pid = current.0
+            let owner = current.1
             guard visited.insert(pid).inserted else { continue }
             if let cached = cache[pid] {
                 result.append(cached)
             } else if let value = identity(pid: pid) {
                 result.append(ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
-                    command: arguments(pid: pid) ?? value.executable))
+                    command: arguments(pid: pid) ?? value.executable, agent: owner))
             } else {
                 continue
             }
-            pending.append(contentsOf: childPIDs(of: pid))
+            pending.append(contentsOf: childPIDs(of: pid).map { ($0, owner) })
         }
         stateLock.lock()
         cachedAgentRecords = Dictionary(uniqueKeysWithValues: result.compactMap {

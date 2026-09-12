@@ -57,12 +57,10 @@ struct AgentOperationsCenterView: View {
         let agents = selectedAgent == "All agents"
             ? discoveredAgents.filter { $0.presence == .running }.map(\.product)
             : [selectedAgent]
-        let roots = Set(processInventory.filter { process in
-            agents.contains { isRootProcess(process, for: $0) }
-        }.map(\.pid))
-        var ids = roots
-        for _ in 0..<8 { for p in processInventory where ids.contains(p.ppid) { ids.insert(p.pid) } }
-        let list = processInventory.filter { ids.contains($0.pid) }
+        let list = processInventory.filter { process in
+            guard let owner = process.agent else { return false }
+            return agents.contains { owner.caseInsensitiveCompare($0) == .orderedSame }
+        }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return list }
         return list.filter { $0.command.lowercased().contains(q) || $0.pid.contains(q) }
@@ -70,24 +68,9 @@ struct AgentOperationsCenterView: View {
     private var processTree: [TreeNode] { Self.buildTree(processes) }
     private var activeProcessTree: [TreeNode] {
         guard let agent = activeSession?.agent else { return processTree }
-        let roots = Set(processInventory.filter { isRootProcess($0, for: agent) }.map(\.pid))
-        var ids = roots
-        for _ in 0..<8 {
-            for process in processInventory where ids.contains(process.ppid) { ids.insert(process.pid) }
-        }
-        return Self.buildTree(processInventory.filter { ids.contains($0.pid) })
-    }
-
-    private func isRootProcess(_ process: ProcessSnapshotRecord, for agent: String) -> Bool {
-        let executable = process.command.split(separator: " ").first.map(String.init) ?? process.command
-        let name = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
-        let path = executable.lowercased()
-        switch agent.lowercased() {
-        case "codex": return name == "chatgpt" || path.contains("/applications/chatgpt.app/")
-        case "cursor": return name == "cursor" || path.contains("/applications/cursor.app/")
-        case "workbuddy": return name == "workbuddy" || path.contains("/applications/workbuddy.app/")
-        default: return name == agent.lowercased()
-        }
+        return Self.buildTree(processInventory.filter {
+            $0.agent?.caseInsensitiveCompare(agent) == .orderedSame
+        })
     }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted()
@@ -106,13 +89,7 @@ struct AgentOperationsCenterView: View {
         activeProcessTree.first?.process.pid ?? activeSession?.events.compactMap(\.processId).first.map(String.init)
     }
     private var liveHeadline: String {
-        if let call = activeTurn?.toolCalls.last(where: { $0.completedAt == nil }) {
-            return "\(call.friendlyName) via \(call.name)"
-        }
-        if let call = activeTurn?.toolCalls.last {
-            return "\(call.friendlyName) via \(call.name)"
-        }
-        return activeTurn?.userInput ?? "Waiting for the next live task"
+        readableActivity(activeTurn)
     }
 
     private func selectInitialAgentIfNeeded() {
@@ -373,64 +350,42 @@ struct AgentOperationsCenterView: View {
 
     private var missionOverview: some View {
         VStack(spacing: 12) {
-            posturePanel("LIVE AGENT MISSION", "Observed flow for the most recent task") {
-                HStack(alignment: .center, spacing: 7) {
-                    missionNode("Agent runtime", activeSession?.agent.capitalized ?? "Waiting",
-                                activeProcessTree.first.map { "PID \($0.process.pid) · \(activeProcessTree.count) processes" },
-                                "cpu", activeProcessTree.first?.process, nil, activeSession != nil, green)
-                    flowArrow("request")
-                    missionNode("Model context", activeTurn?.inputTokens.map { "\($0) tokens" } ?? activeTurn.map { formatBytes($0.contextBytes) } ?? "Waiting",
-                                String((activeTurn?.userInput ?? "No user request captured").prefix(86)),
-                                "doc.text", nil, missionEvent(kind: "model", op: "prompt"), activeTurn != nil, cyan)
-                    flowArrow("HTTPS")
-                    missionNode("Model / relay", activeSession?.model ?? modelDestination?.remoteDomain ?? modelDestination?.remoteHost ?? "Unknown provider",
-                                modelDestination.map { NetworkDestinationAssessment.assess(domain: $0.remoteDomain, host: $0.remoteHost).kind.rawValue } ?? "No destination linked",
-                                "sparkles", nil, modelDestination, activeSession?.model != nil || modelDestination != nil, .blue)
-                    flowArrow("calls")
-                    missionNode("Tools & MCP", "\(activeTurn?.toolCalls.count ?? 0) calls",
-                                activeTurn?.toolCalls.last.map { "Latest: \($0.friendlyName)" } ?? "No tool call captured",
-                                "terminal", nil, latestToolEvent, activeTurn?.toolCalls.isEmpty == false, amber)
-                    flowArrow("writes")
-                    missionNode("Result", resultHeadline, resultDetail,
-                                "checkmark.shield", nil, verificationEvent ?? latestFileEvent,
-                                activeTurn?.finalResponse != nil || verificationEvent != nil, resultColor)
-                }
-            }
-            processPanel.frame(maxWidth: .infinity)
-            HStack(alignment: .top, spacing: 12) {
-                journeyPanel.frame(maxWidth: .infinity)
-                networkPanel.frame(maxWidth: .infinity)
+            HStack(alignment: .top, spacing: 10) {
+                overviewProcessPanel
+                    .frame(minWidth: 330, maxWidth: .infinity, minHeight: 520, alignment: .top)
+                journeyPanel
+                    .frame(minWidth: 300, maxWidth: .infinity, minHeight: 520, alignment: .top)
+                networkPanel
+                    .frame(width: 230)
+                    .frame(minHeight: 520, alignment: .top)
             }
         }
     }
 
-    private func missionNode(_ title: String, _ value: String, _ detail: String?, _ icon: String,
-                             _ process: ProcessSnapshotRecord?, _ event: GuardEvent?,
-                             _ complete: Bool, _ tint: Color) -> some View {
-        Button { selectedProcess = process; selectedEvent = event } label: {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 5) {
-                    Image(systemName: icon).foregroundStyle(tint)
-                    Text(title.uppercased()).micro(.secondary).lineLimit(1).minimumScaleFactor(0.72)
-                    Spacer(minLength: 2)
-                    Circle().fill(complete ? tint : Color.gray).frame(width: 7, height: 7)
+    private var overviewProcessPanel: some View {
+        posturePanel("AGENT INTERNALS", "Real process lineage and component responsibilities") {
+            VStack(alignment: .leading, spacing: 0) {
+                if processTree.isEmpty {
+                    empty("Waiting for the live Agent process tree")
+                } else {
+                    let overviewNodes = processTree.filter { !isOverviewInfrastructureNoise($0.process) }
+                    let limit = 8
+                    ForEach(Array(overviewNodes.prefix(limit))) { node in compactTreeRow(node) }
+                    if processTree.count > overviewNodes.prefix(limit).count {
+                        Button { centerTab = .processes } label: {
+                            HStack {
+                                Text("View complete process tree")
+                                Spacer()
+                                Text("+\(processTree.count - overviewNodes.prefix(limit).count)")
+                                Image(systemName: "arrow.right")
+                            }
+                            .font(.system(size: 9, weight: .semibold)).foregroundStyle(cyan)
+                            .padding(.top, 8)
+                        }.buttonStyle(.plain)
+                    }
                 }
-                Text(value).font(.system(size: 12, weight: .bold)).lineLimit(2)
-                Text(detail ?? "Waiting for evidence").font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(2)
-                Text(event?.attributionConfidence?.rawValue.uppercased() ?? (process == nil ? "UNKNOWN" : "CONFIRMED PID"))
-                    .font(.system(size: 7, weight: .bold)).foregroundStyle(event.map { confidenceColor($0.attributionConfidence) } ?? tint)
             }
-            .padding(10).frame(minWidth: 118, maxWidth: .infinity, minHeight: 112, alignment: .topLeading)
-            .background(raised, in: RoundedRectangle(cornerRadius: 9))
-            .overlay(RoundedRectangle(cornerRadius: 9).stroke((selectedEvent?.id == event?.id && event != nil) || selectedProcess?.pid == process?.pid ? tint : border))
-        }.buttonStyle(.plain)
-    }
-
-    private func flowArrow(_ label: String) -> some View {
-        VStack(spacing: 3) {
-            Text(label.uppercased()).font(.system(size: 6, weight: .bold)).foregroundStyle(.secondary)
-            Image(systemName: "arrow.right").font(.system(size: 9, weight: .bold)).foregroundStyle(cyan)
-        }.frame(width: 30)
+        }
     }
 
     // MARK: - Panels
@@ -462,6 +417,71 @@ struct AgentOperationsCenterView: View {
                 }
             }
         }
+    }
+
+    private func compactTreeRow(_ node: TreeNode) -> some View {
+        let selected = selectedProcess?.pid == node.process.pid
+        let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
+        let active = scopedEvents.contains { $0.processId == Int32(node.process.pid) }
+        let tint = capabilityColor(info.capability)
+        return Button {
+            selectedProcess = node.process
+            selectedEvent = nil
+        } label: {
+            HStack(spacing: 0) {
+                HStack(spacing: 0) {
+                    ForEach(0..<max(node.depth, 0), id: \.self) { level in
+                        let continues = level < node.guides.count && node.guides[level]
+                        let isElbow = level == node.depth - 1
+                        Canvas { context, size in
+                            var path = Path()
+                            let x: CGFloat = 7
+                            if isElbow {
+                                path.move(to: CGPoint(x: x, y: 0))
+                                path.addLine(to: CGPoint(x: x, y: size.height / 2))
+                                path.addLine(to: CGPoint(x: size.width, y: size.height / 2))
+                                if continues {
+                                    path.move(to: CGPoint(x: x, y: size.height / 2))
+                                    path.addLine(to: CGPoint(x: x, y: size.height))
+                                }
+                            } else if continues {
+                                path.move(to: CGPoint(x: x, y: 0))
+                                path.addLine(to: CGPoint(x: x, y: size.height))
+                            }
+                            context.stroke(path, with: .color(Color.gray.opacity(0.65)), lineWidth: 1)
+                        }.frame(width: 17, height: 55)
+                    }
+                }
+                HStack(spacing: 8) {
+                    Image(systemName: info.icon)
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(tint)
+                        .frame(width: 28, height: 28)
+                        .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 6))
+                    VStack(alignment: .leading, spacing: 2) {
+                        HStack(spacing: 5) {
+                            Text(info.displayName).font(.system(size: 10, weight: .bold)).lineLimit(1)
+                            Spacer(minLength: 2)
+                            Text("PID \(node.process.pid)").mono()
+                        }
+                        Text(info.responsibility).font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
+                        Text("\(info.capability.rawValue.uppercased()) · \(info.confidence.rawValue.uppercased())")
+                            .font(.system(size: 6.5, weight: .bold)).foregroundStyle(tint)
+                    }
+                    Circle().fill(active ? green : Color.gray.opacity(0.7)).frame(width: 7, height: 7)
+                }
+                .padding(.horizontal, 9).padding(.vertical, 7)
+                .frame(maxWidth: .infinity, minHeight: 47, alignment: .leading)
+                .background(selected ? tint.opacity(0.16) : raised, in: RoundedRectangle(cornerRadius: 7))
+                .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? tint : border))
+            }
+            .padding(.vertical, 3)
+        }.buttonStyle(.plain)
+    }
+
+    private func isOverviewInfrastructureNoise(_ process: ProcessSnapshotRecord) -> Bool {
+        let command = process.command.lowercased()
+        return ["crashpad", "bare-modifier-monitor", "gpu-process", "audio.mojom.audioservice", "--type=renderer"]
+            .contains(where: command.contains)
     }
 
     private func treeRow(_ node: TreeNode) -> some View {
@@ -1103,15 +1123,26 @@ struct AgentOperationsCenterView: View {
         guard !processes.isEmpty else { return [] }
         let byParent = Dictionary(grouping: processes, by: \.ppid)
         let ids = Set(processes.map(\.pid))
-        let roots = processes.filter { !ids.contains($0.ppid) }
-            .sorted { (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0) }
+        let roots = processes.filter { !ids.contains($0.ppid) }.sorted {
+            let left = rootDisplayPriority($0)
+            let right = rootDisplayPriority($1)
+            return left == right ? (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0) : left < right
+        }
         var result: [TreeNode] = []
         func walk(_ process: ProcessSnapshotRecord, depth: Int, ancestorOpen: [Bool], inheritedAgent: String?) {
-            let agent = AgentRuntimeProfileRegistry.profile(agentHint: nil, command: process.command)?.agent ?? inheritedAgent
+            let agent = process.agent ?? inheritedAgent ??
+                AgentRuntimeProfileRegistry.profile(agentHint: nil, command: process.command)?.agent
             result.append(TreeNode(id: "\(process.pid)-\(depth)", process: process, depth: depth,
                                    guides: ancestorOpen, agentHint: agent))
-            let children = (byParent[process.pid] ?? [])
-                .sorted { (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0) }
+            let children = (byParent[process.pid] ?? []).sorted {
+                let left = AgentRuntimeProfileRegistry.classify($0, agentHint: agent)
+                let right = AgentRuntimeProfileRegistry.classify($1, agentHint: agent)
+                let leftPriority = runtimeDisplayPriority(left.capability)
+                let rightPriority = runtimeDisplayPriority(right.capability)
+                return leftPriority == rightPriority
+                    ? (Int($0.pid) ?? 0) < (Int($1.pid) ?? 0)
+                    : leftPriority < rightPriority
+            }
             for (index, child) in children.enumerated() {
                 let hasMoreSiblings = index < children.count - 1
                 walk(child, depth: depth + 1, ancestorOpen: ancestorOpen + [hasMoreSiblings], inheritedAgent: agent)
@@ -1122,6 +1153,31 @@ struct AgentOperationsCenterView: View {
             : roots
         for root in seed { walk(root, depth: 0, ancestorOpen: [], inheritedAgent: nil) }
         return result
+    }
+
+    private static func runtimeDisplayPriority(_ capability: RuntimeCapability) -> Int {
+        switch capability {
+        case .agentCore: return 0
+        case .context: return 1
+        case .memory: return 2
+        case .modelConnection: return 3
+        case .mcp: return 4
+        case .sandbox: return 5
+        case .network: return 6
+        case .toolRuntime: return 7
+        case .sourceControl: return 8
+        case .storage: return 9
+        case .interface: return 10
+        case .unknown: return 11
+        }
+    }
+
+    private static func rootDisplayPriority(_ process: ProcessSnapshotRecord) -> Int {
+        let info = AgentRuntimeProfileRegistry.classify(process, agentHint: process.agent)
+        if info.displayName.contains("Desktop Host") || info.capability == .agentCore { return 0 }
+        if info.capability == .sandbox { return 1 }
+        if process.command.lowercased().contains("crashpad") { return 9 }
+        return 4
     }
 }
 
