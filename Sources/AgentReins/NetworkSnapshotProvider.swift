@@ -23,16 +23,21 @@ struct NetworkConnectionRecord: Sendable, Equatable {
 
 protocol NetworkSnapshotting: Sendable {
     var sourceID: String { get }
-    func snapshot() -> [NetworkConnectionRecord]
+    func snapshot(pids: [String]) -> [NetworkConnectionRecord]
 }
 
 struct LsofNetworkSnapshotProvider: NetworkSnapshotting {
     let sourceID = "lsof-network"
 
-    func snapshot() -> [NetworkConnectionRecord] {
+    func snapshot(pids: [String]) -> [NetworkConnectionRecord] {
+        let targets = Array(Set(pids.compactMap(Int.init))).sorted()
+        guard !targets.isEmpty else { return [] }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        process.arguments = ["-iTCP", "-n", "-P", "-F", "pn"]
+        // `-a` intersects the PID and TCP selectors. Without it lsof scans all
+        // machine sockets and filters later, causing a visible CPU spike.
+        process.arguments = ["-a", "-p", targets.map(String.init).joined(separator: ","),
+                             "-iTCP", "-n", "-P", "-F", "pn"]
         let pipe = Pipe()
         process.standardOutput = pipe
         process.standardError = Pipe()

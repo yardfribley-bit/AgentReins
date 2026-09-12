@@ -179,9 +179,10 @@ final class ProcessGuard: ObservableObject {
         }
         networkSnapshotInFlight = true
         let started = Date()
+        let agentPIDs = latestProcesses.map(\.pid)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let connections = self.networkProvider.snapshot()
+            let connections = self.networkProvider.snapshot(pids: agentPIDs)
             let proxyDestinations = self.proxyDestinationProvider.snapshot()
             Task { @MainActor [weak self] in
                 guard let self else { return }
