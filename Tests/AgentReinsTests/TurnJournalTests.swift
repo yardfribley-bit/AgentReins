@@ -1139,6 +1139,35 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(try gitOutput(["status", "--porcelain"], at: root).isEmpty)
     }
 
+    func testCursorAdapterProjectsConversationToolResultAndGeneratedCode() {
+        let composer: [String: Any] = [
+            "lastUpdatedAt": 1_789_203_055_082 as NSNumber,
+            "modelConfig": ["modelName": "default"],
+            "workspaceIdentifier": ["uri": ["fsPath": "/tmp/cursor-project"]],
+            "promptTokenBreakdown": ["totalUsedTokens": 13_335, "maxTokens": 256_000]
+        ]
+        let user: [String: Any] = ["type": 1, "bubbleId": "user-1", "text": "Create a page",
+            "requestId": "request-1", "createdAt": "2026-09-12T08:50:55Z"]
+        let toolResult = "{\"beforeContentId\":\"before\",\"afterContentId\":\"after\"}"
+        let tool: [String: Any] = ["type": 2, "bubbleId": "tool-1", "createdAt": "2026-09-12T08:51:00Z",
+            "toolFormerData": ["name": "edit_file_v2", "toolCallId": "call-1", "status": "completed",
+                "params": "{\"relativeWorkspacePath\":\"/tmp/cursor-project/index.html\"}", "result": toolResult]]
+        let response: [String: Any] = ["type": 2, "bubbleId": "assistant-1",
+            "text": "Created index.html", "createdAt": "2026-09-12T08:51:02Z"]
+
+        let events = CursorSight.project(composerId: "composer-1", composer: composer,
+            bubbles: [("user", user), ("tool", tool), ("assistant", response)],
+            content: ["before": "", "after": "<script>document.write(location.hash)</script>"])
+
+        XCTAssertEqual(events.first { $0.op == "prompt" }?.userIntent, "Create a page")
+        XCTAssertEqual(events.first { $0.op == "call" }?.toolCallId, "call-1")
+        XCTAssertEqual(events.first { $0.op == "result" }?.action, "completed")
+        XCTAssertEqual(events.first { $0.kind == "file" }?.path, "/tmp/cursor-project/index.html")
+        XCTAssertFalse(events.first { $0.kind == "file" }?.codeFindings?.isEmpty ?? true)
+        XCTAssertEqual(events.first { $0.op == "response" }?.modelResponse, "Created index.html")
+        XCTAssertTrue(events.allSatisfy { $0.attributionConfidence == .confirmed })
+    }
+
     func testRecoveryEligibilityRejectsPreExistingChanges() {
         let baseline = snapshot(files: [GitFileState(path: "UserWork.swift", status: " M")])
         let final = snapshot(files: [GitFileState(path: "UserWork.swift", status: " M"),

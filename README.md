@@ -61,7 +61,8 @@ flowchart LR
 AgentReins is an early alpha. The repository is public so that the implementation and its limitations can be inspected directly.
 
 - Native macOS menu bar application and security center.
-- WorkBuddy session discovery and a local compatibility adapter for Codex rollout records.
+- Native WorkBuddy evidence plus local compatibility adapters for Codex, Qoder, and Cursor conversations.
+- Cursor Composer correlation across user prompts, context-token composition, model responses, tool calls/results, and generated-file security scanning.
 - A least-privilege Chrome/Edge adapter for confirmed Grok Imagine tab evidence.
 - Per-turn views of captured user intent, model context, model response, model name, token usage, tool calls, and tool results.
 - Fast active-task startup with explicit, on-demand reconstruction of historical WorkBuddy and Codex sessions.
@@ -133,6 +134,8 @@ The extension requests access only to `https://grok.com/*`. It records prompt su
 │   ├── DevelopmentTrace.swift    Five-stage live task reconstruction
 │   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
 │   ├── CodexSight.swift          Codex local compatibility adapter
+│   ├── CursorSight.swift         Cursor Composer compatibility adapter
+│   ├── QoderSight.swift          Qoder local compatibility adapter
 │   ├── WebAgentSight.swift       Browser-extension evidence adapter
 │   ├── AgentSession.swift        Session and turn reconstruction
 │   ├── EventStore.swift          Local normalized event storage

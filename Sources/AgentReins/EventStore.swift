@@ -82,6 +82,9 @@ final class EventStore: ObservableObject {
             if saved.inputTokens == nil, candidate.inputTokens != nil { return true }
             if saved.outputTokens == nil, candidate.outputTokens != nil { return true }
             if saved.costUSD == nil, candidate.costUSD != nil { return true }
+            if saved.action != candidate.action { return true }
+            if saved.modelResponse == nil, candidate.modelResponse != nil { return true }
+            if saved.afterContent == nil, candidate.afterContent != nil { return true }
             return false
         }
     }

@@ -27,4 +27,5 @@ The UI consumes the complete live process inventory, not only risk or short-live
 - Process inventory is a live snapshot. A process that exits between samples can be missed.
 - Network sockets are sampled and short connections can be missed; proxy destinations are exact only when a client-port join is available.
 - Prompts, responses, reasoning and tool results depend on what each native adapter exposes. Transport metadata alone cannot reconstruct encrypted model content.
+- Cursor Composer evidence can provide stable session/turn/tool-call linkage, prompt-token categories, user prompts, visible model responses, tool arguments/results, and before/after file contents. The actual model name remains unknown when Cursor records only `default`.
 - Recorded reasoning means provider-emitted reasoning data; hidden model chain-of-thought is not available as raw evidence.

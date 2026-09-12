@@ -24,7 +24,7 @@ All production code lives in `Sources/AgentReins`.
 | App shell | `AgentGuardApp.swift`, `ContentView.swift`, `UIHelpers.swift` | Menu bar app, navigation, and user-facing evidence views. |
 | Session model | `AgentSession.swift`, `Rule.swift`, `SecurityIncident.swift` | Turns, model exchanges, tool activity, and readable incident summaries. |
 | Development story | `DevelopmentTrace.swift` | Aggregates raw events into Understand, Plan, Build, Test, and Deliver stages with layered drill-down evidence. |
-| Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift`, `QoderSight.swift`, `WebAgentSight.swift` | Read supported WorkBuddy, compatible local Codex and Qoder records, and confirmed browser-extension evidence, then map them into normalized events. |
+| Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift`, `CursorSight.swift`, `QoderSight.swift`, `WebAgentSight.swift` | Read supported WorkBuddy, compatible local Codex/Cursor/Qoder records, and confirmed browser-extension evidence, then map them into normalized events. |
 | Browser bridge | `BrowserExtension/`, `AgentReinsNativeHost` | Captures Grok Imagine tab evidence with a `grok.com`-only extension and transfers it locally through Chrome/Edge Native Messaging. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
 | Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process, file, and network observations to recent turns. A network endpoint is linked to a Tool/MCP call only when one unambiguous call exists in a tight time window; every join records its evidence method and remains inferred. |
@@ -62,7 +62,8 @@ Historical session reconstruction is opt-in. Startup restores only the active se
 
 ## Current boundaries
 
-- WorkBuddy is the native session integration. Codex support is a defensive local compatibility adapter because its rollout JSONL layout is not a documented stable API.
+- WorkBuddy is the native session integration. Codex, Cursor, and Qoder support are defensive local compatibility adapters because their local record layouts are not documented stable APIs.
+- The Cursor adapter uses Composer ID, Bubble ID, Request ID, and Tool Call ID for confirmed conversation-level correlation. It stores the original Composer envelope as raw evidence before projecting prompts, token composition, responses, tool activity, and generated-file changes. An unresolved model name remains `default`; AgentReins does not infer a provider or model without direct evidence.
 - File and process monitoring are observational and do not provide universal pre-execution enforcement.
 - Git-quality turn attribution, independent build/test verification, transactional undo, and Provider Trust are roadmap work.
 - Endpoint Security integration requires Apple approval, entitlements, Developer ID signing, and notarization.
