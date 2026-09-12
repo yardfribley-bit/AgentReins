@@ -327,14 +327,14 @@ final class TurnJournalTests: XCTestCase {
             let database = try EvidenceDatabase(url: url)
             try database.appendRaw([RawEvidenceRecord(source: "codex", stream: "fixture", offsetStart: 0,
                 offsetEnd: 3, fingerprint: "1", observedAt: Date(), payload: Data("raw".utf8))])
+            try database.backup(to: url.appendingPathExtension("backup"))
         }
-        _ = try EvidenceDatabase.openRecovering(url: url)
         var handle: OpaquePointer?
         XCTAssertEqual(sqlite3_open(url.path, &handle), SQLITE_OK)
         XCTAssertEqual(sqlite3_exec(handle, "UPDATE raw_evidence SET record_hash='tampered'", nil, nil, nil), SQLITE_OK)
         sqlite3_close(handle)
 
-        let recovered = try EvidenceDatabase.openRecovering(url: url)
+        let recovered = try EvidenceDatabase.verifyAndRecover(url: url)
         XCTAssertTrue(try recovered.verifyIntegrity())
         XCTAssertEqual(try recovered.rawRecordCount(), 1)
     }
@@ -342,14 +342,26 @@ final class TurnJournalTests: XCTestCase {
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
         setenv("AGENTREINS_TEST_SECRET", "must-not-enter-process-evidence", 1)
         defer { unsetenv("AGENTREINS_TEST_SECRET") }
-        let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["agentreinspackagetests"])
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let executable = root.appendingPathComponent("codex-environment-test")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.copyItem(at: URL(fileURLWithPath: "/bin/sleep"), to: executable)
+        try FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: executable.path)
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = ["3"]
+        process.environment = ["AGENTREINS_TEST_SECRET": "must-not-enter-process-evidence"]
+        try process.run()
+        defer { if process.isRunning { process.terminate() } }
 
+        let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["codex-environment-test"])
         let snapshot = provider.snapshot()
-        let current = try XCTUnwrap(snapshot.first { $0.pid == String(getpid()) })
+        let captured = try XCTUnwrap(snapshot.first { $0.pid == String(process.processIdentifier) })
 
-        XCTAssertFalse(current.ppid.isEmpty)
-        XCTAssertFalse(current.command.isEmpty)
-        XCTAssertFalse(current.command.contains("must-not-enter-process-evidence"))
+        XCTAssertFalse(captured.ppid.isEmpty)
+        XCTAssertFalse(captured.command.isEmpty)
+        XCTAssertFalse(captured.command.contains("must-not-enter-process-evidence"))
     }
 
     func testLibprocRecallForOneSecondProcesses() throws {

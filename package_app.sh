@@ -12,30 +12,42 @@ BUILD_NUMBER="${AGENTREINS_BUILD_NUMBER:-$(date -u '+%Y%m%d.%H%M')}"
 BUILD_DATE="${AGENTREINS_BUILD_DATE:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 BUILD_JOBS="${AGENTREINS_BUILD_JOBS:-2}"
+TARGET_ARCHS="${AGENTREINS_ARCHS:-universal}"
 
-echo "==> Building Universal 2 release binary (arm64 + x86_64)"
 ARM_SCRATCH="$PROJECT_DIR/.build/arm64"
 INTEL_SCRATCH="$PROJECT_DIR/.build/x86_64"
-swift build -c release -j "$BUILD_JOBS" --arch arm64 --scratch-path "$ARM_SCRATCH"
-swift build -c release -j "$BUILD_JOBS" --arch x86_64 --scratch-path "$INTEL_SCRATCH"
-ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH" --show-bin-path)"
-INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH" --show-bin-path)"
+if [[ "$TARGET_ARCHS" == "x86_64" ]]; then
+  echo "==> Building Intel release binary (x86_64)"
+  swift build -c release -j "$BUILD_JOBS" --arch x86_64 --scratch-path "$INTEL_SCRATCH"
+  INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH" --show-bin-path)"
+else
+  echo "==> Building Universal 2 release binary (arm64 + x86_64)"
+  swift build -c release -j "$BUILD_JOBS" --arch arm64 --scratch-path "$ARM_SCRATCH"
+  swift build -c release -j "$BUILD_JOBS" --arch x86_64 --scratch-path "$INTEL_SCRATCH"
+  ARM_BIN_DIR="$(swift build -c release --arch arm64 --scratch-path "$ARM_SCRATCH" --show-bin-path)"
+  INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH" --show-bin-path)"
+fi
 
 echo "==> Creating $APP_NAME.app"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-lipo -create \
-  "$ARM_BIN_DIR/$APP_NAME" \
-  "$INTEL_BIN_DIR/$APP_NAME" \
-  -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+if [[ "$TARGET_ARCHS" == "x86_64" ]]; then
+  cp "$INTEL_BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+  cp "$INTEL_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
+else
+  lipo -create \
+    "$ARM_BIN_DIR/$APP_NAME" \
+    "$INTEL_BIN_DIR/$APP_NAME" \
+    -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+  cp "$ARM_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64"
+  cp "$INTEL_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64"
+  lipo -create \
+    "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64" \
+    "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64" \
+    -output "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
+  rm "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64"
+fi
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
-cp "$ARM_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64"
-cp "$INTEL_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64"
-lipo -create \
-  "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64" \
-  "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64" \
-  -output "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
-rm "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64"
 chmod +x "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
@@ -68,10 +80,14 @@ codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY"
 echo "==> Verifying package"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 ARCHITECTURES="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME")"
-[[ "$ARCHITECTURES" == *arm64* && "$ARCHITECTURES" == *x86_64* ]] || {
-  echo "error: expected arm64 and x86_64, found: $ARCHITECTURES" >&2
-  exit 1
-}
+if [[ "$TARGET_ARCHS" == "x86_64" ]]; then
+  [[ "$ARCHITECTURES" == "x86_64" ]] || { echo "error: expected x86_64, found: $ARCHITECTURES" >&2; exit 1; }
+else
+  [[ "$ARCHITECTURES" == *arm64* && "$ARCHITECTURES" == *x86_64* ]] || {
+    echo "error: expected arm64 and x86_64, found: $ARCHITECTURES" >&2
+    exit 1
+  }
+fi
 
 echo "==> Complete: $APP_BUNDLE"
 echo "    Version: $VERSION ($BUILD_NUMBER)"

@@ -149,6 +149,32 @@ final class EvidenceDatabase: @unchecked Sendable {
         }
     }
 
+    /// Explicit, potentially expensive integrity audit. This is invoked by a
+    /// user action or scheduled maintenance, never on the live startup path.
+    static func verifyAndRecover(url: URL = defaultURL()) throws -> EvidenceDatabase {
+        let backupURL = url.appendingPathExtension("backup")
+        do {
+            let database = try EvidenceDatabase(url: url)
+            if try database.verifyIntegrity() { return database }
+        } catch {
+            // Continue to the same quarantined recovery path below.
+        }
+        guard FileManager.default.fileExists(atPath: backupURL.path) else {
+            throw NSError(domain: "AgentReins.EvidenceDatabase", code: 2,
+                          userInfo: [NSLocalizedDescriptionKey: "Integrity failed and no verified backup is available"])
+        }
+        let quarantined = url.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
+        if FileManager.default.fileExists(atPath: url.path) { try FileManager.default.moveItem(at: url, to: quarantined) }
+        for suffix in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: url.path + suffix) }
+        try FileManager.default.copyItem(at: backupURL, to: url)
+        let recovered = try EvidenceDatabase(url: url)
+        guard try recovered.verifyIntegrity() else {
+            throw NSError(domain: "AgentReins.EvidenceDatabase", code: 3,
+                          userInfo: [NSLocalizedDescriptionKey: "The evidence backup also failed integrity verification"])
+        }
+        return recovered
+    }
+
     /// Full hash-chain verification and a 100+ MB SQLite backup are important
     /// maintenance operations, not launch work. Run them at most weekly and
     /// only after the app has been idle long enough to establish live capture.
