@@ -34,6 +34,9 @@ struct AgentReinsApp: App {
     @StateObject private var turnJournalStore = TurnJournalStore()
     @StateObject private var workBuddySight = WorkBuddySight()
     @StateObject private var codexSight = CodexSight()
+    @StateObject private var qoderSight = QoderSight()
+    @StateObject private var webAgentSight = WebAgentSight()
+    @StateObject private var agentDiscovery = AgentDiscoveryManager()
     @StateObject private var semanticAnalyzer = SemanticAnalyzer()
     @StateObject private var memoryScan = MemoryScanManager()
     @StateObject private var memoryRuleStore = MemoryRuleStore()
@@ -49,6 +52,9 @@ struct AgentReinsApp: App {
                 .environmentObject(turnJournalStore)
                 .environmentObject(workBuddySight)
                 .environmentObject(codexSight)
+                .environmentObject(qoderSight)
+                .environmentObject(webAgentSight)
+                .environmentObject(agentDiscovery)
                 .environmentObject(semanticAnalyzer)
                 .environmentObject(memoryScan)
                 .environmentObject(memoryRuleStore)
@@ -56,6 +62,10 @@ struct AgentReinsApp: App {
                     fileGuard.setRules(rules)
                     processGuard.setRules(rules)
                 }
+                .onReceive(workBuddySight.$connected) { agentDiscovery.setAdapterConnected("workbuddy", connected: $0) }
+                .onReceive(codexSight.$connected) { agentDiscovery.setAdapterConnected("codex", connected: $0) }
+                .onReceive(qoderSight.$connected) { agentDiscovery.setAdapterConnected("qoder", connected: $0) }
+                .onReceive(webAgentSight.$connected) { agentDiscovery.setAdapterConnected("grok-web", connected: $0) }
                 .task {
                     fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
@@ -81,6 +91,22 @@ struct AgentReinsApp: App {
                         eventStore.record(fresh)
                     }
                     codexSight.start()
+                    qoderSight.onEvents = { events in
+                        let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
+                        attributionResolver.observe(fresh)
+                        refineRecentNetworkEvents()
+                        turnJournalStore.ingest(journalEvents(from: fresh))
+                        eventStore.record(fresh)
+                    }
+                    qoderSight.start()
+                    webAgentSight.onEvents = { events in
+                        let fresh = eventStore.unrecorded(events)
+                        attributionResolver.observe(fresh)
+                        turnJournalStore.ingest(journalEvents(from: fresh))
+                        eventStore.record(fresh)
+                    }
+                    webAgentSight.start()
+                    agentDiscovery.start()
                     memoryScan.startAuto { memoryRuleStore.enabledRules }
                 }
         }

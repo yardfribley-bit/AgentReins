@@ -129,6 +129,7 @@ struct ContextUsageSample: Identifiable, Equatable {
     let outputTokens: Int?
     let cachedTokens: Int?
     let reasoningTokens: Int?
+    var costUSD: Double? = nil
     let model: String?
 }
 
@@ -141,6 +142,7 @@ struct ContextGrowthMetrics: Equatable {
     let cumulativeOutputTokens: Int
     let cumulativeCachedTokens: Int
     let largestInputIncrease: Int
+    let cumulativeCostUSD: Double
 
     init?(samples: [ContextUsageSample]) {
         guard let first = samples.first, let last = samples.last else { return nil }
@@ -153,6 +155,7 @@ struct ContextGrowthMetrics: Equatable {
         cumulativeCachedTokens = samples.reduce(0) { $0 + ($1.cachedTokens ?? 0) }
         largestInputIncrease = zip(samples, samples.dropFirst())
             .map { $1.inputTokens - $0.inputTokens }.max() ?? 0
+        cumulativeCostUSD = samples.reduce(0) { $0 + ($1.costUSD ?? 0) }
     }
 
     var growthPercent: Double {
@@ -222,7 +225,10 @@ struct AgentSessionSnapshot: Identifiable {
     }
 
     private static func buildTurns(_ events: [GuardEvent], exchanges: [ModelExchange]) -> [AgentTurn] {
-        let grouped = Dictionary(grouping: events) { $0.turnId ?? "unattributed" }
+        // Session-scoped context (for example Codex base instructions) applies
+        // to turns but must not appear as a fake standalone conversation turn.
+        let turnEvents = events.filter { $0.turnId != nil || $0.kind != "context" }
+        let grouped = Dictionary(grouping: turnEvents) { $0.turnId ?? "unattributed" }
         let orderedGroups = grouped.map { id, turnEvents in
             (id, turnEvents.sorted { $0.ts < $1.ts })
         }.sorted { ($0.1.first?.ts ?? .distantPast) < ($1.1.first?.ts ?? .distantPast) }
@@ -233,7 +239,7 @@ struct AgentSessionSnapshot: Identifiable {
                 ContextUsageSample(id: event.id.uuidString, timestamp: event.ts,
                     inputTokens: event.inputTokens!, outputTokens: event.outputTokens,
                     cachedTokens: event.cachedTokens, reasoningTokens: event.reasoningTokens,
-                    model: event.model)
+                    costUSD: event.costUSD, model: event.model)
             }
             return AgentTurn(id: id, index: offset + 1,
                 userInput: turnEvents.first(where: { $0.op == "prompt" })?.userIntent ?? turnEvents.compactMap(\.userIntent).first,

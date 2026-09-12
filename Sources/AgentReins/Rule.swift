@@ -55,6 +55,7 @@ struct GuardEvent: Identifiable, Codable {
     let outputTokens: Int?
     let cachedTokens: Int?
     let reasoningTokens: Int?
+    let costUSD: Double?
     let beforeContent: String?
     let afterContent: String?
     let fileDiff: String?
@@ -76,6 +77,7 @@ struct GuardEvent: Identifiable, Codable {
          modelReasoning: String? = nil, modelPrompt: String? = nil, modelResponse: String? = nil,
          toolName: String? = nil, model: String? = nil, inputTokens: Int? = nil,
          outputTokens: Int? = nil, cachedTokens: Int? = nil, reasoningTokens: Int? = nil,
+         costUSD: Double? = nil,
          beforeContent: String? = nil, afterContent: String? = nil, fileDiff: String? = nil,
          codeFindings: [CodeFinding]? = nil,
          source: String? = nil, attributionConfidence: EvidenceConfidence? = nil,
@@ -107,6 +109,7 @@ struct GuardEvent: Identifiable, Codable {
         self.outputTokens = outputTokens
         self.cachedTokens = cachedTokens
         self.reasoningTokens = reasoningTokens
+        self.costUSD = costUSD
         self.beforeContent = beforeContent
         self.afterContent = afterContent
         self.fileDiff = fileDiff
@@ -133,7 +136,7 @@ struct GuardEvent: Identifiable, Codable {
                    modelPrompt: modelPrompt, modelResponse: modelResponse,
                    toolName: toolName ?? self.toolName, model: model, inputTokens: inputTokens,
                    outputTokens: outputTokens, cachedTokens: cachedTokens,
-                   reasoningTokens: reasoningTokens, beforeContent: beforeContent,
+                   reasoningTokens: reasoningTokens, costUSD: costUSD, beforeContent: beforeContent,
                    afterContent: afterContent, fileDiff: fileDiff, codeFindings: codeFindings,
                    source: source, attributionConfidence: confidence,
                    attributionMethod: method, processId: processId,
@@ -154,7 +157,7 @@ struct GuardEvent: Identifiable, Codable {
                           modelPrompt: modelPrompt, modelResponse: modelResponse,
                           toolName: toolName, model: model, inputTokens: inputTokens,
                           outputTokens: outputTokens, cachedTokens: cachedTokens,
-                          reasoningTokens: reasoningTokens, beforeContent: beforeContent,
+                          reasoningTokens: reasoningTokens, costUSD: costUSD, beforeContent: beforeContent,
                           afterContent: afterContent, fileDiff: fileDiff, codeFindings: codeFindings,
                           source: source, attributionConfidence: attributionConfidence,
                           attributionMethod: attributionMethod, processId: processId,

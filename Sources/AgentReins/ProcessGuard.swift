@@ -29,6 +29,10 @@ final class ProcessGuard: ObservableObject {
     @Published var events: [GuardEvent] = []
     @Published var running = false
     @Published private(set) var activeAgents: [String] = []
+    /// Complete live process inventory. This is intentionally separate from
+    /// `events`: long-running helpers (Storage Service, NodePeer, MCP servers,
+    /// renderers) are evidence even when they are not risky or user actions.
+    @Published private(set) var processInventory: [ProcessSnapshotRecord] = []
     @Published private(set) var collectionHealth = CollectionHealth()
     var onEvent: ((GuardEvent) -> Void)?
     var onEvents: (([GuardEvent]) -> Void)?
@@ -41,13 +45,15 @@ final class ProcessGuard: ObservableObject {
     private var seen: Set<String> = []
     private var seenConnections: [String: Date] = [:]
     private var currentCmdRules: [CmdRule] = []
-    private let agentMarkers = ["codex", "kiro", "cursor", "workbuddy", "claude", "aider", "windsurf", "trae"]
+    private let agentMarkers = ["codex", "kiro", "cursor", "workbuddy", "qoder", "claude", "aider", "windsurf", "trae"]
     private let snapshotProvider: any ProcessSnapshotting
     private let networkProvider: any NetworkSnapshotting
     private let proxyDestinationProvider: any ProxyDestinationSnapshotting
     private var recentProxyDestinations: [Int: ProxyDestinationRecord] = [:]
     private let evidenceDatabase = try? EvidenceDatabase()
     private var lastHealthPersist: [String: Date] = [:]
+    private var workingCollectionHealth = CollectionHealth()
+    private var lastHealthPublish = Date.distantPast
 
     /// 内置默认高危命令监测集（对齐 agentguard/rules.json 的命令层规则）。
     static let builtin: [CmdRule] = {
@@ -109,7 +115,10 @@ final class ProcessGuard: ObservableObject {
 
     private func captureProcesses() {
         guard running, !processSnapshotInFlight else {
-            if processSnapshotInFlight { collectionHealth.skippedProcessSnapshots += 1 }
+            if processSnapshotInFlight {
+                workingCollectionHealth.skippedProcessSnapshots += 1
+                publishHealthIfNeeded()
+            }
             return
         }
         processSnapshotInFlight = true
@@ -120,24 +129,32 @@ final class ProcessGuard: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.processSnapshotInFlight = false
-                self.collectionHealth.lastProcessDurationMS = Date().timeIntervalSince(started) * 1_000
+                self.workingCollectionHealth.lastProcessDurationMS = Date().timeIntervalSince(started) * 1_000
                 guard !procs.isEmpty else {
-                    self.collectionHealth.processFailures += 1
+                    self.workingCollectionHealth.processFailures += 1
+                    self.publishHealthIfNeeded()
                     self.persistHealth(source: "process", state: .failed,
                                        detail: "The process provider returned an empty snapshot")
                     return
                 }
-                self.collectionHealth.lastProcessSuccess = Date()
+                self.workingCollectionHealth.lastProcessSuccess = Date()
                 self.latestProcesses = procs
+                self.processInventory = procs.map {
+                    ProcessSnapshotRecord(pid: $0.pid, ppid: $0.ppid, command: $0.cmd)
+                }
                 self.process(procs: procs)
                 self.persistHealth(source: "process", state: .healthy, detail: nil)
+                self.publishHealthIfNeeded()
             }
         }
     }
 
     private func captureNetwork() {
         guard running, !networkSnapshotInFlight else {
-            if networkSnapshotInFlight { collectionHealth.skippedNetworkSnapshots += 1 }
+            if networkSnapshotInFlight {
+                workingCollectionHealth.skippedNetworkSnapshots += 1
+                publishHealthIfNeeded()
+            }
             return
         }
         networkSnapshotInFlight = true
@@ -149,12 +166,13 @@ final class ProcessGuard: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.networkSnapshotInFlight = false
-                self.collectionHealth.lastNetworkDurationMS = Date().timeIntervalSince(started) * 1_000
-                self.collectionHealth.lastNetworkSuccess = Date()
+                self.workingCollectionHealth.lastNetworkDurationMS = Date().timeIntervalSince(started) * 1_000
+                self.workingCollectionHealth.lastNetworkSuccess = Date()
                 self.processNetwork(procs: self.latestProcesses, connections: connections,
                                     proxyDestinations: proxyDestinations)
                 self.persistHealth(source: "network", state: .healthy,
                                    detail: "Socket evidence is sampled and may miss short connections")
+                self.publishHealthIfNeeded()
             }
         }
     }
@@ -198,7 +216,7 @@ final class ProcessGuard: ObservableObject {
             }
         }
         guard !newEvents.isEmpty else { return }
-        collectionHealth.acceptedProcessEvents += newEvents.count
+        workingCollectionHealth.acceptedProcessEvents += newEvents.count
         events.insert(contentsOf: newEvents, at: 0)
         if events.count > 300 { events.removeLast(events.count - 300) }
         onEvents?(newEvents)
@@ -229,7 +247,7 @@ final class ProcessGuard: ObservableObject {
             }
         }
         guard !networkEvents.isEmpty else { return }
-        collectionHealth.acceptedNetworkEvents += networkEvents.count
+        workingCollectionHealth.acceptedNetworkEvents += networkEvents.count
         events.insert(contentsOf: networkEvents, at: 0)
         if events.count > 300 { events.removeLast(events.count - 300) }
         onEvents?(networkEvents)
@@ -323,11 +341,19 @@ final class ProcessGuard: ObservableObject {
         let isProcess = source == "process"
         try? evidenceDatabase?.updateHealth(CollectorHealthRecord(
             source: source, state: state,
-            lastSuccess: isProcess ? collectionHealth.lastProcessSuccess : collectionHealth.lastNetworkSuccess,
+            lastSuccess: isProcess ? workingCollectionHealth.lastProcessSuccess : workingCollectionHealth.lastNetworkSuccess,
             lagSeconds: nil,
-            accepted: isProcess ? collectionHealth.acceptedProcessEvents : collectionHealth.acceptedNetworkEvents,
-            malformed: isProcess ? collectionHealth.processFailures : collectionHealth.networkFailures,
-            dropped: isProcess ? collectionHealth.skippedProcessSnapshots : collectionHealth.skippedNetworkSnapshots,
+            accepted: isProcess ? workingCollectionHealth.acceptedProcessEvents : workingCollectionHealth.acceptedNetworkEvents,
+            malformed: isProcess ? workingCollectionHealth.processFailures : workingCollectionHealth.networkFailures,
+            dropped: isProcess ? workingCollectionHealth.skippedProcessSnapshots : workingCollectionHealth.skippedNetworkSnapshots,
             detail: detail))
+    }
+
+    private func publishHealthIfNeeded(force: Bool = false) {
+        guard force || Date().timeIntervalSince(lastHealthPublish) >= 5 else { return }
+        lastHealthPublish = Date()
+        if collectionHealth != workingCollectionHealth {
+            collectionHealth = workingCollectionHealth
+        }
     }
 }

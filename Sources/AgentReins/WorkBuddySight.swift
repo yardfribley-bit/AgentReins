@@ -138,6 +138,7 @@ final class WorkBuddySight: ObservableObject {
         var lastReasoning: [String: String] = [:]
         var currentTurn: [String: String] = [:]
         var toolNames: [String: String] = [:]
+        var lastModelEndpoint: [String: String] = [:]
         var result: [GuardEvent] = []
         // 启动时只读取活跃窗口；完整历史已在 EventStore，避免重复解析巨型会话。
         let lines = text.split(whereSeparator: \.isNewline)
@@ -167,6 +168,10 @@ final class WorkBuddySight: ObservableObject {
             }
             if type == "message", row["role"] as? String == "assistant", let response = textContent(row["content"]) {
                 let provider = row["providerData"] as? [String: Any] ?? [:]
+                if let domain = ExternalURLEvidence.firstDomain(in: response) {
+                    lastModelEndpoint[session] = domain
+                }
+                let usage = provider["rawUsage"] as? [String: Any] ?? provider["usage"] as? [String: Any] ?? [:]
                 let rawAgent = provider["agent"] as? String
                 let agent = (rawAgent == nil || rawAgent == "cli") ? "workbuddy" : rawAgent!
                 result.append(GuardEvent(id: id, kind: "model", ruleId: "agentsight_model_response",
@@ -176,7 +181,12 @@ final class WorkBuddySight: ObservableObject {
                     turnId: currentTurn[session],
                     userIntent: lastIntent[session], modelResponse: String(response.prefix(64_000)),
                     model: provider["requestModelName"] as? String ?? provider["model"] as? String,
-                    source: "agentsight:workbuddy-local"))
+                    inputTokens: intValue(usage["prompt_tokens"] ?? usage["inputTokens"]),
+                    outputTokens: intValue(usage["completion_tokens"] ?? usage["outputTokens"]),
+                    cachedTokens: intValue((usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"]),
+                    reasoningTokens: intValue((usage["completion_tokens_details"] as? [String: Any])?["reasoning_tokens"]),
+                    costUSD: doubleValue(usage["cost"]),
+                    source: "agentsight:workbuddy-local", remoteDomain: lastModelEndpoint[session]))
                 continue
             }
             if type == "reasoning" {
@@ -216,8 +226,9 @@ final class WorkBuddySight: ObservableObject {
                 cachedTokens: [intValue(usage["cached_tokens"]), intValue(usage["cache_read_input_tokens"]),
                                intValue((usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"])].compactMap { $0 }.max(),
                 reasoningTokens: intValue((usage["completion_tokens_details"] as? [String: Any])?["reasoning_tokens"] ?? usage["completion_thinking_tokens"]),
+                costUSD: doubleValue(usage["cost"]),
                 codeFindings: generatedCodeFindings.isEmpty ? nil : generatedCodeFindings,
-                source: "agentsight:workbuddy-local"))
+                source: "agentsight:workbuddy-local", remoteDomain: lastModelEndpoint[session]))
         }
         return result
     }
@@ -309,6 +320,13 @@ final class WorkBuddySight: ObservableObject {
     private nonisolated static func intValue(_ value: Any?) -> Int? {
         if let number = value as? NSNumber { return number.intValue }
         if let string = value as? String { return Int(string) }
+        return nil
+    }
+
+    private nonisolated static func doubleValue(_ value: Any?) -> Double? {
+        if let value = value as? Double { return value }
+        if let value = value as? NSNumber { return value.doubleValue }
+        if let value = value as? String { return Double(value) }
         return nil
     }
 }

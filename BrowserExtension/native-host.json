@@ -1,0 +1,9 @@
+{
+  "name": "com.agentspec.agentreins.web",
+  "description": "AgentReins local web-agent evidence bridge",
+  "path": "__AGENTREINS_NATIVE_HOST__",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://hcmoeaheokpfbbggdmkdeaiokakiampk/"
+  ]
+}

@@ -62,6 +62,7 @@ AgentReins is an early alpha. The repository is public so that the implementatio
 
 - Native macOS menu bar application and security center.
 - WorkBuddy session discovery and a local compatibility adapter for Codex rollout records.
+- A least-privilege Chrome/Edge adapter for confirmed Grok Imagine tab evidence.
 - Per-turn views of captured user intent, model context, model response, model name, token usage, tool calls, and tool results.
 - Fast active-task startup with explicit, on-demand reconstruction of historical WorkBuddy and Codex sessions.
 - Process snapshots and monitoring for explicitly protected files.
@@ -113,6 +114,15 @@ open AgentReins.app
 
 The packaging script creates `AgentReins.app` in the repository root and applies an ad-hoc development signature. Distribution to other Macs without security warnings requires a Developer ID Application certificate and Apple notarization.
 
+### Connect Grok Imagine in Chrome or Edge
+
+1. Package AgentReins and move `AgentReins.app` into `/Applications`.
+2. Run `/Applications/AgentReins.app/Contents/Resources/BrowserExtension/install-native-host.sh`.
+3. Open `chrome://extensions` or `edge://extensions`, enable Developer mode, choose **Load unpacked**, and select `AgentReins.app/Contents/Resources/BrowserExtension`.
+4. Open `https://grok.com/imagine`. AgentReins will show `Grok Web` after the first local evidence message arrives.
+
+The extension requests access only to `https://grok.com/*`. It records prompt submissions, file metadata and hashes, generation status, and discovered result media. Evidence is delivered through Native Messaging; AgentReins does not expose a localhost HTTP listener.
+
 ## How the repository is organized
 
 ```text
@@ -123,6 +133,7 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 │   ├── DevelopmentTrace.swift    Five-stage live task reconstruction
 │   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
 │   ├── CodexSight.swift          Codex local compatibility adapter
+│   ├── WebAgentSight.swift       Browser-extension evidence adapter
 │   ├── AgentSession.swift        Session and turn reconstruction
 │   ├── EventStore.swift          Local normalized event storage
 │   ├── ProcessGuard.swift        Process observation
@@ -133,6 +144,7 @@ The packaging script creates `AgentReins.app` in the repository root and applies
 ├── Assets/                       Packaged application assets
 ├── AppIcon.iconset/              Source application icons
 ├── Resources/                    Runtime resources bundled with the app
+├── BrowserExtension/             Least-privilege Grok Chrome/Edge extension
 ├── .github/workflows/            Universal 2 CI and release automation
 ├── docs/                         Architecture, roadmaps, and launch plans
 ├── Package.swift                 Swift Package Manager manifest

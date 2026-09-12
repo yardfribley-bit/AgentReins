@@ -103,6 +103,22 @@ final class EvidenceDatabase: @unchecked Sendable {
               updated_at REAL NOT NULL
             ) WITHOUT ROWID
             """)
+        try execute("""
+            CREATE TABLE IF NOT EXISTS forensic_assessments (
+              assessment_id TEXT PRIMARY KEY,
+              session_id TEXT NOT NULL,
+              turn_id TEXT NOT NULL,
+              agent TEXT NOT NULL,
+              assessment_type TEXT NOT NULL,
+              rule_version INTEGER NOT NULL,
+              confidence TEXT NOT NULL,
+              generated_at REAL NOT NULL,
+              evidence_event_ids BLOB NOT NULL,
+              payload BLOB NOT NULL,
+              payload_sha256 TEXT NOT NULL
+            ) WITHOUT ROWID
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS forensic_turn ON forensic_assessments(session_id,turn_id,generated_at DESC)")
     }
 
     deinit { sqlite3_close(handle) }
@@ -205,6 +221,63 @@ final class EvidenceDatabase: @unchecked Sendable {
               sqlite3_step(statement) == SQLITE_ROW else { throw failure("raw count") }
         defer { sqlite3_finalize(statement) }
         return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    func upsertAssessments(_ records: [ForensicAssessmentRecord]) throws {
+        guard !records.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            let sql = """
+              INSERT INTO forensic_assessments(assessment_id,session_id,turn_id,agent,assessment_type,
+              rule_version,confidence,generated_at,evidence_event_ids,payload,payload_sha256)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(assessment_id) DO UPDATE SET
+              confidence=excluded.confidence,generated_at=excluded.generated_at,
+              evidence_event_ids=excluded.evidence_event_ids,payload=excluded.payload,payload_sha256=excluded.payload_sha256
+              """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare assessment") }
+            defer { sqlite3_finalize(statement) }
+            for record in records {
+                let references = try encoder.encode(record.evidenceEventIds)
+                let digest = SHA256.hash(data: record.payload).map { String(format: "%02x", $0) }.joined()
+                bind(record.assessmentId, at: 1, to: statement); bind(record.sessionId, at: 2, to: statement)
+                bind(record.turnId, at: 3, to: statement); bind(record.agent, at: 4, to: statement)
+                bind(record.kind.rawValue, at: 5, to: statement); sqlite3_bind_int(statement, 6, Int32(record.ruleVersion))
+                bind(record.confidence.rawValue, at: 7, to: statement)
+                sqlite3_bind_double(statement, 8, record.generatedAt.timeIntervalSince1970)
+                _ = references.withUnsafeBytes { sqlite3_bind_blob(statement, 9, $0.baseAddress, Int32(references.count), SQLITE_TRANSIENT) }
+                _ = record.payload.withUnsafeBytes { sqlite3_bind_blob(statement, 10, $0.baseAddress, Int32(record.payload.count), SQLITE_TRANSIENT) }
+                bind(digest, at: 11, to: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert assessment") }
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func assessments(sessionId: String, turnId: String) throws -> [ForensicAssessmentRecord] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = "SELECT assessment_id,agent,assessment_type,rule_version,confidence,generated_at,evidence_event_ids,payload FROM forensic_assessments WHERE session_id=? AND turn_id=? ORDER BY assessment_type"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare assessment read") }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionId, at: 1, to: statement); bind(turnId, at: 2, to: statement)
+        var result: [ForensicAssessmentRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = text(statement, 0), let agent = text(statement, 1), let rawKind = text(statement, 2),
+                  let kind = ForensicAssessmentKind(rawValue: rawKind), let rawConfidence = text(statement, 4),
+                  let confidence = EvidenceConfidence(rawValue: rawConfidence),
+                  let referenceBytes = sqlite3_column_blob(statement, 6), let payloadBytes = sqlite3_column_blob(statement, 7) else { continue }
+            let references = Data(bytes: referenceBytes, count: Int(sqlite3_column_bytes(statement, 6)))
+            let payload = Data(bytes: payloadBytes, count: Int(sqlite3_column_bytes(statement, 7)))
+            let ids = (try? decoder.decode([String].self, from: references)) ?? []
+            result.append(ForensicAssessmentRecord(assessmentId: id, sessionId: sessionId, turnId: turnId,
+                agent: agent, kind: kind, ruleVersion: Int(sqlite3_column_int(statement, 3)), confidence: confidence,
+                generatedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)), evidenceEventIds: ids,
+                payload: payload))
+        }
+        return result
     }
 
     func verifyIntegrity() throws -> Bool {

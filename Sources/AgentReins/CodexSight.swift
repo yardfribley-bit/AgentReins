@@ -171,10 +171,61 @@ final class CodexSight: ObservableObject {
             let timestamp = date(row["timestamp"])
             let timestampKey = row["timestamp"] as? String ?? String(timestamp.timeIntervalSince1970)
 
+            if type == "session_meta", let base = payload["base_instructions"] as? [String: Any],
+               let instructions = base["text"] as? String, !instructions.isEmpty {
+                let provenance = jsonString(base["provenance"]) ?? "unknown"
+                result.append(event(identity: "\(session):base-instructions", kind: "context",
+                    rule: "codex_base_instructions", workspace: workspace, op: "base_instructions",
+                    timestamp: timestamp, action: "captured", session: session, trace: nil, turn: nil,
+                    intent: nil, prompt: String(instructions.prefix(128_000)), response: nil,
+                    toolCallId: nil, toolName: "codex.base_instructions", command: provenance, model: model))
+                continue
+            }
+
             if type == "turn_context" {
                 currentTurn = payload["turn_id"] as? String ?? currentTurn
                 workspace = payload["cwd"] as? String ?? workspace
                 model = payload["model"] as? String ?? model
+                let context = selectedJSON(payload, keys: ["cwd", "current_date", "timezone", "model", "effort",
+                    "approval_policy", "sandbox_policy", "permission_profile", "active_permission_profile",
+                    "collaboration_mode", "workspace_roots", "realtime_active"])
+                result.append(event(identity: "\(session):\(currentTurn ?? timestampKey):turn-context", kind: "context",
+                    rule: "codex_turn_context", workspace: workspace, op: "turn_context", timestamp: timestamp,
+                    action: "captured", session: session, trace: nil, turn: currentTurn, intent: lastIntent,
+                    prompt: nil, response: nil, toolCallId: nil, toolName: "codex.turn_context",
+                    command: context, model: model))
+                continue
+            }
+            if type == "compacted" {
+                let replacement = payload["replacement_history"] as? [Any] ?? []
+                let guardian = payload["guardian_history"] as? [Any] ?? []
+                let metadata: [String: Any] = [
+                    "window_number": payload["window_number"] ?? NSNull(),
+                    "previous_window_id": payload["previous_window_id"] ?? NSNull(),
+                    "window_id": payload["window_id"] ?? NSNull(),
+                    "compaction_response_id": payload["compaction_response_id"] ?? NSNull(),
+                    "replacement_history_items": replacement.count,
+                    "replacement_history_bytes": jsonByteCount(replacement),
+                    "guardian_history_items": guardian.count,
+                    "guardian_history_bytes": jsonByteCount(guardian)
+                ]
+                result.append(event(identity: "\(session):\(payload["window_id"] as? String ?? timestampKey):compaction",
+                    kind: "context", rule: "codex_context_compaction", workspace: workspace,
+                    op: "context_compaction", timestamp: timestamp, action: "captured", session: session,
+                    trace: payload["compaction_response_id"] as? String, turn: currentTurn, intent: lastIntent,
+                    prompt: nil, response: nil, toolCallId: nil, toolName: "codex.compaction",
+                    command: jsonString(metadata), model: model))
+                continue
+            }
+            if type == "world_state" {
+                let state = payload["state"] as? [String: Any] ?? [:]
+                let summary: [String: Any] = ["full": payload["full"] ?? false,
+                    "state_keys": state.keys.sorted(), "state_bytes": jsonByteCount(state)]
+                result.append(event(identity: "\(session):\(currentTurn ?? "none"):\(timestampKey):world-state",
+                    kind: "context", rule: "codex_world_state", workspace: workspace, op: "world_state",
+                    timestamp: timestamp, action: "captured", session: session, trace: nil, turn: currentTurn,
+                    intent: lastIntent, prompt: nil, response: nil, toolCallId: nil,
+                    toolName: "codex.world_state", command: jsonString(summary), model: model))
                 continue
             }
             if type == "event_msg", payloadType == "task_started" {
@@ -192,6 +243,42 @@ final class CodexSight: ObservableObject {
                     action: "sent", session: session, trace: nil, turn: turn, intent: lastIntent,
                     prompt: String(content.prefix(64_000)), response: nil, toolCallId: nil,
                     toolName: nil, command: nil, model: model))
+                let attachments = (item["content"] as? [[String: Any]] ?? []).filter {
+                    ($0["type"] as? String) != "text" && ($0["type"] as? String) != "input_text"
+                }
+                if !attachments.isEmpty {
+                    let kinds = attachments.compactMap { $0["type"] as? String }
+                    result.append(event(identity: "\(session):\(turn ?? "none"):\(timestampKey):attachments",
+                        kind: "context", rule: "codex_attachment", workspace: workspace, op: "attachment",
+                        timestamp: timestamp, action: "captured", session: session, trace: nil, turn: turn,
+                        intent: lastIntent, prompt: nil, response: nil, toolCallId: nil,
+                        toolName: "codex.attachment", command: jsonString(["count": attachments.count, "types": kinds]),
+                        model: model))
+                }
+                continue
+            }
+            if type == "response_item", payloadType == "message", payload["role"] as? String == "developer",
+               let content = textContent(payload["content"]) {
+                let turn = metadataTurn(payload) ?? currentTurn
+                result.append(event(identity: "\(session):\(turn ?? "none"):\(payload["id"] as? String ?? timestampKey):developer",
+                    kind: "context", rule: "codex_developer_instructions", workspace: workspace,
+                    op: "developer_instructions", timestamp: timestamp, action: "captured", session: session,
+                    trace: nil, turn: turn, intent: lastIntent, prompt: String(content.prefix(128_000)),
+                    response: nil, toolCallId: nil, toolName: "codex.developer_instructions",
+                    command: nil, model: model))
+                continue
+            }
+            if type == "response_item", payloadType == "reasoning" {
+                let summary = recursiveText(payload["summary"])
+                if let summary {
+                    let turn = metadataTurn(payload) ?? currentTurn
+                    result.append(event(identity: "\(session):\(turn ?? "none"):\(payload["id"] as? String ?? timestampKey):reasoning",
+                        kind: "model", rule: "codex_reasoning_summary", workspace: workspace,
+                        op: "reasoning_summary", timestamp: timestamp, action: "captured", session: session,
+                        trace: nil, turn: turn, intent: lastIntent, prompt: nil, response: nil,
+                        toolCallId: nil, toolName: nil, command: nil, model: model,
+                        reasoning: String(summary.prefix(64_000))))
+                }
                 continue
             }
             if type == "response_item", payloadType == "message", payload["role"] as? String == "assistant",
@@ -240,13 +327,13 @@ final class CodexSight: ObservableObject {
         op: String, timestamp: Date, action: String, session: String, trace: String?, turn: String?,
         intent: String?, prompt: String?, response: String?, toolCallId: String?, toolName: String?,
         command: String?, model: String?, inputTokens: Int? = nil, outputTokens: Int? = nil,
-        cachedTokens: Int? = nil, reasoningTokens: Int? = nil) -> GuardEvent {
+        cachedTokens: Int? = nil, reasoningTokens: Int? = nil, reasoning: String? = nil) -> GuardEvent {
         GuardEvent(id: deterministicUUID(identity), kind: kind, ruleId: rule, path: workspace,
             command: command, agent: "codex", op: op, severity: "info", ts: timestamp,
             action: action, sessionId: session, traceId: trace, turnId: turn,
             toolCallId: toolCallId, userIntent: intent,
             modelDecision: op == "call" ? "The model selected \(toolName ?? "a tool")" : nil,
-            modelPrompt: prompt, modelResponse: response, toolName: toolName, model: model,
+            modelReasoning: reasoning, modelPrompt: prompt, modelResponse: response, toolName: toolName, model: model,
             inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens,
             reasoningTokens: reasoningTokens, source: "agentsight:codex-local-compat")
     }
@@ -303,8 +390,26 @@ final class CodexSight: ObservableObject {
 
     private nonisolated static func recursiveText(_ value: Any?) -> String? {
         if let value = value as? String { return nonEmpty(value) }
-        if let items = value as? [[String: Any]] { return textContent(items) }
+        if let items = value as? [[String: Any]] {
+            return nonEmpty(items.compactMap { item in
+                (item["text"] as? String) ?? (item["summary_text"] as? String)
+            }.joined(separator: "\n"))
+        }
         return nil
+    }
+
+    private nonisolated static func selectedJSON(_ object: [String: Any], keys: [String]) -> String? {
+        jsonString(Dictionary(uniqueKeysWithValues: keys.compactMap { key in object[key].map { (key, $0) } }))
+    }
+
+    private nonisolated static func jsonString(_ value: Any?) -> String? {
+        guard let value, JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else { return nil }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private nonisolated static func jsonByteCount(_ value: Any) -> Int {
+        (try? JSONSerialization.data(withJSONObject: value)).map(\.count) ?? 0
     }
 
     private nonisolated static func metadataTurn(_ payload: [String: Any]) -> String? {

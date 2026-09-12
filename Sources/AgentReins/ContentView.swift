@@ -31,6 +31,8 @@ struct ContentView: View {
     @EnvironmentObject private var turnJournalStore: TurnJournalStore
     @EnvironmentObject private var workBuddySight: WorkBuddySight
     @EnvironmentObject private var codexSight: CodexSight
+    @EnvironmentObject private var webAgentSight: WebAgentSight
+    @EnvironmentObject private var agentDiscovery: AgentDiscoveryManager
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     @EnvironmentObject private var memoryScan: MemoryScanManager
     @EnvironmentObject private var memoryRuleStore: MemoryRuleStore
@@ -130,24 +132,67 @@ struct ContentView: View {
     }
 
     private var home: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                header(l("Your coding agent, under control", "你的编程 Agent，尽在掌控"), subtitle: l("See what it is doing now, verify what it changed, and recover when something goes wrong.", "实时了解它正在做什么、验证代码更改，并在出现问题时恢复。"))
-                activeTaskCard
-                collectorHealthStrip
-                productValueStrip
-                safetyHero
-                recentSessions
-                if let incident = attentionIncident { decisionCard(incident) }
-                HStack(spacing: 14) {
-                    metricCard(title: l("Protection", "正在保护"), value: isRunning ? l("Active", "运行中") : l("Paused", "已暂停"), icon: "dot.radiowaves.left.and.right", tint: isRunning ? .green : .secondary)
-                    metricCard(title: l("Today's activity", "今日活动"), value: "\(todayIncidents.count)", icon: "waveform.path.ecg", tint: .blue)
-                    metricCard(title: l("Auto-recovered", "今日自动恢复"), value: "\(todayEvents.filter { $0.action == "restored" }.count)", icon: "arrow.uturn.backward", tint: .purple)
-                }
-                recentActivity
-            }
-            .padding(32).frame(maxWidth: 980, alignment: .leading)
+        AgentOperationsCenterView(sessions: sessions, events: events, incidents: riskIncidents,
+                                  health: eventStore.collectorHealth, observing: isRunning,
+                                  processInventory: processGuard.processInventory,
+                                  discoveredAgents: agentDiscovery.agents,
+                                  onSession: { selectedSession = $0 },
+                                  onIncident: { selectedIncident = $0 })
+    }
+
+    private var situationCanvas: Color { Color(red: 7/255, green: 16/255, blue: 29/255) }
+    private var situationPanel: Color { Color(red: 16/255, green: 28/255, blue: 45/255) }
+    private var situationLine: Color { Color(red: 41/255, green: 61/255, blue: 88/255) }
+    private var situationCyan: Color { Color(red: 72/255, green: 216/255, blue: 205/255) }
+
+    private func situationMetric(_ title: String, _ value: String, _ detail: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Text(title).font(.caption2.bold()).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 27, weight: .bold)).foregroundStyle(color)
+            Text(detail).font(.caption2).foregroundStyle(.tertiary).lineLimit(1)
         }
+        .frame(maxWidth: .infinity, alignment: .leading).padding(16)
+        .background(RoundedRectangle(cornerRadius: 13).fill(situationPanel))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(situationLine))
+    }
+
+    private var evidenceCoverageLabel: String {
+        let attributed = todayEvents.filter { $0.attributionConfidence == .confirmed }.count
+        guard !todayEvents.isEmpty else { return "—" }
+        return "\(Int(Double(attributed) / Double(todayEvents.count) * 100))%"
+    }
+
+    private var recentEvidencePanel: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("Evidence requiring explanation").font(.headline)
+                Spacer()
+                Text("\(riskIncidents.count) ITEMS").font(.caption2.bold()).foregroundStyle(.orange)
+            }.padding(14)
+            Divider()
+            if riskIncidents.isEmpty {
+                Text("No unexplained behavior in the active evidence window.")
+                    .font(.callout).foregroundStyle(.secondary).padding(18)
+            } else {
+                ForEach(riskIncidents.prefix(4)) { incident in
+                    Button { selectedIncident = incident } label: {
+                        HStack(spacing: 11) {
+                            Image(systemName: "exclamationmark.triangle").foregroundStyle(.orange).frame(width: 26)
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(incident.summary).font(.callout.weight(.semibold)).lineLimit(1)
+                                Text("\(incident.agent ?? "Unattributed") · \(incident.primary.attributionConfidence?.rawValue ?? "unknown") evidence")
+                                    .font(.caption2).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Text(incident.severity.uppercased()).font(.caption2.bold()).foregroundStyle(.orange)
+                        }.padding(.horizontal, 14).padding(.vertical, 10).contentShape(Rectangle())
+                    }.buttonStyle(.plain)
+                    Divider().opacity(0.5)
+                }
+            }
+        }
+        .background(RoundedRectangle(cornerRadius: 13).fill(situationPanel))
+        .overlay(RoundedRectangle(cornerRadius: 13).stroke(situationLine))
     }
 
     private var collectorHealthStrip: some View {
@@ -602,7 +647,7 @@ struct ContentView: View {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 8) {
-                        Circle().fill((workBuddySight.connected || codexSight.connected) ? Color.green : Color.secondary)
+                        Circle().fill(anyAgentAdapterConnected ? Color.green : Color.secondary)
                             .frame(width: 8, height: 8)
                         Text("Live context monitor").font(.headline)
                     }
@@ -614,7 +659,7 @@ struct ContentView: View {
                     Text("Updated \(update, style: .relative)")
                         .font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text((workBuddySight.connected || codexSight.connected) ? "Waiting for activity" : "Agent not connected")
+                    Text(anyAgentAdapterConnected ? "Waiting for activity" : "Agent not connected")
                         .font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -981,6 +1026,9 @@ struct ContentView: View {
     private func turnDetail(_ turn: AgentTurn, sessionId: String) -> some View {
         let journalId = TurnJournalStore.journalId(sessionId: sessionId, turnId: turn.id)
         let journal = turnJournalStore.journals.first { $0.id == journalId }
+        let turnEvents = eventStore.events.filter {
+            $0.sessionId == sessionId && ($0.turnId == turn.id || $0.turnId == nil)
+        }
         return GroupBox {
             VStack(alignment: .leading, spacing: 16) {
                 HStack(spacing: 18) {
@@ -1005,6 +1053,7 @@ struct ContentView: View {
                 }
                 contextGrowthCard(turn.contextGrowth)
                 contextIntegritySummary(turn.contextIntegrity)
+                modelRequestForensicsCard(turnEvents)
                 outcomeCard(journal)
                 aiAnalysisCard(turn)
                 summaryStep(number: "1", title: l("Your instruction", "用户输入的指令"), value: turn.userInput ?? l("Not captured", "未采集"), tint: .blue)
@@ -1036,6 +1085,81 @@ struct ContentView: View {
             HStack {
                 Text(english ? "Turn \(turn.index)" : "第 \(turn.index) 轮")
                 Spacer(); Text(english ? "\(turn.toolCalls.count) tool calls" : "\(turn.toolCalls.count) 次工具调用").font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+
+    @ViewBuilder
+    private func modelRequestForensicsCard(_ turnEvents: [GuardEvent]) -> some View {
+        let economics = ModelEconomicsReport.build(events: turnEvents)
+        let exposure = ContextExposureReport.build(events: turnEvents)
+        let traffic = AgentTrafficAnalyzer.build(events: turnEvents)
+        if economics != nil || exposure != nil || !traffic.isEmpty {
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 16) {
+                    if let economics {
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Token & cost evidence").font(.subheadline.bold())
+                            HStack(spacing: 22) {
+                                contextMetric("Model requests", economics.requestCount.formatted())
+                                contextMetric("Cumulative input", economics.cumulativeInputTokens.formatted())
+                                contextMetric("Subsequent input load", economics.subsequentRequestInputLoad.formatted())
+                                contextMetric("Reported cost", String(format: "$%.6f", economics.totalCostUSD))
+                            }
+                            Text("Subsequent input load is provider-reported input after the first request. It indicates repeated processing, not proven byte-for-byte duplication.")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    if let exposure {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Text("Context exposed to the model route").font(.subheadline.bold())
+                                Spacer()
+                                Text("\(exposure.capturedPromptBytes.formatted()) captured bytes")
+                                    .font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+                            }
+                            ForEach(exposure.items, id: \.category.rawValue) { item in
+                                HStack(alignment: .top, spacing: 9) {
+                                    Image(systemName: item.present ? "checkmark.circle.fill" : "minus.circle")
+                                        .foregroundStyle(item.present ? Color.orange : Color.secondary)
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text(item.category.rawValue).font(.callout.weight(.medium))
+                                        if !item.evidence.isEmpty {
+                                            Text(item.evidence.joined(separator: " · "))
+                                                .font(.caption.monospaced()).foregroundStyle(.secondary)
+                                        }
+                                    }
+                                    Spacer()
+                                    Text(item.present ? "Present" : "No evidence").font(.caption)
+                                        .foregroundStyle(item.present ? .orange : .secondary)
+                                }
+                            }
+                        }
+                    }
+                    if !traffic.isEmpty {
+                        Divider()
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("Traffic separation").font(.subheadline.bold())
+                            ForEach(traffic, id: \.destination) { item in
+                                HStack(spacing: 10) {
+                                    securityBadge(item.classification.rawValue,
+                                        color: item.classification == .modelRelay ? .orange : .blue)
+                                    Text(item.destination).font(.system(.caption, design: .monospaced))
+                                    Spacer()
+                                    Text(item.confidence.rawValue.capitalized).font(.caption).foregroundStyle(.secondary)
+                                    if !item.processIds.isEmpty {
+                                        Text("PID \(item.processIds.map { String($0) }.joined(separator: ", "))")
+                                            .font(.caption.monospacedDigit()).foregroundStyle(.tertiary)
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }.padding(.top, 12)
+            } label: {
+                Label("Model request forensics", systemImage: "point.3.connected.trianglepath.dotted")
+                    .font(.headline)
             }
         }
     }
@@ -1331,8 +1455,8 @@ struct ContentView: View {
                 }
             }
             HStack(spacing: 6) {
-                Image(systemName: (workBuddySight.connected || codexSight.connected) ? "link.circle.fill" : "exclamationmark.circle")
-                    .foregroundStyle((workBuddySight.connected || codexSight.connected) ? .green : .orange)
+                Image(systemName: anyAgentAdapterConnected ? "link.circle.fill" : "exclamationmark.circle")
+                    .foregroundStyle(anyAgentAdapterConnected ? .green : .orange)
                 Text(adapterStatus)
                     .font(.caption).foregroundStyle(.secondary)
             }
@@ -1352,11 +1476,17 @@ struct ContentView: View {
     }
 
     private var adapterStatus: String {
-        let connected = [workBuddySight.connected ? "WorkBuddy" : nil, codexSight.connected ? "Codex" : nil]
+        let connected = [workBuddySight.connected ? "WorkBuddy" : nil,
+                         codexSight.connected ? "Codex" : nil,
+                         webAgentSight.connected ? "Grok Web" : nil]
             .compactMap { $0 }
         if connected.isEmpty { return l("AgentSight is waiting for a supported agent", "AgentSight 正在等待受支持的 Agent") }
         return l("AgentSight connected to \(connected.joined(separator: " + "))",
                  "AgentSight · \(connected.joined(separator: " + ")) 会话源已连接")
+    }
+
+    private var anyAgentAdapterConnected: Bool {
+        workBuddySight.connected || codexSight.connected || webAgentSight.connected
     }
 
     private var safetyHero: some View {

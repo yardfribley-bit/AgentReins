@@ -7,6 +7,8 @@ final class EventStore: ObservableObject {
     @Published private(set) var incidents: [SecurityIncident] = []
     @Published private(set) var sessions: [AgentSessionSnapshot] = []
     @Published private(set) var influenceChains: [InfluenceChain] = []
+    @Published private(set) var webResourceChains: [WebResourceChain] = []
+    @Published private(set) var externalResources: [ExternalResource] = []
     @Published private(set) var historyLoaded = false
     @Published private(set) var persistenceError: String?
     @Published private(set) var collectorHealth: [CollectorHealthRecord] = []
@@ -77,6 +79,9 @@ final class EventStore: ObservableObject {
             // scanner learns about inline code or a tool-provided website.
             if saved.codeFindings == nil, candidate.codeFindings?.isEmpty == false { return true }
             if saved.remoteDomain == nil, candidate.remoteDomain != nil { return true }
+            if saved.inputTokens == nil, candidate.inputTokens != nil { return true }
+            if saved.outputTokens == nil, candidate.outputTokens != nil { return true }
+            if saved.costUSD == nil, candidate.costUSD != nil { return true }
             return false
         }
     }
@@ -92,6 +97,8 @@ final class EventStore: ObservableObject {
         guard !historyLoaded else { return }
         historyLoaded = true
         rebuildViews()
+        do { try database?.upsertAssessments(ForensicAssessmentRecord.build(events: events)) }
+        catch { persistenceError = error.localizedDescription }
     }
 
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {
@@ -118,6 +125,10 @@ final class EventStore: ObservableObject {
         for event in durable { byID[event.id] = event }
         events = byID.values.sorted { $0.ts > $1.ts }
         rebuildViews()
+        // Backfill only the active window during startup. Full historical
+        // reconstruction remains explicitly user-triggered to protect launch performance.
+        do { try database?.upsertAssessments(ForensicAssessmentRecord.build(events: liveSessionEvents())) }
+        catch { persistenceError = error.localizedDescription }
     }
 
     private func trimAndSave() {
@@ -135,6 +146,7 @@ final class EventStore: ObservableObject {
         if let database {
             do {
                 try database.append(evidence)
+                try database.upsertAssessments(ForensicAssessmentRecord.build(events: evidenceForAffectedTurns(evidence)))
                 persistenceError = nil
                 refreshCollectorHealth()
             } catch {
@@ -142,6 +154,18 @@ final class EventStore: ObservableObject {
             }
         } else {
             persistenceError = "SQLite evidence database is unavailable"
+        }
+    }
+
+    private func evidenceForAffectedTurns(_ incoming: [GuardEvent]) -> [GuardEvent] {
+        let keys = Set(incoming.compactMap { event -> String? in
+            guard let session = event.sessionId, let turn = event.turnId else { return nil }
+            return "\(session):\(turn)"
+        })
+        guard !keys.isEmpty else { return [] }
+        return events.filter { event in
+            guard let session = event.sessionId, let turn = event.turnId else { return false }
+            return keys.contains("\(session):\(turn)")
         }
     }
 
@@ -156,6 +180,8 @@ final class EventStore: ObservableObject {
         incidents = SecurityIncident.correlate(Array(events.prefix(historyLoaded ? 1_200 : 400)))
         sessions = AgentSessionSnapshot.build(from: historyLoaded ? events : liveSessionEvents())
         influenceChains = ExternalContentSecurity.influenceChains(events: Array(events.prefix(historyLoaded ? 500 : 300)))
+        webResourceChains = WebResourceSecurity.build(events: Array(events.prefix(historyLoaded ? 1_200 : 400)))
+        externalResources = ExternalResourceCatalog.build(events: Array(events.prefix(historyLoaded ? 1_200 : 400)))
     }
 
     private func liveSessionEvents() -> [GuardEvent] {

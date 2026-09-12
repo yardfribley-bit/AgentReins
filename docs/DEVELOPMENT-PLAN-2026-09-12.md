@@ -1,5 +1,7 @@
 # Development Plan — September 12, 2026
 
+> Scope update: Web Agent Security P0 now prioritizes poisoned external content through execution and code consequences. Historical page fingerprint/change detection is deferred. See `WEB-AGENT-SECURITY-P0.md`.
+
 ## Objective
 
 Strengthen AgentReins as a zero-trust evidence layer for coding agents. The day is focused on reliable data, correlation, and security conclusions—not visual redesign.

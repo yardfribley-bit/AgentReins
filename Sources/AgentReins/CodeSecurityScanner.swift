@@ -48,7 +48,13 @@ enum CodeSecurityScanner {
         rule("insecure-resource", "Generated UI loads an insecure HTTP resource", "high",
              #"(?i)(src|href)\s*=\s*["']http://"#),
         rule("dom-html-injection", "Dynamic HTML insertion may enable script injection", "high",
-             #"(?i)(\.innerHTML\s*=|document\.write\s*\()"#)
+             #"(?i)(\.innerHTML\s*=|document\.write\s*\()"#),
+        rule("unsafe-c-input", "Unbounded C input function", "critical",
+             #"\bgets\s*\("#),
+        rule("unsafe-c-copy", "Unbounded C string copy", "high",
+             #"\b(strcpy|strcat)\s*\("#),
+        rule("unsafe-c-format", "Unbounded C formatted output", "high",
+             #"\bsprintf\s*\("#)
     ]
 
     static func scan(path: String, before: String?, after: String?) -> [CodeFinding] {
@@ -75,8 +81,14 @@ enum CodeSecurityScanner {
     static func scanGenerated(toolName: String?, arguments: String?) -> [CodeFinding] {
         guard let arguments, !arguments.isEmpty else { return [] }
         let name = toolName?.lowercased() ?? ""
-        if let data = arguments.data(using: .utf8),
+        // Foundation's JSON reader recursively descends containers and can
+        // overflow its stack on hostile or corrupted agent logs. Bound both
+        // bytes and structural depth before handing untrusted evidence to it.
+        let bounded = String(arguments.prefix(512_000))
+        if arguments.utf8.count <= 512_000, hasSafeJSONShape(arguments),
+           let data = arguments.data(using: .utf8),
            let object = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            let filePath = (object["file_path"] as? String) ?? (object["path"] as? String)
             if let widget = object["widget_code"] as? String {
                 return scan(path: "generated-widget.html", before: nil, after: widget)
             }
@@ -85,15 +97,39 @@ enum CodeSecurityScanner {
             }
             for key in ["code", "content", "text"] {
                 if let code = object[key] as? String {
-                    let ext = name.contains("html") || code.localizedCaseInsensitiveContains("<script") ? "html" : "txt"
-                    return scan(path: "generated.\(ext)", before: nil, after: code)
+                    let fallbackExtension = name.contains("html") || code.localizedCaseInsensitiveContains("<script")
+                        ? "html" : "txt"
+                    return scan(path: filePath ?? "generated.\(fallbackExtension)", before: nil, after: code)
                 }
             }
         }
         if name.contains("bash") || name.contains("shell") {
-            return scan(path: "generated-command.sh", before: nil, after: arguments)
+            return scan(path: "generated-command.sh", before: nil, after: bounded)
         }
         return []
+    }
+
+    private static func hasSafeJSONShape(_ value: String, maximumDepth: Int = 64) -> Bool {
+        var depth = 0
+        var inString = false
+        var escaped = false
+        for scalar in value.unicodeScalars {
+            if inString {
+                if escaped { escaped = false }
+                else if scalar == "\\" { escaped = true }
+                else if scalar == "\"" { inString = false }
+                continue
+            }
+            if scalar == "\"" { inString = true; continue }
+            if scalar == "{" || scalar == "[" {
+                depth += 1
+                if depth > maximumDepth { return false }
+            } else if scalar == "}" || scalar == "]" {
+                depth -= 1
+                if depth < 0 { return false }
+            }
+        }
+        return !inString && depth == 0
     }
 
     private static func rule(_ id: String, _ title: String, _ severity: String, _ pattern: String) -> Rule {

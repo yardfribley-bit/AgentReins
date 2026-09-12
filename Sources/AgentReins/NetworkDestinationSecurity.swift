@@ -18,6 +18,7 @@ enum ExternalURLEvidence {
 
 enum NetworkDestinationKind: String {
     case modelProvider = "Model provider"
+    case modelRelay = "Model relay"
     case externalContent = "External content"
     case developerService = "Developer service"
     case telemetry = "Telemetry"
@@ -40,7 +41,11 @@ struct NetworkDestinationAssessment: Equatable {
             return NetworkDestinationAssessment(kind: .localInfrastructure, needsAttention: false,
                 reason: "This is a loopback endpoint, not the final external destination.")
         }
-        if matches(value, suffixes: ["chatgpt.com", "openai.com", "openrouter.ai", "anthropic.com",
+        if matches(value, suffixes: ["openrouter.ai", "portkey.ai", "helicone.ai", "litellm.ai"]) {
+            return NetworkDestinationAssessment(kind: .modelRelay, needsAttention: true,
+                reason: "This is an intermediary model gateway. It can receive prompts, code, tool results, and responses; the final upstream model is not independently verified by this connection.")
+        }
+        if matches(value, suffixes: ["chatgpt.com", "openai.com", "anthropic.com", "deepseek.com",
                                      "mistral.ai", "groq.com", "together.ai", "cohere.com"]) {
             return NetworkDestinationAssessment(kind: .modelProvider, needsAttention: false,
                 reason: "Recognized model-service infrastructure; still monitored, but not treated as external content by default.")

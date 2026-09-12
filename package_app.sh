@@ -28,8 +28,17 @@ lipo -create \
   "$INTEL_BIN_DIR/$APP_NAME" \
   -output "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
+cp "$ARM_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64"
+cp "$INTEL_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64"
+lipo -create \
+  "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64" \
+  "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64" \
+  -output "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
+rm "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-arm64" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost-x86_64"
+chmod +x "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
+cp -R "$PROJECT_DIR/BrowserExtension" "$APP_BUNDLE/Contents/Resources/BrowserExtension"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

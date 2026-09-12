@@ -24,7 +24,8 @@ All production code lives in `Sources/AgentReins`.
 | App shell | `AgentGuardApp.swift`, `ContentView.swift`, `UIHelpers.swift` | Menu bar app, navigation, and user-facing evidence views. |
 | Session model | `AgentSession.swift`, `Rule.swift`, `SecurityIncident.swift` | Turns, model exchanges, tool activity, and readable incident summaries. |
 | Development story | `DevelopmentTrace.swift` | Aggregates raw events into Understand, Plan, Build, Test, and Deliver stages with layered drill-down evidence. |
-| Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift` | Read supported WorkBuddy evidence and compatible local Codex rollout records, then map them into normalized events. |
+| Agent adapters | `WorkBuddySight.swift`, `CodexSight.swift`, `QoderSight.swift`, `WebAgentSight.swift` | Read supported WorkBuddy, compatible local Codex and Qoder records, and confirmed browser-extension evidence, then map them into normalized events. |
+| Browser bridge | `BrowserExtension/`, `AgentReinsNativeHost` | Captures Grok Imagine tab evidence with a `grok.com`-only extension and transfers it locally through Chrome/Edge Native Messaging. |
 | Event storage | `EventStore.swift` | Persists and publishes normalized security and activity events. |
 | Evidence attribution | `EventAttributionResolver.swift` | Conservatively joins fallback process, file, and network observations to recent turns. A network endpoint is linked to a Tool/MCP call only when one unambiguous call exists in a tight time window; every join records its evidence method and remains inferred. |
 | System evidence boundary | `SystemEvidenceProvider.swift` | Keeps entitlement-free polling providers behind the same interface reserved for future ESF and ETW sources. |
@@ -41,6 +42,7 @@ All production code lives in `Sources/AgentReins`.
 ## Runtime flow
 
 1. An adapter discovers supported agent sessions and emits normalized `GuardEvent` records.
+   Grok browser events arrive through a fixed-ID extension and an origin-validating Native Messaging host.
 2. `EventStore` persists evidence locally.
 3. Session-building code groups events into sessions, turns, and model exchanges.
 4. Process, file, code, and memory monitors add computer-side evidence.
@@ -84,3 +86,20 @@ Every field must retain its evidence source and attribution confidence. Adapter-
 - [Trace, Verify, Recover](TRACE-VERIFY-RECOVER-ROADMAP.md)
 - [Provider Trust](PROVIDER-TRUST-ROADMAP.md)
 - [Product Hunt launch](PRODUCT-HUNT-LAUNCH.md)
+# Web Resource and Generated Code Security
+
+AgentReins treats every external URL as evidence in a task, not as an isolated browser-history row. `WebResourceSecurity` builds chains only when events share an exact `sessionId` and `turnId`:
+
+```text
+user request
+  -> model-recommended URL
+  -> agent tool request
+  -> process network connection
+  -> downloaded or changed files
+  -> local code findings
+  -> task-level risk result
+```
+
+The same model accepts evidence from browser adapters, WorkBuddy, Codex, MCP tools, shell commands, network collectors, and file monitoring. Each resource records whether it was recommended by a model, requested by a tool, or contacted by a process. Timestamp-only evidence is intentionally left unattributed.
+
+GitHub repositories receive special treatment because a trusted model recommendation does not make repository contents trustworthy. The current foundation connects recommendations, clone commands, changed files, and local code findings. Repository ownership, transfer history, release provenance, dependency reputation, and isolated pre-clone inspection remain verification work rather than inferred facts.
