@@ -189,6 +189,7 @@ enum AgentDiscoveryEngine {
                          webEvidenceActive: Bool, now: Date = Date()) -> [DiscoveredAgent] {
         var result = signatures.compactMap { signature -> DiscoveredAgent? in
             let matches = processes.filter { process in
+                if process.agent?.caseInsensitiveCompare(signature.id) == .orderedSame { return true }
                 let command = process.command.lowercased()
                 return signature.markers.contains(where: command.contains)
             }

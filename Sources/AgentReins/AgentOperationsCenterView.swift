@@ -553,6 +553,8 @@ struct AgentOperationsCenterView: View {
     private func runtimeGraphView(height: CGFloat) -> some View {
         let groups = graphProcessGroups
         let edges = graphDisplayEdges
+        let laneCounts = Dictionary(grouping: groups, by: graphLane).values.map(\.count)
+        let requiredHeight = max(height, CGFloat(laneCounts.max() ?? 1) * 76 + 18)
         return GeometryReader { geometry in
             let positions = graphPositions(groups, size: geometry.size)
             ZStack {
@@ -560,12 +562,22 @@ struct AgentOperationsCenterView: View {
                     for edge in edges {
                         guard let start = positions[edge.source], let end = positions[edge.target] else { continue }
                         var path = Path()
-                        path.move(to: CGPoint(x: start.x + 68, y: start.y))
-                        let destination = CGPoint(x: end.x - 68, y: end.y)
-                        let middle = (start.x + destination.x) / 2
-                        path.addCurve(to: destination,
-                                      control1: CGPoint(x: middle, y: start.y),
-                                      control2: CGPoint(x: middle, y: destination.y))
+                        if abs(start.x - end.x) < 2 {
+                            let from = CGPoint(x: start.x, y: start.y + 31)
+                            let destination = CGPoint(x: end.x, y: end.y - 31)
+                            path.move(to: from)
+                            path.addCurve(to: destination,
+                                control1: CGPoint(x: from.x + 24, y: from.y + 14),
+                                control2: CGPoint(x: destination.x + 24, y: destination.y - 14))
+                        } else {
+                            let from = CGPoint(x: start.x + (end.x > start.x ? 68 : -68), y: start.y)
+                            let destination = CGPoint(x: end.x + (end.x > start.x ? -68 : 68), y: end.y)
+                            path.move(to: from)
+                            let middle = (from.x + destination.x) / 2
+                            path.addCurve(to: destination,
+                                          control1: CGPoint(x: middle, y: from.y),
+                                          control2: CGPoint(x: middle, y: destination.y))
+                        }
                         let color = edge.kind == .processParent ? cyan.opacity(0.75) : Color.blue.opacity(0.8)
                         context.stroke(path, with: .color(color),
                                        style: StrokeStyle(lineWidth: edge.kind == .processParent ? 1.5 : 1.2,
@@ -578,7 +590,7 @@ struct AgentOperationsCenterView: View {
                         .position(positions[group.id] ?? .zero)
                 }
             }
-        }.frame(height: height)
+        }.frame(height: requiredHeight)
     }
 
     private func graphNode(_ group: OverviewProcessGroup) -> some View {

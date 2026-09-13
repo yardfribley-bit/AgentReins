@@ -112,6 +112,7 @@ final class TurnJournalTests: XCTestCase {
             ProcessSnapshotRecord(pid: "12", ppid: "2", command: "/Users/test/.vscode/extensions/openai.chatgpt-1/bin/codex app-server"),
             ProcessSnapshotRecord(pid: "20", ppid: "1", command: "/Applications/WorkBuddy.app/Contents/MacOS/Electron"),
             ProcessSnapshotRecord(pid: "21", ppid: "20", command: "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper"),
+            ProcessSnapshotRecord(pid: "22", ppid: "21", command: "/usr/local/bin/node generic-tool.js", agent: "workbuddy"),
             ProcessSnapshotRecord(pid: "30", ppid: "1", command: "/Applications/Qoder.app/Contents/MacOS/Qoder")
         ]
         let paths: Set<String> = [
@@ -126,7 +127,7 @@ final class TurnJournalTests: XCTestCase {
         let codex = try XCTUnwrap(agents.first { $0.id == "codex" })
         XCTAssertEqual(codex.connection, .partial)
         XCTAssertEqual(Set(codex.instances), ["Desktop", "VS Code"])
-        XCTAssertEqual(agents.first { $0.id == "workbuddy" }?.processIds.count, 2)
+        XCTAssertEqual(agents.first { $0.id == "workbuddy" }?.processIds.count, 3)
         XCTAssertEqual(agents.first { $0.id == "qoder" }?.connection, .partial)
         XCTAssertEqual(agents.first { $0.id == "claude" }?.presence, .installed)
         XCTAssertEqual(agents.first { $0.id == "web-ai" }?.connection, .browser)
