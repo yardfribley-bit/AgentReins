@@ -803,6 +803,30 @@ final class TurnJournalTests: XCTestCase {
     }
 
     @MainActor
+    func testAttributionResolverJoinsKnownMemoryPathWithoutPretendingWriterPID() {
+        let resolver = EventAttributionResolver(window: 45)
+        let now = Date()
+        resolver.observe([
+            GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project", command: nil,
+                agent: "workbuddy", op: "prompt", severity: "info", ts: now, action: "sent",
+                sessionId: "memory-session", turnId: "memory-turn")
+        ], now: now)
+        let mutation = GuardEvent(kind: "file", ruleId: "live-memory-commit",
+            path: "/Users/me/.workbuddy/memory/abc_memory.md", command: nil,
+            agent: "workbuddy", op: "modify", severity: "info",
+            ts: now.addingTimeInterval(2), action: "observed",
+            source: "memory-live:workbuddy", attributionConfidence: .unknown,
+            attributionMethod: "confirmed WorkBuddy memory path; writer process awaiting correlation")
+
+        let resolved = resolver.resolve(mutation)
+        XCTAssertEqual(resolved.sessionId, "memory-session")
+        XCTAssertEqual(resolved.turnId, "memory-turn")
+        XCTAssertEqual(resolved.attributionConfidence, .inferred)
+        XCTAssertNil(resolved.processId)
+        XCTAssertTrue(resolved.attributionMethod?.contains("known agent memory path") == true)
+    }
+
+    @MainActor
     func testAttributionResolverRefusesTimestampOnlyGuess() {
         let resolver = EventAttributionResolver(window: 45)
         let now = Date()

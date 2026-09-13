@@ -43,6 +43,7 @@ struct AgentReinsApp: App {
     @StateObject private var semanticAnalyzer = SemanticAnalyzer()
     @StateObject private var memoryScan = MemoryScanManager()
     @StateObject private var memoryRuleStore = MemoryRuleStore()
+    @StateObject private var liveMemoryMonitor = LiveMemoryMonitor()
     @StateObject private var attributionResolver = EventAttributionResolver()
     @StateObject private var activityProjector = ToolActivityEvidenceProjector()
 
@@ -86,6 +87,10 @@ struct AgentReinsApp: App {
                     memoryScan.onFindings = { findings, date in
                         eventStore.recordMemoryFindings(findings, scannedAt: date)
                     }
+                    liveMemoryMonitor.onEvents = { events in
+                        eventStore.record(events.map { attributionResolver.resolve($0) })
+                    }
+                    liveMemoryMonitor.start()
                     workBuddySight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)

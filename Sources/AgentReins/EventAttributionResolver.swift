@@ -77,7 +77,8 @@ final class EventAttributionResolver: ObservableObject {
         guard event.agent != nil || event.path != "-" else { return event }
         let matching = contexts.filter { context in
             abs(event.ts.timeIntervalSince(context.timestamp)) <= window &&
-            agentMatches(event.agent, context.agent) && workspaceMatches(event.path, context.workspace)
+            agentMatches(event.agent, context.agent) &&
+            (workspaceMatches(event.path, context.workspace) || isAgentMemoryPath(event.path))
         }
         let candidates = Dictionary(grouping: matching) { "\($0.sessionId):\($0.turnId)" }
             .compactMap { $0.value.max(by: { $0.timestamp < $1.timestamp }) }
@@ -87,7 +88,8 @@ final class EventAttributionResolver: ObservableObject {
 
         var reasons: [String] = ["bounded \(Int(window))s time window"]
         if event.agent != nil, best.agent != nil { reasons.insert("process-tree agent", at: 0) }
-        if event.path != "-", best.workspace != nil { reasons.insert("workspace path", at: 0) }
+        if isAgentMemoryPath(event.path) { reasons.insert("known agent memory path", at: 0) }
+        else if event.path != "-", best.workspace != nil { reasons.insert("workspace path", at: 0) }
         let tool = uniqueToolContext(for: event, in: matching,
                                      sessionId: best.sessionId, turnId: best.turnId)
         if tool != nil { reasons.append("single active tool call") }
@@ -140,6 +142,12 @@ final class EventAttributionResolver: ObservableObject {
         let observed = URL(fileURLWithPath: path).standardizedFileURL.path
         let root = URL(fileURLWithPath: workspace).standardizedFileURL.path
         return observed == root || observed.hasPrefix(root + "/")
+    }
+
+    private func isAgentMemoryPath(_ path: String) -> Bool {
+        let value = path.lowercased()
+        return value.contains("/.workbuddy/memory/") || value.contains("/.kiro/knowledge/memory/") ||
+            value.contains("/.agent-memory/")
     }
 
     private func normalizedWorkspace(_ path: String) -> String? {
