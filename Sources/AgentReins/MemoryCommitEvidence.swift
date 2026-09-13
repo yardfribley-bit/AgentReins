@@ -61,10 +61,26 @@ struct MemoryCommitEvidence: Codable, Equatable, Sendable {
         guard ["create", "write", "modify", "update", "delete", "append", "call"].contains(event.op.lowercased()) else {
             return false
         }
-        let descriptor = "\(event.path) \(event.relatedPath ?? "") \(event.toolName ?? "") \(event.command ?? "")".lowercased()
-        let memoryMarkers = ["memory", "remember", "knowledge", "user.md", "identity.md", "soul.md",
-                             "workspaceStorage".lowercased(), "globalstorage", "state.vscdb"]
-        return memoryMarkers.contains { descriptor.contains($0) }
+        if event.kind == "file" {
+            return isKnownMemoryStore(event.path) || event.relatedPath.map(isKnownMemoryStore) == true
+        }
+        guard event.kind == "tool" else { return false }
+        let tool = (event.toolName ?? "").lowercased()
+        if tool.contains("memory") || tool.contains("remember") || tool.contains("knowledge") { return true }
+        // A generic write/edit/shell call counts only when its captured
+        // arguments explicitly target a known Agent memory store. Merely
+        // editing source files named Memory*.swift must never become a commit.
+        return isKnownMemoryStore(event.command ?? "")
+    }
+
+    private static func isKnownMemoryStore(_ value: String) -> Bool {
+        let path = value.lowercased()
+        return path.contains("/.workbuddy/memory/") ||
+            path.contains("/.kiro/knowledge/memory/") ||
+            path.contains("/.kiro/crew/workspace/memory/") ||
+            path.contains("/.agent-memory/") ||
+            (path.contains("/.workbuddy/") &&
+                ["/user.md", "/identity.md", "/soul.md"].contains(where: path.contains))
     }
 
     private static func changeKind(_ event: GuardEvent) -> MemoryChangeKind {

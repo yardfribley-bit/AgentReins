@@ -1658,6 +1658,24 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertFalse(commit.riskReasons.contains { $0.contains("External content") })
     }
 
+    func testSourceCodeNamedMemoryIsNotPersistentAgentMemory() {
+        let sourceEdit = GuardEvent(kind: "tool", ruleId: "apply-patch", path: "/Users/me/project",
+            command: #"{"path":"/Users/me/project/MemoryCommitEvidence.swift","content":"struct MemoryCommit {}"}"#,
+            agent: "codex", op: "call", severity: "info", ts: Date(), action: "completed",
+            sessionId: "s", turnId: "t", toolCallId: "patch", toolName: "apply_patch",
+            attributionConfidence: .confirmed)
+        XCTAssertTrue(MemoryCommitEvidence.build(events: [sourceEdit]).isEmpty)
+    }
+
+    func testGenericFileToolTargetingKnownMemoryStoreIsACommit() {
+        let memoryEdit = GuardEvent(kind: "tool", ruleId: "write", path: "-",
+            command: #"{"path":"/Users/me/.workbuddy/memory/a_memory.md","content":"Theme: dark"}"#,
+            agent: "workbuddy", op: "call", severity: "info", ts: Date(), action: "completed",
+            sessionId: "s", turnId: "t", toolCallId: "write", toolName: "write_file",
+            attributionConfidence: .confirmed)
+        XCTAssertEqual(MemoryCommitEvidence.build(events: [memoryEdit]).count, 1)
+    }
+
     private func runGit(_ arguments: [String], at root: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
