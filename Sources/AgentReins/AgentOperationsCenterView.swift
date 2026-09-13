@@ -46,12 +46,15 @@ struct AgentOperationsCenterView: View {
     private let amber = Color(red: 255/255, green: 177/255, blue: 45/255)
 
     private var scopedSessions: [AgentSessionSnapshot] {
-        sessions.filter { selectedAgent == "All agents" || $0.agent.caseInsensitiveCompare(selectedAgent) == .orderedSame }
+        sessions.filter { matchesSelectedAgent($0.agent) }
     }
     private var activeSession: AgentSessionSnapshot? { scopedSessions.max { $0.lastActivityAt < $1.lastActivityAt } }
     private var activeTurn: AgentTurn? { activeSession?.turns.last }
     private var scopedEvents: [GuardEvent] {
-        let base = events.filter { selectedAgent == "All agents" || $0.agent?.caseInsensitiveCompare(selectedAgent) == .orderedSame }
+        let base = events.filter { event in
+            guard let agent = event.agent else { return selectedAgent == "All agents" }
+            return matchesSelectedAgent(agent)
+        }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return base }
         return base.filter {
@@ -77,6 +80,15 @@ struct AgentOperationsCenterView: View {
     private var runtimeTopologyFingerprint: String {
         let topology = processes.map { "\($0.pid):\($0.ppid):\($0.command.hashValue)" }.joined(separator: "|")
         return "\(selectedAgent)|\(topology)"
+    }
+    private var isWebAISelected: Bool { selectedAgent.caseInsensitiveCompare("Web AI") == .orderedSame }
+    private func matchesSelectedAgent(_ agent: String) -> Bool {
+        if selectedAgent == "All agents" { return true }
+        if isWebAISelected {
+            return ["gemini", "chatgpt", "grok", "claude-web", "web-ai"]
+                .contains(agent.lowercased())
+        }
+        return agent.caseInsensitiveCompare(selectedAgent) == .orderedSame
     }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted()
@@ -274,7 +286,13 @@ struct AgentOperationsCenterView: View {
                      detail: observing ? "Monitoring connected adapters" : "Paused",
                      live: observing)
             ForEach(discoveredAgents) { item in
-                let session = sessions.filter { $0.agent.caseInsensitiveCompare(item.product) == .orderedSame }
+                let session = sessions.filter { session in
+                    if item.product.caseInsensitiveCompare("Web AI") == .orderedSame {
+                        return ["gemini", "chatgpt", "grok", "claude-web", "web-ai"]
+                            .contains(session.agent.lowercased())
+                    }
+                    return session.agent.caseInsensitiveCompare(item.product) == .orderedSame
+                }
                     .max { $0.lastActivityAt < $1.lastActivityAt }
                 let turn = session?.turns.last
                 let running = item.presence == .running
@@ -462,6 +480,16 @@ struct AgentOperationsCenterView: View {
     }
 
     private var missionOverview: some View {
+        Group {
+            if isWebAISelected {
+                webAIMissionOverview
+            } else {
+                nativeAgentMissionOverview
+            }
+        }
+    }
+
+    private var nativeAgentMissionOverview: some View {
         VStack(spacing: 12) {
             overviewProcessPanel
                 .frame(maxWidth: .infinity, minHeight: 390, alignment: .top)
@@ -472,6 +500,16 @@ struct AgentOperationsCenterView: View {
                     .frame(minWidth: 280, maxWidth: 360)
                     .frame(minHeight: 430, alignment: .top)
             }
+        }
+    }
+
+    private var webAIMissionOverview: some View {
+        VStack(spacing: 12) {
+            HStack(alignment: .top, spacing: 10) {
+                journeyPanel.frame(maxWidth: .infinity, alignment: .top)
+                networkPanel.frame(minWidth: 300, maxWidth: 380, alignment: .top)
+            }
+            modelRequestDetail
         }
     }
 
