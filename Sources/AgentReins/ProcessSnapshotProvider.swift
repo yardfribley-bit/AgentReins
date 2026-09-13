@@ -18,6 +18,7 @@ struct ProcessSnapshotRecord: Sendable, Equatable {
 enum ProcessArgumentRedactor {
     private static let patterns: [(NSRegularExpression, String)] = [
         (try! NSRegularExpression(pattern: #"(?i)(--?(?:token|api[-_]?key|secret|password)(?:=|\s+))[^\s]+"#), "$1[REDACTED]"),
+        (try! NSRegularExpression(pattern: #"(?i)(\b(?:OPENROUTER|DEEPSEEK|OPENAI|ANTHROPIC|GITHUB|AWS)_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)=)[^\s]+"#), "$1[REDACTED]"),
         (try! NSRegularExpression(pattern: #"(?i)([\"']?Authorization[\"']?\s*[:=]\s*[\"']?Bearer\s+)[^\"',}\s]+"#), "$1[REDACTED]"),
         (try! NSRegularExpression(pattern: #"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}"#), "$1[REDACTED]")
     ]
@@ -104,7 +105,8 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         let result = agentTree.compactMap { pid -> ProcessSnapshotRecord? in
             guard let value = records[pid] else { return nil }
             let rawCommand = arguments(pid: pid) ?? value.executable
-            return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid), command: rawCommand,
+            return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
+                command: ProcessArgumentRedactor.redact(rawCommand),
                 agent: owners[pid])
         }
         stateLock.lock()
@@ -171,7 +173,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
                 result.append(cached)
             } else if let value = identity(pid: pid) {
                 result.append(ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
-                    command: arguments(pid: pid) ?? value.executable, agent: owner))
+                    command: ProcessArgumentRedactor.redact(arguments(pid: pid) ?? value.executable), agent: owner))
             } else {
                 continue
             }

@@ -585,13 +585,14 @@ final class TurnJournalTests: XCTestCase {
     }
 
     func testProcessArgumentRedactorRemovesAgentAndMCPCredentials() {
-        let command = #"agent --token abcdefghijklmnop --api-key=sk-secret {"Authorization":"Bearer mcp-secret-value"}"#
+        let command = #"agent --token abcdefghijklmnop --api-key=sk-secret {"Authorization":"Bearer mcp-secret-value"} OPENROUTER_API_KEY=private"#
 
         let redacted = ProcessArgumentRedactor.redact(command)
 
         XCTAssertFalse(redacted.contains("abcdefghijklmnop"))
         XCTAssertFalse(redacted.contains("sk-secret"))
         XCTAssertFalse(redacted.contains("mcp-secret-value"))
+        XCTAssertFalse(redacted.contains("private"))
         XCTAssertTrue(redacted.contains("[REDACTED]"))
     }
 
@@ -1367,6 +1368,27 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(events.filter { $0.kind != "verification" }
             .allSatisfy { $0.attributionConfidence == .confirmed })
         XCTAssertEqual(events.first { $0.op == "requirement_completion" }?.action, "partial")
+    }
+
+    func testCursorTranscriptProjectsPromptResponseToolAndCompletion() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("cursor-transcript-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let lines = [
+            #"{"role":"user","message":{"content":[{"type":"text","text":"<timestamp>now</timestamp>\n<user_query>\nBuild weather page\n</user_query>"}]}}"#,
+            #"{"role":"assistant","message":{"content":[{"type":"tool_use","id":"call-1","name":"write_file","input":{"path":"index.html"}}]}}"#,
+            #"{"role":"user","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"written"}]}}"#,
+            #"{"role":"assistant","message":{"content":[{"type":"text","text":"Created the page."}]}}"#,
+            #"{"type":"turn_ended","status":"success"}"#
+        ]
+        try (lines.joined(separator: "\n") + "\n").write(to: url, atomically: true, encoding: .utf8)
+
+        let snapshot = try XCTUnwrap(CursorSight.readTranscript(url))
+        XCTAssertEqual(snapshot.events.first { $0.op == "prompt" }?.userIntent, "Build weather page")
+        XCTAssertEqual(snapshot.events.first { $0.op == "call" }?.toolName, "write_file")
+        XCTAssertEqual(snapshot.events.first { $0.op == "result" }?.toolCallId, "call-1")
+        XCTAssertEqual(snapshot.events.first { $0.op == "response" }?.modelResponse, "Created the page.")
+        XCTAssertEqual(snapshot.events.first { $0.op == "turn_ended" }?.action, "success")
+        XCTAssertTrue(snapshot.events.allSatisfy { $0.source == "agentsight:cursor-transcript-v1" })
     }
 
     func testCursorTerminalRedirectProducesIndependentFileEvidenceAndPartialVerification() throws {

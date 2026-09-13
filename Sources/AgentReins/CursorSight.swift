@@ -19,6 +19,9 @@ final class CursorSight: ObservableObject {
     private var accepted = 0
     private var malformed = 0
     private var databaseFingerprint: String?
+    private var latestTranscriptURL: URL?
+    private var transcriptFingerprint: String?
+    private var lastTranscriptDiscovery = Date.distantPast
 
     static var databaseURL: URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -39,23 +42,35 @@ final class CursorSight: ObservableObject {
         let url = Self.databaseURL
         let database = evidenceDatabase
         let previousFingerprint = databaseFingerprint
+        let previousTranscriptURL = latestTranscriptURL
+        let previousTranscriptFingerprint = transcriptFingerprint
+        let discoverTranscript = previousTranscriptURL == nil || Date().timeIntervalSince(lastTranscriptDiscovery) >= 30
         queue.async { [weak self] in
             let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             let fingerprint = values.map {
                 "\($0.fileSize ?? -1):\($0.contentModificationDate?.timeIntervalSince1970 ?? 0)"
             }
-            if fingerprint == previousFingerprint { return }
-            let snapshots = Self.readLatest(url: url)
-            let raw = (snapshots ?? []).map(\.rawEvidence)
+            let snapshots = fingerprint == previousFingerprint ? [] : Self.readLatest(url: url)
+            let transcriptURL = discoverTranscript ? Self.latestTranscriptURL() : previousTranscriptURL
+            let transcriptValues = try? transcriptURL?.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+            let nextTranscriptFingerprint = transcriptValues.map {
+                "\(transcriptURL?.path ?? "-"):\($0.fileSize ?? -1):\($0.contentModificationDate?.timeIntervalSince1970 ?? 0)"
+            }
+            let transcript = nextTranscriptFingerprint == previousTranscriptFingerprint
+                ? nil : transcriptURL.flatMap(Self.readTranscript)
+            let raw = (snapshots ?? []).map(\.rawEvidence) + (transcript.map { [$0.rawEvidence] } ?? [])
             var rawWriteFailed = false
             do { try database?.appendRaw(raw) } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.databaseFingerprint = fingerprint
+                self.latestTranscriptURL = transcriptURL
+                self.transcriptFingerprint = nextTranscriptFingerprint
+                if discoverTranscript { self.lastTranscriptDiscovery = Date() }
                 let isConnected = FileManager.default.fileExists(atPath: url.path)
                 if self.connected != isConnected { self.connected = isConnected }
                 if snapshots == nil { self.malformed += 1 }
-                let values = snapshots ?? []
+                let values = (snapshots ?? []) + (transcript.map { [$0] } ?? [])
                 if rawWriteFailed { self.malformed += 1 }
                 let fresh = values.flatMap(\.events).filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
@@ -64,7 +79,9 @@ final class CursorSight: ObservableObject {
                     source: "cursor", state: !self.connected ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: self.connected ? Date() : nil, lagSeconds: nil, accepted: self.accepted,
                     malformed: self.malformed, dropped: 0,
-                    detail: self.connected ? "Cursor Composer SQLite evidence connected (undocumented compatibility schema)" : "Cursor state.vscdb is unavailable"))
+                    detail: self.connected
+                        ? "Cursor Composer SQLite + native agent transcript evidence connected"
+                        : "Cursor state.vscdb is unavailable"))
             }
         }
     }
@@ -72,6 +89,110 @@ final class CursorSight: ObservableObject {
     struct Snapshot {
         let rawEvidence: RawEvidenceRecord
         let events: [GuardEvent]
+    }
+
+    nonisolated static func latestTranscriptURL() -> URL? {
+        let root = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".cursor/projects")
+        guard let enumerator = FileManager.default.enumerator(at: root,
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey],
+            options: [.skipsHiddenFiles]) else { return nil }
+        var latest: (url: URL, date: Date)?
+        let cutoff = Date().addingTimeInterval(-86_400)
+        for case let candidate as URL in enumerator where candidate.pathExtension == "jsonl"
+            && candidate.path.contains("/agent-transcripts/") {
+            let modified = (try? candidate.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
+            guard modified >= cutoff else { continue }
+            if latest == nil || modified > latest!.date { latest = (candidate, modified) }
+        }
+        return latest?.url
+    }
+
+    nonisolated static func readTranscript(_ url: URL) -> Snapshot? {
+        guard let attributes = try? FileManager.default.attributesOfItem(atPath: url.path),
+              let size = attributes[.size] as? NSNumber, size.intValue <= 10_485_760,
+              let data = try? Data(contentsOf: url, options: [.mappedIfSafe]), !data.isEmpty else { return nil }
+        let session = url.deletingPathExtension().lastPathComponent
+        let modified = (attributes[.modificationDate] as? Date) ?? Date()
+        let lines = data.split(separator: 0x0A, omittingEmptySubsequences: true)
+        var events: [GuardEvent] = []
+        var intent: String?
+        var turn: String?
+        for (index, bytes) in lines.enumerated() {
+            guard let object = try? JSONSerialization.jsonObject(with: Data(bytes)) as? [String: Any] else { continue }
+            let timestamp = modified.addingTimeInterval(Double(index - lines.count) / 1_000)
+            if object["type"] as? String == "turn_ended" {
+                events.append(transcriptEvent(id: "\(session):\(index):ended", kind: "verification",
+                    op: "turn_ended", action: object["status"] as? String ?? "completed",
+                    ts: timestamp, session: session, turn: turn, intent: intent,
+                    response: json(object)))
+                continue
+            }
+            guard let role = object["role"] as? String,
+                  let message = object["message"] as? [String: Any],
+                  let content = message["content"] as? [[String: Any]] else { continue }
+            for (contentIndex, item) in content.enumerated() {
+                let type = item["type"] as? String ?? ""
+                let eventID = "\(session):\(index):\(contentIndex):\(type)"
+                if role == "user", type == "text", let raw = item["text"] as? String {
+                    let text = transcriptUserQuery(raw)
+                    guard !text.isEmpty else { continue }
+                    turn = eventID; intent = text
+                    events.append(transcriptEvent(id: eventID, kind: "model", op: "prompt", action: "sent",
+                        ts: timestamp, session: session, turn: turn, intent: text, prompt: raw))
+                } else if role == "assistant", type == "text", let text = item["text"] as? String, !text.isEmpty {
+                    events.append(transcriptEvent(id: eventID, kind: "model", op: "response", action: "received",
+                        ts: timestamp, session: session, turn: turn, intent: intent, response: text))
+                } else if role == "assistant", type == "tool_use", let name = item["name"] as? String {
+                    let callID = item["id"] as? String ?? eventID
+                    let arguments = item["input"].flatMap(json)
+                    events.append(transcriptEvent(id: eventID, kind: "tool", op: "call", action: "requested",
+                        ts: timestamp, session: session, turn: turn, intent: intent, command: arguments,
+                        toolCallId: callID, toolName: name))
+                } else if type == "tool_result" {
+                    let callID = item["tool_use_id"] as? String ?? eventID
+                    events.append(transcriptEvent(id: eventID, kind: "tool", op: "result", action: "completed",
+                        ts: timestamp, session: session, turn: turn, intent: intent,
+                        response: transcriptContentText(item["content"]), toolCallId: callID))
+                } else if ["thinking", "reasoning"].contains(type) {
+                    let reasoning = item["thinking"] as? String ?? item["text"] as? String
+                    events.append(transcriptEvent(id: eventID, kind: "model", op: "reasoning", action: "captured",
+                        ts: timestamp, session: session, turn: turn, intent: intent, reasoning: reasoning))
+                }
+            }
+        }
+        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+        let raw = RawEvidenceRecord(source: "cursor", stream: "cursor-transcript:\(session)",
+            offsetStart: 0, offsetEnd: Int64(data.count), fingerprint: digest,
+            observedAt: modified, payload: data)
+        return Snapshot(rawEvidence: raw, events: events)
+    }
+
+    private nonisolated static func transcriptUserQuery(_ text: String) -> String {
+        guard let start = text.range(of: "<user_query>"), let end = text.range(of: "</user_query>") else {
+            return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        return String(text[start.upperBound..<end.lowerBound]).trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func transcriptContentText(_ value: Any?) -> String? {
+        if let text = value as? String { return text }
+        if let items = value as? [[String: Any]] {
+            let text = items.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            return text.isEmpty ? json(items) : text
+        }
+        return value.flatMap(json)
+    }
+
+    private nonisolated static func transcriptEvent(id: String, kind: String, op: String, action: String,
+        ts: Date, session: String, turn: String?, intent: String?, command: String? = nil,
+        prompt: String? = nil, reasoning: String? = nil, response: String? = nil,
+        toolCallId: String? = nil, toolName: String? = nil) -> GuardEvent {
+        GuardEvent(id: uuid(id), kind: kind, ruleId: "cursor_transcript_\(op)", path: "-",
+            command: command, agent: "cursor", op: op, severity: "info", ts: ts, action: action,
+            sessionId: session, turnId: turn, toolCallId: toolCallId, userIntent: intent,
+            modelReasoning: reasoning, modelPrompt: prompt, modelResponse: response, toolName: toolName,
+            source: "agentsight:cursor-transcript-v1", attributionConfidence: .confirmed,
+            attributionMethod: "Cursor native agent transcript role/content/tool identifiers")
     }
 
     nonisolated static func readLatest(url: URL) -> [Snapshot]? {
