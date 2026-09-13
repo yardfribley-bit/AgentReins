@@ -26,39 +26,54 @@ final class SemanticAnalyzer: ObservableObject {
     // only the non-sensitive presence flag here; the secret itself is read
     // solely after an explicit Analyze action.
     @Published private(set) var configured: Bool
+    @Published var baseURL: String {
+        didSet { UserDefaults.standard.set(baseURL, forKey: "agr_openai_compatible_base_url") }
+    }
     @Published var model: String {
-        didSet { UserDefaults.standard.set(model, forKey: "agr_openrouter_model") }
+        didSet { UserDefaults.standard.set(model, forKey: "agr_openai_compatible_model") }
     }
 
     init() {
-        model = UserDefaults.standard.string(forKey: "agr_openrouter_model") ?? "openai/gpt-4o-mini"
-        configured = UserDefaults.standard.bool(forKey: "agr_openrouter_configured")
+        let defaults = UserDefaults.standard
+        let legacyConfigured = defaults.bool(forKey: "agr_openrouter_configured")
+        baseURL = defaults.string(forKey: "agr_openai_compatible_base_url")
+            ?? (legacyConfigured ? "https://openrouter.ai/api/v1" : "https://api.openai.com/v1")
+        model = defaults.string(forKey: "agr_openai_compatible_model")
+            ?? defaults.string(forKey: "agr_openrouter_model")
+            ?? (legacyConfigured ? "openai/gpt-4o-mini" : "gpt-4o-mini")
+        configured = defaults.bool(forKey: "agr_openai_compatible_configured") || legacyConfigured
     }
 
-    func configure(key: String, model: String) -> Bool {
+    func configure(baseURL: String, key: String, model: String) -> Bool {
+        let cleanBaseURL = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !cleanKey.isEmpty, !cleanModel.isEmpty, KeychainStore.saveOpenRouterKey(cleanKey) else {
-            lastError = "无法保存 OpenRouter 配置"
+        let keyReady = cleanKey.isEmpty ? KeychainStore.analysisAPIKey() != nil
+                                        : KeychainStore.saveAnalysisAPIKey(cleanKey)
+        guard Self.chatCompletionsURL(baseURL: cleanBaseURL) != nil,
+              !cleanModel.isEmpty, keyReady else {
+            lastError = "Base URL, API key, or model is invalid."
             return false
         }
+        self.baseURL = cleanBaseURL
         self.model = cleanModel
         configured = true
-        UserDefaults.standard.set(true, forKey: "agr_openrouter_configured")
+        UserDefaults.standard.set(true, forKey: "agr_openai_compatible_configured")
         lastError = nil
         return true
     }
 
     func removeConfiguration() {
-        KeychainStore.deleteOpenRouterKey()
+        KeychainStore.deleteAnalysisAPIKey()
         configured = false
-        UserDefaults.standard.set(false, forKey: "agr_openrouter_configured")
+        UserDefaults.standard.set(false, forKey: "agr_openai_compatible_configured")
     }
 
     func analyze(_ turn: AgentTurn) async {
         guard !analyzing.contains(turn.id) else { return }
-        guard let key = KeychainStore.openRouterKey() else {
-            lastError = "OpenRouter Key 未配置"
+        guard let key = KeychainStore.analysisAPIKey(),
+              let endpoint = Self.chatCompletionsURL(baseURL: baseURL) else {
+            lastError = "Analysis model is not configured."
             return
         }
         analyzing.insert(turn.id)
@@ -87,16 +102,19 @@ final class SemanticAnalyzer: ObservableObject {
             ]
         ]
         do {
-            var request = URLRequest(url: URL(string: "https://openrouter.ai/api/v1/chat/completions")!)
+            var request = URLRequest(url: endpoint)
             request.httpMethod = "POST"
             request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization")
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-            request.setValue("AgentReins", forHTTPHeaderField: "X-OpenRouter-Title")
+            if endpoint.host?.lowercased().hasSuffix("openrouter.ai") == true {
+                request.setValue("AgentReins", forHTTPHeaderField: "X-OpenRouter-Title")
+            }
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             let (data, response) = try await URLSession.shared.data(for: request)
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
-                throw NSError(domain: "OpenRouter", code: (response as? HTTPURLResponse)?.statusCode ?? -1,
-                              userInfo: [NSLocalizedDescriptionKey: "OpenRouter 请求失败"])
+                throw NSError(domain: "AgentReins.AnalysisModel",
+                              code: (response as? HTTPURLResponse)?.statusCode ?? -1,
+                              userInfo: [NSLocalizedDescriptionKey: "OpenAI-compatible request failed."])
             }
             let envelope = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             let choices = envelope?["choices"] as? [[String: Any]]
@@ -116,6 +134,18 @@ final class SemanticAnalyzer: ObservableObject {
         }
     }
 
+    nonisolated static func chatCompletionsURL(baseURL: String) -> URL? {
+        let trimmed = baseURL.trimmingCharacters(in: .whitespacesAndNewlines)
+            .trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+        guard var components = URLComponents(string: trimmed),
+              let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
+              components.host != nil else { return nil }
+        if !components.path.hasSuffix("/chat/completions") {
+            components.path += "/chat/completions"
+        }
+        return components.url
+    }
+
     private func redact(_ text: String) -> String {
         let patterns = [
             #"sk-[A-Za-z0-9_-]{16,}"#,
@@ -131,11 +161,16 @@ final class SemanticAnalyzer: ObservableObject {
 }
 
 enum KeychainStore {
-    static func openRouterKey() -> String? {
+    static func analysisAPIKey() -> String? {
+        read(service: "com.agentspec.agentreins.analysis", account: "openai-compatible")
+            ?? read(service: "com.agentspec.agentreins.openrouter", account: "openrouter")
+    }
+
+    private static func read(service: String, account: String) -> String? {
         let query: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.agentspec.agentreins.openrouter",
-            kSecAttrAccount as String: "openrouter",
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
             kSecReturnData as String: true,
             kSecMatchLimit as String: kSecMatchLimitOne
         ]
@@ -145,12 +180,12 @@ enum KeychainStore {
         return String(data: data, encoding: .utf8)
     }
 
-    static func saveOpenRouterKey(_ key: String) -> Bool {
+    static func saveAnalysisAPIKey(_ key: String) -> Bool {
         guard let data = key.data(using: .utf8) else { return false }
         let identity: [String: Any] = [
             kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.agentspec.agentreins.openrouter",
-            kSecAttrAccount as String: "openrouter"
+            kSecAttrService as String: "com.agentspec.agentreins.analysis",
+            kSecAttrAccount as String: "openai-compatible"
         ]
         let update = SecItemUpdate(identity as CFDictionary, [kSecValueData as String: data] as CFDictionary)
         if update == errSecSuccess { return true }
@@ -161,12 +196,17 @@ enum KeychainStore {
         return SecItemAdd(item as CFDictionary, nil) == errSecSuccess
     }
 
-    static func deleteOpenRouterKey() {
-        let query: [String: Any] = [
-            kSecClass as String: kSecClassGenericPassword,
-            kSecAttrService as String: "com.agentspec.agentreins.openrouter",
-            kSecAttrAccount as String: "openrouter"
-        ]
-        SecItemDelete(query as CFDictionary)
+    static func deleteAnalysisAPIKey() {
+        for (service, account) in [
+            ("com.agentspec.agentreins.analysis", "openai-compatible"),
+            ("com.agentspec.agentreins.openrouter", "openrouter")
+        ] {
+            let query: [String: Any] = [
+                kSecClass as String: kSecClassGenericPassword,
+                kSecAttrService as String: service,
+                kSecAttrAccount as String: account
+            ]
+            SecItemDelete(query as CFDictionary)
+        }
     }
 }

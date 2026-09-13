@@ -3,6 +3,7 @@ import SwiftUI
 /// Live agent posture first; complete evidence appears only after node selection.
 struct AgentOperationsCenterView: View {
     @EnvironmentObject private var webAgentSight: WebAgentSight
+    @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     let sessions: [AgentSessionSnapshot]
     let events: [GuardEvent]
     let incidents: [SecurityIncident]
@@ -24,6 +25,7 @@ struct AgentOperationsCenterView: View {
     @State private var selectedStageID: String?
     @State private var followingLive = true
     @State private var showingBrowserProtection = false
+    @State private var showingAnalysisModel = false
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
 
     private enum CenterTab: String, CaseIterable, Identifiable {
@@ -233,6 +235,9 @@ struct AgentOperationsCenterView: View {
         .sheet(isPresented: $showingBrowserProtection) {
             BrowserProtectionView(extensionConnected: webAgentSight.connected)
         }
+        .sheet(isPresented: $showingAnalysisModel) {
+            AnalysisModelSettingsView().environmentObject(semanticAnalyzer)
+        }
     }
 
     // MARK: - Chrome
@@ -259,6 +264,14 @@ struct AgentOperationsCenterView: View {
                 .font(.system(size: 9, weight: .bold)).foregroundStyle(observing ? green : amber)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background((observing ? green : amber).opacity(0.12), in: Capsule())
+            Button { showingAnalysisModel = true } label: {
+                Label(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL",
+                      systemImage: "brain.head.profile")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(semanticAnalyzer.configured ? green : cyan)
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background((semanticAnalyzer.configured ? green : cyan).opacity(0.12), in: Capsule())
+            }.buttonStyle(.plain)
             Button { showingBrowserProtection = true } label: {
                 Label(webAgentSight.connected ? "WEB PROTECTED" : "PROTECT WEB AI",
                       systemImage: webAgentSight.connected ? "checkmark.shield.fill" : "shield.lefthalf.filled")

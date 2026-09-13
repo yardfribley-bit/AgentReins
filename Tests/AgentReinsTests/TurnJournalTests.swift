@@ -4,6 +4,13 @@ import XCTest
 @testable import AgentReins
 
 final class TurnJournalTests: XCTestCase {
+    func testOpenAICompatibleEndpointNormalization() {
+        XCTAssertEqual(SemanticAnalyzer.chatCompletionsURL(baseURL: "https://api.openai.com/v1")?.absoluteString,
+                       "https://api.openai.com/v1/chat/completions")
+        XCTAssertEqual(SemanticAnalyzer.chatCompletionsURL(baseURL: "https://relay.example/v1/chat/completions")?.absoluteString,
+                       "https://relay.example/v1/chat/completions")
+        XCTAssertNil(SemanticAnalyzer.chatCompletionsURL(baseURL: "not a URL"))
+    }
     func testGrokBrowserEvidenceProducesConfirmedPromptUploadAndResult() throws {
         let fixture = """
         {"schemaVersion":1,"provider":"grok","eventId":"prompt-1","eventType":"prompt","timestamp":"2026-09-11T06:00:00Z","url":"https://grok.com/imagine?type=video","tabId":42,"sessionId":"grok:1:42","mode":"video","text":"Create a launch video"}
