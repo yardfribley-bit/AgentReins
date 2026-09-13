@@ -307,6 +307,51 @@ final class TurnJournalTests: XCTestCase {
     }
 
     @MainActor
+    func testSCPDestinationUsesRemoteSpecInsteadOfFirstLocalPath() throws {
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/site",
+            command: "scp public/index.html public/app.css root@50.118.187.180:/opt/site/",
+            agent: "codex", op: "call", severity: "info", ts: Date(), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "scp", toolName: "exec_command")
+        let event = try XCTUnwrap(ToolActivityEvidenceProjector().project([call]).first { $0.kind == "network" })
+        XCTAssertEqual(event.remoteDomain, "50.118.187.180")
+        XCTAssertEqual(event.remotePort, 22)
+    }
+
+    @MainActor
+    func testSSHSessionJoinsSocketCredentialCommandsAndTransfer() throws {
+        let started = Date(timeIntervalSince1970: 100)
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/site",
+            command: "ssh -o StrictHostKeyChecking=accept-new root@50.118.187.180",
+            agent: "codex", op: "call", severity: "info", ts: started, action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "ssh", toolName: "exec_command")
+        let intent = try XCTUnwrap(ToolActivityEvidenceProjector().project([call]).first { $0.kind == "network" })
+        let credential = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/site",
+            command: #"write_stdin({"session_id":1,"chars":"example-password\n"})"#,
+            agent: "codex", op: "call", severity: "info", ts: started.addingTimeInterval(1), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "stdin", toolName: "write_stdin")
+        let remote = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/site",
+            command: #"write_stdin({"session_id":1,"chars":"systemctl reload nginx\n"})"#,
+            agent: "codex", op: "call", severity: "info", ts: started.addingTimeInterval(2), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "remote", toolName: "write_stdin")
+        let scpCall = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/site",
+            command: "scp public/index.html root@50.118.187.180:/opt/site/",
+            agent: "codex", op: "call", severity: "info", ts: started.addingTimeInterval(3), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "scp", toolName: "exec_command")
+        let scpIntent = try XCTUnwrap(ToolActivityEvidenceProjector().project([scpCall]).first { $0.kind == "network" })
+        let socket = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "codex", op: "connect", severity: "medium", ts: started.addingTimeInterval(1), action: "observed",
+            sessionId: "s", turnId: "t", source: "lsof-network", attributionConfidence: .inferred,
+            processId: 123, remoteHost: "50.118.187.180", remotePort: 22)
+        let session = try XCTUnwrap(SSHSessionEvidence.build(events: [intent, credential, remote, scpCall, scpIntent, socket]).first)
+        XCTAssertEqual(session.username, "root")
+        XCTAssertTrue(session.credentialEntered)
+        XCTAssertTrue(session.socketObserved)
+        XCTAssertEqual(session.remoteCommandCount, 1)
+        XCTAssertEqual(session.transfers.first?.remotePath, "/opt/site/")
+        XCTAssertEqual(session.risk, "review required")
+    }
+
+    @MainActor
     func testToolActivityDoesNotClaimUnknownShellResultOrUnresolvedPath() throws {
         let started = Date(timeIntervalSince1970: 100)
         let call = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",

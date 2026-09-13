@@ -92,8 +92,14 @@ final class ToolActivityEvidenceProjector: ObservableObject {
         if let domain = ExternalURLEvidence.firstDomain(in: command) {
             return (domain, lower.contains("http://") ? 80 : 443)
         }
-        if ["ssh ", "scp ", "rsync "].contains(where: lower.contains),
-           let host = firstMatch(#"(?:ssh|scp|rsync)(?:\s+-[A-Za-z]+(?:\s+\S+)?)?\s+(?:[^\s@]+@)?([A-Za-z0-9._-]+)"#, in: command) {
+        if lower.contains("scp ") || lower.contains("rsync "),
+           let host = firstMatch(#"(?:^|\s)(?:[^\s@:/]+@)?([A-Za-z0-9._-]+):[^\s]+"#, in: command) {
+            let port = firstMatch(#"(?:^|\s)-P\s*(\d+)"#, in: command).flatMap(Int.init)
+                ?? firstMatch(#"(?:^|\s)-p\s*(\d+)"#, in: command).flatMap(Int.init) ?? 22
+            return (host.lowercased(), port)
+        }
+        if lower.contains("ssh "),
+           let host = firstMatch(#"\bssh\b(?:\s+-[^\s]+(?:\s+[^\s-][^\s]*)?)*\s+(?:[^\s@]+@)?([A-Za-z0-9._-]+)"#, in: command) {
             let port = firstMatch(#"(?:^|\s)-p\s*(\d+)"#, in: command).flatMap(Int.init) ?? 22
             return (host.lowercased(), port)
         }

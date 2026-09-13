@@ -111,6 +111,7 @@ struct AgentOperationsCenterView: View {
             (host, scopedEvents.filter { ($0.remoteDomain ?? $0.remoteHost) == host }.max { $0.ts < $1.ts })
         }
     }
+    private var sshSessions: [SSHSessionEvidence] { SSHSessionEvidence.build(events: scopedEvents) }
     private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
     private var memoryEvidenceRows: [GuardEvent] {
         guard let session = activeSession else { return [] }
@@ -1128,6 +1129,50 @@ struct AgentOperationsCenterView: View {
     private var networkPanel: some View {
         posturePanel("NETWORK EVIDENCE", "Who the Agent contacted, why, and how certain we are") {
             VStack(spacing: 5) {
+                if !sshSessions.isEmpty {
+                    HStack {
+                        Text("SSH SESSIONS").micro(cyan)
+                        Spacer()
+                        Text("\(sshSessions.count)").mono()
+                    }.padding(.bottom, 2)
+                    ForEach(sshSessions) { session in
+                        Button {
+                            selectedEvent = session.sourceEvent
+                            selectedProcess = nil
+                            selectedProcessGroup = []
+                            selectedStageID = nil
+                            followingLive = false
+                        } label: {
+                            VStack(alignment: .leading, spacing: 7) {
+                                HStack(spacing: 8) {
+                                    Image(systemName: "terminal.fill")
+                                        .foregroundStyle(session.risk == "review required" ? amber : cyan)
+                                        .frame(width: 25, height: 25)
+                                        .background((session.risk == "review required" ? amber : cyan).opacity(0.12),
+                                                    in: RoundedRectangle(cornerRadius: 6))
+                                    VStack(alignment: .leading, spacing: 2) {
+                                        Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
+                                            .font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
+                                        Text("\(session.agent.capitalized) · Remote SSH session")
+                                            .font(.system(size: 8)).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Text(session.risk.uppercased()).font(.system(size: 6.5, weight: .bold))
+                                        .foregroundStyle(session.risk == "review required" ? amber : cyan)
+                                }
+                                HStack(spacing: 10) {
+                                    Text("Auth: \(session.authentication)")
+                                    Text("Transfers: \(session.transfers.count)")
+                                    Text("Commands: \(session.remoteCommandCount)")
+                                }.font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
+                            }
+                            .padding(.horizontal, 9).padding(.vertical, 8)
+                            .node(selectedEvent?.id == session.sourceEvent.id)
+                        }.buttonStyle(.plain)
+                    }
+                    Divider().overlay(border).padding(.vertical, 5)
+                    Text("OTHER DESTINATIONS").micro(.secondary).frame(maxWidth: .infinity, alignment: .leading)
+                }
                 if externalServices.isEmpty {
                     empty("No external destination captured")
                 }
@@ -1435,6 +1480,10 @@ struct AgentOperationsCenterView: View {
 
     private func eventDetail(_ e: GuardEvent) -> some View {
         VStack(alignment: .leading, spacing: 10) {
+            if let ssh = sshSessions.first(where: { $0.sourceEvent.id == e.id }) {
+                sshSessionDetail(ssh)
+                Divider().overlay(border)
+            }
             Text("NODE DETAILS").micro(.secondary)
             Text(eventTitle(e)).font(.headline)
             field("Observed", e.ts.formatted(date: .abbreviated, time: .standard))
@@ -1456,6 +1505,37 @@ struct AgentOperationsCenterView: View {
                 field("Destination class", assessment.kind.rawValue)
                 field("Review reason", assessment.reason)
             }
+        }
+    }
+
+    private func sshSessionDetail(_ session: SSHSessionEvidence) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            Text("SSH SESSION SECURITY").micro(cyan)
+            Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
+                .font(.system(size: 14, weight: .bold, design: .monospaced))
+            labelChip(session.risk.uppercased(), color: session.risk == "review required" ? amber : cyan)
+            field("Agent", session.agent.capitalized)
+            field("Authentication", session.authentication)
+            field("Credential", session.credentialEntered ? "Detected · hidden by default" : "Not observed")
+            field("Host key policy", session.hostKeyPolicy)
+            field("PID-owned socket", session.socketObserved ? "Observed" : "Not captured")
+            field("Remote commands", "\(session.remoteCommandCount) observed through Agent tool input")
+            field("Transfers", session.transfers.isEmpty ? "No SCP/rsync transfer reconstructed" : "\(session.transfers.count) reconstructed")
+            ForEach(Array(session.transfers.enumerated()), id: \.offset) { _, transfer in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text("\(transfer.tool.uppercased()) · \(transfer.direction.uppercased())").micro(.secondary)
+                    field("Local files", transfer.localPaths.isEmpty ? "Not resolved" : transfer.localPaths.joined(separator: ", "))
+                    field("Remote path", transfer.remotePath ?? "Not resolved")
+                }.padding(8).background(raised, in: RoundedRectangle(cornerRadius: 6))
+            }
+            ForEach(session.findings, id: \.self) { finding in
+                HStack(alignment: .top, spacing: 6) {
+                    Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
+                    Text(finding).font(.system(size: 8.5)).foregroundStyle(.secondary)
+                }
+            }
+            Text("SSH payloads are encrypted. Commands, credentials, and transfers shown here come from local Agent/tool evidence; the socket proves the connection, not its plaintext contents.")
+                .font(.system(size: 8)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
     }
 
