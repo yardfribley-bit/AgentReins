@@ -1628,6 +1628,17 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(ModelRouteEvidence.build(events: [prompt, socket]).isEmpty)
     }
 
+    func testIPGeolocationParsingAndPrivateAddressProtection() throws {
+        let data = #"{"success":true,"ip":"104.18.3.115","country":"United States","region":"California","city":"San Francisco","connection":{"asn":13335,"org":"Cloudflare, Inc.","isp":"Cloudflare"}}"#.data(using: .utf8)!
+        let geo = try XCTUnwrap(IPGeolocationStore.decode(data, fallbackIP: "104.18.3.115"))
+        XCTAssertEqual(geo.locationLabel, "San Francisco, California, United States")
+        XCTAssertEqual(geo.ownerLabel, "AS13335 · Cloudflare, Inc.")
+        XCTAssertTrue(IPGeolocationStore.isPublicIPAddress("104.18.3.115"))
+        XCTAssertFalse(IPGeolocationStore.isPublicIPAddress("127.0.0.1"))
+        XCTAssertFalse(IPGeolocationStore.isPublicIPAddress("192.168.1.20"))
+        XCTAssertFalse(IPGeolocationStore.isPublicIPAddress("fd00::1"))
+    }
+
     func testReplacingModelRoutesRemovesObsoleteCandidate() throws {
         let root = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentreins-route-replace-\(UUID().uuidString)")

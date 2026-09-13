@@ -29,6 +29,7 @@ struct AgentOperationsCenterView: View {
     @State private var showingAnalysisModel = false
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
     @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
+    @StateObject private var ipGeolocation = IPGeolocationStore()
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -254,6 +255,10 @@ struct AgentOperationsCenterView: View {
         }
         .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
         .onChange(of: memoryEvidenceFingerprint) { _ in refreshMemoryCommits() }
+        .onAppear { ipGeolocation.resolve(externalServices.map(\.host)) }
+        .onChange(of: externalServices.map(\.host).joined(separator: "|")) { _ in
+            ipGeolocation.resolve(externalServices.map(\.host))
+        }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
@@ -1147,6 +1152,14 @@ struct AgentOperationsCenterView: View {
                                     Text(item.host).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
                                     Text(networkPurpose(item.event, assessment: assessment))
                                         .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
+                                    if let geo = ipGeolocation.records[item.host.lowercased()] {
+                                        Text(geo.locationLabel + (geo.ownerLabel.map { " · \($0)" } ?? ""))
+                                            .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
+                                    } else if ipGeolocation.pending.contains(item.host.lowercased()) {
+                                        Text("Resolving IP location…").font(.system(size: 7.5)).foregroundStyle(.tertiary)
+                                    } else if IPGeolocationStore.isPublicIPAddress(item.host) {
+                                        Text("Location unavailable").font(.system(size: 7.5)).foregroundStyle(.tertiary)
+                                    }
                                 }
                             }
                             Spacer(minLength: 4)
