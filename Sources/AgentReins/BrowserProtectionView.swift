@@ -55,6 +55,7 @@ struct BrowserProtectionView: View {
     let extensionConnected: Bool
     @Environment(\.dismiss) private var dismiss
     @State private var status = BrowserProtectionStatus.inspect()
+    @State private var setupPrepared = false
 
     private let cyan = Color(red: 48/255, green: 211/255, blue: 229/255)
     private let green = Color(red: 57/255, green: 214/255, blue: 117/255)
@@ -107,6 +108,28 @@ struct BrowserProtectionView: View {
                     if !protected {
                         section("FINISH SETUP", setupExplanation) {
                             VStack(alignment: .leading, spacing: 12) {
+                                Button {
+                                    prepareChromeInstallation()
+                                } label: {
+                                    HStack(spacing: 9) {
+                                        Image(systemName: setupPrepared ? "checkmark.circle.fill" : "shippingbox.fill")
+                                        VStack(alignment: .leading, spacing: 2) {
+                                            Text(setupPrepared ? "Correct extension is ready" : "Prepare Chrome extension")
+                                                .font(.system(size: 12, weight: .bold))
+                                            Text(setupPrepared
+                                                 ? "In Chrome, choose Load unpacked and paste the copied folder path."
+                                                 : "Uses the version bundled with this AgentReins app — no source checkout required.")
+                                                .font(.system(size: 9)).opacity(0.82)
+                                        }
+                                        Spacer()
+                                        Image(systemName: "arrow.right")
+                                    }
+                                    .padding(12).frame(maxWidth: .infinity)
+                                }
+                                .buttonStyle(.plain)
+                                .foregroundStyle(.white)
+                                .background(cyan.opacity(0.78), in: RoundedRectangle(cornerRadius: 9))
+
                                 setupRow(1, "Open Chrome extensions", "Enable Developer mode in the top-right corner.") {
                                     open("chrome://extensions/?id=hcmoeaheokpfbbggdmkdeaiokakiampk")
                                 }
@@ -212,6 +235,15 @@ struct BrowserProtectionView: View {
     private func copyExtensionPath() {
         NSPasteboard.general.clearContents()
         NSPasteboard.general.setString(BrowserProtectionStatus.extensionURL.path, forType: .string)
+    }
+
+    private func prepareChromeInstallation() {
+        BrowserProtectionInstaller.installBundledAssets()
+        copyExtensionPath()
+        NSWorkspace.shared.activateFileViewerSelecting([BrowserProtectionStatus.extensionURL])
+        open("chrome://extensions")
+        setupPrepared = true
+        status = BrowserProtectionStatus.inspect()
     }
 }
 
