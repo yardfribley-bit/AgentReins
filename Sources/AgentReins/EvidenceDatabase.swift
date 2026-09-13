@@ -327,11 +327,22 @@ final class EvidenceDatabase: @unchecked Sendable {
         } catch { try? executeUnlocked("ROLLBACK"); throw error }
     }
 
-    func upsertModelRoutes(_ records: [ModelRouteEvidence]) throws {
-        guard !records.isEmpty else { return }
+    func replaceModelRoutes(_ records: [ModelRouteEvidence], turns: [(sessionId: String, turnId: String)]) throws {
+        guard !turns.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("BEGIN IMMEDIATE")
         do {
+            var deleteStatement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle,
+                "DELETE FROM model_route_evidence WHERE session_id=? AND turn_id=?", -1,
+                &deleteStatement, nil) == SQLITE_OK else { throw failure("prepare model route replacement") }
+            defer { sqlite3_finalize(deleteStatement) }
+            for turn in turns {
+                bind(turn.sessionId, at: 1, to: deleteStatement)
+                bind(turn.turnId, at: 2, to: deleteStatement)
+                guard sqlite3_step(deleteStatement) == SQLITE_DONE else { throw failure("replace model routes") }
+                sqlite3_reset(deleteStatement); sqlite3_clear_bindings(deleteStatement)
+            }
             let sql = """
               INSERT INTO model_route_evidence(route_id,session_id,turn_id,agent,destination,
               classification,confidence,identity_status,first_observed_at,last_observed_at,payload,payload_sha256)
@@ -359,6 +370,15 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
             try executeUnlocked("COMMIT")
         } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func upsertModelRoutes(_ records: [ModelRouteEvidence]) throws {
+        let turns = Array(Set(records.map { "\($0.sessionId)\u{0}\($0.turnId)" })).compactMap { key -> (String, String)? in
+            let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
+            guard parts.count == 2 else { return nil }
+            return (String(parts[0]), String(parts[1]))
+        }
+        try replaceModelRoutes(records, turns: turns)
     }
 
     func modelRoutes(sessionId: String, turnId: String) throws -> [ModelRouteEvidence] {

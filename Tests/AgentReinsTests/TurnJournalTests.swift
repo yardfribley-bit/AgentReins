@@ -728,7 +728,7 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(traffic.first?.confidence, .confirmed)
     }
 
-    func testUnknownModelTurnEndpointIsTreatedAsUnverifiedRelay() throws {
+    func testUnknownModelTurnEndpointRemainsNetworkCandidateWithoutRequestEvidence() throws {
         let events = [
             GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil, agent: "cursor",
                 op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: "s", turnId: "t",
@@ -739,9 +739,9 @@ final class TurnJournalTests: XCTestCase {
         ]
 
         let route = try XCTUnwrap(AgentTrafficAnalyzer.build(events: events).first)
-        XCTAssertEqual(route.classification, .modelRelay)
-        XCTAssertEqual(route.identityStatus, "unverified")
-        XCTAssertTrue(route.identityReason?.contains("cannot be independently verified") == true)
+        XCTAssertEqual(route.classification, .networkCandidate)
+        XCTAssertEqual(route.identityStatus, "not_applicable")
+        XCTAssertNil(route.claimedModels)
     }
 
     func testClaimedModelMismatchWithOfficialEndpointIsVisible() throws {
@@ -1603,16 +1603,46 @@ final class TurnJournalTests: XCTestCase {
             sessionId: session, turnId: turn, source: "process-network",
             attributionConfidence: .confirmed, attributionMethod: "PID ancestry",
             processId: 42, remoteHost: "43.156.86.223", remotePort: 443,
-            remoteDomain: "relay.example")
+            remoteDomain: "openrouter.ai")
 
         let route = try XCTUnwrap(ModelRouteEvidence.build(events: [model, network]).first)
-        XCTAssertEqual(route.destination, "relay.example")
+        XCTAssertEqual(route.destination, "openrouter.ai")
         XCTAssertEqual(route.classification, .modelRelay)
         XCTAssertEqual(route.claimedModels, ["deepseek-chat"])
         XCTAssertEqual(route.connectedIPs, ["43.156.86.223"])
         XCTAssertEqual(route.ports, [443])
         XCTAssertEqual(route.identityStatus, "unverified")
         XCTAssertEqual(route.evidenceEventIds, [network.id.uuidString])
+    }
+
+    func testUnknownSocketIsNotPersistedAsModelRoute() {
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil,
+            agent: "workbuddy", op: "prompt", severity: "info", ts: Date(), action: "sent",
+            sessionId: "s", turnId: "t", model: "deepseek/model")
+        let socket = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "workbuddy", op: "connect", severity: "medium", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", attributionConfidence: .inferred,
+            attributionMethod: "process-tree + bounded time window", remoteHost: "104.18.3.115", remotePort: 443)
+
+        XCTAssertEqual(AgentTrafficAnalyzer.build(events: [prompt, socket]).first?.classification, .networkCandidate)
+        XCTAssertTrue(ModelRouteEvidence.build(events: [prompt, socket]).isEmpty)
+    }
+
+    func testReplacingModelRoutesRemovesObsoleteCandidate() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-route-replace-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let stale = ModelRouteEvidence(routeId: "stale", sessionId: "s", turnId: "t",
+            agent: "workbuddy", destination: "104.18.3.115", classification: .modelRelay,
+            confidence: .inferred, processIds: [1], connectedIPs: [], ports: [443],
+            claimedModels: ["deepseek/model"], identityStatus: "unverified",
+            identityReason: "old heuristic", firstObservedAt: Date(), lastObservedAt: Date(),
+            evidenceEventIds: ["e"])
+        try database.upsertModelRoutes([stale])
+        try database.replaceModelRoutes([], turns: [("s", "t")])
+        XCTAssertTrue(try database.modelRoutes(sessionId: "s", turnId: "t").isEmpty)
     }
 
     func testModelRouteEvidencePersistsAndCanBeReadByTurn() throws {

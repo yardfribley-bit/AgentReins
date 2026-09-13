@@ -1555,6 +1555,10 @@ struct AgentOperationsCenterView: View {
                             Text("Claimed model · \(models.joined(separator: ", "))")
                                 .font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
                         }
+                        if destination.classification == .networkCandidate {
+                            Text("Observed in the same turn; not proven to carry the model request.")
+                                .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(2)
+                        }
                         if let status = destination.identityStatus, status != "not_applicable" {
                             Text("MODEL IDENTITY · \(status.replacingOccurrences(of: "_", with: " ").uppercased())")
                                 .font(.system(size: 7, weight: .bold))

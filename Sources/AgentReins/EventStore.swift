@@ -130,7 +130,15 @@ final class EventStore: ObservableObject {
                 try database.append(evidence)
                 let affectedEvidence = evidenceForAffectedTurns(evidence)
                 try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
-                try database.upsertModelRoutes(ModelRouteEvidence.build(events: affectedEvidence))
+                let affectedTurns = Array(Set(evidence.compactMap { event -> String? in
+                    guard let session = event.sessionId, let turn = event.turnId else { return nil }
+                    return "\(session)\u{0}\(turn)"
+                })).compactMap { key -> (sessionId: String, turnId: String)? in
+                    let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
+                    guard parts.count == 2 else { return nil }
+                    return (String(parts[0]), String(parts[1]))
+                }
+                try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence), turns: affectedTurns)
                 try database.upsertMemoryCommits(MemoryCommitEvidence.build(events: affectedEvidence))
                 persistenceError = nil
                 refreshCollectorHealth(publish: false)

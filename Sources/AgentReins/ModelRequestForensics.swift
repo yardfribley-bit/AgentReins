@@ -112,6 +112,7 @@ enum AgentTrafficClass: String, Codable, CaseIterable, Sendable {
     case agentControlPlane = "Agent control plane"
     case telemetry = "Telemetry"
     case toolExternal = "Tool external access"
+    case networkCandidate = "Network candidate"
     case unknown = "Unknown"
 }
 
@@ -151,7 +152,9 @@ struct ModelRouteEvidence: Codable, Equatable, Sendable {
         let turns = Dictionary(grouping: turnEvents) { "\($0.sessionId!):\($0.turnId!)" }
         return turns.flatMap { _, rows -> [ModelRouteEvidence] in
             guard let first = rows.first, let sessionId = first.sessionId, let turnId = first.turnId else { return [] }
-            return AgentTrafficAnalyzer.build(events: rows).map { destination in
+            return AgentTrafficAnalyzer.build(events: rows)
+                .filter { $0.classification == .modelRelay || $0.classification == .modelProvider }
+                .map { destination in
                 let routeRows = rows.filter { ($0.remoteDomain ?? $0.remoteHost)?.lowercased() == destination.destination }
                 let timestamps = routeRows.map(\.ts)
                 let stableMaterial = "\(sessionId)|\(turnId)|\(destination.destination)"
@@ -295,7 +298,9 @@ enum AgentTrafficAnalyzer {
             let classification = classify(destination: destination, events: rows, allEvents: events)
             let confidence: EvidenceConfidence = rows.allSatisfy { $0.attributionConfidence == .confirmed }
                 ? .confirmed : (rows.contains { $0.attributionConfidence == .inferred } ? .inferred : .unknown)
-            let claimedModels = Array(Set(events.compactMap(\.model).filter { !$0.isEmpty })).sorted()
+            let allClaimedModels = Array(Set(events.compactMap(\.model).filter { !$0.isEmpty })).sorted()
+            let claimedModels = classification == .modelProvider || classification == .modelRelay
+                ? allClaimedModels : []
             let identity = modelIdentity(destination: destination, classification: classification,
                                          claimedModels: claimedModels)
             return AgentTrafficDestination(destination: destination, classification: classification,
@@ -361,20 +366,10 @@ enum AgentTrafficAnalyzer {
         if assessment.kind == .modelRelay { return .modelRelay }
         if assessment.kind == .modelProvider { return .modelProvider }
         if events.contains(where: { $0.toolCallId != nil }) { return .toolExternal }
-        let modelTurns = Set(allEvents.filter { $0.kind == "model" }.compactMap { event -> String? in
-            guard let session = event.sessionId, let turn = event.turnId else { return nil }
-            return "\(session):\(turn)"
-        })
-        let linkedToModelTurn = events.contains { event in
-            guard let session = event.sessionId, let turn = event.turnId else { return event.kind == "model" }
-            return modelTurns.contains("\(session):\(turn)")
-        }
-        // A destination carrying model-turn traffic that is neither a known
-        // provider nor an explicit tool website is an unverified model route.
-        // This catches private gateways and regional relays without pretending
-        // that their advertised upstream model was independently observed.
-        if linkedToModelTurn { return .modelRelay }
-        return .unknown
+        // Time-window/process attribution proves only that the Agent had this
+        // socket open during the turn. It does not prove that the socket carried
+        // the model request. Unknown IPs and domains must remain candidates.
+        return .networkCandidate
     }
 
     private static func matches(_ value: String, _ suffixes: [String]) -> Bool {
