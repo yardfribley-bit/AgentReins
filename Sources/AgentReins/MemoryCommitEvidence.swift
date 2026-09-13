@@ -80,7 +80,7 @@ struct MemoryCommitEvidence: Codable, Equatable, Sendable {
             path.contains("/.kiro/crew/workspace/memory/") ||
             path.contains("/.agent-memory/") ||
             (path.contains("/.workbuddy/") &&
-                ["/user.md", "/identity.md", "/soul.md"].contains(where: path.contains))
+                ["/memory.md", "/user.md", "/identity.md", "/soul.md"].contains(where: path.contains))
     }
 
     private static func changeKind(_ event: GuardEvent) -> MemoryChangeKind {

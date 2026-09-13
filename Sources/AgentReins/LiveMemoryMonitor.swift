@@ -32,7 +32,11 @@ final class LiveMemoryMonitor: ObservableObject {
 
     private func roots() -> [(agent: String, url: URL)] {
         let home = FileManager.default.homeDirectoryForCurrentUser
-        return [("workbuddy", home.appendingPathComponent(".workbuddy/memory", isDirectory: true))]
+        let workBuddy = home.appendingPathComponent(".workbuddy", isDirectory: true)
+        return [
+            ("workbuddy", workBuddy),
+            ("workbuddy", workBuddy.appendingPathComponent("memory", isDirectory: true))
+        ]
     }
 
     private func establishBaseline() {
@@ -67,6 +71,7 @@ final class LiveMemoryMonitor: ObservableObject {
                 includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey],
                 options: [.skipsHiddenFiles]) else { continue }
             for file in files where file.pathExtension.lowercased() != "bak" {
+                guard isKnownMemoryFile(file) else { continue }
                 guard let values = try? file.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .isRegularFileKey]),
                       values.isRegularFile == true else { continue }
                 let size = values.fileSize ?? 0
@@ -79,6 +84,13 @@ final class LiveMemoryMonitor: ObservableObject {
             }
         }
         return result
+    }
+
+    private func isKnownMemoryFile(_ file: URL) -> Bool {
+        let path = file.path.lowercased()
+        if path.contains("/.workbuddy/memory/") { return true }
+        guard path.contains("/.workbuddy/") else { return false }
+        return ["memory.md", "user.md", "identity.md", "soul.md"].contains(file.lastPathComponent.lowercased())
     }
 
     private func event(path: String, op: String, before: String?, after: String?, at timestamp: Date) -> GuardEvent {

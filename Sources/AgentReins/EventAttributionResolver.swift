@@ -146,8 +146,10 @@ final class EventAttributionResolver: ObservableObject {
 
     private func isAgentMemoryPath(_ path: String) -> Bool {
         let value = path.lowercased()
-        return value.contains("/.workbuddy/memory/") || value.contains("/.kiro/knowledge/memory/") ||
-            value.contains("/.agent-memory/")
+        return value.contains("/.workbuddy/memory/") ||
+            (value.contains("/.workbuddy/") &&
+                ["/memory.md", "/user.md", "/identity.md", "/soul.md"].contains(where: value.contains)) ||
+            value.contains("/.kiro/knowledge/memory/") || value.contains("/.agent-memory/")
     }
 
     private func normalizedWorkspace(_ path: String) -> String? {

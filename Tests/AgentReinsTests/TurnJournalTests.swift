@@ -1676,6 +1676,19 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(MemoryCommitEvidence.build(events: [memoryEdit]).count, 1)
     }
 
+    func testWorkBuddyRootMemoryFileIsACommit() throws {
+        let memoryEdit = GuardEvent(kind: "file", ruleId: "memory-watch",
+            path: "/Users/me/.workbuddy/MEMORY.md", command: nil,
+            agent: "workbuddy", op: "modify", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", beforeContent: "old", afterContent: "old\nBlue Harbor",
+            fileDiff: "+Blue Harbor", attributionConfidence: .confirmed)
+
+        let commit = try XCTUnwrap(MemoryCommitEvidence.build(events: [memoryEdit]).first)
+        XCTAssertEqual(commit.storagePath, "/Users/me/.workbuddy/MEMORY.md")
+        XCTAssertEqual(commit.changeKind, .update)
+        XCTAssertNotEqual(commit.beforeHash, commit.afterHash)
+    }
+
     private func runGit(_ arguments: [String], at root: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
