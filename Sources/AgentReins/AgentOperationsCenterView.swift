@@ -1457,6 +1457,7 @@ struct AgentOperationsCenterView: View {
         let economics = ModelEconomicsReport.build(events: rows)
         let exposure = ContextExposureReport.build(events: rows)
         let traffic = AgentTrafficAnalyzer.build(events: rows)
+        let relay = RelaySecurityAssessment.build(events: rows)
         let knownRoute = traffic.first { $0.classification == .modelRelay || $0.classification == .modelProvider }
         let routeStatus = knownRoute.map { $0.classification.rawValue } ?? "Unknown"
         let routeColor = knownRoute?.classification == .modelProvider ? green : amber
@@ -1484,6 +1485,24 @@ struct AgentOperationsCenterView: View {
                  ? "Socket candidates were observed, but no hostname or configured endpoint evidence proves which connection carried this model request."
                  : "Classification is based on recorded destination evidence; a relay can still misreport its upstream model.")
                 .font(.system(size: 9)).foregroundStyle(.secondary)
+
+            if let relay {
+                Divider().overlay(border)
+                Text("RELAY SECURITY VERDICT").micro(.secondary)
+                field("Risk", relay.risk.uppercased())
+                field("Configured gateway", relay.configuredGateways.isEmpty
+                      ? "Not captured" : relay.configuredGateways.joined(separator: ", "))
+                field("Claimed upstream", relay.claimedModels.isEmpty
+                      ? "Not reported" : relay.claimedModels.joined(separator: ", "))
+                field("Independent identity", relay.upstreamIdentity)
+                field("Route consistency", relay.routeConsistency)
+                ForEach(relay.findings, id: \.self) { finding in
+                    HStack(alignment: .top, spacing: 6) {
+                        Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
+                        Text(finding).font(.system(size: 8)).foregroundStyle(.secondary)
+                    }
+                }
+            }
 
             if let economics {
                 Divider().overlay(border)

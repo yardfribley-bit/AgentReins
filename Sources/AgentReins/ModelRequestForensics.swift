@@ -176,10 +176,64 @@ struct ModelRouteEvidence: Codable, Equatable, Sendable {
     }
 }
 
+/// Turn-level relay verdict. Configuration evidence, observed sockets, and the
+/// advertised upstream model remain separate so no gateway can be presented as
+/// independently verified merely because its request body names a model.
+struct RelaySecurityAssessment: Codable, Equatable, Sendable {
+    let configuredGateways: [String]
+    let observedDestinations: [String]
+    let claimedModels: [String]
+    let exposedPromptBytes: Int
+    let exposedCategories: [ContextExposureCategory]
+    let routeConsistency: String
+    let upstreamIdentity: String
+    let risk: String
+    let findings: [String]
+
+    static func build(events: [GuardEvent]) -> RelaySecurityAssessment? {
+        let configured = Array(Set(events.compactMap { event -> String? in
+            guard event.attributionMethod == "WorkBuddy model catalog endpoint" else { return nil }
+            return event.remoteDomain?.lowercased()
+        })).sorted()
+        let sockets = Array(Set(events.filter { $0.kind == "network" }
+            .compactMap { ($0.remoteDomain ?? $0.remoteHost)?.lowercased() })).sorted()
+        let models = Array(Set(events.compactMap(\.model).filter { !$0.isEmpty })).sorted()
+        guard !configured.isEmpty || !sockets.isEmpty || !models.isEmpty else { return nil }
+        let exposure = ContextExposureReport.build(events: events)
+        let routes = AgentTrafficAnalyzer.build(events: events)
+        let hasRelay = routes.contains { $0.classification == .modelRelay }
+        let directMatch = configured.contains { gateway in sockets.contains(gateway) }
+        let consistency = configured.isEmpty ? "configured endpoint not captured"
+            : directMatch ? "configured endpoint and observed hostname agree"
+            : sockets.isEmpty ? "configured endpoint captured; transport not observed"
+            : "configured endpoint captured; socket correlation remains unverified"
+        let identity = hasRelay ? "unverified upstream model" :
+            (routes.contains { $0.identityStatus == "consistent" } ? "consistent with official provider" : "unknown")
+        var findings: [String] = []
+        if hasRelay { findings.append("An intermediary gateway can receive the complete model request and response") }
+        if hasRelay && !models.isEmpty { findings.append("The advertised upstream model cannot be independently proven through the relay") }
+        if !configured.isEmpty && !directMatch { findings.append("Configured gateway and network transport are not joined by request-level socket evidence") }
+        if sockets.contains(where: { NetworkDestinationAssessment.assess(domain: nil, host: $0).kind == .unknown }) {
+            findings.append("One or more connections expose only an IP address, without a confirmed hostname")
+        }
+        if let exposure, exposure.items.contains(where: { $0.present && [.identity, .memory, .skills, .toolResults].contains($0.category) }) {
+            findings.append("Sensitive agent context was included in the turn handled by this route")
+        }
+        let maxInput = events.compactMap(\.inputTokens).max() ?? 0
+        if maxInput >= 32_000 { findings.append("Large context transmission detected (\(maxInput) input tokens)") }
+        return RelaySecurityAssessment(configuredGateways: configured, observedDestinations: sockets,
+            claimedModels: models, exposedPromptBytes: exposure?.capturedPromptBytes ?? 0,
+            exposedCategories: exposure?.items.filter(\.present).map(\.category) ?? [],
+            routeConsistency: consistency, upstreamIdentity: identity,
+            risk: findings.isEmpty ? "low" : (hasRelay ? "high" : "medium"), findings: findings)
+    }
+}
+
 enum ForensicAssessmentKind: String, Codable, Sendable {
     case modelEconomics = "model_economics"
     case contextExposure = "context_exposure"
     case trafficSeparation = "traffic_separation"
+    case relaySecurity = "relay_security"
 }
 
 struct ForensicAssessmentRecord: Equatable, Sendable {
@@ -224,6 +278,10 @@ struct ForensicAssessmentRecord: Equatable, Sendable {
                 let confidence: EvidenceConfidence = traffic.allSatisfy { $0.confidence == .confirmed } ? .confirmed : .inferred
                 if let item = record(.trafficSeparation, version: 1, confidence: confidence, value: traffic) { result.append(item) }
             }
+            if let relay = RelaySecurityAssessment.build(events: rows),
+               let item = record(.relaySecurity, version: 1,
+                                 confidence: relay.configuredGateways.isEmpty ? .inferred : .confirmed,
+                                 value: relay) { result.append(item) }
             return result
         }
     }
