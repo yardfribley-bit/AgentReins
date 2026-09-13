@@ -667,6 +667,8 @@ final class TurnJournalTests: XCTestCase {
         let relay = NetworkDestinationAssessment.assess(domain: "openrouter.ai", host: nil)
         let poisonedContentSurface = NetworkDestinationAssessment.assess(domain: "raw.githubusercontent.com", host: nil)
         let external = NetworkDestinationAssessment.assess(domain: "untrusted-example.test", host: nil)
+        let geminiWeb = NetworkDestinationAssessment.assess(domain: "gemini.google.com", host: nil)
+        let grokWeb = NetworkDestinationAssessment.assess(domain: "grok.com", host: nil)
 
         XCTAssertEqual(model.kind, .modelProvider)
         XCTAssertFalse(model.needsAttention)
@@ -677,6 +679,8 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(poisonedContentSurface.needsAttention)
         XCTAssertEqual(external.kind, .externalContent)
         XCTAssertTrue(external.needsAttention)
+        XCTAssertEqual(geminiWeb.kind, .modelProvider)
+        XCTAssertEqual(grokWeb.kind, .modelProvider)
     }
 
     func testModelRequestForensicsSeparatesEconomicsExposureAndTraffic() throws {

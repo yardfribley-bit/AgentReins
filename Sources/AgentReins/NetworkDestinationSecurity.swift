@@ -51,6 +51,7 @@ struct NetworkDestinationAssessment: Equatable {
                                      "deepseek.com", "mistral.ai", "groq.com", "together.ai",
                                      "cohere.com", "x.ai", "fireworks.ai", "perplexity.ai",
                                      "moonshot.ai", "siliconflow.cn", "dashscope.aliyuncs.com",
+                                     "gemini.google.com", "grok.com",
                                      "generativelanguage.googleapis.com", "aiplatform.googleapis.com"])
             || value.hasSuffix(".openai.azure.com")
             || value.contains(".bedrock-runtime.") && value.hasSuffix(".amazonaws.com") {

@@ -236,8 +236,8 @@ enum AgentTrafficAnalyzer {
         if matches(destination, ["openai.com", "chatgpt.com", "openai.azure.com"]) { return "openai" }
         if matches(destination, ["anthropic.com", "claude.ai"]) { return "anthropic" }
         if matches(destination, ["deepseek.com"]) { return "deepseek" }
-        if matches(destination, ["generativelanguage.googleapis.com", "aiplatform.googleapis.com"]) { return "google" }
-        if matches(destination, ["x.ai"]) { return "xai" }
+        if matches(destination, ["gemini.google.com", "generativelanguage.googleapis.com", "aiplatform.googleapis.com"]) { return "google" }
+        if matches(destination, ["x.ai", "grok.com"]) { return "xai" }
         if matches(destination, ["mistral.ai"]) { return "mistral" }
         if matches(destination, ["dashscope.aliyuncs.com"]) { return "alibaba" }
         if matches(destination, ["cohere.com"]) { return "cohere" }
