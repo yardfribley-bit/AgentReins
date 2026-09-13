@@ -96,10 +96,18 @@ struct AgentOperationsCenterView: View {
         return agent.caseInsensitiveCompare(selectedAgent) == .orderedSame
     }
     private var externalServices: [(host: String, event: GuardEvent?)] {
-        let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted()
+        let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted { left, right in
+            let leftKind = NetworkDestinationAssessment.assess(domain: left, host: left).kind
+            let rightKind = NetworkDestinationAssessment.assess(domain: right, host: right).kind
+            let order: [NetworkDestinationKind: Int] = [.modelRelay: 0, .modelProvider: 1,
+                .developerService: 2, .externalContent: 3, .telemetry: 4,
+                .localInfrastructure: 5, .unknown: 6]
+            let lhs = order[leftKind] ?? 7, rhs = order[rightKind] ?? 7
+            return lhs == rhs ? left < right : lhs < rhs
+        }
         let visibleHosts = centerTab == .network ? hosts : Array(hosts.prefix(6))
         return visibleHosts.map { host in
-            (host, scopedEvents.first { ($0.remoteDomain ?? $0.remoteHost) == host })
+            (host, scopedEvents.filter { ($0.remoteDomain ?? $0.remoteHost) == host }.max { $0.ts < $1.ts })
         }
     }
     private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
@@ -1113,8 +1121,8 @@ struct AgentOperationsCenterView: View {
     }
 
     private var networkPanel: some View {
-        posturePanel("EXTERNAL SERVICES", "Providers and data flows") {
-            VStack(spacing: 9) {
+        posturePanel("NETWORK EVIDENCE", "Who the Agent contacted, why, and how certain we are") {
+            VStack(spacing: 5) {
                 if externalServices.isEmpty {
                     empty("No external destination captured")
                 }
@@ -1127,38 +1135,33 @@ struct AgentOperationsCenterView: View {
                         selectedStageID = nil
                         followingLive = false
                     } label: {
-                        VStack(alignment: .leading, spacing: 7) {
+                        HStack(spacing: 9) {
+                            let isCandidate = assessment.kind == .unknown
                             HStack(spacing: 8) {
                                 Image(systemName: serviceIcon(assessment.kind))
                                     .foregroundStyle(assessment.needsAttention ? amber : cyan)
-                                    .frame(width: 28, height: 28)
+                                    .frame(width: 25, height: 25)
                                     .background((assessment.needsAttention ? amber : cyan).opacity(0.12),
-                                                in: RoundedRectangle(cornerRadius: 7))
+                                                in: RoundedRectangle(cornerRadius: 6))
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(serviceTitle(item.host)).font(.system(size: 11, weight: .semibold)).lineLimit(1)
-                                    Text(assessment.kind.rawValue).font(.system(size: 8)).foregroundStyle(.secondary)
+                                    Text(item.host).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
+                                    Text(networkPurpose(item.event, assessment: assessment))
+                                        .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
                                 }
-                                Spacer(minLength: 0)
                             }
-                            Text(item.host).font(.system(size: 8, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                            Spacer(minLength: 4)
                             if let event = item.event {
-                                HStack {
-                                    Text(event.action.uppercased())
-                                    Spacer()
+                                VStack(alignment: .trailing, spacing: 2) {
+                                    Text(isCandidate ? "NETWORK CANDIDATE" : assessment.kind.rawValue.uppercased())
+                                        .font(.system(size: 6.5, weight: .bold))
+                                        .foregroundStyle(isCandidate ? Color.secondary : (assessment.needsAttention ? amber : cyan))
+                                    Text(networkActor(event)).font(.system(size: 7)).foregroundStyle(.secondary)
                                     Text(clock(event.startedAt ?? event.ts))
-                                    if let duration = event.durationMS { Text("· \(formatDuration(duration))") }
+                                        .font(.system(size: 7, design: .monospaced)).foregroundStyle(.tertiary)
                                 }
-                                .font(.system(size: 7, weight: .bold, design: .monospaced))
-                                .foregroundStyle(event.action == "failed" ? Color.red : Color.secondary)
-                            }
-                            if assessment.needsAttention {
-                                Text("Needs review")
-                                    .font(.system(size: 8, weight: .bold))
-                                    .foregroundStyle(amber)
-                                    .padding(.horizontal, 7).padding(.vertical, 3)
-                                    .background(amber.opacity(0.12), in: Capsule())
                             }
                         }
+                        .padding(.horizontal, 9).padding(.vertical, 7)
                         .node(focusedTaskEvent?.id == item.event?.id && item.event != nil)
                     }.buttonStyle(.plain)
                 }
@@ -2092,6 +2095,22 @@ struct AgentOperationsCenterView: View {
     private func serviceTitle(_ host: String) -> String {
         let base = host.split(separator: ".").prefix(1).first.map(String.init) ?? host
         return base.prefix(1).uppercased() + base.dropFirst()
+    }
+
+    private func networkPurpose(_ event: GuardEvent?, assessment: NetworkDestinationAssessment) -> String {
+        guard let event else { return assessment.kind.rawValue }
+        if event.kind == "model" { return "Configured model route · \(event.model ?? "model not reported")" }
+        if let tool = event.toolName { return "Tool access · \(tool)" }
+        if event.command?.lowercased().contains("ssh ") == true { return "Remote deployment · SSH" }
+        if event.command?.lowercased().contains("git ") == true { return "Source control · Git" }
+        if assessment.kind == .unknown { return "Observed with Agent; request purpose is not proven" }
+        return assessment.kind.rawValue
+    }
+
+    private func networkActor(_ event: GuardEvent) -> String {
+        let agent = event.agent?.capitalized ?? "Unknown agent"
+        if let pid = event.processId { return "\(agent) · PID \(pid)" }
+        return agent
     }
 
     private func serviceIcon(_ kind: NetworkDestinationKind) -> String {
