@@ -82,7 +82,18 @@ struct AgentOperationsCenterView: View {
     }
     private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
     private var focusedTaskEvent: GuardEvent? {
-        followingLive ? currentTaskStage?.event : selectedEvent
+        guard followingLive else { return selectedEvent }
+        guard let session = activeSession else { return nil }
+        // Runtime highlighting must stay cheap: rebuilding the complete staged
+        // journey here makes every graph node and service card reclassify all
+        // tool calls during a SwiftUI update.
+        if let running = session.events.last(where: {
+            $0.action == "running" || $0.action == "requested"
+        }) { return running }
+        return session.events.last(where: {
+            $0.kind == "verification" || $0.kind == "file" || $0.kind == "tool" ||
+                ($0.kind == "model" && $0.op == "response") || $0.kind == "context"
+        })
     }
     private var focusedProcessIDs: Set<String> {
         let rawPIDs: [String]
@@ -857,16 +868,18 @@ struct AgentOperationsCenterView: View {
         posturePanel("LIVE TASK", "Request → context → model → tools → result") {
             VStack(alignment: .leading, spacing: 0) {
                 let stages = taskStages
+                let currentStage = stages.last { $0.status == .active }
                 HStack(spacing: 7) {
-                    Circle().fill(currentTaskStage == nil ? Color.gray : green).frame(width: 7, height: 7)
-                    Text(liveTaskStateHeadline)
-                        .font(.system(size: 8, weight: .bold)).foregroundStyle(liveTaskStateColor)
+                    Circle().fill(currentStage == nil ? Color.gray : green).frame(width: 7, height: 7)
+                    Text(liveTaskStateHeadline(currentStage: currentStage))
+                        .font(.system(size: 8, weight: .bold))
+                        .foregroundStyle(liveTaskStateColor(currentStage: currentStage))
                     Spacer()
                     if !followingLive {
                         Button("Return to live") {
                             followingLive = true
-                            selectedStageID = currentTaskStage?.id
-                            selectedEvent = currentTaskStage?.event
+                            selectedStageID = currentStage?.id
+                            selectedEvent = currentStage?.event
                             selectedProcessGroup = []
                         }.buttonStyle(.plain).font(.system(size: 8, weight: .semibold)).foregroundStyle(cyan)
                     }
@@ -875,17 +888,18 @@ struct AgentOperationsCenterView: View {
                     empty("Waiting for task evidence")
                 } else {
                     ForEach(Array(stages.enumerated()), id: \.offset) { index, stage in
-                        timelineRow(stage, isLast: index == stages.count - 1)
+                        timelineRow(stage, isLast: index == stages.count - 1,
+                                    currentStageID: currentStage?.id)
                     }
                 }
             }
         }
     }
 
-    private func timelineRow(_ stage: TaskStage, isLast: Bool) -> some View {
+    private func timelineRow(_ stage: TaskStage, isLast: Bool, currentStageID: String?) -> some View {
         let selected = selectedStageID == stage.id ||
             (selectedStageID == nil && selectedEvent?.id == stage.event?.id && stage.event != nil)
-        let isCurrent = currentTaskStage?.id == stage.id
+        let isCurrent = currentStageID == stage.id
         let stageColor = stage.status == .failed ? Color.red :
             (isCurrent ? green : (stage.status == .completed ? confidenceColor(stage.event?.attributionConfidence) : Color.gray))
         return Button {
@@ -1545,20 +1559,16 @@ struct AgentOperationsCenterView: View {
         let monospace: Bool
     }
 
-    private var currentTaskStage: TaskStage? {
-        taskStages.last { $0.status == .active }
-    }
-
-    private var liveTaskStateHeadline: String {
-        if let currentTaskStage { return "CURRENT · \(currentTaskStage.title.uppercased())" }
+    private func liveTaskStateHeadline(currentStage: TaskStage?) -> String {
+        if let currentStage { return "CURRENT · \(currentStage.title.uppercased())" }
         if verificationEvent != nil { return "INDEPENDENTLY VERIFIED" }
         if activeTurn?.finalResponse != nil { return "AGENT REPORTED COMPLETE · AWAITING VERIFICATION" }
         if activeTurn != nil { return "WAITING FOR THE NEXT OBSERVED ACTION" }
         return "WAITING FOR LIVE EVIDENCE"
     }
 
-    private var liveTaskStateColor: Color {
-        if currentTaskStage != nil || verificationEvent != nil { return green }
+    private func liveTaskStateColor(currentStage: TaskStage?) -> Color {
+        if currentStage != nil || verificationEvent != nil { return green }
         if activeTurn?.finalResponse != nil { return amber }
         return .secondary
     }
