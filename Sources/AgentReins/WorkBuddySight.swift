@@ -111,8 +111,10 @@ final class WorkBuddySight: ObservableObject {
                 max(0, selected.count - raw.count))
     }
 
-    nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {
+    nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false,
+                                         modelCatalogURL: URL? = nil) -> [GuardEvent] {
         guard let text = sessionText(url, fullHistory: fullHistory) else { return [] }
+        let configuredEndpoints = modelEndpoints(catalogURL: modelCatalogURL)
         var lastIntent: [String: String] = [:]
         var lastReasoning: [String: String] = [:]
         var currentTurn: [String: String] = [:]
@@ -147,9 +149,8 @@ final class WorkBuddySight: ObservableObject {
             }
             if type == "message", row["role"] as? String == "assistant", let response = textContent(row["content"]) {
                 let provider = row["providerData"] as? [String: Any] ?? [:]
-                if let domain = ExternalURLEvidence.firstDomain(in: response) {
-                    lastModelEndpoint[session] = domain
-                }
+                let configuredEndpoint = modelEndpoint(provider: provider, catalog: configuredEndpoints)
+                if let configuredEndpoint { lastModelEndpoint[session] = configuredEndpoint }
                 let usage = provider["rawUsage"] as? [String: Any] ?? provider["usage"] as? [String: Any] ?? [:]
                 let rawAgent = provider["agent"] as? String
                 let agent = (rawAgent == nil || rawAgent == "cli") ? "workbuddy" : rawAgent!
@@ -165,7 +166,9 @@ final class WorkBuddySight: ObservableObject {
                     cachedTokens: intValue((usage["prompt_tokens_details"] as? [String: Any])?["cached_tokens"]),
                     reasoningTokens: intValue((usage["completion_tokens_details"] as? [String: Any])?["reasoning_tokens"]),
                     costUSD: doubleValue(usage["cost"]),
-                    source: "agentsight:workbuddy-local", remoteDomain: lastModelEndpoint[session]))
+                    source: "agentsight:workbuddy-local", attributionConfidence: configuredEndpoint == nil ? .inferred : .confirmed,
+                    attributionMethod: configuredEndpoint == nil ? "adapter session/turn correlation" : "WorkBuddy model catalog endpoint",
+                    remoteDomain: lastModelEndpoint[session]))
                 continue
             }
             if type == "reasoning" {
@@ -176,6 +179,8 @@ final class WorkBuddySight: ObservableObject {
             }
             guard type == "function_call" || type == "function_call_result" else { continue }
             let provider = row["providerData"] as? [String: Any] ?? [:]
+            let configuredEndpoint = modelEndpoint(provider: provider, catalog: configuredEndpoints)
+            if let configuredEndpoint { lastModelEndpoint[session] = configuredEndpoint }
             let usage = (provider["rawUsage"] as? [String: Any]) ?? (row["message"] as? [String: Any])?["usage"] as? [String: Any] ?? [:]
             let callId = row["callId"] as? String
             let recordedName = row["name"] as? String
@@ -210,6 +215,34 @@ final class WorkBuddySight: ObservableObject {
                 source: "agentsight:workbuddy-local", remoteDomain: lastModelEndpoint[session]))
         }
         return result
+    }
+
+    private nonisolated static func modelEndpoints(catalogURL: URL?) -> [String: String] {
+        let url = catalogURL ?? FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent(".workbuddy/models.json")
+        guard let data = try? Data(contentsOf: url),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else { return [:] }
+        var result: [String: String] = [:]
+        for row in rows {
+            guard let endpoint = row["url"] as? String,
+                  let host = URL(string: endpoint)?.host?.lowercased() else { continue }
+            for key in [row["id"] as? String, row["name"] as? String].compactMap({ $0 }) {
+                result[key.lowercased()] = host
+            }
+        }
+        return result
+    }
+
+    private nonisolated static func modelEndpoint(provider: [String: Any], catalog: [String: String]) -> String? {
+        let values = [provider["requestModelId"] as? String,
+                      provider["requestModelName"] as? String,
+                      provider["model"] as? String].compactMap { $0?.lowercased() }
+        for value in values {
+            if let endpoint = catalog[value] { return endpoint }
+            if let suffix = value.split(separator: ":", maxSplits: 1).last,
+               let endpoint = catalog[String(suffix)] { return endpoint }
+        }
+        return nil
     }
 
     private nonisolated static func sessionText(_ url: URL, fullHistory: Bool) -> String? {
