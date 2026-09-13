@@ -124,6 +124,12 @@ struct AgentTrafficDestination: Codable, Equatable, Sendable {
     let claimedModels: [String]?
     let identityStatus: String?
     let identityReason: String?
+
+    var relayType: String? {
+        guard classification == .modelRelay else { return nil }
+        let known = NetworkDestinationAssessment.assess(domain: destination, host: destination).kind == .modelRelay
+        return known ? "Known model gateway" : "Private model relay"
+    }
 }
 
 /// Queryable, durable evidence for one model route observed during a turn.
@@ -205,6 +211,9 @@ struct RelaySecurityAssessment: Codable, Equatable, Sendable {
         let exposure = ContextExposureReport.build(events: events)
         let routes = AgentTrafficAnalyzer.build(events: events)
         let hasRelay = routes.contains { $0.classification == .modelRelay }
+        let hasPrivateRelay = configured.contains {
+            NetworkDestinationAssessment.assess(domain: $0, host: $0).kind != .modelRelay
+        }
         let directMatch = configured.contains { gateway in sockets.contains(gateway) }
         let consistency = configured.isEmpty ? "configured endpoint not captured"
             : directMatch ? "configured endpoint and observed hostname agree"
@@ -214,6 +223,7 @@ struct RelaySecurityAssessment: Codable, Equatable, Sendable {
             (routes.contains { $0.identityStatus == "consistent" } ? "consistent with official provider" : "unknown")
         var findings: [String] = []
         if hasRelay { findings.append("An intermediary gateway can receive the complete model request and response") }
+        if hasPrivateRelay { findings.append("A private or previously unknown relay endpoint is configured; operator identity and data handling are unverified") }
         if hasRelay && !models.isEmpty { findings.append("The advertised upstream model cannot be independently proven through the relay") }
         if !configured.isEmpty && !directMatch { findings.append("Configured gateway and network transport are not joined by request-level socket evidence") }
         if sockets.contains(where: { NetworkDestinationAssessment.assess(domain: nil, host: $0).kind == .unknown }) {
@@ -228,7 +238,8 @@ struct RelaySecurityAssessment: Codable, Equatable, Sendable {
             claimedModels: models, exposedPromptBytes: exposure?.capturedPromptBytes ?? 0,
             exposedCategories: exposure?.items.filter(\.present).map(\.category) ?? [],
             routeConsistency: consistency, upstreamIdentity: identity,
-            risk: findings.isEmpty ? "low" : (hasRelay ? "high" : "medium"), findings: findings)
+            risk: findings.isEmpty ? "low" : (hasPrivateRelay ? "critical" : (hasRelay ? "high" : "medium")),
+            findings: findings)
     }
 }
 
@@ -365,6 +376,14 @@ enum AgentTrafficAnalyzer {
         let assessment = NetworkDestinationAssessment.assess(domain: destination, host: destination)
         if assessment.kind == .modelRelay { return .modelRelay }
         if assessment.kind == .modelProvider { return .modelProvider }
+        // A model endpoint read directly from an Agent's configuration is
+        // request-route evidence even when the hostname is a previously unseen
+        // private reseller. Unknown private relays must not depend on a static
+        // allowlist such as OpenRouter.
+        if events.contains(where: {
+            $0.kind == "model" && $0.remoteDomain != nil &&
+            $0.attributionMethod?.contains("model catalog endpoint") == true
+        }) { return .modelRelay }
         if events.contains(where: { $0.toolCallId != nil }) { return .toolExternal }
         // Time-window/process attribution proves only that the Agent had this
         // socket open during the turn. It does not prove that the socket carried

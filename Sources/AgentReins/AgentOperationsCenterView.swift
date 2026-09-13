@@ -1571,6 +1571,11 @@ struct AgentOperationsCenterView: View {
                             Text("Claimed model · \(models.joined(separator: ", "))")
                                 .font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
                         }
+                        if let relayType = destination.relayType {
+                            Text(relayType.uppercased())
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(amber)
+                        }
                         if destination.classification == .networkCandidate {
                             Text("Observed in the same turn; not proven to carry the model request.")
                                 .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(2)

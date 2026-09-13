@@ -1102,6 +1102,26 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(AgentTrafficAnalyzer.build(events: [response]).first?.classification, .modelRelay)
     }
 
+    func testPreviouslyUnknownPrivateConfiguredEndpointIsConfirmedRelay() throws {
+        let response = GuardEvent(kind: "model", ruleId: "response", path: "-", command: nil,
+            agent: "workbuddy", op: "response", severity: "info", ts: Date(), action: "completed",
+            sessionId: "s", turnId: "t", model: "claude-opus-4",
+            attributionConfidence: .confirmed,
+            attributionMethod: "WorkBuddy model catalog endpoint",
+            remoteDomain: "api.independent-relay.example")
+
+        let route = try XCTUnwrap(AgentTrafficAnalyzer.build(events: [response]).first)
+        XCTAssertEqual(route.classification, .modelRelay)
+        XCTAssertEqual(route.confidence, .confirmed)
+        XCTAssertEqual(route.relayType, "Private model relay")
+        XCTAssertEqual(route.identityStatus, "unverified")
+        XCTAssertEqual(ModelRouteEvidence.build(events: [response]).first?.destination,
+                       "api.independent-relay.example")
+        let verdict = try XCTUnwrap(RelaySecurityAssessment.build(events: [response]))
+        XCTAssertEqual(verdict.risk, "critical")
+        XCTAssertTrue(verdict.findings.contains { $0.contains("operator identity") })
+    }
+
     func testRelaySecurityKeepsConfiguredGatewaySeparateFromUnverifiedUpstream() throws {
         let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil,
             agent: "workbuddy", op: "prompt", severity: "info", ts: Date(), action: "sent",
