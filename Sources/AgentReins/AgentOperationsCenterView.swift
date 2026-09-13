@@ -193,6 +193,8 @@ struct AgentOperationsCenterView: View {
                 }
                 inspector.frame(width: 318)
             }
+            .frame(maxHeight: .infinity)
+            .clipped()
             statusBar
         }
         .background(canvas).environment(\.colorScheme, .dark)
@@ -245,6 +247,8 @@ struct AgentOperationsCenterView: View {
         }
         .padding(.horizontal, 18).frame(height: 64).background(panel)
         .overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(10)
     }
 
     private var fleet: some View {
@@ -1876,6 +1880,8 @@ struct AgentOperationsCenterView: View {
         .frame(height: 32)
         .background(raised)
         .overlay(Rectangle().fill(border).frame(height: 1), alignment: .top)
+        .fixedSize(horizontal: false, vertical: true)
+        .layoutPriority(10)
     }
 
     // MARK: - Tree model
