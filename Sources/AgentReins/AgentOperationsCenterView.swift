@@ -73,12 +73,6 @@ struct AgentOperationsCenterView: View {
     }
     private var processTree: [TreeNode] { Self.buildTree(processes) }
     private var runtimeGraph: AgentRuntimeGraph { AgentRuntimeGraph.build(processes: processes, agent: selectedAgent) }
-    private var activeProcessTree: [TreeNode] {
-        guard let agent = activeSession?.agent else { return processTree }
-        return Self.buildTree(processInventory.filter {
-            $0.agent?.caseInsensitiveCompare(agent) == .orderedSame
-        })
-    }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted()
         let visibleHosts = centerTab == .network ? hosts : Array(hosts.prefix(6))
@@ -116,7 +110,15 @@ struct AgentOperationsCenterView: View {
         return "\(Int(Double(confirmed) / Double(scopedEvents.count) * 100))%"
     }
     private var rootPID: String? {
-        activeProcessTree.first?.process.pid ?? activeSession?.events.compactMap(\.processId).first.map(String.init)
+        let agent = activeSession?.agent ?? (selectedAgent == "All agents" ? nil : selectedAgent)
+        let candidates = agent.map { owner in
+            processInventory.filter { $0.agent?.caseInsensitiveCompare(owner) == .orderedSame }
+        } ?? processes
+        let ids = Set(candidates.map(\.pid))
+        return candidates
+            .filter { !ids.contains($0.ppid) }
+            .min { (Int($0.pid) ?? .max) < (Int($1.pid) ?? .max) }?.pid
+            ?? activeSession?.events.compactMap(\.processId).first.map(String.init)
     }
     private var liveHeadline: String {
         readableActivity(activeTurn)
