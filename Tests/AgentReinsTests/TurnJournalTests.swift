@@ -211,6 +211,11 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude").displayName, "Claude Code Agent")
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude").capability, .agentCore)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeRenderer, agentHint: "Claude").capability, .interface)
+        let workBuddyNetwork = ProcessSnapshotRecord(pid: "15", ppid: "10",
+            command: "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=utility --utility-sub-type=network.mojom.NetworkService")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddyNetwork, agentHint: "WorkBuddy").displayName,
+                       "WorkBuddy Network Service")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddyNetwork, agentHint: "WorkBuddy").capability, .network)
     }
 
     func testRuntimeProfileKeepsUnknownResponsibilityExplicit() {

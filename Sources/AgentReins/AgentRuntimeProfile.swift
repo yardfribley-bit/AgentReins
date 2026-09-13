@@ -134,6 +134,9 @@ enum AgentRuntimeProfileRegistry {
             rule("workbuddy-edge-sync", ["edge-sync/server/index.cjs"], "Edge Sync Service", .storage,
                  "Synchronizes WorkBuddy integration state for the desktop agent runtime.",
                  "arrow.triangle.2.circlepath", ["Persistent state", "Remote synchronization", "Account context"]),
+            rule("workbuddy-network", ["network.mojom.networkservice"], "WorkBuddy Network Service", .network,
+                 "Owns WorkBuddy desktop network sockets and external service connections.",
+                 "network", ["Model endpoints", "Relay ownership", "External websites", "Data exfiltration"]),
             rule("workbuddy-host", ["workbuddy.app/contents/macos/electron"], "WorkBuddy Desktop Host", .interface,
                  "Hosts the WorkBuddy interface and launches its native agent services.",
                  "macwindow", ["Agent lifecycle", "User interaction", "Runtime launch"]),
@@ -145,10 +148,7 @@ enum AgentRuntimeProfileRegistry {
                  "shippingbox.and.arrow.backward", ["Downloaded artifact execution", "Filesystem mounts", "Network access", "Sandbox escape"]),
             rule("node-peer", ["nodepeer", "node-peer"], "NodePeer", .agentCore,
                  "Coordinates WorkBuddy runtime messages and supporting services.",
-                 "point.3.connected.trianglepath.dotted", ["Cross-component messages", "Tool dispatch", "Context propagation"]),
-            rootRule("workbuddy-core", "workbuddy", "WorkBuddy Core", .agentCore,
-                 "Owns the WorkBuddy agent instance and its child-process lifecycle.",
-                 "brain.head.profile", ["Task orchestration", "Child process authority", "Session lifecycle"])
+                 "point.3.connected.trianglepath.dotted", ["Cross-component messages", "Tool dispatch", "Context propagation"])
         ])
 
     private static let codex = AgentRuntimeProfile(

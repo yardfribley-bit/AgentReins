@@ -139,7 +139,10 @@ struct AgentReinsApp: App {
                     }
                     webAgentSight.start()
                     agentDiscovery.start()
-                    memoryScan.startAuto { memoryRuleStore.enabledRules }
+                    // Historical memory stores are intentionally on-demand.
+                    // A full ~/.claude + ~/.cursor + ~/.codex scan at launch
+                    // made the live posture screen compete with a CPU-heavy
+                    // history reconstruction that the user did not request.
                 }
         }
 

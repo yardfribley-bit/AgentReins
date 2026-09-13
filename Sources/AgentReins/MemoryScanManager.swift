@@ -22,7 +22,7 @@ final class MemoryScanManager: ObservableObject {
     @Published var files: [MemoryFile] = []      // 记忆体结构树（按 agent 分组在 UI 做）
     @Published var lastScan: Date?
     @Published var scanning = false
-    @Published var autoScan = true
+    @Published var autoScan = false
     var onFindings: (([MemoryFinding], Date) -> Void)?
     private var timer: Timer?
     private let autoInterval: TimeInterval = 86400  // 24h
@@ -241,7 +241,8 @@ final class MemoryScanManager: ObservableObject {
         scanProcess = nil
     }
 
-    /// 定期自动审计：UI 加载完成(延迟2s)后跑首扫，之后每 24h 一次。
+    /// Optional scheduled audit. Live startup never calls this method: full
+    /// historical memory reconstruction is an explicit user action.
     /// 每次触发前通过 rulesProvider 拉取最新的启用规则。
     func startAuto(rulesProvider: @escaping () -> [MemoryRule]) {
         guard autoScan else { return }

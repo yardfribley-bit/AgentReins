@@ -86,6 +86,12 @@ final class EvidenceDatabase: @unchecked Sendable {
         try addColumnIfMissing(table: "raw_evidence", column: "previous_hash", definition: "TEXT")
         try addColumnIfMissing(table: "raw_evidence", column: "record_hash", definition: "TEXT")
         try execute("""
+            CREATE TABLE IF NOT EXISTS raw_chain_state (
+              singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+              record_hash TEXT NOT NULL
+            ) WITHOUT ROWID
+            """)
+        try execute("""
             CREATE TABLE IF NOT EXISTS source_checkpoints (
               source TEXT NOT NULL,
               stream TEXT NOT NULL,
@@ -250,6 +256,9 @@ final class EvidenceDatabase: @unchecked Sendable {
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append raw") }
                 if sqlite3_changes(handle) > 0 { previousHash = recordHash }
                 sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            }
+            if let previousHash {
+                try setRawHashUnlocked(previousHash)
             }
             try executeUnlocked("COMMIT")
         } catch { try? executeUnlocked("ROLLBACK"); throw error }
@@ -475,10 +484,32 @@ final class EvidenceDatabase: @unchecked Sendable {
     }
     private func lastRawHashUnlocked() throws -> String? {
         var statement: OpaquePointer?
+        let stateSQL = "SELECT record_hash FROM raw_chain_state WHERE singleton=1"
+        guard sqlite3_prepare_v2(handle, stateSQL, -1, &statement, nil) == SQLITE_OK else { throw failure("last hash state") }
+        if sqlite3_step(statement) == SQLITE_ROW {
+            let value = text(statement, 0)
+            sqlite3_finalize(statement)
+            return value
+        }
+        sqlite3_finalize(statement)
+        statement = nil
+
+        // One-time migration for stores created before raw_chain_state. The
+        // discovered head is persisted by appendRaw in the same transaction;
+        // all subsequent live writes use the constant-time lookup above.
         let sql = "SELECT r.record_hash FROM raw_evidence r LEFT JOIN raw_evidence n ON n.previous_hash=r.record_hash WHERE r.record_hash IS NOT NULL AND n.record_hash IS NULL LIMIT 1"
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("last hash") }
         defer { sqlite3_finalize(statement) }
         return sqlite3_step(statement) == SQLITE_ROW ? text(statement, 0) : nil
+    }
+
+    private func setRawHashUnlocked(_ hash: String) throws {
+        var statement: OpaquePointer?
+        let sql = "INSERT INTO raw_chain_state(singleton,record_hash) VALUES(1,?) ON CONFLICT(singleton) DO UPDATE SET record_hash=excluded.record_hash"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare chain head") }
+        defer { sqlite3_finalize(statement) }
+        bind(hash, at: 1, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("save chain head") }
     }
     private func addColumnIfMissing(table: String, column: String, definition: String) throws {
         var statement: OpaquePointer?

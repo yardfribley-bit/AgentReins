@@ -448,8 +448,8 @@ struct AgentOperationsCenterView: View {
     }
 
     private var overviewProcessPanel: some View {
-        posturePanel("AGENT RUNTIME GRAPH", "Grouped responsibilities · solid = real PPID · dashed = verified or inferred runtime relationship") {
-            if processTree.isEmpty {
+        posturePanel("AGENT RUNTIME GRAPH", "Observed runtime depth · solid = real PPID · dashed = explicitly labeled logical relationship") {
+            if processes.isEmpty {
                 empty("Waiting for the live Agent runtime")
             } else {
                 runtimeGraphView(height: 320)
@@ -482,27 +482,73 @@ struct AgentOperationsCenterView: View {
     // MARK: - Panels
 
     private var processPanel: some View {
-        posturePanel("AGENT RUNTIME GRAPH", "Role topology with evidence-backed relationships; raw PID and PPID remain in node details") {
-            if processTree.isEmpty { empty("No live Agent runtime") }
+        posturePanel("AGENT RUNTIME GRAPH", "Observed runtime depth with evidence-backed relationships; raw PID and PPID remain in node details") {
+            if processes.isEmpty { empty("No live Agent runtime") }
             else { runtimeGraphView(height: 560) }
         }
     }
 
-    private var graphProcessGroups: [OverviewProcessGroup] {
-        let visible = processTree.filter { !isOverviewInfrastructureNoise($0.process) }
+    private struct RuntimeGraphPresentation {
+        let groups: [OverviewProcessGroup]
+        let edges: [RuntimeDisplayEdge]
+    }
+
+    /// Builds the complete graph presentation from one immutable process snapshot.
+    /// SwiftUI may evaluate a view body many times; keeping grouping, classification,
+    /// and PID-edge projection in one pass prevents multiplicative recomputation.
+    private func makeRuntimeGraphPresentation() -> RuntimeGraphPresentation {
+        let snapshot = processes
+        let visible = Self.buildTree(snapshot).filter { !isOverviewInfrastructureNoise($0.process) }
+        let parentPIDs = Set(visible.map { $0.process.ppid })
+        let visiblePIDs = Set(visible.map { $0.process.pid })
+        let parentByPID = Dictionary(uniqueKeysWithValues: visible.map { ($0.process.pid, $0.process.ppid) })
+        func observedDepth(_ process: ProcessSnapshotRecord, capability: RuntimeCapability) -> Int {
+            var depth = 0
+            var parent = process.ppid
+            var visited = Set<String>()
+            while visiblePIDs.contains(parent), visited.insert(parent).inserted {
+                depth += 1
+                parent = parentByPID[parent] ?? ""
+            }
+            // Sandbox/storage services launched by the OS are separate roots,
+            // but belong on the service side of the semantic graph. Their
+            // dashed edges still state that no PPID claim is being made.
+            if depth == 0, [.sandbox, .memory, .storage].contains(capability) { return 2 }
+            return min(depth, 3)
+        }
         var groups: [OverviewProcessGroup] = []
         var indexes: [String: Int] = [:]
         for node in visible {
             let info = AgentRuntimeProfileRegistry.classify(node.process, agentHint: node.agentHint)
             let executable = URL(fileURLWithPath: node.process.command.split(separator: " ").first.map(String.init) ?? node.process.command).lastPathComponent
-            let key = info.componentId == "unknown" ? "unknown:\(executable)" : info.componentId
+            // Only collapse repeated sibling leaves. Merging equal roles from
+            // different roots destroys WorkBuddy's real multi-runtime topology.
+            let componentKey = info.componentId == "unknown" ? "unknown:\(executable)" : info.componentId
+            let key = parentPIDs.contains(node.process.pid)
+                ? "pid:\(node.process.pid)"
+                : "parent:\(node.process.ppid):\(componentKey)"
             if let index = indexes[key] { groups[index].processes.append(node.process) }
             else {
                 indexes[key] = groups.count
-                groups.append(OverviewProcessGroup(id: key, node: node, processes: [node.process]))
+                groups.append(OverviewProcessGroup(id: key, node: node, processes: [node.process],
+                                                   classification: info,
+                                                   lane: observedDepth(node.process, capability: info.capability)))
             }
         }
-        return groups.sorted { graphLane($0) == graphLane($1) ? $0.id < $1.id : graphLane($0) < graphLane($1) }
+        groups.sort { $0.lane == $1.lane ? $0.id < $1.id : $0.lane < $1.lane }
+
+        let pidGroup = Dictionary(uniqueKeysWithValues: groups.flatMap { group in
+            group.processes.map { ($0.pid, group.id) }
+        })
+        var seen = Set<String>()
+        let edges = AgentRuntimeGraph.build(processes: snapshot, agent: selectedAgent).relationships.compactMap { edge -> RuntimeDisplayEdge? in
+            guard let source = pidGroup[edge.sourcePID], let target = pidGroup[edge.targetPID], source != target else { return nil }
+            let id = "\(edge.kind.rawValue):\(source):\(target)"
+            guard seen.insert(id).inserted else { return nil }
+            return RuntimeDisplayEdge(id: id, source: source, target: target,
+                                      kind: edge.kind, confidence: edge.confidence)
+        }
+        return RuntimeGraphPresentation(groups: groups, edges: edges)
     }
 
     private struct RuntimeDisplayEdge: Identifiable {
@@ -513,22 +559,8 @@ struct AgentOperationsCenterView: View {
         let confidence: EvidenceConfidence
     }
 
-    private var graphDisplayEdges: [RuntimeDisplayEdge] {
-        let pidGroup = Dictionary(uniqueKeysWithValues: graphProcessGroups.flatMap { group in
-            group.processes.map { ($0.pid, group.id) }
-        })
-        var seen = Set<String>()
-        return runtimeGraph.relationships.compactMap { edge in
-            guard let source = pidGroup[edge.sourcePID], let target = pidGroup[edge.targetPID], source != target else { return nil }
-            let id = "\(edge.kind.rawValue):\(source):\(target)"
-            guard seen.insert(id).inserted else { return nil }
-            return RuntimeDisplayEdge(id: id, source: source, target: target,
-                                      kind: edge.kind, confidence: edge.confidence)
-        }
-    }
-
-    private func graphLane(_ group: OverviewProcessGroup) -> Int {
-        switch AgentRuntimeProfileRegistry.classify(group.node.process, agentHint: group.node.agentHint).capability {
+    private func graphLane(_ capability: RuntimeCapability) -> Int {
+        switch capability {
         case .interface, .agentCore: return 0
         case .context, .memory, .storage: return 1
         case .modelConnection, .mcp, .toolRuntime, .sandbox, .sourceControl: return 2
@@ -542,7 +574,7 @@ struct AgentOperationsCenterView: View {
         var indexes = Array(repeating: 0, count: columns)
         var positions: [String: CGPoint] = [:]
         for group in groups {
-            let lane = graphLane(group)
+            let lane = group.lane
             let y = CGFloat(indexes[lane]) * 76 + 42
             positions[group.id] = CGPoint(x: columnWidth * (CGFloat(lane) + 0.5), y: y)
             indexes[lane] += 1
@@ -551,9 +583,11 @@ struct AgentOperationsCenterView: View {
     }
 
     private func runtimeGraphView(height: CGFloat) -> some View {
-        let groups = graphProcessGroups
-        let edges = graphDisplayEdges
-        let laneCounts = Dictionary(grouping: groups, by: graphLane).values.map(\.count)
+        let presentation = makeRuntimeGraphPresentation()
+        let groups = presentation.groups
+        let edges = presentation.edges
+        let activePIDs = focusedProcessIDs
+        let laneCounts = Dictionary(grouping: groups, by: \.lane).values.map(\.count)
         let requiredHeight = max(height, CGFloat(laneCounts.max() ?? 1) * 76 + 18)
         return GeometryReader { geometry in
             let positions = graphPositions(groups, size: geometry.size)
@@ -585,7 +619,7 @@ struct AgentOperationsCenterView: View {
                     }
                 }
                 ForEach(groups) { group in
-                    graphNode(group)
+                    graphNode(group, focusedProcessIDs: activePIDs)
                         .frame(width: 136, height: 62)
                         .position(positions[group.id] ?? .zero)
                 }
@@ -593,8 +627,8 @@ struct AgentOperationsCenterView: View {
         }.frame(height: requiredHeight)
     }
 
-    private func graphNode(_ group: OverviewProcessGroup) -> some View {
-        let info = AgentRuntimeProfileRegistry.classify(group.node.process, agentHint: group.node.agentHint)
+    private func graphNode(_ group: OverviewProcessGroup, focusedProcessIDs: Set<String>) -> some View {
+        let info = group.classification
         let tint = capabilityColor(info.capability)
         let active = group.processes.contains { focusedProcessIDs.contains($0.pid) }
         let selected = selectedProcessGroup.map(\.pid) == group.processes.map(\.pid)
@@ -728,7 +762,8 @@ struct AgentOperationsCenterView: View {
                 groups[index].processes.append(node.process)
             } else {
                 indexByKey[key] = groups.count
-                groups.append(OverviewProcessGroup(id: key, node: node, processes: [node.process]))
+                groups.append(OverviewProcessGroup(id: key, node: node, processes: [node.process],
+                                                   classification: info, lane: graphLane(info.capability)))
             }
         }
         return groups
@@ -1845,6 +1880,8 @@ struct AgentOperationsCenterView: View {
         let id: String
         let node: TreeNode
         var processes: [ProcessSnapshotRecord]
+        let classification: RuntimeComponentClassification
+        let lane: Int
     }
 
     private static func buildTree(_ processes: [ProcessSnapshotRecord]) -> [TreeNode] {

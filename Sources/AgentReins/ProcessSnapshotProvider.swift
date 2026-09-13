@@ -80,7 +80,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         var children: [pid_t: [pid_t]] = [:]
         for (pid, value) in records { children[value.ppid, default: []].append(pid) }
         let rootOwners = Dictionary(uniqueKeysWithValues: records.compactMap { pid, value in
-            agentOwner(for: value.executable).map { (pid, $0) }
+            agentOwner(pid: pid, executable: value.executable).map { (pid, $0) }
         })
         let roots = Array(rootOwners.keys)
         stateLock.lock()
@@ -118,6 +118,24 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
 
     func isAgentRootExecutable(_ executable: String) -> Bool {
         agentOwner(for: executable) != nil
+    }
+
+    /// Older independently launched Electron services can remain observable
+    /// through libproc while macOS withholds their executable path. In that
+    /// case `pbi_comm` is only "Electron" or "sandbox-center". Read argv only
+    /// for this narrow candidate set so WorkBuddy's sidecar, prewarm pool, and
+    /// sandbox roots are not lost without collecting unrelated process args.
+    private func agentOwner(pid: pid_t, executable: String) -> String? {
+        if let owner = agentOwner(for: executable) { return owner }
+        let name = URL(fileURLWithPath: executable).lastPathComponent.lowercased()
+        let argvCandidates: Set<String> = ["electron", "sandbox-center", "codebuddy"]
+        guard argvCandidates.contains(name), let command = arguments(pid: pid) else { return nil }
+        let text = command.lowercased()
+        if agentMarkers.contains("workbuddy"),
+           text.contains("/applications/workbuddy.app/") || text.contains("/.workbuddy/") {
+            return "workbuddy"
+        }
+        return nil
     }
 
     private func agentOwner(for executable: String) -> String? {
