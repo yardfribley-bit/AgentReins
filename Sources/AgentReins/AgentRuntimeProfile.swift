@@ -200,7 +200,7 @@ enum AgentRuntimeProfileRegistry {
         ])
 
     private static let cursor = AgentRuntimeProfile(
-        id: "cursor-macos", agent: "Cursor", version: 1,
+        id: "cursor-macos", agent: "Cursor", version: 2,
         aliases: ["cursor.app", "/.cursor/"],
         rules: [
             rule("cursor-extension-host", ["extension-host", "extensionhost"], "Extension Host", .context,
@@ -212,6 +212,15 @@ enum AgentRuntimeProfileRegistry {
             rule("cursor-file-watcher", ["filewatcher", "file-watcher"], "Workspace File Watcher", .storage,
                  "Observes workspace changes used to refresh editor and agent context.",
                  "doc.badge.ellipsis", ["Source-code observation", "Context expansion", "Generated-file detection"]),
+            rule("cursor-mcp-gateway", ["mcp-process"], "Cursor MCP Gateway", .mcp,
+                 "Hosts Cursor's MCP boundary and brokers configured tool-server connections.",
+                 "shippingbox", ["MCP server lifecycle", "Tool arguments", "Tool results", "External service authority"]),
+            rule("cursor-git-worker", ["extensions/cursor-always-local/dist/gitworker.js", "gitworker.js"], "Git Worker", .sourceControl,
+                 "Reads repository state and performs source-control operations for the Cursor workspace.",
+                 "arrow.triangle.branch", ["Repository contents", "Commit metadata", "Remote supply chain", "Push authority"]),
+            rule("cursor-network", ["network.mojom.networkservice"], "Cursor Network Service", .network,
+                 "Owns Cursor network sockets, including model, relay, extension, and external website connections.",
+                 "network", ["Model endpoints", "Relay ownership", "External websites", "Data exfiltration"]),
             rootRule("cursor-core", "cursor", "Cursor Core", .agentCore,
                  "Owns the Cursor editor instance and coordinates its supporting process tree.",
                  "brain.head.profile", ["Agent lifecycle", "Editor authority", "Child process creation"])

@@ -216,6 +216,18 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddyNetwork, agentHint: "WorkBuddy").displayName,
                        "WorkBuddy Network Service")
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddyNetwork, agentHint: "WorkBuddy").capability, .network)
+        let cursorNetwork = ProcessSnapshotRecord(pid: "16", ppid: "10",
+            command: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper.app/Contents/MacOS/Cursor Helper --type=utility --utility-sub-type=network.mojom.NetworkService")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursorNetwork, agentHint: "Cursor").displayName,
+                       "Cursor Network Service")
+        let cursorGit = ProcessSnapshotRecord(pid: "17", ppid: "16",
+            command: "/Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin) /Applications/Cursor.app/Contents/Resources/app/extensions/cursor-always-local/dist/gitWorker.js")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursorGit, agentHint: "Cursor").displayName,
+                       "Git Worker")
+        let cursorMCP = ProcessSnapshotRecord(pid: "18", ppid: "10",
+            command: "Cursor Helper: mcp-process")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursorMCP, agentHint: "Cursor").displayName,
+                       "Cursor MCP Gateway")
     }
 
     func testRuntimeProfileKeepsUnknownResponsibilityExplicit() {
