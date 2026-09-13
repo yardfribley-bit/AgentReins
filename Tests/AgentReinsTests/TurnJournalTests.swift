@@ -1519,6 +1519,48 @@ final class TurnJournalTests: XCTestCase {
                     files: files)
     }
 
+    func testModelRouteEvidenceSeparatesObservedRouteFromClaimedModel() throws {
+        let session = "relay-session", turn = "relay-turn"
+        let model = GuardEvent(kind: "model", ruleId: "response", path: "-", command: nil,
+            agent: "workbuddy", op: "response", severity: "info",
+            ts: Date(timeIntervalSince1970: 100), action: "received",
+            sessionId: session, turnId: turn, modelResponse: "done", model: "deepseek-chat")
+        let network = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "workbuddy", op: "connect", severity: "info",
+            ts: Date(timeIntervalSince1970: 101), action: "observed",
+            sessionId: session, turnId: turn, source: "process-network",
+            attributionConfidence: .confirmed, attributionMethod: "PID ancestry",
+            processId: 42, remoteHost: "43.156.86.223", remotePort: 443,
+            remoteDomain: "relay.example")
+
+        let route = try XCTUnwrap(ModelRouteEvidence.build(events: [model, network]).first)
+        XCTAssertEqual(route.destination, "relay.example")
+        XCTAssertEqual(route.classification, .modelRelay)
+        XCTAssertEqual(route.claimedModels, ["deepseek-chat"])
+        XCTAssertEqual(route.connectedIPs, ["43.156.86.223"])
+        XCTAssertEqual(route.ports, [443])
+        XCTAssertEqual(route.identityStatus, "unverified")
+        XCTAssertEqual(route.evidenceEventIds, [network.id.uuidString])
+    }
+
+    func testModelRouteEvidencePersistsAndCanBeReadByTurn() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-route-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let record = ModelRouteEvidence(routeId: "route-1", sessionId: "s", turnId: "t",
+            agent: "codex", destination: "api.openai.com", classification: .modelProvider,
+            confidence: .confirmed, processIds: [7], connectedIPs: ["203.0.113.10"], ports: [443],
+            claimedModels: ["gpt-5"], identityStatus: "consistent",
+            identityReason: "Official endpoint matches the claimed provider.",
+            firstObservedAt: Date(timeIntervalSince1970: 1), lastObservedAt: Date(timeIntervalSince1970: 2),
+            evidenceEventIds: ["event-1"])
+
+        try database.upsertModelRoutes([record])
+        XCTAssertEqual(try database.modelRoutes(sessionId: "s", turnId: "t"), [record])
+    }
+
     private func runGit(_ arguments: [String], at root: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

@@ -7,6 +7,7 @@ struct ContentView: View {
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
     @EnvironmentObject private var agentDiscovery: AgentDiscoveryManager
+    @StateObject private var liveDashboard = LiveDashboardViewModel()
 
     @State private var selectedSession: AgentSessionSnapshot?
     @State private var selectedIncident: SecurityIncident?
@@ -15,24 +16,40 @@ struct ContentView: View {
     private var observing: Bool { fileGuard.running || processGuard.running }
     var body: some View {
         AgentOperationsCenterView(
-            sessions: eventStore.sessions,
-            events: eventStore.events,
-            incidents: eventStore.incidents.filter { $0.severity != "info" },
-            health: eventStore.collectorHealth,
+            sessions: liveDashboard.snapshot.sessions,
+            events: liveDashboard.snapshot.events,
+            incidents: liveDashboard.snapshot.incidents,
+            health: liveDashboard.snapshot.health,
             observing: observing,
-            processInventory: processGuard.processInventory,
-            discoveredAgents: agentDiscovery.agents,
+            processInventory: liveDashboard.snapshot.processInventory,
+            discoveredAgents: liveDashboard.snapshot.discoveredAgents,
             onSession: { selectedSession = $0 },
             onIncident: { selectedIncident = $0 }
         )
         .frame(minWidth: 1500, minHeight: 780)
         .task {
+            refreshLiveDashboard()
+            liveDashboard.publishImmediately()
             if !fileGuard.running { fileGuard.start() }
             if !processGuard.running { processGuard.start() }
         }
+        .onReceive(eventStore.$revision) { _ in refreshEvidence() }
+        .onReceive(processGuard.$processInventory) { liveDashboard.updateProcesses($0) }
+        .onReceive(agentDiscovery.$agents) { liveDashboard.updateAgents($0) }
         .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth() }
         .sheet(item: $selectedSession) { SessionEvidenceSheet(session: $0) }
         .sheet(item: $selectedIncident) { IncidentEvidenceSheet(incident: $0) }
+    }
+
+    private func refreshLiveDashboard() {
+        refreshEvidence()
+        liveDashboard.updateProcesses(processGuard.processInventory)
+        liveDashboard.updateAgents(agentDiscovery.agents)
+    }
+
+    private func refreshEvidence() {
+        liveDashboard.updateEvidence(sessions: eventStore.sessions, events: eventStore.events,
+            incidents: eventStore.incidents, health: eventStore.collectorHealth)
     }
 }
 

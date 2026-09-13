@@ -128,7 +128,9 @@ final class EventStore: ObservableObject {
         if let database {
             do {
                 try database.append(evidence)
-                try database.upsertAssessments(ForensicAssessmentRecord.build(events: evidenceForAffectedTurns(evidence)))
+                let affectedEvidence = evidenceForAffectedTurns(evidence)
+                try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
+                try database.upsertModelRoutes(ModelRouteEvidence.build(events: affectedEvidence))
                 persistenceError = nil
                 refreshCollectorHealth(publish: false)
             } catch {

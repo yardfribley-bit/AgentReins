@@ -130,6 +130,17 @@ final class EvidenceDatabase: @unchecked Sendable {
             ) WITHOUT ROWID
             """)
         try execute("CREATE INDEX IF NOT EXISTS forensic_turn ON forensic_assessments(session_id,turn_id,generated_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS model_route_evidence (
+              route_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, turn_id TEXT NOT NULL,
+              agent TEXT NOT NULL, destination TEXT NOT NULL, classification TEXT NOT NULL,
+              confidence TEXT NOT NULL, identity_status TEXT NOT NULL,
+              first_observed_at REAL NOT NULL, last_observed_at REAL NOT NULL,
+              payload BLOB NOT NULL, payload_sha256 TEXT NOT NULL
+            ) WITHOUT ROWID
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS model_route_turn ON model_route_evidence(session_id,turn_id,last_observed_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS model_route_destination ON model_route_evidence(destination,last_observed_at DESC)")
     }
 
     deinit { sqlite3_close(handle) }
@@ -304,6 +315,56 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
             try executeUnlocked("COMMIT")
         } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func upsertModelRoutes(_ records: [ModelRouteEvidence]) throws {
+        guard !records.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            let sql = """
+              INSERT INTO model_route_evidence(route_id,session_id,turn_id,agent,destination,
+              classification,confidence,identity_status,first_observed_at,last_observed_at,payload,payload_sha256)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(route_id) DO UPDATE SET
+              classification=excluded.classification,confidence=excluded.confidence,
+              identity_status=excluded.identity_status,last_observed_at=excluded.last_observed_at,
+              payload=excluded.payload,payload_sha256=excluded.payload_sha256
+              """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare model route") }
+            defer { sqlite3_finalize(statement) }
+            for record in records {
+                let payload = try encoder.encode(record)
+                let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                bind(record.routeId, at: 1, to: statement); bind(record.sessionId, at: 2, to: statement)
+                bind(record.turnId, at: 3, to: statement); bind(record.agent, at: 4, to: statement)
+                bind(record.destination, at: 5, to: statement); bind(record.classification.rawValue, at: 6, to: statement)
+                bind(record.confidence.rawValue, at: 7, to: statement); bind(record.identityStatus, at: 8, to: statement)
+                sqlite3_bind_double(statement, 9, record.firstObservedAt.timeIntervalSince1970)
+                sqlite3_bind_double(statement, 10, record.lastObservedAt.timeIntervalSince1970)
+                _ = payload.withUnsafeBytes { sqlite3_bind_blob(statement, 11, $0.baseAddress, Int32(payload.count), SQLITE_TRANSIENT) }
+                bind(digest, at: 12, to: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert model route") }
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func modelRoutes(sessionId: String, turnId: String) throws -> [ModelRouteEvidence] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = "SELECT payload FROM model_route_evidence WHERE session_id=? AND turn_id=? ORDER BY last_observed_at DESC"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare model route read") }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionId, at: 1, to: statement); bind(turnId, at: 2, to: statement)
+        var result: [ModelRouteEvidence] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let route = try? decoder.decode(ModelRouteEvidence.self, from: payload) { result.append(route) }
+        }
+        return result
     }
 
     func assessments(sessionId: String, turnId: String) throws -> [ForensicAssessmentRecord] {

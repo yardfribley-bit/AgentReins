@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 struct ModelEconomicsReport: Codable, Equatable, Sendable {
@@ -122,6 +123,57 @@ struct AgentTrafficDestination: Codable, Equatable, Sendable {
     let claimedModels: [String]?
     let identityStatus: String?
     let identityReason: String?
+}
+
+/// Queryable, durable evidence for one model route observed during a turn.
+/// Observed transport facts stay separate from the claimed model identity so
+/// a relay cannot turn an advertisement into a verified fact.
+struct ModelRouteEvidence: Codable, Equatable, Sendable {
+    let routeId: String
+    let sessionId: String
+    let turnId: String
+    let agent: String
+    let destination: String
+    let classification: AgentTrafficClass
+    let confidence: EvidenceConfidence
+    let processIds: [Int32]
+    let connectedIPs: [String]
+    let ports: [Int]
+    let claimedModels: [String]
+    let identityStatus: String
+    let identityReason: String
+    let firstObservedAt: Date
+    let lastObservedAt: Date
+    let evidenceEventIds: [String]
+
+    static func build(events: [GuardEvent]) -> [ModelRouteEvidence] {
+        let turnEvents = events.filter { $0.sessionId != nil && $0.turnId != nil }
+        let turns = Dictionary(grouping: turnEvents) { "\($0.sessionId!):\($0.turnId!)" }
+        return turns.flatMap { _, rows -> [ModelRouteEvidence] in
+            guard let first = rows.first, let sessionId = first.sessionId, let turnId = first.turnId else { return [] }
+            return AgentTrafficAnalyzer.build(events: rows).map { destination in
+                let routeRows = rows.filter { ($0.remoteDomain ?? $0.remoteHost)?.lowercased() == destination.destination }
+                let timestamps = routeRows.map(\.ts)
+                let stableMaterial = "\(sessionId)|\(turnId)|\(destination.destination)"
+                let routeId = SHA256.hash(data: Data(stableMaterial.utf8))
+                    .map { String(format: "%02x", $0) }.joined()
+                return ModelRouteEvidence(
+                    routeId: routeId, sessionId: sessionId, turnId: turnId,
+                    agent: first.agent ?? "unknown", destination: destination.destination,
+                    classification: destination.classification, confidence: destination.confidence,
+                    processIds: destination.processIds,
+                    connectedIPs: Array(Set(routeRows.compactMap(\.remoteHost)
+                        .filter { $0.lowercased() != destination.destination })).sorted(),
+                    ports: Array(Set(routeRows.compactMap(\.remotePort))).sorted(),
+                    claimedModels: destination.claimedModels ?? [],
+                    identityStatus: destination.identityStatus ?? "unverified",
+                    identityReason: destination.identityReason ?? "No identity assessment was available.",
+                    firstObservedAt: timestamps.min() ?? first.ts,
+                    lastObservedAt: timestamps.max() ?? first.ts,
+                    evidenceEventIds: routeRows.map { $0.id.uuidString }.sorted())
+            }
+        }.sorted { $0.lastObservedAt > $1.lastObservedAt }
+    }
 }
 
 enum ForensicAssessmentKind: String, Codable, Sendable {
