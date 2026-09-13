@@ -49,6 +49,25 @@ enum BrowserProtectionInstaller {
             try? data.write(to: directory.appendingPathComponent("com.agentspec.agentreins.web.json"), options: .atomic)
         }
     }
+
+    /// Export a human-visible copy for Chrome's mandatory "Load unpacked"
+    /// picker. Users should never need to navigate into Library or an app
+    /// bundle to finish browser setup.
+    static func exportExtensionToDesktop() throws -> URL {
+        stageExtension()
+        let desktop = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask)[0]
+        let destination = desktop.appendingPathComponent("AgentReins Browser Extension", isDirectory: true)
+        let fm = FileManager.default
+        try fm.createDirectory(at: destination, withIntermediateDirectories: true)
+        for name in ["manifest.json", "service-worker.js", "web-agent-content.js"] {
+            let source = stagedExtensionURL.appendingPathComponent(name)
+            let target = destination.appendingPathComponent(name)
+            guard fm.fileExists(atPath: source.path) else { continue }
+            if fm.fileExists(atPath: target.path) { try fm.removeItem(at: target) }
+            try fm.copyItem(at: source, to: target)
+        }
+        return destination
+    }
 }
 
 struct BrowserProtectionView: View {
@@ -56,6 +75,7 @@ struct BrowserProtectionView: View {
     @Environment(\.dismiss) private var dismiss
     @State private var status = BrowserProtectionStatus.inspect()
     @State private var setupPrepared = false
+    @State private var setupError: String?
 
     private let cyan = Color(red: 48/255, green: 211/255, blue: 229/255)
     private let green = Color(red: 57/255, green: 214/255, blue: 117/255)
@@ -114,11 +134,11 @@ struct BrowserProtectionView: View {
                                     HStack(spacing: 9) {
                                         Image(systemName: setupPrepared ? "checkmark.circle.fill" : "shippingbox.fill")
                                         VStack(alignment: .leading, spacing: 2) {
-                                            Text(setupPrepared ? "Correct extension is ready" : "Prepare Chrome extension")
+                                            Text(setupPrepared ? "Extension saved to your Desktop" : "Save Extension to Desktop")
                                                 .font(.system(size: 12, weight: .bold))
                                             Text(setupPrepared
-                                                 ? "In Chrome, choose Load unpacked and paste the copied folder path."
-                                                 : "Uses the version bundled with this AgentReins app — no source checkout required.")
+                                                 ? "In Chrome, choose Load unpacked and select AgentReins Browser Extension."
+                                                 : "Creates a visible folder you can select in Chrome — no paths or source checkout.")
                                                 .font(.system(size: 9)).opacity(0.82)
                                         }
                                         Spacer()
@@ -129,6 +149,10 @@ struct BrowserProtectionView: View {
                                 .buttonStyle(.plain)
                                 .foregroundStyle(.white)
                                 .background(cyan.opacity(0.78), in: RoundedRectangle(cornerRadius: 9))
+                                if let setupError {
+                                    Label(setupError, systemImage: "exclamationmark.triangle.fill")
+                                        .font(.system(size: 9)).foregroundStyle(amber)
+                                }
 
                                 setupRow(1, "Open Chrome extensions", "Enable Developer mode in the top-right corner.") {
                                     open("chrome://extensions/?id=hcmoeaheokpfbbggdmkdeaiokakiampk")
@@ -136,8 +160,8 @@ struct BrowserProtectionView: View {
                                 setupRow(2, status.extensionInstalled ? "Reload AgentReins" : "Load unpacked extension",
                                          status.extensionInstalled
                                             ? "Click Reload on AgentReins Web AI Monitor to grant the new site permissions."
-                                            : "Choose the BrowserExtension folder AgentReins reveals in Finder.") {
-                                    revealExtension(); copyExtensionPath()
+                                            : "Choose AgentReins Browser Extension directly from your Desktop.") {
+                                    prepareChromeInstallation()
                                 }
                                 setupRow(3, "Verify the live connection", "Open Gemini and send a test prompt. AgentReins should receive a heartbeat and turn evidence.") {
                                     open("https://gemini.google.com/app")
@@ -239,11 +263,18 @@ struct BrowserProtectionView: View {
 
     private func prepareChromeInstallation() {
         BrowserProtectionInstaller.installBundledAssets()
-        copyExtensionPath()
-        NSWorkspace.shared.activateFileViewerSelecting([BrowserProtectionStatus.extensionURL])
-        open("chrome://extensions")
-        setupPrepared = true
-        status = BrowserProtectionStatus.inspect()
+        do {
+            let exported = try BrowserProtectionInstaller.exportExtensionToDesktop()
+            NSPasteboard.general.clearContents()
+            NSPasteboard.general.setString(exported.path, forType: .string)
+            NSWorkspace.shared.activateFileViewerSelecting([exported])
+            open("chrome://extensions")
+            setupPrepared = true
+            setupError = nil
+            status = BrowserProtectionStatus.inspect()
+        } catch {
+            setupError = "Could not save the extension: \(error.localizedDescription)"
+        }
     }
 }
 
