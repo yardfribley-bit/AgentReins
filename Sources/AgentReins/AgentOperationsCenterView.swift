@@ -24,6 +24,7 @@ struct AgentOperationsCenterView: View {
     @State private var selectedStageID: String?
     @State private var followingLive = true
     @State private var showingBrowserProtection = false
+    @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -73,6 +74,10 @@ struct AgentOperationsCenterView: View {
     }
     private var processTree: [TreeNode] { Self.buildTree(processes) }
     private var runtimeGraph: AgentRuntimeGraph { AgentRuntimeGraph.build(processes: processes, agent: selectedAgent) }
+    private var runtimeTopologyFingerprint: String {
+        let topology = processes.map { "\($0.pid):\($0.ppid):\($0.command.hashValue)" }.joined(separator: "|")
+        return "\(selectedAgent)|\(topology)"
+    }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted()
         let visibleHosts = centerTab == .network ? hosts : Array(hosts.prefix(6))
@@ -177,28 +182,34 @@ struct AgentOperationsCenterView: View {
     }
 
     var body: some View {
-        VStack(spacing: 0) {
-            header
-            HStack(spacing: 0) {
-                fleet.frame(width: 248)
-                Rectangle().fill(border).frame(width: 1)
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 14) {
-                        taskHeader
-                        tabBar
-                        centerContent
-                        evidencePanel
-                        flowLegend
-                    }.padding(16)
+        GeometryReader { geometry in
+            VStack(spacing: 0) {
+                header
+                HStack(spacing: 0) {
+                    fleet.frame(width: 248)
+                    Rectangle().fill(border).frame(width: 1)
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 14) {
+                            taskHeader
+                            tabBar
+                            centerContent
+                            evidencePanel
+                            flowLegend
+                        }.padding(16)
+                    }
+                    inspector.frame(width: 318)
                 }
-                inspector.frame(width: 318)
+                .frame(height: max(0, geometry.size.height - 96))
+                .clipped()
+                statusBar
             }
-            .frame(maxHeight: .infinity)
-            .clipped()
-            statusBar
         }
         .background(canvas).environment(\.colorScheme, .dark)
-        .onAppear { selectInitialAgentIfNeeded() }
+        .onAppear {
+            selectInitialAgentIfNeeded()
+            refreshRuntimeGraph()
+        }
+        .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
@@ -568,6 +579,10 @@ struct AgentOperationsCenterView: View {
         return RuntimeGraphPresentation(groups: groups, edges: edges)
     }
 
+    private func refreshRuntimeGraph() {
+        cachedRuntimeGraph = makeRuntimeGraphPresentation()
+    }
+
     private struct RuntimeDisplayEdge: Identifiable {
         let id: String
         let source: String
@@ -600,7 +615,7 @@ struct AgentOperationsCenterView: View {
     }
 
     private func runtimeGraphView(height: CGFloat) -> some View {
-        let presentation = makeRuntimeGraphPresentation()
+        let presentation = cachedRuntimeGraph
         let groups = presentation.groups
         let edges = presentation.edges
         let activePIDs = focusedProcessIDs
@@ -1309,6 +1324,18 @@ struct AgentOperationsCenterView: View {
                         Text("\(destination.confidence.rawValue.capitalized) · PID " +
                              (destination.processIds.isEmpty ? "not captured" : destination.processIds.map(String.init).joined(separator: ", ")))
                             .font(.system(size: 8)).foregroundStyle(.secondary)
+                        if let models = destination.claimedModels, !models.isEmpty {
+                            Text("Claimed model · \(models.joined(separator: ", "))")
+                                .font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
+                        }
+                        if let status = destination.identityStatus, status != "not_applicable" {
+                            Text("MODEL IDENTITY · \(status.replacingOccurrences(of: "_", with: " ").uppercased())")
+                                .font(.system(size: 7, weight: .bold))
+                                .foregroundStyle(status == "consistent" ? green : amber)
+                        }
+                        if let reason = destination.identityReason, destination.identityStatus != "not_applicable" {
+                            Text(reason).font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(3)
+                        }
                     }
                     .padding(8).background(raised, in: RoundedRectangle(cornerRadius: 7))
                     .overlay(RoundedRectangle(cornerRadius: 7).stroke(border))

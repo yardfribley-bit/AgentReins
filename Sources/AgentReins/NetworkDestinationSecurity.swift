@@ -41,12 +41,19 @@ struct NetworkDestinationAssessment: Equatable {
             return NetworkDestinationAssessment(kind: .localInfrastructure, needsAttention: false,
                 reason: "This is a loopback endpoint, not the final external destination.")
         }
-        if matches(value, suffixes: ["openrouter.ai", "portkey.ai", "helicone.ai", "litellm.ai"]) {
+        if matches(value, suffixes: ["openrouter.ai", "portkey.ai", "helicone.ai", "litellm.ai",
+                                             "requesty.ai", "withmartian.com", "braintrust.dev",
+                                             "ai-gateway.vercel.sh", "gateway.ai.cloudflare.com"]) {
             return NetworkDestinationAssessment(kind: .modelRelay, needsAttention: true,
                 reason: "This is an intermediary model gateway. It can receive prompts, code, tool results, and responses; the final upstream model is not independently verified by this connection.")
         }
-        if matches(value, suffixes: ["chatgpt.com", "openai.com", "anthropic.com", "deepseek.com",
-                                     "mistral.ai", "groq.com", "together.ai", "cohere.com"]) {
+        if matches(value, suffixes: ["chatgpt.com", "openai.com", "anthropic.com", "claude.ai",
+                                     "deepseek.com", "mistral.ai", "groq.com", "together.ai",
+                                     "cohere.com", "x.ai", "fireworks.ai", "perplexity.ai",
+                                     "moonshot.ai", "siliconflow.cn", "dashscope.aliyuncs.com",
+                                     "generativelanguage.googleapis.com", "aiplatform.googleapis.com"])
+            || value.hasSuffix(".openai.azure.com")
+            || value.contains(".bedrock-runtime.") && value.hasSuffix(".amazonaws.com") {
             return NetworkDestinationAssessment(kind: .modelProvider, needsAttention: false,
                 reason: "Recognized model-service infrastructure; still monitored, but not treated as external content by default.")
         }

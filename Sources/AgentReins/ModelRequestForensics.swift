@@ -119,6 +119,9 @@ struct AgentTrafficDestination: Codable, Equatable, Sendable {
     let classification: AgentTrafficClass
     let confidence: EvidenceConfidence
     let processIds: [Int32]
+    let claimedModels: [String]?
+    let identityStatus: String?
+    let identityReason: String?
 }
 
 enum ForensicAssessmentKind: String, Codable, Sendable {
@@ -179,21 +182,88 @@ enum AgentTrafficAnalyzer {
         let networkLike = events.filter { $0.remoteDomain != nil || $0.remoteHost != nil }
         let grouped = Dictionary(grouping: networkLike) { ($0.remoteDomain ?? $0.remoteHost!).lowercased() }
         return grouped.map { destination, rows in
-            let classification = classify(destination: destination, events: rows)
+            let classification = classify(destination: destination, events: rows, allEvents: events)
             let confidence: EvidenceConfidence = rows.allSatisfy { $0.attributionConfidence == .confirmed }
                 ? .confirmed : (rows.contains { $0.attributionConfidence == .inferred } ? .inferred : .unknown)
+            let claimedModels = Array(Set(events.compactMap(\.model).filter { !$0.isEmpty })).sorted()
+            let identity = modelIdentity(destination: destination, classification: classification,
+                                         claimedModels: claimedModels)
             return AgentTrafficDestination(destination: destination, classification: classification,
-                confidence: confidence, processIds: Array(Set(rows.compactMap(\.processId))).sorted())
+                confidence: confidence, processIds: Array(Set(rows.compactMap(\.processId))).sorted(),
+                claimedModels: claimedModels.isEmpty ? nil : claimedModels,
+                identityStatus: identity.status, identityReason: identity.reason)
         }.sorted { $0.destination < $1.destination }
     }
 
-    private static func classify(destination: String, events: [GuardEvent]) -> AgentTrafficClass {
+    private static func modelIdentity(destination: String, classification: AgentTrafficClass,
+                                      claimedModels: [String]) -> (status: String, reason: String) {
+        guard classification == .modelProvider || classification == .modelRelay else {
+            return ("not_applicable", "This destination is not classified as a model route.")
+        }
+        let families = Set(claimedModels.compactMap(modelFamily))
+        if classification == .modelRelay {
+            return ("unverified", claimedModels.isEmpty
+                ? "A relay was observed, but it did not expose a verifiable upstream model identity."
+                : "The relay claims \(claimedModels.joined(separator: ", ")), but the encrypted upstream model cannot be independently verified and may be substituted.")
+        }
+        guard let provider = providerFamily(destination) else {
+            return ("unverified", "The endpoint is recognized as model infrastructure, but its provider family was not resolved.")
+        }
+        guard !families.isEmpty else {
+            return ("unverified", "The official \(provider) route was observed, but no model identity was reported for comparison.")
+        }
+        if families == Set([provider]) {
+            return ("consistent", "The claimed model family is consistent with the observed official \(provider) endpoint.")
+        }
+        return ("mismatch", "Claimed model family \(families.sorted().joined(separator: ", ")) conflicts with the observed official \(provider) endpoint.")
+    }
+
+    private static func modelFamily(_ model: String) -> String? {
+        let value = model.lowercased()
+        if value == "auto" || value.contains("automatic") { return nil }
+        if value.contains("deepseek") { return "deepseek" }
+        if value.contains("claude") { return "anthropic" }
+        if value.contains("gemini") || value.contains("gemma") { return "google" }
+        if value.contains("gpt") || value.contains("openai") || value.range(of: #"\bo[134](?:-|\b)"#, options: .regularExpression) != nil { return "openai" }
+        if value.contains("grok") { return "xai" }
+        if value.contains("mistral") || value.contains("mixtral") { return "mistral" }
+        if value.contains("qwen") { return "alibaba" }
+        if value.contains("command-r") || value.contains("cohere") { return "cohere" }
+        return nil
+    }
+
+    private static func providerFamily(_ destination: String) -> String? {
+        if matches(destination, ["openai.com", "chatgpt.com", "openai.azure.com"]) { return "openai" }
+        if matches(destination, ["anthropic.com", "claude.ai"]) { return "anthropic" }
+        if matches(destination, ["deepseek.com"]) { return "deepseek" }
+        if matches(destination, ["generativelanguage.googleapis.com", "aiplatform.googleapis.com"]) { return "google" }
+        if matches(destination, ["x.ai"]) { return "xai" }
+        if matches(destination, ["mistral.ai"]) { return "mistral" }
+        if matches(destination, ["dashscope.aliyuncs.com"]) { return "alibaba" }
+        if matches(destination, ["cohere.com"]) { return "cohere" }
+        return nil
+    }
+
+    private static func classify(destination: String, events: [GuardEvent], allEvents: [GuardEvent]) -> AgentTrafficClass {
         if matches(destination, ["copilot.tencent.com", "codebuddy.ai"]) { return .agentControlPlane }
         if matches(destination, ["tdid.m.qq.com", "sentry.io", "segment.io", "datadoghq.com"]) { return .telemetry }
         let assessment = NetworkDestinationAssessment.assess(domain: destination, host: destination)
         if assessment.kind == .modelRelay { return .modelRelay }
         if assessment.kind == .modelProvider { return .modelProvider }
         if events.contains(where: { $0.toolCallId != nil }) { return .toolExternal }
+        let modelTurns = Set(allEvents.filter { $0.kind == "model" }.compactMap { event -> String? in
+            guard let session = event.sessionId, let turn = event.turnId else { return nil }
+            return "\(session):\(turn)"
+        })
+        let linkedToModelTurn = events.contains { event in
+            guard let session = event.sessionId, let turn = event.turnId else { return event.kind == "model" }
+            return modelTurns.contains("\(session):\(turn)")
+        }
+        // A destination carrying model-turn traffic that is neither a known
+        // provider nor an explicit tool website is an unverified model route.
+        // This catches private gateways and regional relays without pretending
+        // that their advertised upstream model was independently observed.
+        if linkedToModelTurn { return .modelRelay }
         return .unknown
     }
 

@@ -717,6 +717,35 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(traffic.first?.confidence, .confirmed)
     }
 
+    func testUnknownModelTurnEndpointIsTreatedAsUnverifiedRelay() throws {
+        let events = [
+            GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil, agent: "cursor",
+                op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: "s", turnId: "t",
+                model: "gpt-5", attributionConfidence: .confirmed),
+            GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil, agent: "cursor",
+                op: "connect", severity: "info", ts: Date(), action: "observed", sessionId: "s", turnId: "t",
+                model: "gpt-5", attributionConfidence: .inferred, remoteDomain: "models.example-relay.test")
+        ]
+
+        let route = try XCTUnwrap(AgentTrafficAnalyzer.build(events: events).first)
+        XCTAssertEqual(route.classification, .modelRelay)
+        XCTAssertEqual(route.identityStatus, "unverified")
+        XCTAssertTrue(route.identityReason?.contains("cannot be independently verified") == true)
+    }
+
+    func testClaimedModelMismatchWithOfficialEndpointIsVisible() throws {
+        let events = [
+            GuardEvent(kind: "model", ruleId: "response", path: "-", command: nil, agent: "workbuddy",
+                op: "response", severity: "info", ts: Date(), action: "received", sessionId: "s", turnId: "t",
+                model: "GPT-4o", attributionConfidence: .confirmed, remoteDomain: "api.deepseek.com")
+        ]
+
+        let route = try XCTUnwrap(AgentTrafficAnalyzer.build(events: events).first)
+        XCTAssertEqual(route.classification, .modelProvider)
+        XCTAssertEqual(route.identityStatus, "mismatch")
+        XCTAssertTrue(route.identityReason?.contains("official deepseek endpoint") == true)
+    }
+
     func testForensicAssessmentsPersistWithRuleVersionAndEvidenceReferences() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
