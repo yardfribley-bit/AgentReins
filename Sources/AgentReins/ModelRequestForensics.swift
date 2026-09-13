@@ -198,6 +198,8 @@ struct RelaySecurityAssessment: Codable, Equatable, Sendable {
     let upstreamIdentity: String
     let risk: String
     let findings: [String]
+    let sensitiveFindings: [SensitiveExposureFinding]
+    let contentCoverage: String
 
     static func build(events: [GuardEvent]) -> RelaySecurityAssessment? {
         let configured = Array(Set(events.compactMap { event -> String? in
@@ -209,6 +211,7 @@ struct RelaySecurityAssessment: Codable, Equatable, Sendable {
         let models = Array(Set(events.compactMap(\.model).filter { !$0.isEmpty })).sorted()
         guard !configured.isEmpty || !sockets.isEmpty || !models.isEmpty else { return nil }
         let exposure = ContextExposureReport.build(events: events)
+        let sensitive = SensitiveContextExposure.scan(events: events)
         let routes = AgentTrafficAnalyzer.build(events: events)
         let hasRelay = routes.contains { $0.classification == .modelRelay }
         let hasPrivateRelay = configured.contains {
@@ -234,12 +237,17 @@ struct RelaySecurityAssessment: Codable, Equatable, Sendable {
         }
         let maxInput = events.compactMap(\.inputTokens).max() ?? 0
         if maxInput >= 32_000 { findings.append("Large context transmission detected (\(maxInput) input tokens)") }
+        if !sensitive.isEmpty { findings.append("Sensitive values were found in captured content sent through this route") }
+        let capturedBytes = exposure?.capturedPromptBytes ?? 0
+        let coverage = maxInput > 0
+            ? "\(capturedBytes) captured bytes inspected; provider reported \(maxInput) input tokens, so full-body coverage is not proven"
+            : "\(capturedBytes) captured bytes inspected; provider token total unavailable"
         return RelaySecurityAssessment(configuredGateways: configured, observedDestinations: sockets,
-            claimedModels: models, exposedPromptBytes: exposure?.capturedPromptBytes ?? 0,
+            claimedModels: models, exposedPromptBytes: capturedBytes,
             exposedCategories: exposure?.items.filter(\.present).map(\.category) ?? [],
             routeConsistency: consistency, upstreamIdentity: identity,
             risk: findings.isEmpty ? "low" : (hasPrivateRelay ? "critical" : (hasRelay ? "high" : "medium")),
-            findings: findings)
+            findings: findings, sensitiveFindings: sensitive, contentCoverage: coverage)
     }
 }
 

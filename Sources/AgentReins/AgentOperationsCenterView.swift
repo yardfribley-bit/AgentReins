@@ -1512,11 +1512,20 @@ struct AgentOperationsCenterView: View {
                       ? "Not reported" : relay.claimedModels.joined(separator: ", "))
                 field("Independent identity", relay.upstreamIdentity)
                 field("Route consistency", relay.routeConsistency)
+                field("Inspection coverage", relay.contentCoverage)
                 ForEach(relay.findings, id: \.self) { finding in
                     HStack(alignment: .top, spacing: 6) {
                         Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
                         Text(finding).font(.system(size: 8)).foregroundStyle(.secondary)
                     }
+                }
+                ForEach(Array(relay.sensitiveFindings.enumerated()), id: \.offset) { _, finding in
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(finding.category.rawValue.uppercased()) · \(finding.severity.uppercased())")
+                            .font(.system(size: 7, weight: .bold)).foregroundStyle(Color.red)
+                        Text(finding.source).font(.system(size: 7.5)).foregroundStyle(.secondary)
+                        Text(finding.evidence).mono().lineLimit(3)
+                    }.padding(7).background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 }
             }
 
