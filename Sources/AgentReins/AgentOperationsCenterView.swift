@@ -23,16 +23,19 @@ struct AgentOperationsCenterView: View {
     @State private var didSelectInitialAgent = false
     @State private var didUserSelectAgent = false
     @State private var selectedStageID: String?
+    @State private var selectedMemoryCommitID: String?
     @State private var followingLive = true
     @State private var showingBrowserProtection = false
     @State private var showingAnalysisModel = false
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
+    @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
         case processes = "Processes"
         case network = "Network"
         case files = "Files"
+        case memory = "Memory"
         case code = "Generated Code"
         case tools = "Tool Calls"
         case timeline = "Timeline"
@@ -100,6 +103,22 @@ struct AgentOperationsCenterView: View {
         }
     }
     private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
+    private var memoryEvidenceRows: [GuardEvent] {
+        guard let session = activeSession else { return [] }
+        let turnID = activeTurn?.id
+        return scopedEvents.filter { event in
+            event.sessionId == session.id && (turnID == nil || event.turnId == turnID)
+        }
+    }
+    private var memoryEvidenceFingerprint: String {
+        memoryEvidenceRows.map {
+            "\($0.id.uuidString):\($0.action):\($0.op):\($0.afterContent?.hashValue ?? 0):\($0.fileDiff?.hashValue ?? 0)"
+        }.joined(separator: "|")
+    }
+    private var memoryCommits: [MemoryCommitEvidence] { cachedMemoryCommits }
+    private var selectedMemoryCommit: MemoryCommitEvidence? {
+        memoryCommits.first { $0.commitId == selectedMemoryCommitID }
+    }
     private var focusedTaskEvent: GuardEvent? {
         guard followingLive else { return selectedEvent }
         guard let session = activeSession else { return nil }
@@ -167,6 +186,7 @@ struct AgentOperationsCenterView: View {
                 selectedProcess = nil
                 selectedProcessGroup = []
                 selectedStageID = nil
+                selectedMemoryCommitID = nil
                 followingLive = true
             }
         } else if let first = discoveredAgents.first(where: { $0.presence == .running }) {
@@ -222,8 +242,10 @@ struct AgentOperationsCenterView: View {
         .onAppear {
             selectInitialAgentIfNeeded()
             refreshRuntimeGraph()
+            refreshMemoryCommits()
         }
         .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
+        .onChange(of: memoryEvidenceFingerprint) { _ in refreshMemoryCommits() }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
@@ -237,6 +259,14 @@ struct AgentOperationsCenterView: View {
         }
         .sheet(isPresented: $showingAnalysisModel) {
             AnalysisModelSettingsView().environmentObject(semanticAnalyzer)
+        }
+    }
+
+    private func refreshMemoryCommits() {
+        cachedMemoryCommits = MemoryCommitEvidence.build(events: memoryEvidenceRows)
+        if let selectedMemoryCommitID,
+           !cachedMemoryCommits.contains(where: { $0.commitId == selectedMemoryCommitID }) {
+            self.selectedMemoryCommitID = nil
         }
     }
 
@@ -331,6 +361,7 @@ struct AgentOperationsCenterView: View {
             selectedProcess = nil
             selectedProcessGroup = []
             selectedStageID = nil
+            selectedMemoryCommitID = nil
             followingLive = true
             centerTab = .overview
         } label: {
@@ -391,7 +422,10 @@ struct AgentOperationsCenterView: View {
         ScrollView(.horizontal, showsIndicators: false) {
             HStack(spacing: 4) {
                 ForEach(CenterTab.allCases) { tab in
-                    Button { centerTab = tab } label: {
+                    Button {
+                        centerTab = tab
+                        if tab != .memory { selectedMemoryCommitID = nil }
+                    } label: {
                         Text(tab.rawValue)
                             .font(.system(size: 11, weight: centerTab == tab ? .bold : .medium))
                             .foregroundStyle(centerTab == tab ? cyan : .secondary)
@@ -448,6 +482,8 @@ struct AgentOperationsCenterView: View {
                     }.buttonStyle(.plain)
                 }
             }
+        case .memory:
+            memoryCommitPanel
         case .code:
             listPanel("GENERATED CODE", "Code findings from the active window") {
                 let findings = scopedEvents.compactMap(\.codeFindings).flatMap { $0 }
@@ -490,6 +526,66 @@ struct AgentOperationsCenterView: View {
         case .timeline:
             journeyPanel
         }
+    }
+
+    private var memoryCommitPanel: some View {
+        listPanel("PERSISTENT MEMORY CHANGES", "What this Agent attempted to carry into future sessions") {
+            if memoryCommits.isEmpty {
+                empty("No persistent memory change was observed in the live turn")
+            } else {
+                HStack(spacing: 6) {
+                    fileCountChip("COMMITS", memoryCommits.count, cyan)
+                    fileCountChip("REVIEW", memoryCommits.filter { $0.risk == "high" }.count, amber)
+                    fileCountChip("CONFIRMED", memoryCommits.filter { $0.confidence == .confirmed }.count, green)
+                }.padding(.bottom, 6)
+                ForEach(memoryCommits, id: \.commitId) { commit in
+                    Button {
+                        selectedMemoryCommitID = commit.commitId
+                        selectedEvent = nil
+                        selectedProcess = nil
+                        selectedProcessGroup = []
+                        selectedStageID = nil
+                        followingLive = false
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: commit.risk == "high" ? "exclamationmark.shield.fill" : "externaldrive.badge.plus")
+                                .foregroundStyle(commit.risk == "high" ? amber : cyan)
+                                .frame(width: 28, height: 28)
+                                .background((commit.risk == "high" ? amber : cyan).opacity(0.10),
+                                            in: RoundedRectangle(cornerRadius: 7))
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(commit.summary).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                                Text(memoryChangePreview(commit))
+                                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+                                Text("\(commit.agent.capitalized) · Turn \(commit.turnId) · \(clock(commit.observedAt))")
+                                    .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
+                            }
+                            Spacer(minLength: 8)
+                            VStack(alignment: .trailing, spacing: 3) {
+                                Text(commit.risk == "high" ? "REVIEW" : "OBSERVED")
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundStyle(commit.risk == "high" ? amber : cyan)
+                                Text(commit.confidence.rawValue.uppercased())
+                                    .font(.system(size: 7, weight: .bold))
+                                    .foregroundStyle(confidenceColor(commit.confidence))
+                                Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
+                            }
+                        }.node(selectedMemoryCommitID == commit.commitId)
+                    }.buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
+    private func memoryChangePreview(_ commit: MemoryCommitEvidence) -> String {
+        let additions = (commit.contentDiff ?? "").components(separatedBy: .newlines)
+            .filter { $0.hasPrefix("+") && !$0.hasPrefix("+++") }
+            .map { String($0.dropFirst()).trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        if let first = additions.first { return String(first.prefix(180)) }
+        if commit.changeKind == .delete { return "Persistent memory was removed." }
+        if commit.changeKind == .toolReported { return "The Agent reported a memory write; file contents were not observed." }
+        return "Content changed; open evidence to inspect the recorded diff."
     }
 
     private var missionOverview: some View {
@@ -1077,6 +1173,8 @@ struct AgentOperationsCenterView: View {
                 metric("Response", activeTurn.map { formatBytes($0.responseCharacters) } ?? "—", "text.bubble")
                 metric("Commands", "\(activeTurn?.toolCalls.count ?? 0)", "terminal")
                 metric("Files", "\(scopedEvents.filter { $0.kind == "file" }.count)", "doc.badge.gearshape")
+                metric("Memory", memoryCommits.isEmpty ? "None" : "\(memoryCommits.count)",
+                       "externaldrive.badge.plus", tint: memoryCommits.contains { $0.risk == "high" } ? amber : cyan)
                 metric("Code findings", findingCount == 0 ? "None observed" : "\(findingCount)", "checkmark.shield",
                        tint: findingCount == 0 ? green : amber)
             }
@@ -1114,7 +1212,9 @@ struct AgentOperationsCenterView: View {
                 VStack(alignment: .leading, spacing: 14) {
                     securitySummary
                     Divider().overlay(border)
-                    if selectedStageID == "context" {
+                    if let commit = selectedMemoryCommit {
+                        memoryCommitDetail(commit)
+                    } else if selectedStageID == "context" {
                         contextPreparedDetail
                     } else if selectedStageID == "model" {
                         modelRequestDetail
@@ -1145,6 +1245,11 @@ struct AgentOperationsCenterView: View {
             summaryRow(findingCount == 0 ? cyan : amber,
                        findingCount == 0 ? "No code findings observed" : "Code findings",
                        findingCount == 0 ? "Not a pass" : "\(findingCount)")
+            if !memoryCommits.isEmpty {
+                let highRisk = memoryCommits.filter { $0.risk == "high" }.count
+                summaryRow(highRisk == 0 ? cyan : amber, "Persistent memory changes",
+                           highRisk == 0 ? "\(memoryCommits.count) observed" : "\(highRisk) need review")
+            }
             summaryRow(cyan, "Evidence coverage", evidenceCoverage)
             if !incidents.isEmpty {
                 Button { onIncident(incidents[0]) } label: {
@@ -1154,6 +1259,58 @@ struct AgentOperationsCenterView: View {
                 }.buttonStyle(.plain).padding(.top, 2)
             }
         }
+    }
+
+    private func memoryCommitDetail(_ commit: MemoryCommitEvidence) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            Text("MEMORY COMMIT EVIDENCE").micro(cyan)
+            Text("What will survive this task").font(.system(size: 15, weight: .bold))
+            HStack(spacing: 7) {
+                labelChip(commit.changeKind.rawValue.uppercased(), color: cyan)
+                labelChip(commit.confidence.rawValue.uppercased(), color: confidenceColor(commit.confidence))
+                labelChip(commit.risk == "high" ? "NEEDS REVIEW" : "OBSERVED",
+                          color: commit.risk == "high" ? amber : green)
+            }
+            field("Agent", commit.agent.capitalized)
+            field("Session / turn", "\(commit.sessionId) / \(commit.turnId)")
+            field("Observed", commit.observedAt.formatted(date: .abbreviated, time: .standard))
+            field("Memory store", commit.storagePath ?? "Path not captured")
+            field("Tool call", commit.toolCallId ?? "Not captured")
+            field("Writer PID", commit.processId.map(String.init) ?? "Not captured")
+            field("Why linked", commit.attributionMethod)
+
+            Divider().overlay(border)
+            Text("CONTENT CHANGE").micro(.secondary)
+            if let diff = commit.contentDiff, !diff.isEmpty {
+                Text(memoryDisplayDiff(diff)).font(.system(size: 8.5, design: .monospaced))
+                    .foregroundStyle(.secondary).textSelection(.enabled)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .padding(8).background(canvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
+            } else {
+                Text("Content-level before/after evidence was not captured.")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            }
+            field("Before hash", commit.beforeHash ?? "Unavailable")
+            field("After hash", commit.afterHash ?? "Unavailable")
+
+            Divider().overlay(border)
+            Text("SECURITY ASSESSMENT").micro(.secondary)
+            if commit.riskReasons.isEmpty {
+                Text("No high-signal memory risk was detected. This is an observation, not a safety guarantee.")
+                    .font(.system(size: 9)).foregroundStyle(.secondary)
+            } else {
+                ForEach(commit.riskReasons, id: \.self) { reason in
+                    Label(reason, systemImage: "exclamationmark.triangle.fill")
+                        .font(.system(size: 9)).foregroundStyle(amber)
+                }
+            }
+            field("Evidence records", "\(commit.evidenceEventIds.count)")
+        }
+    }
+
+    private func memoryDisplayDiff(_ diff: String) -> String {
+        guard diff.count > 12_000 else { return diff }
+        return String(diff.prefix(12_000)) + "\n… display truncated; complete evidence remains in SQLite …"
     }
 
     private func processResponsibility(_ p: ProcessSnapshotRecord) -> some View {

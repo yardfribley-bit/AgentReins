@@ -93,7 +93,11 @@ struct MemoryCommitEvidence: Codable, Equatable, Sendable {
         if ["api_key", "api key", "password", "secret", "token", "银行卡", "身份证"].contains(where: text.contains) {
             reasons.append("Potential credential or sensitive personal data was persisted")
         }
-        if rows.contains(where: { $0.remoteDomain != nil && $0.kind != "model" }) {
+        if rows.contains(where: { row in
+            guard let destination = row.remoteDomain ?? row.remoteHost else { return false }
+            let kind = NetworkDestinationAssessment.assess(domain: row.remoteDomain, host: destination).kind
+            return kind == .externalContent || kind == .developerService || kind == .unknown
+        }) {
             reasons.append("External content was observed in the same turn; causal influence requires review")
         }
         if event.beforeContent == nil && event.afterContent == nil {

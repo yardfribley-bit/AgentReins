@@ -1623,6 +1623,41 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(commit.riskReasons.contains { $0.contains("content-level") })
     }
 
+    func testMemoryCommitPersistenceIsIdempotentAndQueryableByTurn() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-memory-commit-test-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let record = MemoryCommitEvidence(commitId: "commit-1", sessionId: "session", turnId: "turn",
+            agent: "workbuddy", toolCallId: "memory-call", processId: nil,
+            storagePath: "/Users/me/.workbuddy/memory/a_memory.md", changeKind: .update,
+            beforeHash: "before", afterHash: "after", contentDiff: "+Theme: dark",
+            summary: "Update persistent memory", risk: "info", riskReasons: [],
+            confidence: .inferred, attributionMethod: "known agent memory path + bounded 45s time window",
+            observedAt: Date(timeIntervalSince1970: 10), evidenceEventIds: ["event-1"])
+
+        try database.upsertMemoryCommits([record])
+        try database.upsertMemoryCommits([record])
+
+        XCTAssertEqual(try database.memoryCommits(sessionId: "session", turnId: "turn"), [record])
+        XCTAssertTrue(try database.memoryCommits(sessionId: "session", turnId: "other").isEmpty)
+    }
+
+    func testModelProviderTrafficDoesNotImplyExternalMemoryPoisoning() throws {
+        let mutation = GuardEvent(kind: "file", ruleId: "live-memory-commit",
+            path: "/Users/me/.workbuddy/memory/a_memory.md", command: nil,
+            agent: "workbuddy", op: "modify", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", beforeContent: "old", afterContent: "new",
+            fileDiff: "+new", attributionConfidence: .inferred)
+        let provider = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "workbuddy", op: "connect", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", remoteDomain: "api.openai.com")
+
+        let commit = try XCTUnwrap(MemoryCommitEvidence.build(events: [mutation, provider]).first)
+        XCTAssertFalse(commit.riskReasons.contains { $0.contains("External content") })
+    }
+
     private func runGit(_ arguments: [String], at root: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
