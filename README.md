@@ -1,4 +1,5 @@
 <div align="center">
+  <p><strong>English</strong> · <a href="README.zh-CN.md">简体中文</a></p>
   <img src="Assets/agentreins-logo.png" width="144" alt="AgentReins logo">
 
   <h1>AgentReins</h1>
