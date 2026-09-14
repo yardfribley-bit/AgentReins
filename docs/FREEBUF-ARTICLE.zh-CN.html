@@ -1,0 +1,78 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>当 AI Agent 开始替你执行命令：我们如何重建一条可验证的安全证据链</title>
+  <style>
+    body{margin:0;background:#f5f7fa;color:#202938;font:16px/1.85 -apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Microsoft YaHei",sans-serif}article{max-width:900px;margin:40px auto;padding:56px 68px;background:#fff;box-shadow:0 12px 40px #20304412}h1{font-size:38px;line-height:1.35;margin:0 0 18px;color:#101828}h2{margin:54px 0 18px;padding-left:14px;border-left:4px solid #1677ff;font-size:27px;line-height:1.4;color:#101828}h3{margin:32px 0 10px;font-size:20px;color:#162337}p{margin:14px 0}a{color:#0969da;text-decoration:none}strong{color:#101828}.lead{font-size:19px;color:#475467}.meta{color:#667085;font-size:14px;border-bottom:1px solid #e4e7ec;padding-bottom:28px;margin-bottom:30px}.problem{background:#fff5f3;border-left:4px solid #f04438;padding:18px 22px;margin:24px 0}.solution{background:#eff8ff;border-left:4px solid #1570ef;padding:18px 22px;margin:24px 0}.note{background:#fffaeb;border:1px solid #fedf89;border-radius:8px;padding:16px 20px;margin:22px 0}.evidence{background:#071827;color:#cbddea;border-radius:10px;padding:22px 26px;font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;overflow:auto}.evidence b{color:#53d8ef}.evidence .warn{color:#ffbd4a}.flow{display:grid;grid-template-columns:repeat(7,1fr);gap:7px;align-items:center;margin:28px 0}.flow span{padding:12px 7px;border:1px solid #b7d4f4;border-radius:7px;text-align:center;background:#f2f8ff;font-size:13px}.flow i{text-align:center;color:#1677ff;font-style:normal}table{width:100%;border-collapse:collapse;margin:22px 0;font-size:14px}th,td{padding:12px 14px;border:1px solid #dfe5ec;text-align:left;vertical-align:top}th{background:#f4f7fb;color:#182230}img{max-width:100%;height:auto;border:1px solid #dfe5ec;border-radius:10px;margin:24px 0}.caption{text-align:center;color:#667085;font-size:13px;margin-top:-15px}ul,ol{padding-left:24px}li{margin:8px 0}.closing{font-size:19px;font-weight:600;color:#162337}.links{padding:20px 24px;background:#f4f7fb;border-radius:8px}@media(max-width:760px){article{margin:0;padding:30px 20px}h1{font-size:29px}.flow{display:block}.flow span,.flow i{display:block;margin:7px 0}.flow i{transform:rotate(90deg)}}
+  </style>
+</head>
+<body><article>
+  <h1>当 AI Agent 开始替你执行命令：我们如何重建一条可验证的安全证据链</h1>
+  <p class="lead">AI 编程工具正在从“回答问题”变成“直接行动”：读取项目、拼接上下文、请求模型、调用 MCP、执行 Shell、修改代码、连接服务器。问题是，用户通常只能看到一句“任务已完成”。中间到底发生了什么，往往没人说得清。</p>
+  <p class="meta">作者：AgentReins 团队　｜　关键词：AI Agent、终端安全、模型中转、MCP、上下文安全、供应链安全</p>
+
+  <h2>一、具体问题：一句简单需求，背后可能发生了什么？</h2>
+  <p>假设开发者对 AI 编程 Agent 说：“写一个 hello.c，编译并运行。”表面上只是一个十几个字的需求，但 Agent 真实执行的链路可能包括：</p>
+  <div class="flow"><span>用户需求</span><i>→</i><span>上下文组装</span><i>→</i><span>模型或中转</span><i>→</i><span>工具 / MCP</span><i>→</i><span>进程与网络</span><i>→</i><span>文件与代码</span><i>→</i><span>结果</span></div>
+  <p>其中，发送给模型的内容可能远多于用户输入：系统提示词、项目结构、代码片段、长期记忆、Skill、工具结果、操作系统信息，甚至本不应该离开本机的凭据。模型返回后，Agent 还可能启动编译器、Shell、Node REPL、沙箱、存储服务或 MCP Server。</p>
+  <div class="problem"><strong>问题不只是“有没有恶意命令”。</strong>真正困难的是：用户不知道哪个 Agent 在做什么，不知道数据发到了哪里，也无法证明文件变化、网络连接和最终结果是否属于这次任务。</div>
+
+  <h3>问题 1：传统日志很多，但缺少因果关系</h3>
+  <p>进程列表能看到 PID，网络工具能看到 IP，Git 能看到 Diff，Agent 自己的日志可能记录 Tool Call。但它们彼此独立。只按时间靠近进行关联，很容易把浏览器、后台更新或另一个 Agent 的行为误归到当前任务。</p>
+
+  <h3>问题 2：模型中转看起来像 API，风险却像数据出口</h3>
+  <p>不少 AI 编程工具使用订阅账号或第三方中转，用户看不到真正上游。一个端点声称返回 GPT 或 DeepSeek，并不等于其模型身份已经得到证明。更关键的是，中转可能接触完整请求正文，包括记忆、代码、Skill 和工具结果。</p>
+
+  <h3>问题 3：“Agent 报告完成”不是安全结论</h3>
+  <p>Agent 说编译成功，可能只是复述终端输出；说修复了漏洞，也不代表测试覆盖、静态扫描或产物验证通过。如果产品直接把“Tool completed”显示成绿色，实际上是在把 Agent 自己的陈述当作证据。</p>
+
+  <h2>二、我们的解决思路：Trace + Independent Verification + Recovery</h2>
+  <p>我们开发了一个名为 <strong>AgentReins</strong> 的 macOS 本地优先项目。它的目标不是再造一个日志查看器，而是回答七个连续问题：</p>
+  <ol><li>用户输入了什么需求？</li><li>Agent 向模型发送了什么上下文？</li><li>模型返回了什么可见内容或工具指令？</li><li>Agent 调用了哪些 Tool、Skill、MCP 和 Shell？</li><li>产生了哪些进程、网络连接、文件与记忆变化？</li><li>生成代码是否出现可识别的安全问题？</li><li>任务结果是否经过独立验证，必要时能否恢复？</li></ol>
+  <div class="solution"><strong>核心原则：</strong>先保存 Raw Evidence，再生成解释与结论；明确区分 Confirmed、Inferred 和 Unknown。无法证明的事实显示 Unknown，而不是用看似聪明的语言补齐。</div>
+
+  <img src="https://raw.githubusercontent.com/yardfribley-bit/AgentReins/main/Design/exports/agentreins-home-situational-awareness-v2.png" alt="AgentReins 实时运行态势界面">
+  <p class="caption">AgentReins 将 Agent 内部组件、实时任务、外部服务与安全结果放入同一条证据链。</p>
+
+  <h2>三、第一层：自动发现 Agent，并解释它的运行时结构</h2>
+  <p>普通用户看到的可能只是 WorkBuddy、Codex 或 Cursor 的一个窗口，但实际运行时包含多个职责不同的进程。我们根据真实 PID/PPID、可执行文件、参数和 Agent 专属特征建立 Runtime Profile，把进程解释为：</p>
+  <ul><li><strong>Agent Core：</strong>任务编排与主会话；</li><li><strong>Context Engine：</strong>准备项目文件、规则、记忆和 Skill；</li><li><strong>Storage Service：</strong>会话、索引或记忆存储；</li><li><strong>MCP Tool Server：</strong>向 Agent 暴露外部能力；</li><li><strong>Node REPL / Code Execution Host：</strong>实际执行代码或脚本；</li><li><strong>Sandbox / Repair：</strong>隔离执行或修复辅助组件；</li><li><strong>Network Service：</strong>模型、网页和外部 API 连接。</li></ul>
+  <p>这里不能使用一套固定模板套所有 Agent。Codex、Cursor、WorkBuddy 的组件不同，因此采用“通用发现 + 原生 Adapter + 可解释 Runtime Profile”的方式。重复 Worker 可以折叠，但存储、沙箱、MCP、执行宿主等安全边界必须保留。</p>
+
+  <h2>四、第二层：从用户需求重建 Live Task</h2>
+  <p>AgentReins 默认只处理实时数据和最近一次活动会话，避免启动时全量导入历史造成 CPU、I/O 和界面卡顿。一次任务被整理为连续阶段：</p>
+  <div class="evidence"><b>10:14:03 USER REQUEST</b>　创建并编译一个 C 程序<br><b>10:14:05 CONTEXT PREPARED</b>　Memory / Skills / 14 project files<br><span class="warn">10:14:08 MODEL CONNECTION</span>　Private relay → claimed DeepSeek<br><b>10:14:10 SHELL</b>　clang hello.c -o hello<br><b>10:14:11 FILE UPDATE</b>　hello.c +6 / -0<br><span class="warn">10:14:12 AGENT REPORTED COMPLETE</span>　尚未独立验证</div>
+  <p>用户点击任意阶段，可以继续查看工具名称、参数、结果、PID、工作目录、网络目标、文件 Diff 和原始证据 ID。首页展示故事，细节页保留证据，而不是让用户在实时日志流里寻找答案。</p>
+
+  <h2>五、第三层：分析模型中转到底拿走了什么</h2>
+  <p>对于模型安全，我们拆分了三个容易被混淆的概念：</p>
+  <table><thead><tr><th>证据</th><th>能回答什么</th><th>不能证明什么</th></tr></thead><tbody><tr><td>Agent 配置</td><td>配置的 Base URL、模型名、网关</td><td>实际请求一定走了该端点</td></tr><tr><td>Socket / DNS</td><td>哪个进程连接了哪个 IP、端口与网络资产</td><td>TLS 内完整请求正文</td></tr><tr><td>Agent 本地正文证据</td><td>可见提示词、上下文类别、响应、工具调用</td><td>远端是否保存或二次使用数据</td></tr></tbody></table>
+  <p>当正文确实被 Agent 本地保存或通过适配器捕获时，我们会进一步统计 Token/字节规模，并识别其中的用户需求、Memory、Skills/Policy、代码、项目文件和工具结果；同时扫描 API Key、密码、私钥、银行卡号、身份证号、邮箱等敏感内容。</p>
+  <div class="note"><strong>重要边界：</strong>仅凭网络连接不能宣称“看到了完整上下文”；仅凭中转响应中的 model 字段，也不能证明真实上游模型身份。客户端能证明数据发送到了哪里，但不能证明远端服务商没有留存。</div>
+
+  <h2>六、第四层：把网络、SSH、文件和记忆纳入同一任务</h2>
+  <h3>网络与 SSH</h3>
+  <p>系统从工具参数识别 HTTP(S)、Git、SSH、SCP、rsync、curl、wget 等网络意图，再与 Socket 的 PID、远端地址和进程树归属对齐。公网 IP 异步补充国家、城市、ASN 和资产运营方。对于 SSH，还会展示用户名、认证方式、Host Key 策略、远程命令和文件传输，并提示 Root 登录、交互式凭据或自动接受 Host Key 等风险。</p>
+  <p>SSH 正文是加密的，Socket 只能证明连接存在。远程命令与传输内容必须来自本机 Tool Call；若未在远端部署 Collector，就不能完整证明服务器端最终发生了什么。</p>
+  <h3>文件与代码</h3>
+  <p>文件活动统一为 Create、Read、Update、Delete、Rename，并回答“哪个 Agent 修改了哪个文件、修改内容是什么”。对捕获到的变更文本和 AI 生成代码执行本地安全模式扫描，同时保存 Git HEAD、工作区状态和 Diff 作为验证上下文。</p>
+  <h3>记忆变化</h3>
+  <p>长期记忆是容易被忽略的持久化攻击面。一次提示注入如果写入 MEMORY.md 或 Agent 数据库，可能在未来多轮任务中反复生效。因此需要同时记录 Memory Commit 与 Memory Retrieval：新增了什么、读取了什么、存在哪里、属于哪个 Agent、Session 和 Turn，以及关联置信度。</p>
+
+  <h2>七、可靠性：采集不到必须让用户知道</h2>
+  <p>安全产品最危险的失败方式不是报错，而是悄悄漏采后仍然显示“一切正常”。AgentReins 使用 SQLite WAL 保存本地证据，将实时 UI 状态与历史还原分开，并提供 Collector Health 展示采集失败、延迟、丢弃样本和盲区。</p>
+  <p>我们为模糊归属拒绝、幂等写入、WAL 恢复、Runtime Profile、Git/SSH、文件生命周期和十万事件存储建立了基准测试。状态语义也被严格限制：</p>
+  <table><thead><tr><th>状态</th><th>含义</th></tr></thead><tbody><tr><td>Observed</td><td>看到了活动，不代表安全</td></tr><tr><td>Agent reported complete</td><td>Agent 自己声明完成，尚未验证</td></tr><tr><td>Verified</td><td>独立检查确认结果有效</td></tr><tr><td>Inferred</td><td>基于间接证据推断归属</td></tr><tr><td>Unknown</td><td>当前证据无法证明</td></tr></tbody></table>
+
+  <h2>八、目前仍未解决的问题</h2>
+  <p>AgentReins 目前仍是 Alpha。以下能力不能被包装成已经完成：</p>
+  <ul><li>没有 macOS Endpoint Security 权限时，无法保证捕获所有毫秒级短进程和短连接；</li><li>无法读取模型服务端从未展示、Agent 本地也从未保存的隐藏思维链；</li><li>尚不能把所有操作系统级文件事件精确归属到 Session、Turn 和 Tool Call；</li><li>完整的独立构建/测试验证与任务级事务恢复仍在开发；</li><li>没有远程 Collector 时，无法证明 SSH 服务器端的文件和进程变化；</li><li>不同 Agent 仍需要持续维护适配器与证据解析规则。</li></ul>
+  <p>我们认为，诚实展示盲区本身就是安全能力。绿色状态必须来自证据，而不是来自产品希望用户安心的愿望。</p>
+
+  <h2>结语：AI Agent 安全首先是可理解性问题</h2>
+  <p class="closing">当软件开始代表用户读取记忆、访问网络、修改代码和操作服务器时，“它做了什么”不应只是开发者日志，而应该成为每个用户都拥有的基本知情权。</p>
+  <p>我们的目标是：<strong>让每个人都能看懂、验证并信任自己的 AI Agent。</strong>先建立可靠的本地证据地基，再在每一步上落实零信任：上下文安全、中转安全、工具与 MCP 安全、外部网页安全、代码安全、记忆安全，以及最终结果验证与恢复。</p>
+  <div class="links"><strong>项目地址</strong><br>GitHub：<a href="https://github.com/yardfribley-bit/AgentReins">https://github.com/yardfribley-bit/AgentReins</a><br>官网：<a href="https://www.chuhaijian.com/zh-CN/">https://www.chuhaijian.com/zh-CN/</a><br>X：<a href="https://x.com/agentreins">https://x.com/agentreins</a><br>邮箱：<a href="mailto:yardfribley@gmail.com">yardfribley@gmail.com</a></div>
+</article></body></html>
