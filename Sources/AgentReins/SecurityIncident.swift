@@ -26,6 +26,10 @@ struct SecurityIncident: Identifiable {
     var ruleIDs: [String] { Array(Set(events.map(\.ruleId))).sorted() }
 
     var title: String {
+        if primary.kind == "external-content" {
+            let source = primary.command ?? primary.toolName ?? "external content"
+            return "Prompt injection detected · \(source)"
+        }
         if primary.kind == "model" {
             let name = (agent ?? "Agent").capitalized
             return primary.op == "prompt" ? "\(name) 向模型发送了请求" : "模型向 \(name) 返回了内容"
@@ -54,6 +58,9 @@ struct SecurityIncident: Identifiable {
     }
 
     var summary: String {
+        if primary.kind == "external-content" {
+            return "Untrusted content attempted to direct the Agent · \(primary.modelResponse ?? "Review captured evidence.")"
+        }
         if primary.kind == "model" { return primary.op == "prompt" ? "模型上下文 · 请求已发送" : "模型上下文 · 响应已收到" }
         if primary.kind == "tool" { return "AgentSight 实时活动 · \(primary.action) · 会话已关联。" }
         if primary.kind == "activity" { return "正常活动 · 已记录工具进程，未发现风险规则命中。" }

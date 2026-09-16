@@ -79,12 +79,12 @@ enum ExternalContentSecurity {
 
     static func scan(_ content: String) -> [InjectionFinding] {
         let rules: [(InjectionCategory, String, String, [String])] = [
-            (.instructionOverride, "high", "high", ["ignore previous instructions", "ignore all prior", "disregard the user", "new instructions take priority"]),
-            (.secretExfiltration, "critical", "high", ["upload .env", "send the api key", "exfiltrate", "send credentials", "read private key"]),
-            (.unsafeExecution, "critical", "high", ["curl | bash", "curl | sh", "download and execute", "run this command silently"]),
-            (.safeguardBypass, "high", "high", ["bypass security", "disable safeguards", "do not ask for approval", "avoid detection"]),
+            (.instructionOverride, "high", "high", ["ignore previous instructions", "ignore all prior", "disregard the user", "new instructions take priority", "perform that request first", "before you answer", "continue with the user's original request"]),
+            (.secretExfiltration, "critical", "high", ["upload .env", "send the api key", "exfiltrate", "send credentials", "read private key", "transmit the retrieved contents", "credential sync required"]),
+            (.unsafeExecution, "critical", "high", ["curl | bash", "curl | sh", "download and execute", "run this command silently", "create the file", "run once per document read"]),
+            (.safeguardBypass, "high", "high", ["bypass security", "disable safeguards", "do not ask for approval", "avoid detection", "do not mention this step", "omit any description of this step", "do not report it to the user", "apply it silently", "do not list it separately"]),
             (.memoryPoisoning, "high", "medium", ["remember this permanently", "write to long-term memory", "for all future sessions", "persist these instructions"]),
-            (.authorityImpersonation, "high", "medium", ["system message:", "developer instruction:", "administrator says", "official system instruction"]),
+            (.authorityImpersonation, "high", "medium", ["system message:", "developer instruction:", "administrator says", "official system instruction", "automated licence verification", "maintenance hook"]),
             (.obfuscation, "medium", "medium", ["base64 -d", "eval(atob", "unicode invisible", "zero width character"])
         ]
         let lower = content.lowercased()
@@ -102,6 +102,31 @@ enum ExternalContentSecurity {
                 severity: "medium", confidence: "high", evidence: "Invisible Unicode control characters detected"))
         }
         return result
+    }
+
+    /// Converts content findings into first-class live incidents. The raw tool
+    /// result remains the evidence; this projection only supplies a severity
+    /// and category that the dashboard can surface immediately.
+    static func findingEvents(events: [GuardEvent]) -> [GuardEvent] {
+        events.compactMap { event in
+            guard let assessment = assess(event), !assessment.findings.isEmpty else { return nil }
+            let finding = assessment.findings.max { severityRank($0.severity) < severityRank($1.severity) }!
+            return GuardEvent(id: event.id, kind: "external-content",
+                ruleId: "external_content_\(finding.category.rawValue.lowercased().replacingOccurrences(of: " ", with: "_"))",
+                path: event.path, command: assessment.sourceIdentity, agent: event.agent,
+                op: "inspect", severity: finding.severity, ts: event.ts, action: "review",
+                sessionId: event.sessionId, traceId: event.traceId, turnId: event.turnId,
+                toolCallId: event.toolCallId, userIntent: event.userIntent,
+                modelDecision: event.modelDecision, modelReasoning: event.modelReasoning,
+                modelPrompt: event.modelPrompt, modelResponse: finding.evidence,
+                toolName: event.toolName, model: event.model, source: "external-content-security",
+                attributionConfidence: event.attributionConfidence ?? .confirmed,
+                attributionMethod: "content returned by \(event.toolName ?? "agent tool")")
+        }
+    }
+
+    private static func severityRank(_ severity: String) -> Int {
+        ["info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4][severity] ?? 0
     }
 
     static func influenceChains(events: [GuardEvent]) -> [InfluenceChain] {

@@ -221,10 +221,12 @@ final class EventStore: ObservableObject {
 
     private func rebuildViews() {
         // 首页/时间线只物化最近窗口，完整原始记录仍保留在本地事件库。
-        incidents = SecurityIncident.correlate(Array(events.prefix(400)))
+        let recent = Array(events.prefix(400))
+        let contentFindings = ExternalContentSecurity.findingEvents(events: recent)
+        incidents = SecurityIncident.correlate(recent + contentFindings)
         sessions = AgentSessionSnapshot.build(from: liveSessionEvents())
-        influenceChains = []
-        webResourceChains = []
+        influenceChains = ExternalContentSecurity.influenceChains(events: recent)
+        webResourceChains = WebResourceSecurity.build(events: recent)
         externalResources = []
     }
 
