@@ -293,3 +293,7 @@ struct AgentSessionSnapshot: Identifiable {
 func formattedAgentName(_ value: String) -> String {
     value.replacingOccurrences(of: "-", with: " ").capitalized
 }
+
+func normalizedAgentIdentity(_ value: String) -> String {
+    value.lowercased().filter(\.isLetter)
+}

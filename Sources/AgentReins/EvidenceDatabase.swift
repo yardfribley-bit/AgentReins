@@ -294,6 +294,33 @@ final class EvidenceDatabase: @unchecked Sendable {
         return Int(sqlite3_column_int64(statement, 0))
     }
 
+    func rawRecords(source: String) throws -> [RawEvidenceRecord] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+          SELECT source,stream,offset_start,offset_end,fingerprint,observed_at,payload
+          FROM raw_evidence WHERE source=? ORDER BY stream,offset_start,observed_at
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare raw read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(source, at: 1, to: statement)
+        var records: [RawEvidenceRecord] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let storedSource = text(statement, 0), let stream = text(statement, 1),
+                  let bytes = sqlite3_column_blob(statement, 6) else {
+                throw failure("decode raw read")
+            }
+            records.append(RawEvidenceRecord(source: storedSource, stream: stream,
+                offsetStart: sqlite3_column_int64(statement, 2),
+                offsetEnd: sqlite3_column_int64(statement, 3), fingerprint: text(statement, 4),
+                observedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 5)),
+                payload: Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 6)))))
+        }
+        return records
+    }
+
     func upsertAssessments(_ records: [ForensicAssessmentRecord]) throws {
         guard !records.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }

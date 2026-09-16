@@ -6,7 +6,7 @@ enum RawLogCapture {
         return UInt64(record.offsetStart) + UInt64(record.payload.distance(from: record.payload.startIndex, to: newline) + 1)
     }
 
-    static func capture(url: URL, source: String, previousOffset: UInt64?, maximumInitialBytes: UInt64 = 512 * 1_024)
+    static func capture(url: URL, source: String, previousOffset: UInt64?, maximumInitialBytes: UInt64)
         -> RawEvidenceRecord? {
         guard let handle = try? FileHandle(forReadingFrom: url),
               let end = try? handle.seekToEnd() else { return nil }

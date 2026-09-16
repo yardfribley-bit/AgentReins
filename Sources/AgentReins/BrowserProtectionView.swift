@@ -94,11 +94,11 @@ struct BrowserProtectionView: View {
                 VStack(alignment: .leading, spacing: 3) {
                     Text("Browser Protection").font(.system(size: 22, weight: .bold))
                     Text("See what Web AI receives, returns, searches, and exposes.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Text(protected ? "PROTECTED" : status.extensionInstalled ? "ACTION REQUIRED" : "NOT INSTALLED")
-                    .font(.system(size: 9, weight: .bold)).foregroundStyle(protected ? green : amber)
+                    .font(.system(size: 13, weight: .bold)).foregroundStyle(protected ? green : amber)
                     .padding(.horizontal, 10).padding(.vertical, 5)
                     .background((protected ? green : amber).opacity(0.12), in: Capsule())
                 Button("Done") { dismiss() }.buttonStyle(.bordered)
@@ -135,11 +135,11 @@ struct BrowserProtectionView: View {
                                         Image(systemName: setupPrepared ? "checkmark.circle.fill" : "shippingbox.fill")
                                         VStack(alignment: .leading, spacing: 2) {
                                             Text(setupPrepared ? "Extension saved to your Desktop" : "Save Extension to Desktop")
-                                                .font(.system(size: 12, weight: .bold))
+                                                .font(.system(size: 14, weight: .bold))
                                             Text(setupPrepared
                                                  ? "In Chrome, choose Load unpacked and select AgentReins Browser Extension."
                                                  : "Creates a visible folder you can select in Chrome — no paths or source checkout.")
-                                                .font(.system(size: 9)).opacity(0.82)
+                                                .font(.system(size: 13)).opacity(0.82)
                                         }
                                         Spacer()
                                         Image(systemName: "arrow.right")
@@ -151,7 +151,7 @@ struct BrowserProtectionView: View {
                                 .background(cyan.opacity(0.78), in: RoundedRectangle(cornerRadius: 9))
                                 if let setupError {
                                     Label(setupError, systemImage: "exclamationmark.triangle.fill")
-                                        .font(.system(size: 9)).foregroundStyle(amber)
+                                        .font(.system(size: 13)).foregroundStyle(amber)
                                 }
 
                                 setupRow(1, "Open Chrome extensions", "Enable Developer mode in the top-right corner.") {
@@ -172,7 +172,7 @@ struct BrowserProtectionView: View {
                         section("PROTECTION ACTIVE", "Browser evidence remains on this Mac and is linked to the corresponding Web AI turn.") {
                             Label("Prompts, rendered responses, visible reasoning/search progress, URLs, timestamps, and upload hashes are being observed.",
                                   systemImage: "checkmark.circle.fill")
-                                .font(.system(size: 11)).foregroundStyle(green)
+                                .font(.system(size: 13)).foregroundStyle(green)
                         }
                     }
 
@@ -198,9 +198,9 @@ struct BrowserProtectionView: View {
 
     private func statusCell(_ title: String, _ okay: Bool, _ detail: String) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+            Text(title).font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
             Label(detail, systemImage: okay ? "checkmark.circle.fill" : "exclamationmark.circle.fill")
-                .font(.system(size: 10, weight: .semibold)).foregroundStyle(okay ? green : amber).lineLimit(1)
+                .font(.system(size: 12, weight: .semibold)).foregroundStyle(okay ? green : amber).lineLimit(1)
         }.padding(12).frame(maxWidth: .infinity, alignment: .leading)
             .background(raised, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(border))
@@ -208,8 +208,8 @@ struct BrowserProtectionView: View {
 
     private func section<Content: View>(_ title: String, _ subtitle: String, @ViewBuilder content: () -> Content) -> some View {
         VStack(alignment: .leading, spacing: 11) {
-            Text(title).font(.system(size: 10, weight: .bold)).foregroundStyle(cyan)
-            Text(subtitle).font(.system(size: 10)).foregroundStyle(.secondary)
+            Text(title).font(.system(size: 12, weight: .bold)).foregroundStyle(cyan)
+            Text(subtitle).font(.system(size: 12)).foregroundStyle(.secondary)
             content()
         }.padding(15).frame(maxWidth: .infinity, alignment: .leading)
             .background(raised.opacity(0.7), in: RoundedRectangle(cornerRadius: 11))
@@ -218,19 +218,19 @@ struct BrowserProtectionView: View {
 
     private func site(_ name: String, _ host: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
-            Text(name).font(.system(size: 11, weight: .semibold))
-            Text(host).font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
+            Text(name).font(.system(size: 13, weight: .semibold))
+            Text(host).font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
         }.padding(10).frame(maxWidth: .infinity, alignment: .leading)
             .background(panel, in: RoundedRectangle(cornerRadius: 8))
     }
 
     private func setupRow(_ number: Int, _ title: String, _ detail: String, action: @escaping () -> Void) -> some View {
         HStack(spacing: 11) {
-            Text("\(number)").font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+            Text("\(number)").font(.system(size: 13, weight: .bold)).foregroundStyle(cyan)
                 .frame(width: 26, height: 26).background(cyan.opacity(0.12), in: Circle())
             VStack(alignment: .leading, spacing: 2) {
-                Text(title).font(.system(size: 11, weight: .semibold))
-                Text(detail).font(.system(size: 9)).foregroundStyle(.secondary)
+                Text(title).font(.system(size: 13, weight: .semibold))
+                Text(detail).font(.system(size: 13)).foregroundStyle(.secondary)
             }
             Spacer()
             Button(number == 1 ? "Open" : number == 2 ? "Show folder" : "Test") { action() }
@@ -241,8 +241,8 @@ struct BrowserProtectionView: View {
     private func boundary(_ title: String, _ detail: String, _ color: Color) -> some View {
         HStack(alignment: .top, spacing: 8) {
             Circle().fill(color).frame(width: 7, height: 7).padding(.top, 4)
-            Text(title).font(.system(size: 10, weight: .semibold)) +
-            Text(" — \(detail)").font(.system(size: 10)).foregroundColor(.secondary)
+            Text(title).font(.system(size: 12, weight: .semibold)) +
+            Text(" — \(detail)").font(.system(size: 12)).foregroundColor(.secondary)
         }
     }
 

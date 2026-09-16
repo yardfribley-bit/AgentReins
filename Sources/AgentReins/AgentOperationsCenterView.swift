@@ -103,7 +103,7 @@ struct AgentOperationsCenterView: View {
         return normalizedAgentKey(agent) == normalizedAgentKey(selectedAgent)
     }
     private func normalizedAgentKey(_ value: String) -> String {
-        value.lowercased().filter(\.isLetter)
+        normalizedAgentIdentity(value)
     }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted { left, right in
@@ -196,9 +196,10 @@ struct AgentOperationsCenterView: View {
 
     private func selectInitialAgentIfNeeded() {
         guard !didUserSelectAgent else { return }
-        let running = Set(discoveredAgents.filter { $0.presence == .running }.map { $0.product.lowercased() })
+        let running = Set(discoveredAgents.filter { $0.presence == .running }
+            .map { normalizedAgentIdentity($0.product) })
         guard !running.isEmpty else { return }
-        if let latest = sessions.filter({ running.contains($0.agent.lowercased()) })
+        if let latest = sessions.filter({ running.contains(normalizedAgentIdentity($0.agent)) })
             .max(by: { $0.lastActivityAt < $1.lastActivityAt }) {
             let next = latest.agentDisplayName
             if selectedAgent.caseInsensitiveCompare(next) != .orderedSame {
@@ -240,9 +241,9 @@ struct AgentOperationsCenterView: View {
         GeometryReader { geometry in
             let compactLayout = geometry.size.width < 1420
             VStack(spacing: 0) {
-                header
+                header(compactLayout: compactLayout)
                 HStack(spacing: 0) {
-                    fleet.frame(width: compactLayout ? 232 : 248)
+                    fleet.frame(width: compactLayout ? 260 : 278)
                     Rectangle().fill(border).frame(width: 1)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
@@ -257,7 +258,7 @@ struct AgentOperationsCenterView: View {
                         inspector.frame(width: 318)
                     }
                 }
-                .frame(height: max(0, geometry.size.height - 96))
+                .frame(height: max(0, geometry.size.height - 110))
                 .clipped()
                 statusBar
             }
@@ -299,26 +300,28 @@ struct AgentOperationsCenterView: View {
 
     // MARK: - Chrome
 
-    private var header: some View {
+    private func header(compactLayout: Bool) -> some View {
         HStack(spacing: 14) {
             Image(systemName: "shield.lefthalf.filled").font(.system(size: 26)).foregroundStyle(cyan)
             VStack(alignment: .leading, spacing: 2) {
                 Text("AgentReins").font(.system(size: 20, weight: .bold))
-                Text("See what your AI agents are doing — and whether it is safe.")
-                    .font(.system(size: 11)).foregroundStyle(cyan.opacity(0.9)).lineLimit(1)
+                if !compactLayout {
+                    Text("See what your AI agents are doing — and whether it is safe.")
+                        .font(.system(size: 13)).foregroundStyle(cyan.opacity(0.9)).lineLimit(1)
+                }
             }
-            Spacer(minLength: 18)
+            Spacer(minLength: compactLayout ? 10 : 18)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField("Search agents, processes, or domains", text: $query)
+                TextField(compactLayout ? "Search…" : "Search agents, processes, or domains", text: $query)
                     .textFieldStyle(.plain)
-                    .font(.system(size: 12))
+                    .font(.system(size: 14))
             }
-            .padding(.horizontal, 12).frame(width: 280, height: 34)
+            .padding(.horizontal, 12).frame(width: compactLayout ? 230 : 280, height: 40)
             .background(raised, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
             Label(observing ? "MONITORING LIVE" : "PAUSED", systemImage: "circle.fill")
-                .font(.system(size: 9, weight: .bold)).foregroundStyle(observing ? green : amber)
+                .font(.system(size: 13, weight: .bold)).foregroundStyle(observing ? green : amber)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background((observing ? green : amber).opacity(0.12), in: Capsule())
             Button { showingHistory = true } label: {
@@ -329,25 +332,25 @@ struct AgentOperationsCenterView: View {
                     .background(cyan.opacity(0.12), in: Capsule())
             }.buttonStyle(.plain)
             Button { showingAnalysisModel = true } label: {
-                Label(semanticAnalyzer.configured ? "ANALYSIS READY…" : "ANALYSIS MODEL…",
+                Label(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL",
                       systemImage: "brain.head.profile")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(semanticAnalyzer.configured ? green : cyan)
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background((semanticAnalyzer.configured ? green : cyan).opacity(0.12), in: Capsule())
             }.buttonStyle(PillActionButtonStyle())
                 .help("Configure the optional external analysis model")
             Button { showingBrowserProtection = true } label: {
-                Label(webAgentSight.connected ? "WEB PROTECTED…" : "PROTECT WEB AI…",
+                Label(webAgentSight.connected ? "WEB PROTECTED" : "PROTECT WEB AI",
                       systemImage: webAgentSight.connected ? "checkmark.shield.fill" : "shield.lefthalf.filled")
-                    .font(.system(size: 9, weight: .bold))
+                    .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(webAgentSight.connected ? green : cyan)
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background((webAgentSight.connected ? green : cyan).opacity(0.12), in: Capsule())
             }.buttonStyle(PillActionButtonStyle())
                 .help("Open browser protection setup")
         }
-        .padding(.horizontal, 18).frame(height: 64).background(panel)
+        .padding(.horizontal, 18).frame(height: 72).background(panel)
         .overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
         .fixedSize(horizontal: false, vertical: true)
         .layoutPriority(10)
@@ -405,18 +408,18 @@ struct AgentOperationsCenterView: View {
                 Circle().fill(live ? green : Color.gray.opacity(0.55)).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(name).font(.system(size: 13, weight: .semibold))
+                        Text(name).font(.system(size: 15, weight: .semibold))
                         Text(live ? "Running" : "Idle")
-                            .font(.system(size: 8, weight: .bold))
+                            .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(live ? green : .secondary)
                             .padding(.horizontal, 6).padding(.vertical, 2)
                             .background((live ? green : Color.gray).opacity(0.12), in: Capsule())
                     }
-                    Text(title).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(1)
-                    Text(detail).font(.system(size: 9)).foregroundStyle(.tertiary).lineLimit(1)
+                    Text(title).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Text(detail).font(.system(size: 13)).foregroundStyle(.tertiary).lineLimit(1)
                 }
                 Spacer()
-                Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
+                Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
@@ -431,19 +434,19 @@ struct AgentOperationsCenterView: View {
                     Text(activeSession?.agentDisplayName ?? "Waiting for agent activity")
                         .font(.system(size: 20, weight: .bold))
                     if activeSession != nil {
-                        Text("Running").font(.system(size: 9, weight: .bold)).foregroundStyle(green)
+                        Text("Running").font(.system(size: 13, weight: .bold)).foregroundStyle(green)
                             .padding(.horizontal, 8).padding(.vertical, 3)
                             .background(green.opacity(0.12), in: Capsule())
                     }
                     if let pid = rootPID {
-                        Text("PID \(pid)").font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        Text("PID \(pid)").font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
                     }
                     if let model = activeSession?.model {
                         Text(model).badge(.blue)
                     }
                 }
                 Text(liveHeadline)
-                    .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                    .font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
             if let session = activeSession {
@@ -462,7 +465,7 @@ struct AgentOperationsCenterView: View {
                         if tab != .memory { selectedMemoryCommitID = nil }
                     } label: {
                         Text(tab.rawValue)
-                            .font(.system(size: 11, weight: centerTab == tab ? .bold : .medium))
+                            .font(.system(size: 13, weight: centerTab == tab ? .bold : .medium))
                             .foregroundStyle(centerTab == tab ? cyan : .secondary)
                             .padding(.horizontal, 12).padding(.vertical, 8)
                     }.buttonStyle(TabButtonStyle(selected: centerTab == tab))
@@ -499,18 +502,18 @@ struct AgentOperationsCenterView: View {
                         HStack(spacing: 9) {
                             Image(systemName: fileOperationIcon(event.op)).foregroundStyle(fileOperationColor(event))
                             VStack(alignment: .leading, spacing: 2) {
-                                Text(fileActivitySentence(event)).font(.system(size: 11, weight: .semibold))
+                                Text(fileActivitySentence(event)).font(.system(size: 13, weight: .semibold))
                                 Text(fileChangeDescription(event))
-                                    .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(2)
+                                    .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(2)
                                 Text("\(event.toolName ?? "AgentReins observation") · \(fileResultLabel(event)) · \(clock(event.startedAt ?? event.ts))")
-                                    .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
+                                    .font(.system(size: 12)).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             Spacer()
                             VStack(alignment: .trailing, spacing: 2) {
                                 Text((event.attributionConfidence?.rawValue ?? "unknown").uppercased())
-                                    .font(.system(size: 7, weight: .bold))
+                                    .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(confidenceColor(event.attributionConfidence))
-                                Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                         }.node(selectedEvent?.id == event.id)
                     }.buttonStyle(HoverCardButtonStyle())
@@ -526,10 +529,10 @@ struct AgentOperationsCenterView: View {
                     HStack(alignment: .top, spacing: 8) {
                         Image(systemName: "checkmark.shield").foregroundStyle(amber)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(finding.title).font(.system(size: 11, weight: .semibold))
+                            Text(finding.title).font(.system(size: 13, weight: .semibold))
                             Text("\(finding.ruleId) · line \(finding.line)")
-                                .font(.system(size: 9)).foregroundStyle(.secondary)
-                            Text(finding.evidence).font(.system(size: 9, design: .monospaced))
+                                .font(.system(size: 13)).foregroundStyle(.secondary)
+                            Text(finding.evidence).font(.system(size: 13, design: .monospaced))
                                 .foregroundStyle(.secondary).lineLimit(3)
                         }
                         Spacer()
@@ -547,12 +550,12 @@ struct AgentOperationsCenterView: View {
                     Button { selectedEvent = related; selectedProcess = nil; selectedProcessGroup = [] } label: { HStack(spacing: 8) {
                         Image(systemName: "terminal").foregroundStyle(cyan)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(call.friendlyName).font(.system(size: 11, weight: .semibold))
+                            Text(call.friendlyName).font(.system(size: 13, weight: .semibold))
                             Text(String((call.arguments ?? call.name).prefix(120)))
-                                .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+                                .font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
                         }
                         Spacer()
-                        Text(call.friendlyStatus).font(.system(size: 9, weight: .bold))
+                        Text(call.friendlyStatus).font(.system(size: 13, weight: .bold))
                             .foregroundStyle(call.completedAt == nil ? amber : green)
                     }.node(selectedEvent?.id == related?.id && related != nil) }
                     .buttonStyle(HoverCardButtonStyle())
@@ -589,21 +592,21 @@ struct AgentOperationsCenterView: View {
                                 .background((commit.risk == "high" ? amber : cyan).opacity(0.10),
                                             in: RoundedRectangle(cornerRadius: 7))
                             VStack(alignment: .leading, spacing: 3) {
-                                Text(commit.summary).font(.system(size: 11, weight: .semibold)).lineLimit(1)
+                                Text(commit.summary).font(.system(size: 13, weight: .semibold)).lineLimit(1)
                                 Text(memoryChangePreview(commit))
-                                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+                                    .font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
                                 Text("\(formattedAgentName(commit.agent)) · Turn \(commit.turnId) · \(clock(commit.observedAt))")
-                                    .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
+                                    .font(.system(size: 12)).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             Spacer(minLength: 8)
                             VStack(alignment: .trailing, spacing: 3) {
                                 Text(commit.risk == "high" ? "REVIEW" : "OBSERVED")
-                                    .font(.system(size: 7, weight: .bold))
+                                    .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(commit.risk == "high" ? amber : cyan)
                                 Text(commit.confidence.rawValue.uppercased())
-                                    .font(.system(size: 7, weight: .bold))
+                                    .font(.system(size: 12, weight: .bold))
                                     .foregroundStyle(confidenceColor(commit.confidence))
-                                Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
+                                Image(systemName: "chevron.right").font(.system(size: 12)).foregroundStyle(.secondary)
                             }
                         }.node(selectedMemoryCommitID == commit.commitId)
                     }.buttonStyle(HoverCardButtonStyle())
@@ -680,9 +683,9 @@ struct AgentOperationsCenterView: View {
             HStack(spacing: 8) {
                 Image(systemName: "point.3.connected.trianglepath.dotted").foregroundStyle(.blue)
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(sourceName) ↝ \(targetName)").font(.system(size: 9, weight: .semibold))
+                    Text("\(sourceName) ↝ \(targetName)").font(.system(size: 13, weight: .semibold))
                     Text("\(edge.kind.rawValue) · \(edge.confidence.rawValue) · no PPID relationship claimed")
-                        .font(.system(size: 7.5)).foregroundStyle(.secondary).lineLimit(1)
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                 }
                 Spacer()
             }.padding(.vertical, 5)
@@ -789,7 +792,7 @@ struct AgentOperationsCenterView: View {
         var positions: [String: CGPoint] = [:]
         for group in groups {
             let lane = group.lane
-            let y = CGFloat(indexes[lane]) * 76 + 42
+            let y = CGFloat(indexes[lane]) * 92 + 50
             positions[group.id] = CGPoint(x: columnWidth * (CGFloat(lane) + 0.5), y: y)
             indexes[lane] += 1
         }
@@ -802,7 +805,7 @@ struct AgentOperationsCenterView: View {
         let edges = presentation.edges
         let activePIDs = focusedProcessIDs
         let laneCounts = Dictionary(grouping: groups, by: \.lane).values.map(\.count)
-        let requiredHeight = max(height, CGFloat(laneCounts.max() ?? 1) * 76 + 18)
+        let requiredHeight = max(height, CGFloat(laneCounts.max() ?? 1) * 92 + 18)
         return GeometryReader { geometry in
             let positions = graphPositions(groups, size: geometry.size)
             ZStack {
@@ -811,15 +814,15 @@ struct AgentOperationsCenterView: View {
                         guard let start = positions[edge.source], let end = positions[edge.target] else { continue }
                         var path = Path()
                         if abs(start.x - end.x) < 2 {
-                            let from = CGPoint(x: start.x, y: start.y + 31)
-                            let destination = CGPoint(x: end.x, y: end.y - 31)
+                            let from = CGPoint(x: start.x, y: start.y + 39)
+                            let destination = CGPoint(x: end.x, y: end.y - 39)
                             path.move(to: from)
                             path.addCurve(to: destination,
                                 control1: CGPoint(x: from.x + 24, y: from.y + 14),
                                 control2: CGPoint(x: destination.x + 24, y: destination.y - 14))
                         } else {
-                            let from = CGPoint(x: start.x + (end.x > start.x ? 68 : -68), y: start.y)
-                            let destination = CGPoint(x: end.x + (end.x > start.x ? -68 : 68), y: end.y)
+                            let from = CGPoint(x: start.x + (end.x > start.x ? 80 : -80), y: start.y)
+                            let destination = CGPoint(x: end.x + (end.x > start.x ? -80 : 80), y: end.y)
                             path.move(to: from)
                             let middle = (from.x + destination.x) / 2
                             path.addCurve(to: destination,
@@ -834,7 +837,7 @@ struct AgentOperationsCenterView: View {
                 }
                 ForEach(groups) { group in
                     graphNode(group, focusedProcessIDs: activePIDs)
-                        .frame(width: 136, height: 62)
+                        .frame(width: 160, height: 78)
                         .position(positions[group.id] ?? .zero)
                 }
             }
@@ -856,13 +859,13 @@ struct AgentOperationsCenterView: View {
             VStack(alignment: .leading, spacing: 4) {
                 HStack(spacing: 5) {
                     Image(systemName: info.icon).foregroundStyle(tint)
-                    Text(info.displayName).font(.system(size: 9, weight: .bold)).lineLimit(1)
+                    Text(info.displayName).font(.system(size: 13, weight: .bold)).lineLimit(1)
                     Spacer(minLength: 2)
                     if group.processes.count > 1 { Text("×\(group.processes.count)").mono() }
                 }
-                Text(info.responsibility).font(.system(size: 7.5)).foregroundStyle(.secondary).lineLimit(2)
+                Text(info.responsibility).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                 HStack {
-                    Text(info.capability.rawValue.uppercased()).font(.system(size: 6.5, weight: .bold)).foregroundStyle(tint)
+                    Text(info.capability.rawValue.uppercased()).font(.system(size: 12, weight: .bold)).foregroundStyle(tint)
                     Spacer()
                     Circle().fill(active ? green : confidenceColor(info.confidence)).frame(width: active ? 8 : 6, height: active ? 8 : 6)
                 }
@@ -909,29 +912,29 @@ struct AgentOperationsCenterView: View {
                                 path.addLine(to: CGPoint(x: x, y: size.height))
                             }
                             context.stroke(path, with: .color(Color.gray.opacity(0.65)), lineWidth: 1)
-                        }.frame(width: 17, height: 55)
+                        }.frame(width: 17, height: 65)
                     }
                 }
                 HStack(spacing: 8) {
                     Image(systemName: info.icon)
-                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(tint)
-                        .frame(width: 28, height: 28)
+                        .font(.system(size: 13, weight: .semibold)).foregroundStyle(tint)
+                        .frame(width: 32, height: 32)
                         .background(tint.opacity(0.13), in: RoundedRectangle(cornerRadius: 6))
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 5) {
                             Text(info.displayName + (group.processes.count > 1 ? " ×\(group.processes.count)" : ""))
-                                .font(.system(size: 10, weight: .bold)).lineLimit(1)
+                                .font(.system(size: 12, weight: .bold)).lineLimit(1)
                             Spacer(minLength: 2)
                             Text(group.processes.count > 1 ? "\(group.processes.count) PIDS" : "PID \(node.process.pid)").mono()
                         }
-                        Text(info.responsibility).font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
+                        Text(info.responsibility).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                         Text("\(info.capability.rawValue.uppercased()) · \(info.confidence.rawValue.uppercased())")
-                            .font(.system(size: 6.5, weight: .bold)).foregroundStyle(tint)
+                            .font(.system(size: 12, weight: .bold)).foregroundStyle(tint)
                     }
                     Circle().fill(active ? green : Color.gray.opacity(0.7)).frame(width: 7, height: 7)
                 }
                 .padding(.horizontal, 9).padding(.vertical, 7)
-                .frame(maxWidth: .infinity, minHeight: 47, alignment: .leading)
+                .frame(maxWidth: .infinity, minHeight: 58, alignment: .leading)
                 .background(selected ? tint.opacity(0.16) : raised, in: RoundedRectangle(cornerRadius: 7))
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? tint : border))
             }
@@ -1017,30 +1020,30 @@ struct AgentOperationsCenterView: View {
                             }
                             context.stroke(path, with: .color(cyan.opacity(0.55)), lineWidth: 1.5)
                         }
-                        .frame(width: 24, height: node.depth == 0 ? 74 : 64)
+                        .frame(width: 24, height: node.depth == 0 ? 86 : 74)
                     }
                 }
                 HStack(spacing: 9) {
                     Image(systemName: info.icon)
-                        .font(.system(size: node.depth == 0 ? 16 : 12, weight: .semibold))
+                        .font(.system(size: node.depth == 0 ? 18 : 14, weight: .semibold))
                         .foregroundStyle(tint)
-                        .frame(width: node.depth == 0 ? 38 : 32, height: node.depth == 0 ? 38 : 32)
+                        .frame(width: node.depth == 0 ? 42 : 36, height: node.depth == 0 ? 42 : 36)
                         .background(tint.opacity(0.14), in: RoundedRectangle(cornerRadius: 9))
                     VStack(alignment: .leading, spacing: 2) {
                         HStack(spacing: 7) {
-                            Text(info.displayName).font(.system(size: node.depth == 0 ? 13 : 11, weight: .bold)).lineLimit(1)
+                            Text(info.displayName).font(.system(size: node.depth == 0 ? 15 : 13, weight: .bold)).lineLimit(1)
                             Text(info.capability.rawValue.uppercased())
-                                .font(.system(size: 7, weight: .bold))
+                                .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(tint)
                                 .padding(.horizontal, 5).padding(.vertical, 2)
                                 .background(tint.opacity(0.12), in: Capsule())
                         }
                         Text(info.responsibility)
-                            .font(.system(size: 9)).foregroundStyle(.secondary).lineLimit(1)
+                            .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
                         HStack(spacing: 5) {
                             Text("PID \(node.process.pid)").mono()
                             Text(info.confidence.rawValue.uppercased())
-                                .font(.system(size: 7, weight: .bold))
+                                .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(confidenceColor(info.confidence))
                         }
                     }
@@ -1048,12 +1051,12 @@ struct AgentOperationsCenterView: View {
                     VStack(spacing: 4) {
                         Circle().fill(active ? green : tint).frame(width: active ? 10 : 7, height: active ? 10 : 7)
                             .shadow(color: active ? green.opacity(0.9) : .clear, radius: 5)
-                        Text(active ? "ACTIVE" : "LIVE").font(.system(size: 6, weight: .bold))
+                        Text(active ? "ACTIVE" : "LIVE").font(.system(size: 12, weight: .bold))
                             .foregroundStyle(active ? green : .secondary)
                     }
                 }
                 .padding(.horizontal, 12).padding(.vertical, 9)
-                .frame(minHeight: node.depth == 0 ? 68 : 58)
+                .frame(minHeight: node.depth == 0 ? 80 : 68)
                 .background(
                     LinearGradient(colors: [selected ? tint.opacity(0.25) : raised,
                                             panel.opacity(0.92)], startPoint: .topLeading, endPoint: .bottomTrailing),
@@ -1073,7 +1076,7 @@ struct AgentOperationsCenterView: View {
                 HStack(spacing: 7) {
                     Circle().fill(currentStage == nil ? Color.gray : green).frame(width: 7, height: 7)
                     Text(liveTaskStateHeadline(currentStage: currentStage))
-                        .font(.system(size: 8, weight: .bold))
+                        .font(.system(size: 12, weight: .bold))
                         .foregroundStyle(liveTaskStateColor(currentStage: currentStage))
                     Spacer()
                     if !followingLive {
@@ -1083,7 +1086,7 @@ struct AgentOperationsCenterView: View {
                             selectedEvent = currentStage?.event
                             selectedProcessGroup = []
                         }.buttonStyle(TextActionButtonStyle())
-                            .font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
+                            .font(.system(size: 12, weight: .semibold)).foregroundStyle(cyan)
                     }
                 }.padding(.bottom, 10)
                 if stages.isEmpty {
@@ -1125,16 +1128,16 @@ struct AgentOperationsCenterView: View {
                 .frame(width: 10)
                 VStack(alignment: .leading, spacing: 4) {
                     HStack {
-                        Text(stage.title).font(.system(size: 11, weight: .semibold))
+                        Text(stage.title).font(.system(size: 13, weight: .semibold))
                         Spacer()
                         Text(stage.status.label.uppercased())
-                            .font(.system(size: 6.5, weight: .bold)).foregroundStyle(stageColor)
+                            .font(.system(size: 12, weight: .bold)).foregroundStyle(stageColor)
                         if let ts = stage.timestamp {
                             Text(clock(ts)).mono()
                         }
                     }
                     Text(stage.detail)
-                        .font(.system(size: stage.monospace ? 9 : 10,
+                        .font(.system(size: 13,
                                       design: stage.monospace ? .monospaced : .default))
                         .foregroundStyle(stage.status == .pending ? Color.gray : Color.secondary)
                         .lineLimit(3)
@@ -1174,19 +1177,19 @@ struct AgentOperationsCenterView: View {
                                                     in: RoundedRectangle(cornerRadius: 6))
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
-                                            .font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
+                                            .font(.system(size: 13, weight: .semibold, design: .monospaced)).lineLimit(1)
                                         Text("\(formattedAgentName(session.agent)) · Remote SSH session")
-                                            .font(.system(size: 8)).foregroundStyle(.secondary)
+                                            .font(.system(size: 12)).foregroundStyle(.secondary)
                                     }
                                     Spacer()
-                                    Text(session.risk.uppercased()).font(.system(size: 6.5, weight: .bold))
+                                    Text(session.risk.uppercased()).font(.system(size: 12, weight: .bold))
                                         .foregroundStyle(session.risk == "review required" ? amber : cyan)
                                 }
                                 HStack(spacing: 10) {
                                     Text("Auth: \(session.authentication)")
                                     Text("Transfers: \(session.transfers.count)")
                                     Text("Commands: \(session.remoteCommandCount)")
-                                }.font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
+                                }.font(.system(size: 12)).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             .padding(.horizontal, 9).padding(.vertical, 8)
                             .node(selectedEvent?.id == session.sourceEvent.id)
@@ -1216,20 +1219,20 @@ struct AgentOperationsCenterView: View {
                                     .background((assessment.needsAttention ? amber : cyan).opacity(0.12),
                                                 in: RoundedRectangle(cornerRadius: 6))
                                 VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.host).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
+                                    Text(item.host).font(.system(size: 13, weight: .semibold, design: .monospaced)).lineLimit(1)
                                     Text(networkPurpose(item.event, assessment: assessment))
-                                        .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
+                                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                                 }
                             }
                             Spacer(minLength: 4)
                             if let event = item.event {
                                 VStack(alignment: .trailing, spacing: 2) {
                                     Text(isCandidate ? "NETWORK CANDIDATE" : assessment.kind.rawValue.uppercased())
-                                        .font(.system(size: 6.5, weight: .bold))
+                                        .font(.system(size: 12, weight: .bold))
                                         .foregroundStyle(isCandidate ? Color.secondary : (assessment.needsAttention ? amber : cyan))
-                                    Text(networkActor(event)).font(.system(size: 7)).foregroundStyle(.secondary)
+                                    Text(networkActor(event)).font(.system(size: 12)).foregroundStyle(.secondary)
                                     Text(clock(event.startedAt ?? event.ts))
-                                        .font(.system(size: 7, design: .monospaced)).foregroundStyle(.tertiary)
+                                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
                                 }
                             }
                         }
@@ -1273,7 +1276,7 @@ struct AgentOperationsCenterView: View {
     private func legendMark(_ color: Color, _ text: String) -> some View {
         HStack(spacing: 6) {
             Capsule().fill(color).frame(width: 14, height: 2)
-            Text(text).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
         }
     }
 
@@ -1329,7 +1332,7 @@ struct AgentOperationsCenterView: View {
             if !scopedIncidents.isEmpty {
                 Button { onIncident(scopedIncidents[0]) } label: {
                     Text("Open top finding")
-                        .font(.system(size: 10, weight: .semibold))
+                        .font(.system(size: 12, weight: .semibold))
                         .foregroundStyle(amber)
                 }.buttonStyle(TextActionButtonStyle()).padding(.top, 2)
             }
@@ -1339,7 +1342,7 @@ struct AgentOperationsCenterView: View {
     private func memoryCommitDetail(_ commit: MemoryCommitEvidence) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text("MEMORY COMMIT EVIDENCE").micro(cyan)
-            Text("What will survive this task").font(.system(size: 15, weight: .bold))
+            Text("What will survive this task").font(.system(size: 17, weight: .bold))
             HStack(spacing: 7) {
                 labelChip(commit.changeKind.rawValue.uppercased(), color: cyan)
                 labelChip(commit.confidence.rawValue.uppercased(), color: confidenceColor(commit.confidence))
@@ -1357,13 +1360,13 @@ struct AgentOperationsCenterView: View {
             Divider().overlay(border)
             Text("CONTENT CHANGE").micro(.secondary)
             if let diff = commit.contentDiff, !diff.isEmpty {
-                Text(memoryDisplayDiff(diff)).font(.system(size: 8.5, design: .monospaced))
+                Text(memoryDisplayDiff(diff)).font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(.secondary).textSelection(.enabled)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(8).background(canvas.opacity(0.7), in: RoundedRectangle(cornerRadius: 7))
             } else {
                 Text("Content-level before/after evidence was not captured.")
-                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
             }
             field("Before hash", commit.beforeHash ?? "Unavailable")
             field("After hash", commit.afterHash ?? "Unavailable")
@@ -1372,11 +1375,11 @@ struct AgentOperationsCenterView: View {
             Text("SECURITY ASSESSMENT").micro(.secondary)
             if commit.riskReasons.isEmpty {
                 Text("No high-signal memory risk was detected. This is an observation, not a safety guarantee.")
-                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
             } else {
                 ForEach(commit.riskReasons, id: \.self) { reason in
                     Label(reason, systemImage: "exclamationmark.triangle.fill")
-                        .font(.system(size: 9)).foregroundStyle(amber)
+                        .font(.system(size: 13)).foregroundStyle(amber)
                 }
             }
             field("Evidence records", "\(commit.evidenceEventIds.count)")
@@ -1399,12 +1402,12 @@ struct AgentOperationsCenterView: View {
                     .frame(width: 30, height: 30)
                     .background(cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text(info.displayName).font(.system(size: 15, weight: .bold))
+                    Text(info.displayName).font(.system(size: 17, weight: .bold))
                     Text("PID \(p.pid)").mono()
                 }
             }
             Text(info.responsibility)
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             labelChip("\(info.capability.rawValue) · \(info.confidence.rawValue.capitalized)",
                       color: confidenceColor(info.confidence))
             if !info.securitySurface.isEmpty {
@@ -1412,16 +1415,16 @@ struct AgentOperationsCenterView: View {
                     Text("SECURITY SURFACE").micro(.secondary)
                     ForEach(info.securitySurface, id: \.self) { item in
                         Label(item, systemImage: "shield.lefthalf.filled")
-                            .font(.system(size: 9)).foregroundStyle(.secondary)
+                            .font(.system(size: 13)).foregroundStyle(.secondary)
                     }
                 }
             }
             if let latest = processEvents.first {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("LATEST OBSERVED ACTIVITY").micro(.secondary)
-                    Text(eventTitle(latest)).font(.system(size: 10, weight: .semibold))
+                    Text(eventTitle(latest)).font(.system(size: 12, weight: .semibold))
                     Text("\(latest.kind) / \(latest.op) · \(clock(latest.ts))")
-                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
                 }
             }
             VStack(alignment: .leading, spacing: 8) {
@@ -1453,12 +1456,12 @@ struct AgentOperationsCenterView: View {
                     .frame(width: 30, height: 30)
                     .background(cyan.opacity(0.12), in: RoundedRectangle(cornerRadius: 7))
                 VStack(alignment: .leading, spacing: 2) {
-                    Text("\(info.displayName) ×\(group.count)").font(.system(size: 15, weight: .bold))
+                    Text("\(info.displayName) ×\(group.count)").font(.system(size: 17, weight: .bold))
                     Text("\(group.count) observed leaf processes").mono()
                 }
             }
             Text(info.responsibility)
-                .font(.system(size: 11)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
+                .font(.system(size: 13)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             labelChip("\(info.capability.rawValue) · \(info.confidence.rawValue.capitalized)",
                       color: confidenceColor(info.confidence))
             VStack(alignment: .leading, spacing: 8) {
@@ -1479,12 +1482,12 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("SELECT A NODE").micro(.secondary)
             Text("Click a process, task stage, or external service to inspect its responsibility and complete evidence.")
-                .font(.system(size: 11)).foregroundStyle(.secondary)
-            Text("Collector coverage").font(.system(size: 12, weight: .semibold)).padding(.top, 8)
+                .font(.system(size: 13)).foregroundStyle(.secondary)
+            Text("Collector coverage").font(.system(size: 14, weight: .semibold)).padding(.top, 8)
             ForEach(health, id: \.source) { h in
                 HStack {
                     Circle().fill(h.state == .healthy ? green : amber).frame(width: 6, height: 6)
-                    Text(h.source).font(.system(size: 10))
+                    Text(h.source).font(.system(size: 12))
                     Spacer()
                     Text(h.state.rawValue).mono()
                 }
@@ -1499,7 +1502,7 @@ struct AgentOperationsCenterView: View {
                 Divider().overlay(border)
             }
             Text("NODE DETAILS").micro(.secondary)
-            Text(eventTitle(e)).font(.headline)
+            Text(eventTitle(e)).font(.system(size: 15, weight: .semibold))
             field("Observed", e.ts.formatted(date: .abbreviated, time: .standard))
             if let started = e.startedAt { field("Started", started.formatted(date: .abbreviated, time: .standard)) }
             if let ended = e.endedAt { field("Ended", ended.formatted(date: .abbreviated, time: .standard)) }
@@ -1526,7 +1529,7 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 9) {
             Text("SSH SESSION SECURITY").micro(cyan)
             Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
-                .font(.system(size: 14, weight: .bold, design: .monospaced))
+                .font(.system(size: 16, weight: .bold, design: .monospaced))
             labelChip(session.risk.uppercased(), color: session.risk == "review required" ? amber : cyan)
             field("Agent", formattedAgentName(session.agent))
             field("Authentication", session.authentication)
@@ -1545,11 +1548,11 @@ struct AgentOperationsCenterView: View {
             ForEach(session.findings, id: \.self) { finding in
                 HStack(alignment: .top, spacing: 6) {
                     Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
-                    Text(finding).font(.system(size: 8.5)).foregroundStyle(.secondary)
+                    Text(finding).font(.system(size: 12)).foregroundStyle(.secondary)
                 }
             }
             Text("SSH payloads are encrypted. Commands, credentials, and transfers shown here come from local Agent/tool evidence; the socket proves the connection, not its plaintext contents.")
-                .font(.system(size: 8)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
+                .font(.system(size: 12)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -1574,7 +1577,7 @@ struct AgentOperationsCenterView: View {
         return VStack(alignment: .leading, spacing: 12) {
             Text("MODEL REQUEST FORENSICS").micro(cyan)
             Text("What was sent, where it went, and what was reported")
-                .font(.system(size: 15, weight: .bold))
+                .font(.system(size: 17, weight: .bold))
             HStack(spacing: 7) {
                 contextMetric("REPORTED MODEL", activeTurn?.modelNames ?? "Not captured")
                 contextMetric("ROUTE", routeStatus)
@@ -1589,12 +1592,12 @@ struct AgentOperationsCenterView: View {
                 Circle().fill(routeColor).frame(width: 7, height: 7)
                 Text(knownRoute == nil ? "The actual model endpoint was not identified" :
                     "Destination classified as \(routeStatus.lowercased())")
-                    .font(.system(size: 10, weight: .semibold))
+                    .font(.system(size: 12, weight: .semibold))
             }
             Text(knownRoute == nil
                  ? "Socket candidates were observed, but no hostname or configured endpoint evidence proves which connection carried this model request."
                  : "Classification is based on recorded destination evidence; a relay can still misreport its upstream model.")
-                .font(.system(size: 9)).foregroundStyle(.secondary)
+                .font(.system(size: 13)).foregroundStyle(.secondary)
 
             if let relay {
                 Divider().overlay(border)
@@ -1610,14 +1613,14 @@ struct AgentOperationsCenterView: View {
                 ForEach(relay.findings, id: \.self) { finding in
                     HStack(alignment: .top, spacing: 6) {
                         Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
-                        Text(finding).font(.system(size: 8)).foregroundStyle(.secondary)
+                        Text(finding).font(.system(size: 12)).foregroundStyle(.secondary)
                     }
                 }
                 ForEach(Array(relay.sensitiveFindings.enumerated()), id: \.offset) { _, finding in
                     VStack(alignment: .leading, spacing: 2) {
                         Text("\(finding.category.rawValue.uppercased()) · \(finding.severity.uppercased())")
-                            .font(.system(size: 7, weight: .bold)).foregroundStyle(Color.red)
-                        Text(finding.source).font(.system(size: 7.5)).foregroundStyle(.secondary)
+                            .font(.system(size: 12, weight: .bold)).foregroundStyle(Color.red)
+                        Text(finding.source).font(.system(size: 12)).foregroundStyle(.secondary)
                         Text(finding.evidence).mono().lineLimit(3)
                     }.padding(7).background(Color.red.opacity(0.08), in: RoundedRectangle(cornerRadius: 6))
                 }
@@ -1632,7 +1635,7 @@ struct AgentOperationsCenterView: View {
                 field("Reasoning", "\(economics.cumulativeReasoningTokens.formatted()) tokens")
                 field("Repeated input load", "\(economics.subsequentRequestInputLoad.formatted()) tokens")
                 Text("Token and cost values are provider-reported. A zero or absent cost is displayed as not reported, not free.")
-                    .font(.system(size: 8)).foregroundStyle(.tertiary)
+                    .font(.system(size: 12)).foregroundStyle(.tertiary)
             }
 
             if let exposure {
@@ -1643,7 +1646,7 @@ struct AgentOperationsCenterView: View {
                     HStack(alignment: .top, spacing: 7) {
                         Circle().fill(amber).frame(width: 5, height: 5).padding(.top, 4)
                         VStack(alignment: .leading, spacing: 2) {
-                            Text(item.category.rawValue).font(.system(size: 9, weight: .semibold))
+                            Text(item.category.rawValue).font(.system(size: 13, weight: .semibold))
                             if !item.evidence.isEmpty {
                                 Text(item.evidence.joined(separator: " · ")).mono()
                             }
@@ -1656,40 +1659,40 @@ struct AgentOperationsCenterView: View {
             Text("OBSERVED NETWORK CANDIDATES").micro(.secondary)
             if traffic.isEmpty {
                 Text("No turn-linked destination evidence was captured.")
-                    .font(.system(size: 9)).foregroundStyle(.secondary)
+                    .font(.system(size: 13)).foregroundStyle(.secondary)
             } else {
                 ForEach(traffic, id: \.destination) { destination in
                     VStack(alignment: .leading, spacing: 4) {
                         HStack {
-                            Text(destination.destination).font(.system(size: 9, weight: .semibold, design: .monospaced))
+                            Text(destination.destination).font(.system(size: 13, weight: .semibold, design: .monospaced))
                             Spacer()
                             Text(destination.classification.rawValue.uppercased())
-                                .font(.system(size: 7, weight: .bold)).foregroundStyle(
+                                .font(.system(size: 12, weight: .bold)).foregroundStyle(
                                     destination.classification == .modelProvider ? green : amber)
                         }
                         Text("\(destination.confidence.rawValue.capitalized) · PID " +
                              (destination.processIds.isEmpty ? "not captured" : destination.processIds.map(String.init).joined(separator: ", ")))
-                            .font(.system(size: 8)).foregroundStyle(.secondary)
+                            .font(.system(size: 12)).foregroundStyle(.secondary)
                         if let models = destination.claimedModels, !models.isEmpty {
                             Text("Claimed model · \(models.joined(separator: ", "))")
-                                .font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
+                                .font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
                         }
                         if let relayType = destination.relayType {
                             Text(relayType.uppercased())
-                                .font(.system(size: 7, weight: .bold))
+                                .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(amber)
                         }
                         if destination.classification == .networkCandidate {
                             Text("Observed in the same turn; not proven to carry the model request.")
-                                .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(2)
+                                .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                         }
                         if let status = destination.identityStatus, status != "not_applicable" {
                             Text("MODEL IDENTITY · \(status.replacingOccurrences(of: "_", with: " ").uppercased())")
-                                .font(.system(size: 7, weight: .bold))
+                                .font(.system(size: 12, weight: .bold))
                                 .foregroundStyle(status == "consistent" ? green : amber)
                         }
                         if let reason = destination.identityReason, destination.identityStatus != "not_applicable" {
-                            Text(reason).font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(3)
+                            Text(reason).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(3)
                         }
                     }
                     .padding(8).background(raised, in: RoundedRectangle(cornerRadius: 7))
@@ -1719,9 +1722,9 @@ struct AgentOperationsCenterView: View {
         return VStack(alignment: .leading, spacing: 12) {
             Text("CONTEXT PREPARED").micro(cyan)
             Text("What the Agent assembled before asking the model")
-                .font(.system(size: 15, weight: .bold))
+                .font(.system(size: 17, weight: .bold))
             Text("This view shows recorded input evidence. It does not claim access to hidden model reasoning.")
-                .font(.system(size: 10)).foregroundStyle(.secondary)
+                .font(.system(size: 12)).foregroundStyle(.secondary)
 
             HStack(spacing: 7) {
                 contextMetric("MODEL", activeTurn?.modelNames ?? activeSession?.model ?? "Not captured")
@@ -1752,7 +1755,7 @@ struct AgentOperationsCenterView: View {
     private func contextMetric(_ label: String, _ value: String) -> some View {
         VStack(alignment: .leading, spacing: 3) {
             Text(label).micro(.secondary)
-            Text(value).font(.system(size: 9, weight: .semibold)).lineLimit(2)
+            Text(value).font(.system(size: 13, weight: .semibold)).lineLimit(2)
         }
         .padding(8).frame(maxWidth: .infinity, alignment: .leading)
         .background(raised, in: RoundedRectangle(cornerRadius: 7))
@@ -1764,16 +1767,16 @@ struct AgentOperationsCenterView: View {
             HStack(alignment: .firstTextBaseline) {
                 Circle().fill(row.status == "Not observed" ? Color.gray : (row.confirmed ? green : amber))
                     .frame(width: 6, height: 6)
-                Text(row.title).font(.system(size: 11, weight: .semibold))
+                Text(row.title).font(.system(size: 13, weight: .semibold))
                 Spacer()
-                Text(row.status).font(.system(size: 8, weight: .bold))
+                Text(row.status).font(.system(size: 12, weight: .bold))
                     .foregroundStyle(row.status == "Not observed" ? .secondary : (row.confirmed ? green : amber))
             }
             if row.status != "Not observed" {
-                Text(row.detail).font(.system(size: 9, design: .monospaced))
+                Text(row.detail).font(.system(size: 13, design: .monospaced))
                     .foregroundStyle(.secondary).textSelection(.enabled)
                     .fixedSize(horizontal: false, vertical: true)
-                Text("Source · \(row.source)").font(.system(size: 8)).foregroundStyle(.tertiary)
+                Text("Source · \(row.source)").font(.system(size: 12)).foregroundStyle(.tertiary)
             }
         }
         .padding(9)
@@ -1863,8 +1866,8 @@ struct AgentOperationsCenterView: View {
 
     private func fileCountChip(_ label: String, _ count: Int, _ color: Color) -> some View {
         HStack(spacing: 4) {
-            Text("\(count)").font(.system(size: 10, weight: .bold))
-            Text(label).font(.system(size: 6.5, weight: .bold))
+            Text("\(count)").font(.system(size: 12, weight: .bold))
+            Text(label).font(.system(size: 12, weight: .bold))
         }
         .foregroundStyle(color)
         .padding(.horizontal, 7).padding(.vertical, 5)
@@ -2074,7 +2077,7 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 3) {
                 Text(title).micro(cyan)
-                Text(subtitle).font(.system(size: 9)).foregroundStyle(.secondary)
+                Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
             }
             content()
         }
@@ -2124,8 +2127,8 @@ struct AgentOperationsCenterView: View {
         HStack(spacing: 8) {
             Image(systemName: icon).foregroundStyle(tint ?? cyan)
             VStack(alignment: .leading, spacing: 2) {
-                Text(value).font(.system(size: 13, weight: .bold)).foregroundStyle(tint ?? .primary)
-                Text(title).font(.system(size: 8)).foregroundStyle(.secondary)
+                Text(value).font(.system(size: 15, weight: .bold)).foregroundStyle(tint ?? .primary)
+                Text(title).font(.system(size: 12)).foregroundStyle(.secondary)
             }
             Spacer(minLength: 0)
         }
@@ -2137,10 +2140,10 @@ struct AgentOperationsCenterView: View {
     private func summaryRow(_ color: Color, _ title: String, _ value: String) -> some View {
         HStack(spacing: 8) {
             Image(systemName: color == amber ? "exclamationmark.triangle.fill" : "checkmark.circle.fill")
-                .foregroundStyle(color).font(.system(size: 11))
-            Text(title).font(.system(size: 11))
+                .foregroundStyle(color).font(.system(size: 13))
+            Text(title).font(.system(size: 13))
             Spacer()
-            Text(value).font(.system(size: 10, weight: .semibold)).foregroundStyle(color)
+            Text(value).font(.system(size: 12, weight: .semibold)).foregroundStyle(color)
         }
     }
 
@@ -2148,7 +2151,7 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 3) {
             Text(name.uppercased()).micro(.secondary)
             Text(value)
-                .font(.system(size: 9, design: .monospaced))
+                .font(.system(size: 13, design: .monospaced))
                 .textSelection(.enabled)
                 .fixedSize(horizontal: false, vertical: true)
         }
@@ -2156,7 +2159,7 @@ struct AgentOperationsCenterView: View {
 
     private func labelChip(_ text: String, color: Color) -> some View {
         Text(text)
-            .font(.system(size: 9, weight: .semibold))
+            .font(.system(size: 13, weight: .semibold))
             .foregroundStyle(color)
             .padding(.horizontal, 8).padding(.vertical, 5)
             .background(color.opacity(0.12), in: Capsule())
@@ -2165,13 +2168,13 @@ struct AgentOperationsCenterView: View {
     private func legend(_ color: Color, _ text: String) -> some View {
         HStack(spacing: 6) {
             Circle().fill(color).frame(width: 6, height: 6)
-            Text(text).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(text).font(.system(size: 13)).foregroundStyle(.secondary)
         }
     }
 
     private func empty(_ text: String) -> some View {
         Text(text)
-            .font(.system(size: 10))
+            .font(.system(size: 12))
             .foregroundStyle(.secondary)
             .frame(maxWidth: .infinity)
             .padding(24)
@@ -2273,9 +2276,9 @@ struct AgentOperationsCenterView: View {
             Spacer()
             Text("Evidence stored locally · external analysis is optional").foregroundStyle(.secondary)
         }
-        .font(.system(size: 9, weight: .medium))
+        .font(.system(size: 13, weight: .medium))
         .padding(.horizontal, 15)
-        .frame(height: 32)
+        .frame(height: 38)
         .background(raised)
         .overlay(Rectangle().fill(border).frame(height: 1), alignment: .top)
         .fixedSize(horizontal: false, vertical: true)
@@ -2510,13 +2513,13 @@ private extension View {
 
 private extension Text {
     func micro(_ color: Color) -> some View {
-        font(.system(size: 10, weight: .bold)).tracking(0.8).foregroundStyle(color)
+        font(.system(size: 12, weight: .bold)).tracking(0.8).foregroundStyle(color)
     }
     func mono() -> some View {
-        font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+        font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
     }
     func badge(_ color: Color) -> some View {
-        font(.system(size: 10, weight: .bold))
+        font(.system(size: 12, weight: .bold))
             .foregroundStyle(color)
             .padding(.horizontal, 7).padding(.vertical, 4)
             .background(color.opacity(0.1), in: Capsule())

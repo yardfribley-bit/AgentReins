@@ -149,7 +149,8 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
             return "claude-desktop"
         }
         if agentMarkers.contains("claude-code"),
-           path.contains("/claude-code/") || path.hasSuffix("/bin/claude") {
+           path.contains("/claude-code/") || path.hasSuffix("/bin/claude") ||
+           path.contains("/.local/share/claude/versions/") {
             return "claude-code"
         }
 

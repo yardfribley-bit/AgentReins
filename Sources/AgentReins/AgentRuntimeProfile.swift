@@ -90,7 +90,7 @@ enum AgentRuntimeProfileRegistry {
     static func profile(agentHint: String?, command: String) -> AgentRuntimeProfile? {
         let hint = agentHint?.lowercased() ?? ""
         if let direct = profiles.first(where: {
-            hint == $0.agent.lowercased() || hint.contains($0.agent.lowercased())
+            normalizedAgentIdentity(hint) == normalizedAgentIdentity($0.agent)
         }) { return direct }
         let text = command.lowercased()
         return profiles.first { $0.aliases.contains(where: text.contains) }
@@ -180,9 +180,11 @@ enum AgentRuntimeProfileRegistry {
 
     private static let claudeCode = AgentRuntimeProfile(
         id: "claude-code-macos", agent: "Claude Code", version: 1,
-        aliases: ["claude-code", "/usr/local/bin/claude", "/opt/homebrew/bin/claude"],
+        aliases: ["claude-code", "/usr/local/bin/claude", "/opt/homebrew/bin/claude",
+                  "/.local/share/claude/versions/"],
         rules: [
-            rule("claude-code-cli", ["claude-code/bin/claude", "/usr/local/bin/claude"], "Claude Code Agent", .agentCore,
+            rule("claude-code-cli", ["claude-code/bin/claude", "/usr/local/bin/claude",
+                                      "/.local/share/claude/versions/"], "Claude Code Agent", .agentCore,
                  "Runs the Claude Code session, prepares model context, and dispatches tools from the terminal.",
                  "brain.head.profile", ["Prompt assembly", "Tool authorization", "Session state", "Model interaction"])
         ])

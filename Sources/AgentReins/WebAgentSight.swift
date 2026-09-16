@@ -49,7 +49,8 @@ final class WebAgentSight: ObservableObject {
             guard let self else { return }
             let modified = try? url.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate
             let extensionActive = modified.map { Date().timeIntervalSince($0) < 90 } ?? false
-            let record = RawLogCapture.capture(url: url, source: "web-agent", previousOffset: previousOffset)
+            let record = RawLogCapture.capture(url: url, source: "web-agent",
+                previousOffset: previousOffset, maximumInitialBytes: 512 * 1_024)
             let events = record.map { Self.parse($0.payload) } ?? []
             let checkpoint = record.map(RawLogCapture.safeCheckpoint)
             var rawWriteFailed = false

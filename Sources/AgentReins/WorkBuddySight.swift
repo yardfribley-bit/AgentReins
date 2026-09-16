@@ -103,7 +103,8 @@ final class WorkBuddySight: ObservableObject {
         // Startup establishes one latest conversation only; later polls are
         // incremental from the persisted byte checkpoint.
         let selected = files.sorted { $0.1 > $1.1 }.prefix(1)
-        let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy", previousOffset: previousSizes[$0.0.path]) }
+        let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy",
+            previousOffset: previousSizes[$0.0.path], maximumInitialBytes: 512 * 1_024) }
         var sizes = Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) })
         for record in raw { sizes[record.stream] = RawLogCapture.safeCheckpoint(for: record) }
         return (selected.flatMap { parseSession($0.0) },

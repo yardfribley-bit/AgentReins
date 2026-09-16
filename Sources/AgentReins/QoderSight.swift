@@ -77,7 +77,8 @@ final class QoderSight: ObservableObject {
         var bad = 0
         for (url, _, size) in files.sorted(by: { $0.1 > $1.1 }).prefix(1) {
             let previous = previousSizes[url.path]
-            guard let record = RawLogCapture.capture(url: url, source: "qoder", previousOffset: previous) else {
+            guard let record = RawLogCapture.capture(url: url, source: "qoder", previousOffset: previous,
+                                                     maximumInitialBytes: 512 * 1_024) else {
                 sizes[url.path] = size; continue
             }
             raw.append(record)
