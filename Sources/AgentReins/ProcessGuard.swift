@@ -54,7 +54,8 @@ final class ProcessGuard: ObservableObject {
     private var currentCmdRules: [CmdRule] = []
     // ChatGPT is the macOS desktop host of the Codex runtime. Keeping the host
     // root is required to preserve the real ChatGPT -> Codex services PID tree.
-    private let agentMarkers = ["chatgpt", "codex", "kiro", "cursor", "workbuddy", "qoder", "claude", "aider", "windsurf", "trae"]
+    private let agentMarkers = ["chatgpt", "codex", "kiro", "cursor", "workbuddy", "qoder",
+                                "claude-code", "claude-desktop", "aider", "windsurf", "trae"]
     private let snapshotProvider: any ProcessSnapshotting
     private let networkProvider: any NetworkSnapshotting
     private let proxyDestinationProvider: any ProxyDestinationSnapshotting

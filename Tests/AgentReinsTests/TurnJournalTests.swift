@@ -125,18 +125,20 @@ final class TurnJournalTests: XCTestCase {
         let paths: Set<String> = [
             "/Applications/ChatGPT.app", "/Applications/WorkBuddy.app", "/Applications/Qoder.app",
             "/Applications/Claude.app", AgentDiscoveryEngine.home + "/.codex/sessions",
-            AgentDiscoveryEngine.home + "/.workbuddy/projects", AgentDiscoveryEngine.home + "/.qoder/projects"
+            AgentDiscoveryEngine.home + "/.workbuddy/projects", AgentDiscoveryEngine.home + "/.qoder/projects",
+            AgentDiscoveryEngine.home + "/.claude/projects"
         ]
         let agents = AgentDiscoveryEngine.discover(processes: processes, existingPaths: paths,
                                                    webEvidenceActive: true, now: Date(timeIntervalSince1970: 1))
 
-        XCTAssertEqual(agents.count, 5)
+        XCTAssertEqual(agents.count, 6)
         let codex = try XCTUnwrap(agents.first { $0.id == "codex" })
         XCTAssertEqual(codex.connection, .partial)
         XCTAssertEqual(Set(codex.instances), ["Desktop", "VS Code"])
         XCTAssertEqual(agents.first { $0.id == "workbuddy" }?.processIds.count, 3)
         XCTAssertEqual(agents.first { $0.id == "qoder" }?.connection, .partial)
-        XCTAssertEqual(agents.first { $0.id == "claude" }?.presence, .installed)
+        XCTAssertEqual(agents.first { $0.id == "claude-code" }?.presence, .installed)
+        XCTAssertEqual(agents.first { $0.id == "claude-desktop" }?.presence, .installed)
         XCTAssertEqual(agents.first { $0.id == "web-ai" }?.connection, .browser)
     }
 
@@ -150,13 +152,17 @@ final class TurnJournalTests: XCTestCase {
         let processes = [ProcessSnapshotRecord(pid: "40", ppid: "1",
             command: "/Applications/Claude.app/Contents/MacOS/Claude")]
         let paths: Set<String> = ["/Applications/Claude.app", AgentDiscoveryEngine.home + "/.claude/projects"]
-        let claude = try XCTUnwrap(AgentDiscoveryEngine.discover(processes: processes,
-            existingPaths: paths, webEvidenceActive: false).first { $0.id == "claude" })
+        let agents = AgentDiscoveryEngine.discover(processes: processes,
+            existingPaths: paths, webEvidenceActive: false)
+        let desktop = try XCTUnwrap(agents.first { $0.id == "claude-desktop" })
+        let code = try XCTUnwrap(agents.first { $0.id == "claude-code" })
 
-        XCTAssertEqual(claude.presence, .running)
-        XCTAssertEqual(claude.connection, .partial)
-        XCTAssertFalse(claude.coverage.contains(.prompt))
-        XCTAssertEqual(claude.instances, ["Desktop"])
+        XCTAssertEqual(desktop.presence, .running)
+        XCTAssertEqual(desktop.connection, .processOnly)
+        XCTAssertFalse(desktop.coverage.contains(.prompt))
+        XCTAssertEqual(desktop.instances, ["Desktop"])
+        XCTAssertEqual(code.presence, .installed)
+        XCTAssertTrue(code.coverage.contains(.prompt))
     }
 
     func testAgentRootDiscoveryRejectsProductNamesInsideUserProjectPaths() {
@@ -215,9 +221,9 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(repl, agentHint: "Codex").displayName, "Node REPL")
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(repl, agentHint: "Codex").capability, .sandbox)
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(cursor, agentHint: "Cursor").capability, .toolRuntime)
-        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude").displayName, "Claude Code Agent")
-        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude").capability, .agentCore)
-        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeRenderer, agentHint: "Claude").capability, .interface)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude Code").displayName, "Claude Code Agent")
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeCode, agentHint: "Claude Code").capability, .agentCore)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(claudeRenderer, agentHint: "Claude Desktop").capability, .interface)
         let workBuddyNetwork = ProcessSnapshotRecord(pid: "15", ppid: "10",
             command: "/Applications/WorkBuddy.app/Contents/Frameworks/WorkBuddy Helper.app/Contents/MacOS/WorkBuddy Helper --type=utility --utility-sub-type=network.mojom.NetworkService")
         XCTAssertEqual(AgentRuntimeProfileRegistry.classify(workBuddyNetwork, agentHint: "WorkBuddy").displayName,
@@ -450,6 +456,25 @@ final class TurnJournalTests: XCTestCase {
 
         XCTAssertEqual(try database.journalMode().lowercased(), "wal")
         XCTAssertEqual(try database.recent(limit: 10).map(\.id), [event.id])
+    }
+
+    func testEvidenceDatabaseLoadsOneCompleteSession() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let first = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil,
+            agent: "claude-code", op: "prompt", severity: "info", ts: Date(timeIntervalSince1970: 1),
+            action: "sent", sessionId: "session-a", turnId: "turn-1")
+        let second = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil,
+            agent: "claude-code", op: "response", severity: "info", ts: Date(timeIntervalSince1970: 2),
+            action: "received", sessionId: "session-a", turnId: "turn-1")
+        let unrelated = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil,
+            agent: "codex", op: "prompt", severity: "info", ts: Date(timeIntervalSince1970: 3),
+            action: "sent", sessionId: "session-b", turnId: "turn-2")
+        try database.append([second, unrelated, first])
+
+        XCTAssertEqual(try database.events(sessionId: "session-a").map(\.id), [first.id, second.id])
     }
 
     func testEvidenceDatabaseAcceptsOneHundredThousandEventsWithinBudget() throws {
@@ -1912,7 +1937,7 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(parsed.malformed, 0)
         XCTAssertEqual(parsed.events.first { $0.op == "prompt" }?.userIntent, "Build a safe parser")
         XCTAssertEqual(parsed.events.first { $0.op == "response" }?.model, "claude-sonnet-4-5")
-        XCTAssertEqual(parsed.events.first { $0.op == "usage" }?.inputTokens, 1200)
+        XCTAssertEqual(parsed.events.first { $0.op == "usage" }?.inputTokens, 2100)
         XCTAssertEqual(parsed.events.first { $0.op == "usage" }?.cachedTokens, 900)
         XCTAssertEqual(parsed.events.first { $0.op == "call" }?.toolName, "Read")
         XCTAssertEqual(parsed.events.first { $0.op == "result" }?.modelResponse, "source")
@@ -1933,6 +1958,55 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(parsed.events.count, 1)
         let event = try XCTUnwrap(parsed.events.first)
         XCTAssertEqual(event.ts.timeIntervalSince1970, 1_789_257_600.123, accuracy: 0.001)
+    }
+
+    func testClaudeIncrementalProjectionPreservesTurnAndLogicalUsageAcrossChunks() throws {
+        let first = Data([
+            #"{"type":"permission-mode","sessionId":"s1","permissionMode":"acceptEdits"}"#,
+            #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"turn-1","timestamp":"2026-09-13T00:00:00Z","cwd":"/tmp/project","message":{"content":"Inspect safely"}}"#
+        ].joined(separator: "\n").utf8)
+        let firstProjection = ClaudeSight.parseIncrement(first, sourcePath: "claude.jsonl",
+                                                          state: ClaudeProjectionState())
+
+        XCTAssertEqual(firstProjection.malformed, 0)
+        XCTAssertTrue(firstProjection.events.first { $0.op == "turn_context" }?.command?
+            .contains("acceptEdits") == true)
+
+        let second = Data([
+            #"{"type":"assistant","uuid":"a1","parentUuid":"u1","requestId":"request-1","sessionId":"s1","timestamp":"2026-09-13T00:00:01Z","message":{"id":"message-1","model":"claude-test","stop_reason":"tool_use","usage":{"input_tokens":1200,"cache_creation_input_tokens":100,"cache_read_input_tokens":900,"output_tokens":80,"output_tokens_details":{"thinking_tokens":12}},"content":[{"type":"thinking","thinking":"Inspect first"}]}}"#,
+            #"{"type":"assistant","uuid":"a2","parentUuid":"u1","requestId":"request-1","sessionId":"s1","timestamp":"2026-09-13T00:00:01Z","message":{"id":"message-1","model":"claude-test","stop_reason":"tool_use","usage":{"input_tokens":1200,"cache_creation_input_tokens":100,"cache_read_input_tokens":900,"output_tokens":80,"output_tokens_details":{"thinking_tokens":12}},"content":[{"type":"text","text":"Working"}]}}"#,
+            #"{"type":"assistant","uuid":"a3","parentUuid":"u1","requestId":"request-1","sessionId":"s1","timestamp":"2026-09-13T00:00:01Z","message":{"id":"message-1","model":"claude-test","stop_reason":"tool_use","usage":{"input_tokens":1200,"cache_creation_input_tokens":100,"cache_read_input_tokens":900,"output_tokens":80,"output_tokens_details":{"thinking_tokens":12}},"content":[{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"Parser.swift"}}]}}"#
+        ].joined(separator: "\n").utf8)
+        let secondProjection = ClaudeSight.parseIncrement(second, sourcePath: "claude.jsonl",
+                                                           state: firstProjection.state)
+
+        XCTAssertEqual(secondProjection.events.filter { $0.op == "usage" }.count, 1)
+        XCTAssertEqual(secondProjection.events.first { $0.op == "usage" }?.inputTokens, 2200)
+        XCTAssertEqual(secondProjection.events.first { $0.op == "usage" }?.cachedTokens, 900)
+        XCTAssertEqual(secondProjection.events.first { $0.op == "usage" }?.reasoningTokens, 12)
+        XCTAssertTrue(secondProjection.events.allSatisfy { $0.turnId == "turn-1" })
+
+        let third = Data(#"{"type":"user","uuid":"u2","parentUuid":"a3","sessionId":"s1","timestamp":"2026-09-13T00:00:02Z","message":{"content":[{"type":"tool_result","tool_use_id":"call-1","content":"source"}]}}"#.utf8)
+        let thirdProjection = ClaudeSight.parseIncrement(third, sourcePath: "claude.jsonl",
+                                                          state: secondProjection.state)
+        let result = try XCTUnwrap(thirdProjection.events.first { $0.op == "result" })
+        XCTAssertEqual(result.turnId, "turn-1")
+        XCTAssertEqual(result.toolName, "Read")
+    }
+
+    func testClaudeAttachmentProjectionKeepsContextAndDropsReminderNoise() throws {
+        let rows = [
+            #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"turn-1","timestamp":"2026-09-13T00:00:00Z","message":{"content":"Inspect"}}"#,
+            #"{"type":"attachment","uuid":"mcp","parentUuid":"u1","sessionId":"s1","timestamp":"2026-09-13T00:00:01Z","attachment":{"type":"mcp_instructions_delta","names":["filesystem"],"context":"MCP policy"}}"#,
+            #"{"type":"attachment","uuid":"noise","parentUuid":"mcp","sessionId":"s1","timestamp":"2026-09-13T00:00:02Z","attachment":{"type":"total_tokens_reminder","text":"token reminder"}}"#
+        ]
+
+        let parsed = ClaudeSight.parse(Data(rows.joined(separator: "\n").utf8))
+
+        let attachment = try XCTUnwrap(parsed.events.first { $0.op == "attachment" })
+        XCTAssertTrue(attachment.command?.contains("filesystem") == true)
+        XCTAssertTrue(attachment.modelPrompt?.contains("MCP policy") == true)
+        XCTAssertEqual(parsed.events.filter { $0.op == "attachment" }.count, 1)
     }
 
     func testClaudeInitialReadBaselinesOlderStreams() throws {

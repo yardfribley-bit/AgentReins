@@ -145,11 +145,18 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         if agentMarkers.contains("workbuddy"), path.contains("/applications/workbuddy.app/") { return "workbuddy" }
         if agentMarkers.contains("chatgpt"), path.contains("/applications/chatgpt.app/") { return "codex" }
         if agentMarkers.contains("cursor"), path.contains("/applications/cursor.app/") { return "cursor" }
+        if agentMarkers.contains("claude-desktop"), path.contains("/applications/claude.app/") {
+            return "claude-desktop"
+        }
+        if agentMarkers.contains("claude-code"),
+           path.contains("/claude-code/") || path.hasSuffix("/bin/claude") {
+            return "claude-code"
+        }
 
         // Product names that commonly appear in user project paths need an
         // application-bundle identity above. Other adapters retain the generic
         // executable marker until they gain an explicit Runtime Profile.
-        let bundleScoped = Set(["workbuddy", "chatgpt", "codex", "cursor"])
+        let bundleScoped = Set(["workbuddy", "chatgpt", "codex", "cursor", "claude-code", "claude-desktop"])
         return agentMarkers.filter { !bundleScoped.contains($0) }.first(where: path.contains)
     }
 

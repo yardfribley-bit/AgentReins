@@ -40,7 +40,8 @@ final class AgentDiscoveryManager: ObservableObject {
 
     init(provider: (any ProcessSnapshotting)? = nil) {
         self.provider = provider ?? ResilientProcessSnapshotProvider(agentMarkers:
-            ["codex", "chatgpt", "workbuddy", "qoder", "claude", "cursor", "kiro", "windsurf", "trae"])
+            ["codex", "chatgpt", "workbuddy", "qoder", "claude-code", "claude-desktop",
+             "cursor", "kiro", "windsurf", "trae"])
     }
 
     func start() {
@@ -135,10 +136,6 @@ final class AgentDiscoveryManager: ObservableObject {
 
     private func connectedState(for item: DiscoveredAgent) -> AgentConnectionState {
         if item.id == "web-ai" { return .browser }
-        // Claude Desktop cloud chat and Claude Code use different evidence
-        // stores. A healthy Claude Code reader must not claim native coverage
-        // for a Desktop-only process.
-        if item.id == "claude" && !item.instances.contains("CLI / background service") { return .partial }
         return .native
     }
 }
@@ -165,10 +162,14 @@ enum AgentDiscoveryEngine {
         Signature(id: "qoder", product: "Qoder",
             appPaths: ["/Applications/Qoder.app"], markers: ["/qoder.app/", "/.qoder/"],
             dataPath: "\(home)/.qoder/projects", adapter: "qoder-native"),
-        Signature(id: "claude", product: "Claude",
-            appPaths: ["/Applications/Claude.app", "\(home)/Applications/Claude Code URL Handler.app"],
-            markers: ["/claude.app/", "/claude-code", "/claude "], dataPath: "\(home)/.claude/projects",
+        Signature(id: "claude-code", product: "Claude Code",
+            appPaths: ["\(home)/Applications/Claude Code URL Handler.app"],
+            markers: ["/claude-code", "/usr/local/bin/claude", "/opt/homebrew/bin/claude"],
+            dataPath: "\(home)/.claude/projects",
             adapter: "claude-code-native"),
+        Signature(id: "claude-desktop", product: "Claude Desktop",
+            appPaths: ["/Applications/Claude.app"], markers: ["/claude.app/"],
+            dataPath: nil, adapter: nil),
         Signature(id: "cursor", product: "Cursor", appPaths: ["/Applications/Cursor.app"],
             markers: ["/cursor.app/", "/.cursor/"],
             dataPath: "\(home)/Library/Application Support/Cursor/User/globalStorage/state.vscdb",
@@ -197,10 +198,8 @@ enum AgentDiscoveryEngine {
                 signature.dataPath.map(existingPaths.contains) == true
             guard installed || !matches.isEmpty else { return nil }
             let running = !matches.isEmpty
-            let adapterMatchesRunningProduct = signature.id != "claude" ||
-                matches.contains { !$0.command.lowercased().contains("/claude.app/") }
             let hasNativeData = signature.dataPath.map(existingPaths.contains) == true &&
-                signature.adapter != nil && (!running || adapterMatchesRunningProduct)
+                signature.adapter != nil
             var coverage: Set<AgentCoverage> = running ? [.process, .network] : []
             if hasNativeData { coverage.formUnion([.session, .prompt, .response, .tools]) }
             // A directory proves adapter availability, not a healthy connection.

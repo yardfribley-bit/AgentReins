@@ -2,6 +2,25 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
+struct ClaudeProjectionState: Sendable {
+    var currentTurn: [String: String] = [:]
+    var turnByUUID: [String: String] = [:]
+    var toolNames: [String: String] = [:]
+    var sessionContext: [String: [String: String]] = [:]
+    var emittedContextSignatures: [String: String] = [:]
+}
+
+private struct ClaudeSessionContextProjection {
+    let state: ClaudeProjectionState
+    let event: GuardEvent?
+}
+
+private struct ClaudeAttachmentProjection {
+    let type: String
+    let metadata: String
+    let context: String?
+}
+
 /// Native, read-only Claude Code adapter. It tails only the most recently
 /// changed local project JSONL and preserves raw evidence before projection.
 @MainActor
@@ -19,6 +38,7 @@ final class ClaudeSight: ObservableObject {
     private var malformed = 0
     private var isInitialPoll = true
     private var isPolling = false
+    private var projectionStates: [String: ClaudeProjectionState] = [:]
 
     func start() {
         guard timer == nil else { return }
@@ -38,9 +58,10 @@ final class ClaudeSight: ObservableObject {
         let previous = fileSizes
         let database = database
         let baselineOtherStreams = isInitialPoll
+        let previousStates = projectionStates
         queue.async { [weak self] in
-            let batch = Self.readRecent(root: root, previousSizes: previous,
-                                        baselineOtherStreams: baselineOtherStreams)
+            let batch = Self.readRecentStateful(root: root, previousSizes: previous,
+                baselineOtherStreams: baselineOtherStreams, previousStates: previousStates)
             var writeFailed = false
             do { try database?.appendRaw(batch.raw) } catch { writeFailed = true }
             DispatchQueue.main.async {
@@ -50,6 +71,7 @@ final class ClaudeSight: ObservableObject {
                 if available { self.isInitialPoll = false }
                 if self.connected != available { self.connected = available }
                 self.malformed += batch.malformed + (writeFailed ? 1 : 0)
+                self.projectionStates = batch.states
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
@@ -89,9 +111,20 @@ final class ClaudeSight: ObservableObject {
     nonisolated static func readRecent(root: String, previousSizes: [String: UInt64],
                                       baselineOtherStreams: Bool)
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], malformed: Int) {
+        let batch = readRecentStateful(root: root, previousSizes: previousSizes,
+            baselineOtherStreams: baselineOtherStreams, previousStates: [:])
+        return (batch.events, batch.sizes, batch.raw, batch.malformed)
+    }
+
+    private nonisolated static func readRecentStateful(root: String, previousSizes: [String: UInt64],
+        baselineOtherStreams: Bool, previousStates: [String: ClaudeProjectionState])
+        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], malformed: Int,
+            states: [String: ClaudeProjectionState]) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 0) }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else {
+            return ([], [:], [], 0, previousStates)
+        }
         var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
@@ -100,47 +133,84 @@ final class ClaudeSight: ObservableObject {
                 files.append((url, values?.contentModificationDate ?? .distantPast, size))
             }
         }
-        guard let item = files.max(by: { $0.1 < $1.1 }) else { return ([], [:], [], 0) }
+        guard let item = files.max(by: { $0.1 < $1.1 }) else {
+            return ([], [:], [], 0, previousStates)
+        }
         var sizes = baselineOtherStreams
             ? Dictionary(uniqueKeysWithValues: files.map { ($0.0.path, $0.2) }) : [:]
         guard let raw = RawLogCapture.capture(url: item.0, source: "claude", previousOffset: previousSizes[item.0.path])
-        else { return ([], sizes, [], 1) }
-        let parsed = parse(raw.payload, sourcePath: item.0.path)
+        else { return ([], sizes, [], 1, previousStates) }
+        let priorOffset = previousSizes[item.0.path]
+        var state = priorOffset.map { $0 <= item.2 } == false ? ClaudeProjectionState() : previousStates[item.0.path]
+        if state == nil, raw.offsetStart > 0,
+           let bootstrap = bootstrapData(url: item.0, beforeOffset: UInt64(raw.offsetStart)) {
+            state = parseWithState(bootstrap, sourcePath: item.0.path,
+                                   initialState: ClaudeProjectionState()).state
+        }
+        let payload = completeProjectionLines(raw.payload, startsAtFileBeginning: raw.offsetStart == 0)
+        let parsed = parseWithState(payload, sourcePath: item.0.path,
+                                    initialState: state ?? ClaudeProjectionState())
         sizes[item.0.path] = RawLogCapture.safeCheckpoint(for: raw)
-        return (parsed.events, sizes, [raw], parsed.malformed)
+        var states = previousStates
+        states[item.0.path] = parsed.state
+        return (parsed.events, sizes, [raw], parsed.malformed, states)
     }
 
     nonisolated static func parse(_ data: Data, sourcePath: String = "claude.jsonl")
         -> (events: [GuardEvent], malformed: Int) {
+        let parsed = parseWithState(data, sourcePath: sourcePath, initialState: ClaudeProjectionState())
+        return (parsed.events, parsed.malformed)
+    }
+
+    nonisolated static func parseIncrement(_ data: Data, sourcePath: String,
+        state: ClaudeProjectionState)
+        -> (events: [GuardEvent], malformed: Int, state: ClaudeProjectionState) {
+        parseWithState(data, sourcePath: sourcePath, initialState: state)
+    }
+
+    private nonisolated static func parseWithState(_ data: Data, sourcePath: String,
+        initialState: ClaudeProjectionState)
+        -> (events: [GuardEvent], malformed: Int, state: ClaudeProjectionState) {
         var events: [GuardEvent] = [], malformed = 0
-        var currentTurn: [String: String] = [:]
-        var turnByUUID: [String: String] = [:]
-        var toolNames: [String: String] = [:]
+        var state = initialState
         for line in data.split(separator: 0x0A) {
             guard let row = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any] else {
                 malformed += 1; continue
             }
             let type = row["type"] as? String ?? "unknown"
             let session = row["sessionId"] as? String ?? row["session_id"] as? String ?? "claude-local"
+            state = stateCapturingSession(row: row, type: type, session: session, state: state)
             let timestamp = date(row["timestamp"])
-            let parentTurn = (row["parentUuid"] as? String).flatMap { turnByUUID[$0] }
+            let parentTurn = (row["parentUuid"] as? String).flatMap { state.turnByUUID[$0] }
             let message = row["message"] as? [String: Any]
             let contents = message?["content"] as? [[String: Any]] ?? []
             let isToolResult = contents.contains { $0["type"] as? String == "tool_result" }
             if type == "user", !isToolResult, let text = userText(message?["content"]), !text.isEmpty {
                 guard let timestamp else { malformed += 1; continue }
                 let turn = row["promptId"] as? String ?? row["uuid"] as? String ?? UUID().uuidString
-                currentTurn[session] = turn
-                if let uuid = row["uuid"] as? String { turnByUUID[uuid] = turn }
-                events.append(event(row, suffix: "prompt", kind: "model", op: "prompt", action: "sent",
+                state.currentTurn[session] = turn
+                if let uuid = row["uuid"] as? String { state.turnByUUID[uuid] = turn }
+                events.append(event(row, identity: row["uuid"] as? String, suffix: "prompt",
+                    kind: "model", op: "prompt", action: "sent",
                     timestamp: timestamp, session: session, turn: turn, userIntent: bounded(text),
                     modelPrompt: bounded(text), sourcePath: sourcePath))
+                let context = sessionContextProjection(row: row, timestamp: timestamp, session: session,
+                    turn: turn, state: state, sourcePath: sourcePath)
+                state = context.state
+                if let event = context.event { events.append(event) }
                 continue
             }
-            let turn = parentTurn ?? currentTurn[session]
-            if let uuid = row["uuid"] as? String, let turn { turnByUUID[uuid] = turn }
+            let turn = parentTurn ?? state.currentTurn[session]
+            if let uuid = row["uuid"] as? String, let turn { state.turnByUUID[uuid] = turn }
+            if let timestamp, let turn {
+                let context = sessionContextProjection(row: row, timestamp: timestamp, session: session,
+                    turn: turn, state: state, sourcePath: sourcePath)
+                state = context.state
+                if let event = context.event { events.append(event) }
+            }
             let model = message?["model"] as? String
             let usage = message?["usage"] as? [String: Any]
+            let messageID = message?["id"] as? String ?? row["requestId"] as? String
             if type == "assistant" {
                 guard let timestamp else { malformed += 1; continue }
                 let text = contents.filter { $0["type"] as? String == "text" }
@@ -148,7 +218,8 @@ final class ClaudeSight: ObservableObject {
                 let thinking = contents.filter { $0["type"] as? String == "thinking" }
                     .compactMap { $0["thinking"] as? String }.joined(separator: "\n")
                 if !text.isEmpty {
-                    events.append(event(row, suffix: "response", kind: "model", op: "response",
+                    events.append(event(row, identity: messageID, suffix: "response",
+                        kind: "model", op: "response",
                         action: message?["stop_reason"] as? String ?? "received", timestamp: timestamp,
                         session: session, turn: turn, modelResponse: bounded(text), model: model,
                         sourcePath: sourcePath))
@@ -156,12 +227,12 @@ final class ClaudeSight: ObservableObject {
                 if !thinking.isEmpty {
                     events.append(reasoningEvent(row: row, timestamp: timestamp, session: session,
                                                  turn: turn, model: model, reasoning: thinking,
-                                                 sourcePath: sourcePath))
+                                                 sourcePath: sourcePath, messageID: messageID))
                 }
                 if usage != nil {
                     events.append(usageEvent(row: row, timestamp: timestamp, session: session,
                                              turn: turn, model: model, usage: usage,
-                                             sourcePath: sourcePath))
+                                             sourcePath: sourcePath, messageID: messageID))
                 }
             }
             let hasToolEvidence = contents.contains {
@@ -172,33 +243,32 @@ final class ClaudeSight: ObservableObject {
                 if content["type"] as? String == "tool_use", let callID = content["id"] as? String,
                    let timestamp {
                     let name = content["name"] as? String ?? "unknown_tool"
-                    toolNames[callID] = name
+                    state.toolNames[callID] = name
                     let arguments = json(content["input"]).map(bounded)
-                    events.append(event(row, suffix: "call:\(callID)", kind: "tool", op: "call",
+                    events.append(event(row, identity: "\(session):\(callID)", suffix: "call",
+                        kind: "tool", op: "call",
                         action: "requested", command: arguments, timestamp: timestamp, session: session,
                         turn: turn, toolCallId: callID, toolName: name, model: model,
                         codeFindings: CodeSecurityScanner.scanGenerated(toolName: name, arguments: arguments),
                         sourcePath: sourcePath))
                 } else if content["type"] as? String == "tool_result",
                           let callID = content["tool_use_id"] as? String, let timestamp {
-                    events.append(event(row, suffix: "result:\(callID)", kind: "tool", op: "result",
+                    events.append(event(row, identity: "\(session):\(callID)", suffix: "result",
+                        kind: "tool", op: "result",
                         action: (content["is_error"] as? Bool) == true ? "failed" : "completed",
                         timestamp: timestamp, session: session, turn: turn, toolCallId: callID,
-                        modelResponse: string(content["content"]), toolName: toolNames[callID],
+                        modelResponse: string(content["content"]), toolName: state.toolNames[callID],
                         sourcePath: sourcePath))
                 }
             }
-            if type == "attachment" {
+            if type == "attachment", shouldProjectAttachment(row["attachment"]) {
                 guard let timestamp else { malformed += 1; continue }
-                events.append(event(row, suffix: "attachment", kind: "context", op: "attachment",
-                    action: "observed", command: attachmentSummary(row["attachment"]), timestamp: timestamp,
-                    session: session, turn: turn, toolName: "claude.attachment", sourcePath: sourcePath))
-            }
-            if type == "permission-mode", let mode = row["permissionMode"] as? String {
-                guard let timestamp else { malformed += 1; continue }
-                events.append(event(row, suffix: "permission", kind: "context", op: "turn_context",
-                    action: "observed", command: "{\"permission_mode\":\"\(mode)\"}", timestamp: timestamp,
-                    session: session, turn: turn, sourcePath: sourcePath))
+                let attachment = attachmentProjection(row["attachment"])
+                events.append(event(row, identity: row["uuid"] as? String, suffix: "attachment",
+                    kind: "context", op: "attachment", action: "observed", command: attachment.metadata,
+                    timestamp: timestamp, session: session, turn: turn,
+                    modelPrompt: attachment.context, toolName: "claude.attachment.\(attachment.type)",
+                    sourcePath: sourcePath))
             }
             if type == "system", let subtype = row["subtype"] as? String {
                 guard let timestamp else { malformed += 1; continue }
@@ -206,16 +276,16 @@ final class ClaudeSight: ObservableObject {
                                           session: session, turn: turn, sourcePath: sourcePath))
             }
         }
-        return (events, malformed)
+        return (deduplicated(events), malformed, state)
     }
 
     private nonisolated static func reasoningEvent(row: [String: Any], timestamp: Date,
         session: String, turn: String?, model: String?, reasoning: String,
-        sourcePath: String) -> GuardEvent {
-        let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        sourcePath: String, messageID: String?) -> GuardEvent {
+        let rawID = messageID ?? row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
         return GuardEvent(id: deterministicUUID("\(rawID):reasoning"), kind: "model",
             ruleId: "claude_reasoning", path: row["cwd"] as? String ?? sourcePath,
-            command: nil, agent: "claude", op: "reasoning_summary", severity: "info",
+            command: nil, agent: "claude-code", op: "reasoning_summary", severity: "info",
             ts: timestamp, action: "captured", sessionId: session, turnId: turn,
             modelReasoning: bounded(reasoning), model: model, source: "agentsight:claude-local",
             attributionConfidence: .confirmed,
@@ -224,16 +294,23 @@ final class ClaudeSight: ObservableObject {
 
     private nonisolated static func usageEvent(row: [String: Any], timestamp: Date,
         session: String, turn: String?, model: String?, usage: [String: Any]?,
-        sourcePath: String) -> GuardEvent {
-        let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        sourcePath: String, messageID: String?) -> GuardEvent {
+        let rawID = messageID ?? row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        let cacheCreation = int(usage?["cache_creation_input_tokens"])
+        let cacheRead = int(usage?["cache_read_input_tokens"])
+        let uncached = int(usage?["input_tokens"])
+        let totalInput = [uncached, cacheCreation, cacheRead].compactMap { $0 }.reduce(0, +)
+        let details = usage?["output_tokens_details"] as? [String: Any]
+        let metadata = selectedJSON(usage, keys: ["cache_creation_input_tokens", "cache_read_input_tokens",
+            "cache_creation", "server_tool_use", "service_tier", "speed", "inference_geo"])
         return GuardEvent(id: deterministicUUID("\(rawID):usage"), kind: "model",
             ruleId: "claude_usage", path: row["cwd"] as? String ?? sourcePath,
-            command: nil, agent: "claude", op: "usage", severity: "info",
+            command: metadata, agent: "claude-code", op: "usage", severity: "info",
             ts: timestamp, action: "reported", sessionId: session,
             traceId: (row["message"] as? [String: Any])?["id"] as? String, turnId: turn,
-            model: model, inputTokens: int(usage?["input_tokens"]),
+            model: model, inputTokens: totalInput > 0 ? totalInput : nil,
             outputTokens: int(usage?["output_tokens"]),
-            cachedTokens: int(usage?["cache_read_input_tokens"]),
+            cachedTokens: cacheRead, reasoningTokens: int(details?["thinking_tokens"]),
             source: "agentsight:claude-local", attributionConfidence: .confirmed,
             attributionMethod: "Claude Code native project JSONL")
     }
@@ -243,27 +320,29 @@ final class ClaudeSight: ObservableObject {
         let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
         var fields = row.filter {
             ["subtype", "entrypoint", "gitBranch", "version", "userType", "slug",
-             "isSidechain", "durationMs", "messageCount", "stopReason"].contains($0.key)
+             "isSidechain", "durationMs", "messageCount", "stopReason", "compactMetadata"].contains($0.key)
         }
         if let content = row["content"] as? String { fields["content"] = bounded(content) }
+        let operation = subtype == "compact_boundary" ? "context_compaction" : "session_metadata"
         return GuardEvent(id: deterministicUUID("\(rawID):system:\(subtype)"), kind: "context",
-            ruleId: "claude_session_metadata", path: row["cwd"] as? String ?? sourcePath,
-            command: json(fields), agent: "claude", op: "session_metadata", severity: "info",
+            ruleId: "claude_\(operation)", path: row["cwd"] as? String ?? sourcePath,
+            command: json(fields), agent: "claude-code", op: operation, severity: "info",
             ts: timestamp, action: "observed", sessionId: session, turnId: turn,
             toolName: "claude.system.\(subtype)", source: "agentsight:claude-local",
             attributionConfidence: .confirmed,
             attributionMethod: "Claude Code native project JSONL")
     }
 
-    private nonisolated static func event(_ row: [String: Any], suffix: String, kind: String, op: String,
+    private nonisolated static func event(_ row: [String: Any], identity: String?, suffix: String,
+        kind: String, op: String,
         action: String, command: String? = nil, timestamp: Date, session: String, turn: String? = nil,
         toolCallId: String? = nil, userIntent: String? = nil, modelPrompt: String? = nil,
         modelResponse: String? = nil, toolName: String? = nil, model: String? = nil,
         inputTokens: Int? = nil, outputTokens: Int? = nil, cachedTokens: Int? = nil,
         codeFindings: [CodeFinding]? = nil, sourcePath: String) -> GuardEvent {
-        let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        let rawID = identity ?? row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
         return GuardEvent(id: deterministicUUID("\(rawID):\(suffix)"), kind: kind, ruleId: "claude_\(op)",
-            path: row["cwd"] as? String ?? sourcePath, command: command, agent: "claude", op: op,
+            path: row["cwd"] as? String ?? sourcePath, command: command, agent: "claude-code", op: op,
             severity: "info", ts: timestamp, action: action, sessionId: session,
             traceId: (row["message"] as? [String: Any])?["id"] as? String, turnId: turn,
             toolCallId: toolCallId, userIntent: userIntent, modelPrompt: modelPrompt,
@@ -279,10 +358,109 @@ final class ClaudeSight: ObservableObject {
         return (value as? [[String: Any]])?.filter { $0["type"] as? String == "text" }
             .compactMap { $0["text"] as? String }.joined(separator: "\n")
     }
-    private nonisolated static func attachmentSummary(_ value: Any?) -> String {
-        guard let item = value as? [String: Any] else { return "Attachment metadata observed" }
-        return json(item.filter { ["type", "filePath", "filename", "mimeType"].contains($0.key) }) ??
-            "Attachment metadata observed"
+    private nonisolated static func stateCapturingSession(row: [String: Any], type: String,
+        session: String, state: ClaudeProjectionState) -> ClaudeProjectionState {
+        var next = state
+        var values = next.sessionContext[session] ?? [:]
+        if type == "permission-mode", let value = row["permissionMode"] as? String {
+            values["permission_mode"] = value
+        }
+        if type == "mode", let value = row["mode"] as? String { values["mode"] = value }
+        if let value = row["effort"] as? String { values["effort"] = value }
+        if let value = row["perTurnEffort"] as? String { values["turn_effort"] = value }
+        if type == "bridge-session", let value = row["bridgeSessionId"] as? String {
+            values["bridge_session"] = value
+        }
+        if !values.isEmpty { next.sessionContext[session] = values }
+        return next
+    }
+
+    private nonisolated static func sessionContextProjection(row: [String: Any], timestamp: Date,
+        session: String, turn: String, state: ClaudeProjectionState,
+        sourcePath: String) -> ClaudeSessionContextProjection {
+        guard let values = state.sessionContext[session], let payload = json(values) else {
+            return ClaudeSessionContextProjection(state: state, event: nil)
+        }
+        let key = "\(session):\(turn)"
+        guard state.emittedContextSignatures[key] != payload else {
+            return ClaudeSessionContextProjection(state: state, event: nil)
+        }
+        var next = state
+        next.emittedContextSignatures[key] = payload
+        let event = GuardEvent(id: deterministicUUID("\(key):context:\(payload)"), kind: "context",
+            ruleId: "claude_turn_context", path: row["cwd"] as? String ?? sourcePath,
+            command: payload, agent: "claude-code", op: "turn_context", severity: "info",
+            ts: timestamp, action: "observed", sessionId: session, turnId: turn,
+            toolName: "claude.turn_context", source: "agentsight:claude-local",
+            attributionConfidence: .confirmed,
+            attributionMethod: "Claude Code native project JSONL")
+        return ClaudeSessionContextProjection(state: next, event: event)
+    }
+
+    private nonisolated static func shouldProjectAttachment(_ value: Any?) -> Bool {
+        guard let item = value as? [String: Any], let type = item["type"] as? String else { return false }
+        let meaningful: Set<String> = [
+            "agent_listing_delta", "auto_mode", "command_permissions", "compact_file_reference",
+            "date_change", "deferred_tools_delta", "deferred_tools_record", "edited_text_file",
+            "environment", "file", "hook_system_message", "instructions", "invoked_skills",
+            "mcp_instructions_delta", "model", "prompt_snapshot", "remote_session_change",
+            "session_context", "skill_listing"
+        ]
+        return meaningful.contains(type)
+    }
+
+    private nonisolated static func attachmentProjection(_ value: Any?) -> ClaudeAttachmentProjection {
+        guard let item = value as? [String: Any] else {
+            return ClaudeAttachmentProjection(type: "unknown", metadata: "{}", context: nil)
+        }
+        let type = item["type"] as? String ?? "unknown"
+        let metadataKeys = ["type", "filename", "displayPath", "url", "hookName", "scope", "model",
+                            "names", "tools", "skills", "files", "changed", "addedLines", "commit"]
+        let contextKeys = ["systemPrompt", "prompt", "context", "text", "content", "snippet"]
+        let metadata = selectedJSON(item, keys: metadataKeys) ?? "{\"type\":\"\(type)\"}"
+        let context = selectedJSON(item, keys: contextKeys)
+        return ClaudeAttachmentProjection(type: type, metadata: metadata, context: context)
+    }
+
+    private nonisolated static func selectedJSON(_ value: [String: Any]?, keys: [String]) -> String? {
+        guard let value else { return nil }
+        let selected = value.filter { keys.contains($0.key) }
+        return selected.isEmpty ? nil : json(selected)
+    }
+
+    private nonisolated static func completeProjectionLines(_ data: Data,
+        startsAtFileBeginning: Bool) -> Data {
+        guard !startsAtFileBeginning else { return data }
+        guard let newline = data.firstIndex(of: 0x0A) else { return Data() }
+        return Data(data[data.index(after: newline)...])
+    }
+
+    private nonisolated static func bootstrapData(url: URL, beforeOffset: UInt64) -> Data? {
+        let maximumBytes: UInt64 = 2 * 1_024 * 1_024
+        let start = beforeOffset > maximumBytes ? beforeOffset - maximumBytes : 0
+        guard beforeOffset > start, let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        do {
+            try handle.seek(toOffset: start)
+            guard let data = try handle.read(upToCount: Int(beforeOffset - start)) else { return nil }
+            return completeProjectionLines(data, startsAtFileBeginning: start == 0)
+        } catch {
+            return nil
+        }
+    }
+
+    private nonisolated static func deduplicated(_ events: [GuardEvent]) -> [GuardEvent] {
+        var result: [GuardEvent] = []
+        var indexes: [UUID: Int] = [:]
+        for event in events {
+            if let index = indexes[event.id] {
+                result[index] = event
+            } else {
+                indexes[event.id] = result.count
+                result.append(event)
+            }
+        }
+        return result
     }
     private nonisolated static func date(_ value: Any?) -> Date? {
         guard let text = value as? String else { return nil }

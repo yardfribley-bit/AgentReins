@@ -72,7 +72,7 @@ struct AgentReinsApp: App {
                 .onReceive(workBuddySight.$connected) { agentDiscovery.setAdapterConnected("workbuddy", connected: $0) }
                 .onReceive(codexSight.$connected) { agentDiscovery.setAdapterConnected("codex", connected: $0) }
                 .onReceive(qoderSight.$connected) { agentDiscovery.setAdapterConnected("qoder", connected: $0) }
-                .onReceive(claudeSight.$connected) { agentDiscovery.setAdapterConnected("claude", connected: $0) }
+                .onReceive(claudeSight.$connected) { agentDiscovery.setAdapterConnected("claude-code", connected: $0) }
                 .onReceive(cursorSight.$connected) { agentDiscovery.setAdapterConnected("cursor", connected: $0) }
                 .onReceive(webAgentSight.$connected) { agentDiscovery.setAdapterConnected("web-ai", connected: $0) }
                 .onReceive(processGuard.$processInventory) { inventory in
