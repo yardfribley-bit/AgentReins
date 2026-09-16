@@ -42,9 +42,22 @@ final class ToolActivityEvidenceProjector: ObservableObject {
                       toolCall: call.toolCallId, tool: call.toolName)
         switch descriptor.payload {
         case let .network(domain, port):
+            // Severity follows the destination classification so that
+            // untrusted content boundaries surface on the dashboard instead
+            // of being filtered out as routine info-level activity.
+            let destination = NetworkDestinationAssessment.assess(domain: domain, host: domain)
+            let severity: String
+            switch destination.kind {
+            case .externalContent, .unknown, .modelRelay:
+                severity = "high"
+            case .developerService:
+                severity = "medium"
+            case .modelProvider, .telemetry, .localInfrastructure:
+                severity = "info"
+            }
             return GuardEvent(id: descriptor.id, kind: "network", ruleId: "tool_network_intent",
                 path: call.path, command: call.command, agent: call.agent, op: "connect",
-                severity: "info", ts: call.ts, action: action, sessionId: common.session,
+                severity: severity, ts: call.ts, action: action, sessionId: common.session,
                 traceId: common.trace, turnId: common.turn, toolCallId: common.toolCall,
                 userIntent: call.userIntent, modelDecision: call.modelDecision,
                 toolName: common.tool, model: call.model, source: "tool-intent",
