@@ -18,6 +18,7 @@ final class LiveDashboardViewModel: ObservableObject {
     @Published private(set) var snapshot = Snapshot()
     private var pending = Snapshot()
     private var publishWork: DispatchWorkItem?
+    private var notifiedIncidentIDs = Set<UUID>()
     private let maximumEvents = 500
     private let publishDelay: TimeInterval = 0.20
 
@@ -25,9 +26,26 @@ final class LiveDashboardViewModel: ObservableObject {
                         incidents: [SecurityIncident], health: [CollectorHealthRecord]) {
         pending.sessions = sessions
         pending.events = Array(events.prefix(maximumEvents))
+        notifyUntrustedNetworkIncidents(incidents)
         pending.incidents = incidents.filter { $0.severity != "info" }
         pending.health = health
         schedulePublish()
+    }
+
+    /// Network incidents touching an untrusted destination are the one class
+    /// of finding that must not stay buried in the timeline: surface them as
+    /// a system notification the first time they are observed.
+    private func notifyUntrustedNetworkIncidents(_ incidents: [SecurityIncident]) {
+        for incident in incidents
+        where incident.primary.kind == "network"
+            && incident.networkDestination.needsAttention
+            && !notifiedIncidentIDs.contains(incident.id) {
+            notifiedIncidentIDs.insert(incident.id)
+            if notifiedIncidentIDs.count > 200 { notifiedIncidentIDs.removeAll() }
+            let site = incident.primary.remoteDomain ?? incident.primary.remoteHost ?? "unknown destination"
+            AppNotifier.send(title: "Untrusted website accessed · \(site)",
+                             body: incident.networkDestination.reason)
+        }
     }
 
     func updateProcesses(_ processes: [ProcessSnapshotRecord]) {
