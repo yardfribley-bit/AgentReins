@@ -20,6 +20,7 @@ final class EventStore: ObservableObject {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let database: EvidenceDatabase?
+    private let persistenceQueue = DispatchQueue(label: "com.agentspec.eventstore.persistence", qos: .utility)
     private let maximumEvents = 500
 
     init(fileURL: URL = EventStore.defaultURL()) {
@@ -126,24 +127,32 @@ final class EventStore: ObservableObject {
         events = snapshot
         rebuildViews()
         if let database {
-            do {
-                try database.append(evidence)
-                let affectedEvidence = evidenceForAffectedTurns(evidence)
-                try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
-                let affectedTurns = Array(Set(evidence.compactMap { event -> String? in
-                    guard let session = event.sessionId, let turn = event.turnId else { return nil }
-                    return "\(session)\u{0}\(turn)"
-                })).compactMap { key -> (sessionId: String, turnId: String)? in
-                    let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
-                    guard parts.count == 2 else { return nil }
-                    return (String(parts[0]), String(parts[1]))
+            let affectedEvidence = evidenceForAffectedTurns(evidence)
+            let affectedTurns = Array(Set(evidence.compactMap { event -> String? in
+                guard let session = event.sessionId, let turn = event.turnId else { return nil }
+                return "\(session)\u{0}\(turn)"
+            })).compactMap { key -> (sessionId: String, turnId: String)? in
+                let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
+                guard parts.count == 2 else { return nil }
+                return (String(parts[0]), String(parts[1]))
+            }
+            persistenceQueue.async { [weak self] in
+                do {
+                    try database.append(evidence)
+                    try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
+                    try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence),
+                                                    turns: affectedTurns)
+                    try database.upsertMemoryCommits(MemoryCommitEvidence.build(events: affectedEvidence))
+                    let health = try database.healthRecords()
+                    DispatchQueue.main.async {
+                        guard let self else { return }
+                        self.persistenceError = nil
+                        self.collectorHealth = health
+                    }
+                } catch {
+                    let message = error.localizedDescription
+                    DispatchQueue.main.async { [weak self] in self?.persistenceError = message }
                 }
-                try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence), turns: affectedTurns)
-                try database.upsertMemoryCommits(MemoryCommitEvidence.build(events: affectedEvidence))
-                persistenceError = nil
-                refreshCollectorHealth(publish: false)
-            } catch {
-                persistenceError = error.localizedDescription
             }
         } else {
             persistenceError = "SQLite evidence database is unavailable"

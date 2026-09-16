@@ -649,7 +649,7 @@ final class TurnJournalTests: XCTestCase {
     }
 
     @MainActor
-    func testEventStorePreservesCompleteLocalEvidence() throws {
+    func testEventStorePreservesCompleteLocalEvidence() async throws {
         let file = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentreins-local-evidence-\(UUID().uuidString).json")
         defer {
@@ -662,8 +662,14 @@ final class TurnJournalTests: XCTestCase {
                                 op: "exec", severity: "info", ts: Date(), action: "observed"))
 
         let database = try EvidenceDatabase(url: file.appendingPathExtension("sqlite3"))
-        XCTAssertEqual(try database.recent(limit: 1).first?.command,
-                       "agent --token highly-sensitive-token")
+        let deadline = Date().addingTimeInterval(2)
+        var saved: GuardEvent?
+        repeat {
+            saved = try database.recent(limit: 1).first
+            if saved != nil { break }
+            try await Task.sleep(for: .milliseconds(20))
+        } while Date() < deadline
+        XCTAssertEqual(saved?.command, "agent --token highly-sensitive-token")
     }
 
     func testLsofParserCapturesOnlyOutboundTCPConnections() {
@@ -1097,6 +1103,31 @@ final class TurnJournalTests: XCTestCase {
 
         XCTAssertFalse(CodexSight.parseSession(url).contains { $0.userIntent == "Old requirement" })
         XCTAssertTrue(CodexSight.parseSession(url, fullHistory: true).contains { $0.userIntent == "Old requirement" })
+    }
+
+    func testCodexInitialReadBaselinesOlderStreams() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("codex-bootstrap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let older = root.appendingPathComponent("older.jsonl")
+        let latest = root.appendingPathComponent("latest.jsonl")
+        let metadata = #"{"timestamp":"2026-09-13T00:00:00Z","type":"session_meta","payload":{"id":"session","cwd":"/tmp"}}"#
+        let oldPrompt = #"{"timestamp":"2026-09-13T00:00:01Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"old","item":{"type":"UserMessage","id":"old","content":[{"type":"text","text":"Old"}]}}}"#
+        let newPrompt = #"{"timestamp":"2026-09-13T00:00:02Z","type":"event_msg","payload":{"type":"item_completed","turn_id":"new","item":{"type":"UserMessage","id":"new","content":[{"type":"text","text":"New"}]}}}"#
+        try (metadata + "\n" + oldPrompt).write(to: older, atomically: true, encoding: .utf8)
+        try (metadata + "\n" + newPrompt).write(to: latest, atomically: true, encoding: .utf8)
+        let now = Date()
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-2)],
+                                              ofItemAtPath: older.path)
+        try FileManager.default.setAttributes([.modificationDate: now.addingTimeInterval(-1)],
+                                              ofItemAtPath: latest.path)
+
+        let batch = CodexSight.readLiveEvents(root: root.path, previousSizes: [:],
+                                              baselineOtherStreams: true)
+
+        XCTAssertEqual(batch.sizes.count, 2)
+        XCTAssertEqual(batch.events.compactMap(\.userIntent), ["New"])
     }
 
     func testWorkBuddyFixtureProducesExternalContentInfluenceChain() throws {
@@ -1870,22 +1901,83 @@ final class TurnJournalTests: XCTestCase {
 
     func testClaudeAdapterCapturesTurnModelToolsUsageAndPermissions() throws {
         let rows = [
-            #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"turn-1","timestamp":"2026-09-13T00:00:00Z","cwd":"/tmp/project","message":{"role":"user","content":"Build a safe parser"}}"#,
-            #"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s1","timestamp":"2026-09-13T00:00:01Z","cwd":"/tmp/project","message":{"id":"msg-1","model":"claude-sonnet-4-5","stop_reason":"tool_use","usage":{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900},"content":[{"type":"thinking","thinking":"private chain"},{"type":"text","text":"I will inspect it."},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"Parser.swift"}}]}}"#,
-            #"{"type":"user","uuid":"u2","parentUuid":"a1","sessionId":"s1","timestamp":"2026-09-13T00:00:02Z","cwd":"/tmp/project","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"source","is_error":false}]}}"#,
-            #"{"type":"permission-mode","sessionId":"s1","permissionMode":"acceptEdits","timestamp":"2026-09-13T00:00:03Z"}"#
+            #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"turn-1","timestamp":"2026-09-13T00:00:00.123Z","cwd":"/tmp/project","message":{"role":"user","content":"Build a safe parser"}}"#,
+            #"{"type":"assistant","uuid":"a1","parentUuid":"u1","sessionId":"s1","timestamp":"2026-09-13T00:00:01.456Z","cwd":"/tmp/project","message":{"id":"msg-1","model":"claude-sonnet-4-5","stop_reason":"tool_use","usage":{"input_tokens":1200,"output_tokens":80,"cache_read_input_tokens":900},"content":[{"type":"thinking","thinking":"private chain"},{"type":"text","text":"I will inspect it."},{"type":"tool_use","id":"call-1","name":"Read","input":{"file_path":"Parser.swift"}}]}}"#,
+            #"{"type":"user","uuid":"u2","parentUuid":"a1","sessionId":"s1","timestamp":"2026-09-13T00:00:02.789Z","cwd":"/tmp/project","message":{"role":"user","content":[{"type":"tool_result","tool_use_id":"call-1","content":"source","is_error":false}]}}"#,
+            #"{"type":"permission-mode","sessionId":"s1","permissionMode":"acceptEdits","timestamp":"2026-09-13T00:00:03.000Z"}"#,
+            #"{"type":"system","subtype":"turn_duration","uuid":"system-1","parentUuid":"u2","sessionId":"s1","timestamp":"2026-09-13T00:00:04.100Z","cwd":"/tmp/project","durationMs":4200,"messageCount":4,"entrypoint":"cli","version":"1.0"}"#
         ]
         let parsed = ClaudeSight.parse(Data(rows.joined(separator: "\n").utf8))
 
         XCTAssertEqual(parsed.malformed, 0)
         XCTAssertEqual(parsed.events.first { $0.op == "prompt" }?.userIntent, "Build a safe parser")
         XCTAssertEqual(parsed.events.first { $0.op == "response" }?.model, "claude-sonnet-4-5")
-        XCTAssertEqual(parsed.events.first { $0.op == "response" }?.inputTokens, 1200)
-        XCTAssertEqual(parsed.events.first { $0.op == "response" }?.cachedTokens, 900)
+        XCTAssertEqual(parsed.events.first { $0.op == "usage" }?.inputTokens, 1200)
+        XCTAssertEqual(parsed.events.first { $0.op == "usage" }?.cachedTokens, 900)
         XCTAssertEqual(parsed.events.first { $0.op == "call" }?.toolName, "Read")
         XCTAssertEqual(parsed.events.first { $0.op == "result" }?.modelResponse, "source")
         XCTAssertTrue(parsed.events.first { $0.op == "turn_context" }?.command?.contains("acceptEdits") == true)
-        XCTAssertNil(parsed.events.first { $0.op == "reasoning_observed" }?.modelReasoning)
+        XCTAssertEqual(parsed.events.first { $0.op == "reasoning_summary" }?.modelReasoning, "private chain")
+        XCTAssertTrue(parsed.events.first { $0.op == "session_metadata" }?.command?.contains("4200") == true)
+    }
+
+    func testClaudeAdapterRejectsInvalidTimestampInsteadOfUsingCurrentTime() throws {
+        let rows = [
+            #"{"type":"user","uuid":"valid","sessionId":"s1","promptId":"turn-1","timestamp":"2026-09-13T00:00:00.123Z","message":{"role":"user","content":"Valid"}}"#,
+            #"{"type":"user","uuid":"invalid","sessionId":"s1","promptId":"turn-2","timestamp":"not-a-date","message":{"role":"user","content":"Invalid"}}"#
+        ]
+
+        let parsed = ClaudeSight.parse(Data(rows.joined(separator: "\n").utf8))
+
+        XCTAssertEqual(parsed.malformed, 1)
+        XCTAssertEqual(parsed.events.count, 1)
+        let event = try XCTUnwrap(parsed.events.first)
+        XCTAssertEqual(event.ts.timeIntervalSince1970, 1_789_257_600.123, accuracy: 0.001)
+    }
+
+    func testClaudeInitialReadBaselinesOlderStreams() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-bootstrap-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let older = root.appendingPathComponent("older.jsonl")
+        let latest = root.appendingPathComponent("latest.jsonl")
+        try #"{"type":"user","uuid":"old","sessionId":"old","timestamp":"2026-09-13T00:00:00Z","message":{"content":"Old"}}"#
+            .write(to: older, atomically: true, encoding: .utf8)
+        try #"{"type":"user","uuid":"new","sessionId":"new","timestamp":"2026-09-13T00:00:01Z","message":{"content":"New"}}"#
+            .write(to: latest, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1)],
+                                              ofItemAtPath: older.path)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 2)],
+                                              ofItemAtPath: latest.path)
+
+        let batch = ClaudeSight.readRecent(root: root.path, previousSizes: [:],
+                                           baselineOtherStreams: true)
+
+        XCTAssertEqual(batch.sizes.count, 2)
+        XCTAssertEqual(batch.events.compactMap(\.userIntent), ["New"])
+    }
+
+    @MainActor
+    func testClaudeToolUseResponseDoesNotCompleteTurnJournal() throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-journal-\(UUID().uuidString).json")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let store = TurnJournalStore(fileURL: file)
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "-", command: nil,
+            agent: "claude", op: "prompt", severity: "info", ts: Date(), action: "sent",
+            sessionId: "s", turnId: "t", source: "agentsight:claude-local")
+        let intermediate = GuardEvent(kind: "model", ruleId: "response", path: "-", command: nil,
+            agent: "claude", op: "response", severity: "info", ts: Date(), action: "tool_use",
+            sessionId: "s", turnId: "t", source: "agentsight:claude-local")
+        let final = GuardEvent(kind: "model", ruleId: "response", path: "-", command: nil,
+            agent: "claude", op: "response", severity: "info", ts: Date(), action: "end_turn",
+            sessionId: "s", turnId: "t", source: "agentsight:claude-local")
+
+        store.ingest([prompt, intermediate])
+        XCTAssertNil(store.journals.first?.completedAt)
+        store.ingest([final])
+        XCTAssertNotNil(store.journals.first?.completedAt)
     }
 
     private func gitOutput(_ arguments: [String], at root: URL) throws -> String {

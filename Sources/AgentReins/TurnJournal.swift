@@ -377,7 +377,9 @@ final class TurnJournalStore: ObservableObject {
 
     private let fileURL: URL
     private let encoder: JSONEncoder
+    private let liveSnapshotWindow: TimeInterval = 300
     private var scheduledSave: Task<Void, Never>?
+    private var pendingSnapshots = Set<String>()
 
     init(fileURL: URL = TurnJournalStore.defaultURL()) {
         self.fileURL = fileURL
@@ -506,18 +508,23 @@ final class TurnJournalStore: ObservableObject {
     }
 
     private func finish(_ journal: inout AgentTurnJournal, with event: GuardEvent) {
+        let firstCompletion = journal.completedAt == nil
         journal.completedAt = event.ts
         journal.status = status(for: event)
-        if let workspace = journal.workspace {
+        if firstCompletion, let workspace = journal.workspace {
             captureSnapshot(journalId: journal.id, workspace: workspace, baseline: false, at: event.ts)
         }
     }
 
     private func captureSnapshot(journalId: String, workspace: String, baseline: Bool, at date: Date = Date()) {
+        guard abs(Date().timeIntervalSince(date)) <= liveSnapshotWindow else { return }
+        let key = "\(journalId)|\(baseline ? "baseline" : "final")"
+        guard pendingSnapshots.insert(key).inserted else { return }
         Task {
             let snapshot = await Task.detached(priority: .utility) {
                 GitRepositoryInspector.capture(workspace: workspace, at: date)
             }.value
+            pendingSnapshots.remove(key)
             guard let index = journals.firstIndex(where: { $0.id == journalId }) else { return }
             if baseline, journals[index].baseline == nil {
                 journals[index].baseline = snapshot
@@ -543,9 +550,13 @@ final class TurnJournalStore: ObservableObject {
     }
 
     private func isTerminal(_ event: GuardEvent) -> Bool {
-        (event.kind == "model" && event.op == "response" &&
-            (event.source != "agentsight:codex-local-compat" || event.action == "final_answer")) ||
-        ["failed", "error", "cancelled"].contains(event.action.lowercased())
+        if ["failed", "error", "cancelled"].contains(event.action.lowercased()) { return true }
+        guard event.kind == "model", event.op == "response" else { return false }
+        if event.source == "agentsight:codex-local-compat" { return event.action == "final_answer" }
+        if event.source == "agentsight:claude-local" {
+            return ["end_turn", "stop_sequence", "max_tokens"].contains(event.action)
+        }
+        return true
     }
 
     private func normalizedWorkspace(_ path: String) -> String? {
