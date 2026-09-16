@@ -604,6 +604,32 @@ final class EvidenceDatabase: @unchecked Sendable {
         return result
     }
 
+    func events(sessionId: String) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+          SELECT payload FROM evidence_records
+          WHERE json_extract(CAST(payload AS TEXT), '$.sessionId') = ?
+          ORDER BY observed_at ASC, ingested_at ASC
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare session read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionId, at: 1, to: statement)
+        var result: [GuardEvent] = []
+        var ids = Set<UUID>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            let event = try decoder.decode(GuardEvent.self, from: data)
+            if ids.insert(event.id).inserted {
+                result.append(event)
+            }
+        }
+        return result
+    }
+
     func saveCheckpoint(_ checkpoint: SourceCheckpoint) throws {
         lock.lock(); defer { lock.unlock() }
         let sql = """

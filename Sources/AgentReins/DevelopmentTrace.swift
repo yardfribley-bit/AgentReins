@@ -63,7 +63,7 @@ struct DevelopmentTaskTrace {
             evidence: field("Session ID", session.id) + field("Turn ID", turn.id) + field("Original user input", intent))
 
         let plan = DevelopmentTraceNode(id: "plan", kind: .plan, title: "Prepare the approach",
-            summary: prompt == nil ? "Waiting for captured model context" : "\(session.agent.capitalized) prepared context for \(turn.modelNames)",
+            summary: prompt == nil ? "Waiting for captured model context" : "\(session.agentDisplayName) prepared context for \(turn.modelNames)",
             status: prompt == nil && calls.isEmpty ? .pending : .completed, confidence: prompt == nil ? .unknown : .confirmed,
             timestamp: turn.exchanges.first?.startedAt,
             activities: [activity("model-request", "Model request prepared", tokenSummary(turn), turn.exchanges.first?.startedAt, prompt == nil ? .pending : .completed),

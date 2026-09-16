@@ -26,7 +26,7 @@ struct ContentView: View {
             onSession: { selectedSession = $0 },
             onIncident: { selectedIncident = $0 }
         )
-        .frame(minWidth: 1500, minHeight: 780)
+        .frame(minWidth: 1100, minHeight: 720)
         .task {
             refreshLiveDashboard()
             liveDashboard.publishImmediately()
@@ -55,21 +55,31 @@ struct ContentView: View {
 
 private struct SessionEvidenceSheet: View {
     let session: AgentSessionSnapshot
+    @EnvironmentObject private var eventStore: EventStore
     @Environment(\.dismiss) private var dismiss
+    @State private var completeSession: AgentSessionSnapshot?
+    @State private var loadError: String?
+
+    private var visibleSession: AgentSessionSnapshot { completeSession ?? session }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack {
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(session.agent.capitalized).font(.title2.bold())
-                    Text("Complete captured session evidence").foregroundStyle(.secondary)
+                    Text(visibleSession.agentDisplayName).font(.title2.bold())
+                    if let loadError {
+                        Text(loadError).foregroundStyle(.red)
+                    } else {
+                        Text(completeSession == nil ? "Loading complete local evidence…" : "Complete captured session evidence")
+                            .foregroundStyle(.secondary)
+                    }
                 }
                 Spacer()
                 Button("Done") { dismiss() }.keyboardShortcut(.cancelAction)
             }
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(session.turns) { turn in
+                    ForEach(visibleSession.turns) { turn in
                         DisclosureGroup("Turn \(turn.index) · \(turn.startedAt.formatted(date: .abbreviated, time: .standard))") {
                             evidence("USER REQUEST", turn.userInput)
                             evidence("MODEL INPUT", turn.fullPrompt)
@@ -90,6 +100,17 @@ private struct SessionEvidenceSheet: View {
             }
         }
         .padding(18).frame(minWidth: 820, minHeight: 620)
+        .onAppear {
+            eventStore.loadSession(session.id) { result in
+                switch result {
+                case .success(let loaded):
+                    completeSession = loaded
+                    loadError = nil
+                case .failure(let error):
+                    loadError = error.localizedDescription
+                }
+            }
+        }
     }
 
     private func evidence(_ title: String, _ value: String?) -> some View {

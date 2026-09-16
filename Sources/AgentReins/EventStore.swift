@@ -1,5 +1,19 @@
 import Foundation
 
+enum EventStoreReadError: LocalizedError {
+    case databaseUnavailable
+    case sessionNotFound(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .databaseUnavailable:
+            return "本地证据数据库不可用"
+        case .sessionNotFound(let sessionId):
+            return "本地证据数据库中未找到会话：\(sessionId)"
+        }
+    }
+}
+
 /// 所有安全信号的统一、本地事件仓库。事件跨 App 重启保留，不上传网络。
 @MainActor
 final class EventStore: ObservableObject {
@@ -94,6 +108,27 @@ final class EventStore: ObservableObject {
 
     func events(on date: Date, calendar: Calendar = .current) -> [GuardEvent] {
         events.filter { calendar.isDate($0.ts, inSameDayAs: date) }
+    }
+
+    func loadSession(_ sessionId: String,
+                     completion: @escaping (Result<AgentSessionSnapshot, Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable))
+            return
+        }
+        persistenceQueue.async {
+            let result: Result<AgentSessionSnapshot, Error>
+            do {
+                let sessions = AgentSessionSnapshot.build(from: try database.events(sessionId: sessionId))
+                guard let session = sessions.first(where: { $0.id == sessionId }) else {
+                    throw EventStoreReadError.sessionNotFound(sessionId)
+                }
+                result = .success(session)
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
     }
 
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {

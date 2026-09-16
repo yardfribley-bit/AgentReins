@@ -196,6 +196,7 @@ struct AgentSessionSnapshot: Identifiable {
     let events: [GuardEvent]
 
     var latestIntent: String? { exchanges.compactMap(\.userIntent).last }
+    var agentDisplayName: String { formattedAgentName(agent) }
     var toolCallCount: Int { exchanges.reduce(0) { $0 + $1.toolCalls.count } }
     var traceCount: Int { Set(exchanges.compactMap(\.traceId)).count }
     var riskCount: Int { events.filter { $0.severity != "info" }.count }
@@ -287,4 +288,8 @@ struct AgentSessionSnapshot: Identifiable {
                 reasoningTokens: ordered.compactMap(\.reasoningTokens).max())
         }.sorted { $0.startedAt < $1.startedAt }
     }
+}
+
+func formattedAgentName(_ value: String) -> String {
+    value.replacingOccurrences(of: "-", with: " ").capitalized
 }

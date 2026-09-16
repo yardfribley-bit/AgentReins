@@ -64,7 +64,7 @@ struct AgentRuntimeProfile: Sendable {
 }
 
 enum AgentRuntimeProfileRegistry {
-    static let profiles: [AgentRuntimeProfile] = [workBuddy, codex, claude, cursor]
+    static let profiles: [AgentRuntimeProfile] = [workBuddy, codex, claudeCode, claudeDesktop, cursor]
 
     static func classify(_ process: ProcessSnapshotRecord, agentHint: String? = nil)
         -> RuntimeComponentClassification {
@@ -178,13 +178,19 @@ enum AgentRuntimeProfileRegistry {
                  "macwindow", ["Agent lifecycle", "User interaction", "Runtime launch"])
         ])
 
-    private static let claude = AgentRuntimeProfile(
-        id: "claude-macos", agent: "Claude", version: 1,
-        aliases: ["claude-code", "/claude.app/", "/usr/local/bin/claude"],
+    private static let claudeCode = AgentRuntimeProfile(
+        id: "claude-code-macos", agent: "Claude Code", version: 1,
+        aliases: ["claude-code", "/usr/local/bin/claude", "/opt/homebrew/bin/claude"],
         rules: [
             rule("claude-code-cli", ["claude-code/bin/claude", "/usr/local/bin/claude"], "Claude Code Agent", .agentCore,
                  "Runs the Claude Code session, prepares model context, and dispatches tools from the terminal.",
-                 "brain.head.profile", ["Prompt assembly", "Tool authorization", "Session state", "Model interaction"]),
+                 "brain.head.profile", ["Prompt assembly", "Tool authorization", "Session state", "Model interaction"])
+        ])
+
+    private static let claudeDesktop = AgentRuntimeProfile(
+        id: "claude-desktop-macos", agent: "Claude Desktop", version: 1,
+        aliases: ["/claude.app/"],
+        rules: [
             rule("claude-desktop-network", ["network.mojom.networkservice"], "Claude Network Service", .network,
                  "Owns Claude Desktop network sockets; it is not a Claude Code CLI process.",
                  "network", ["Anthropic endpoints", "External websites", "Uploaded context"]),

@@ -30,7 +30,6 @@ struct AgentOperationsCenterView: View {
     @State private var showingHistory = false
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
     @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
-    @StateObject private var ipGeolocation = IPGeolocationStore()
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -76,7 +75,7 @@ struct AgentOperationsCenterView: View {
             : [selectedAgent]
         let list = processInventory.filter { process in
             guard let owner = process.agent else { return false }
-            return agents.contains { owner.caseInsensitiveCompare($0) == .orderedSame }
+            return agents.contains { normalizedAgentKey(owner) == normalizedAgentKey($0) }
         }
         let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         guard !q.isEmpty else { return list }
@@ -89,13 +88,22 @@ struct AgentOperationsCenterView: View {
         return "\(selectedAgent)|\(topology)"
     }
     private var isWebAISelected: Bool { selectedAgent.caseInsensitiveCompare("Web AI") == .orderedSame }
+    private var scopedIncidents: [SecurityIncident] {
+        incidents.filter { incident in
+            guard let agent = incident.agent else { return selectedAgent == "All agents" }
+            return matchesSelectedAgent(agent)
+        }
+    }
     private func matchesSelectedAgent(_ agent: String) -> Bool {
         if selectedAgent == "All agents" { return true }
         if isWebAISelected {
             return ["gemini", "chatgpt", "grok", "claude-web", "web-ai"]
                 .contains(agent.lowercased())
         }
-        return agent.caseInsensitiveCompare(selectedAgent) == .orderedSame
+        return normalizedAgentKey(agent) == normalizedAgentKey(selectedAgent)
+    }
+    private func normalizedAgentKey(_ value: String) -> String {
+        value.lowercased().filter(\.isLetter)
     }
     private var externalServices: [(host: String, event: GuardEvent?)] {
         let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted { left, right in
@@ -172,7 +180,9 @@ struct AgentOperationsCenterView: View {
     private var rootPID: String? {
         let agent = activeSession?.agent ?? (selectedAgent == "All agents" ? nil : selectedAgent)
         let candidates = agent.map { owner in
-            processInventory.filter { $0.agent?.caseInsensitiveCompare(owner) == .orderedSame }
+            processInventory.filter { process in
+                process.agent.map { normalizedAgentKey($0) == normalizedAgentKey(owner) } == true
+            }
         } ?? processes
         let ids = Set(candidates.map(\.pid))
         return candidates
@@ -190,7 +200,7 @@ struct AgentOperationsCenterView: View {
         guard !running.isEmpty else { return }
         if let latest = sessions.filter({ running.contains($0.agent.lowercased()) })
             .max(by: { $0.lastActivityAt < $1.lastActivityAt }) {
-            let next = latest.agent.capitalized
+            let next = latest.agentDisplayName
             if selectedAgent.caseInsensitiveCompare(next) != .orderedSame {
                 selectedAgent = next
                 selectedEvent = nil
@@ -228,10 +238,11 @@ struct AgentOperationsCenterView: View {
 
     var body: some View {
         GeometryReader { geometry in
+            let compactLayout = geometry.size.width < 1420
             VStack(spacing: 0) {
                 header
                 HStack(spacing: 0) {
-                    fleet.frame(width: 248)
+                    fleet.frame(width: compactLayout ? 232 : 248)
                     Rectangle().fill(border).frame(width: 1)
                     ScrollView {
                         VStack(alignment: .leading, spacing: 14) {
@@ -242,7 +253,9 @@ struct AgentOperationsCenterView: View {
                             flowLegend
                         }.padding(16)
                     }
-                    inspector.frame(width: 318)
+                    if !compactLayout {
+                        inspector.frame(width: 318)
+                    }
                 }
                 .frame(height: max(0, geometry.size.height - 96))
                 .clipped()
@@ -257,10 +270,6 @@ struct AgentOperationsCenterView: View {
         }
         .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
         .onChange(of: memoryEvidenceFingerprint) { _ in refreshMemoryCommits() }
-        .onAppear { ipGeolocation.resolve(externalServices.map(\.host)) }
-        .onChange(of: externalServices.map(\.host).joined(separator: "|")) { _ in
-            ipGeolocation.resolve(externalServices.map(\.host))
-        }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
@@ -320,21 +329,23 @@ struct AgentOperationsCenterView: View {
                     .background(cyan.opacity(0.12), in: Capsule())
             }.buttonStyle(.plain)
             Button { showingAnalysisModel = true } label: {
-                Label(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL",
+                Label(semanticAnalyzer.configured ? "ANALYSIS READY…" : "ANALYSIS MODEL…",
                       systemImage: "brain.head.profile")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(semanticAnalyzer.configured ? green : cyan)
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background((semanticAnalyzer.configured ? green : cyan).opacity(0.12), in: Capsule())
-            }.buttonStyle(.plain)
+            }.buttonStyle(PillActionButtonStyle())
+                .help("Configure the optional external analysis model")
             Button { showingBrowserProtection = true } label: {
-                Label(webAgentSight.connected ? "WEB PROTECTED" : "PROTECT WEB AI",
+                Label(webAgentSight.connected ? "WEB PROTECTED…" : "PROTECT WEB AI…",
                       systemImage: webAgentSight.connected ? "checkmark.shield.fill" : "shield.lefthalf.filled")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(webAgentSight.connected ? green : cyan)
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background((webAgentSight.connected ? green : cyan).opacity(0.12), in: Capsule())
-            }.buttonStyle(.plain)
+            }.buttonStyle(PillActionButtonStyle())
+                .help("Open browser protection setup")
         }
         .padding(.horizontal, 18).frame(height: 64).background(panel)
         .overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
@@ -359,7 +370,7 @@ struct AgentOperationsCenterView: View {
                         return ["gemini", "chatgpt", "grok", "claude-web", "web-ai"]
                             .contains(session.agent.lowercased())
                     }
-                    return session.agent.caseInsensitiveCompare(item.product) == .orderedSame
+                    return normalizedAgentKey(session.agent) == normalizedAgentKey(item.product)
                 }
                     .max { $0.lastActivityAt < $1.lastActivityAt }
                 let turn = session?.turns.last
@@ -408,9 +419,8 @@ struct AgentOperationsCenterView: View {
                 Image(systemName: "chevron.right").font(.caption2).foregroundStyle(.secondary)
             }
             .padding(.horizontal, 16).padding(.vertical, 12)
-            .background(selected ? cyan.opacity(0.10) : .clear)
-            .overlay(Rectangle().fill(cyan).frame(width: 2).opacity(selected ? 1 : 0), alignment: .leading)
-        }.buttonStyle(.plain)
+            .frame(maxWidth: .infinity, alignment: .leading)
+        }.buttonStyle(FleetRowButtonStyle(selected: selected))
     }
 
     private var taskHeader: some View {
@@ -418,7 +428,7 @@ struct AgentOperationsCenterView: View {
             VStack(alignment: .leading, spacing: 7) {
                 HStack(spacing: 10) {
                     Circle().fill(activeSession == nil ? Color.gray : green).frame(width: 9, height: 9)
-                    Text(activeSession?.agent.capitalized ?? "Waiting for agent activity")
+                    Text(activeSession?.agentDisplayName ?? "Waiting for agent activity")
                         .font(.system(size: 20, weight: .bold))
                     if activeSession != nil {
                         Text("Running").font(.system(size: 9, weight: .bold)).foregroundStyle(green)
@@ -437,7 +447,7 @@ struct AgentOperationsCenterView: View {
             }
             Spacer()
             if let session = activeSession {
-                Button("Open session") { onSession(session) }
+                Button("Open session…") { onSession(session) }
                     .buttonStyle(.bordered)
             }
         }
@@ -455,8 +465,7 @@ struct AgentOperationsCenterView: View {
                             .font(.system(size: 11, weight: centerTab == tab ? .bold : .medium))
                             .foregroundStyle(centerTab == tab ? cyan : .secondary)
                             .padding(.horizontal, 12).padding(.vertical, 8)
-                            .background(centerTab == tab ? cyan.opacity(0.12) : .clear, in: Capsule())
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(TabButtonStyle(selected: centerTab == tab))
                 }
             }
         }
@@ -504,7 +513,7 @@ struct AgentOperationsCenterView: View {
                                 Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
                             }
                         }.node(selectedEvent?.id == event.id)
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(HoverCardButtonStyle())
                 }
             }
         case .memory:
@@ -545,7 +554,8 @@ struct AgentOperationsCenterView: View {
                         Spacer()
                         Text(call.friendlyStatus).font(.system(size: 9, weight: .bold))
                             .foregroundStyle(call.completedAt == nil ? amber : green)
-                    }.node(selectedEvent?.id == related?.id && related != nil) }.buttonStyle(.plain)
+                    }.node(selectedEvent?.id == related?.id && related != nil) }
+                    .buttonStyle(HoverCardButtonStyle())
                 }
             }
         case .timeline:
@@ -582,7 +592,7 @@ struct AgentOperationsCenterView: View {
                                 Text(commit.summary).font(.system(size: 11, weight: .semibold)).lineLimit(1)
                                 Text(memoryChangePreview(commit))
                                     .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
-                                Text("\(commit.agent.capitalized) · Turn \(commit.turnId) · \(clock(commit.observedAt))")
+                                Text("\(formattedAgentName(commit.agent)) · Turn \(commit.turnId) · \(clock(commit.observedAt))")
                                     .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
                             }
                             Spacer(minLength: 8)
@@ -596,7 +606,7 @@ struct AgentOperationsCenterView: View {
                                 Image(systemName: "chevron.right").font(.system(size: 8)).foregroundStyle(.secondary)
                             }
                         }.node(selectedMemoryCommitID == commit.commitId)
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(HoverCardButtonStyle())
                 }
             }
         }
@@ -676,7 +686,7 @@ struct AgentOperationsCenterView: View {
                 }
                 Spacer()
             }.padding(.vertical, 5)
-        }.buttonStyle(.plain).help(edge.evidence)
+        }.buttonStyle(HoverCardButtonStyle()).help(edge.evidence)
     }
 
     // MARK: - Panels
@@ -861,7 +871,7 @@ struct AgentOperationsCenterView: View {
             .background(active ? tint.opacity(0.20) : raised, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(selected || active ? tint : border, lineWidth: active ? 1.8 : 1))
             .shadow(color: active ? tint.opacity(0.35) : .clear, radius: 7)
-        }.buttonStyle(.plain)
+        }.buttonStyle(HoverCardButtonStyle())
     }
 
     private func compactTreeRow(_ group: OverviewProcessGroup) -> some View {
@@ -926,7 +936,7 @@ struct AgentOperationsCenterView: View {
                 .overlay(RoundedRectangle(cornerRadius: 7).stroke(selected ? tint : border))
             }
             .padding(.vertical, 3)
-        }.buttonStyle(.plain)
+        }.buttonStyle(HoverCardButtonStyle())
     }
 
     private func isOverviewInfrastructureNoise(_ process: ProcessSnapshotRecord) -> Bool {
@@ -1052,7 +1062,7 @@ struct AgentOperationsCenterView: View {
                 .shadow(color: tint.opacity(node.depth == 0 ? 0.18 : 0.08), radius: node.depth == 0 ? 10 : 5, x: 0, y: 3)
             }
             .padding(.vertical, 4)
-        }.buttonStyle(.plain)
+        }.buttonStyle(HoverCardButtonStyle())
     }
 
     private var journeyPanel: some View {
@@ -1072,7 +1082,8 @@ struct AgentOperationsCenterView: View {
                             selectedStageID = currentStage?.id
                             selectedEvent = currentStage?.event
                             selectedProcessGroup = []
-                        }.buttonStyle(.plain).font(.system(size: 8, weight: .semibold)).foregroundStyle(cyan)
+                        }.buttonStyle(TextActionButtonStyle())
+                            .font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
                     }
                 }.padding(.bottom, 10)
                 if stages.isEmpty {
@@ -1134,7 +1145,7 @@ struct AgentOperationsCenterView: View {
                 .overlay(RoundedRectangle(cornerRadius: 8).stroke(selected || isCurrent ? stageColor : border))
             }
             .padding(.bottom, isLast ? 0 : 5)
-        }.buttonStyle(.plain)
+        }.buttonStyle(HoverCardButtonStyle())
     }
 
     private var networkPanel: some View {
@@ -1164,7 +1175,7 @@ struct AgentOperationsCenterView: View {
                                     VStack(alignment: .leading, spacing: 2) {
                                         Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
                                             .font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
-                                        Text("\(session.agent.capitalized) · Remote SSH session")
+                                        Text("\(formattedAgentName(session.agent)) · Remote SSH session")
                                             .font(.system(size: 8)).foregroundStyle(.secondary)
                                     }
                                     Spacer()
@@ -1179,7 +1190,7 @@ struct AgentOperationsCenterView: View {
                             }
                             .padding(.horizontal, 9).padding(.vertical, 8)
                             .node(selectedEvent?.id == session.sourceEvent.id)
-                        }.buttonStyle(.plain)
+                        }.buttonStyle(HoverCardButtonStyle())
                     }
                     Divider().overlay(border).padding(.vertical, 5)
                     Text("OTHER DESTINATIONS").micro(.secondary).frame(maxWidth: .infinity, alignment: .leading)
@@ -1208,14 +1219,6 @@ struct AgentOperationsCenterView: View {
                                     Text(item.host).font(.system(size: 9, weight: .semibold, design: .monospaced)).lineLimit(1)
                                     Text(networkPurpose(item.event, assessment: assessment))
                                         .font(.system(size: 8)).foregroundStyle(.secondary).lineLimit(1)
-                                    if let geo = ipGeolocation.records[item.host.lowercased()] {
-                                        Text(geo.locationLabel + (geo.ownerLabel.map { " · \($0)" } ?? ""))
-                                            .font(.system(size: 7.5)).foregroundStyle(.tertiary).lineLimit(1)
-                                    } else if ipGeolocation.pending.contains(item.host.lowercased()) {
-                                        Text("Resolving IP location…").font(.system(size: 7.5)).foregroundStyle(.tertiary)
-                                    } else if IPGeolocationStore.isPublicIPAddress(item.host) {
-                                        Text("Location unavailable").font(.system(size: 7.5)).foregroundStyle(.tertiary)
-                                    }
                                 }
                             }
                             Spacer(minLength: 4)
@@ -1232,7 +1235,7 @@ struct AgentOperationsCenterView: View {
                         }
                         .padding(.horizontal, 9).padding(.vertical, 7)
                         .node(focusedTaskEvent?.id == item.event?.id && item.event != nil)
-                    }.buttonStyle(.plain)
+                    }.buttonStyle(HoverCardButtonStyle())
                 }
             }
         }
@@ -1311,9 +1314,9 @@ struct AgentOperationsCenterView: View {
             summaryRow(verificationEvent == nil ? amber : resultColor,
                        verificationEvent == nil ? "Execution not independently verified" : "Execution verification",
                        verificationEvent == nil ? "Unknown" : resultHeadline)
-            summaryRow(incidents.isEmpty ? cyan : amber,
-                       incidents.isEmpty ? "No alerts observed" : "Relay / items to review",
-                       incidents.isEmpty ? "Observed only" : "\(incidents.count)")
+            summaryRow(scopedIncidents.isEmpty ? cyan : amber,
+                       scopedIncidents.isEmpty ? "No alerts observed" : "Relay / items to review",
+                       scopedIncidents.isEmpty ? "Observed only" : "\(scopedIncidents.count)")
             summaryRow(findingCount == 0 ? cyan : amber,
                        findingCount == 0 ? "No code findings observed" : "Code findings",
                        findingCount == 0 ? "Not a pass" : "\(findingCount)")
@@ -1323,12 +1326,12 @@ struct AgentOperationsCenterView: View {
                            highRisk == 0 ? "\(memoryCommits.count) observed" : "\(highRisk) need review")
             }
             summaryRow(cyan, "Evidence coverage", evidenceCoverage)
-            if !incidents.isEmpty {
-                Button { onIncident(incidents[0]) } label: {
+            if !scopedIncidents.isEmpty {
+                Button { onIncident(scopedIncidents[0]) } label: {
                     Text("Open top finding")
                         .font(.system(size: 10, weight: .semibold))
                         .foregroundStyle(amber)
-                }.buttonStyle(.plain).padding(.top, 2)
+                }.buttonStyle(TextActionButtonStyle()).padding(.top, 2)
             }
         }
     }
@@ -1343,7 +1346,7 @@ struct AgentOperationsCenterView: View {
                 labelChip(commit.risk == "high" ? "NEEDS REVIEW" : "OBSERVED",
                           color: commit.risk == "high" ? amber : green)
             }
-            field("Agent", commit.agent.capitalized)
+            field("Agent", formattedAgentName(commit.agent))
             field("Session / turn", "\(commit.sessionId) / \(commit.turnId)")
             field("Observed", commit.observedAt.formatted(date: .abbreviated, time: .standard))
             field("Memory store", commit.storagePath ?? "Path not captured")
@@ -1431,7 +1434,7 @@ struct AgentOperationsCenterView: View {
                 field("Capability", info.capability.rawValue)
                 field("Responsibility confidence", info.confidence.rawValue.capitalized)
                 field("Profile evidence", info.matchedEvidence.joined(separator: "; "))
-                field("Attribution", "Observed inside \(activeSession?.agent.capitalized ?? selectedAgent) process tree")
+                field("Attribution", "Observed inside \(activeSession?.agentDisplayName ?? selectedAgent) process tree")
             }
             .padding(11)
             .background(raised, in: RoundedRectangle(cornerRadius: 8))
@@ -1464,7 +1467,7 @@ struct AgentOperationsCenterView: View {
                 field("Parent PID", representative.ppid)
                 field("Runtime Profile", "\(info.profileId) v\(info.profileVersion)")
                 field("Aggregation", "Same parent, component, responsibility, and leaf status")
-                field("Attribution", "Observed inside \(activeSession?.agent.capitalized ?? selectedAgent) process tree")
+                field("Attribution", "Observed inside \(activeSession?.agentDisplayName ?? selectedAgent) process tree")
             }
             .padding(11)
             .background(raised, in: RoundedRectangle(cornerRadius: 8))
@@ -1525,7 +1528,7 @@ struct AgentOperationsCenterView: View {
             Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
                 .font(.system(size: 14, weight: .bold, design: .monospaced))
             labelChip(session.risk.uppercased(), color: session.risk == "review required" ? amber : cyan)
-            field("Agent", session.agent.capitalized)
+            field("Agent", formattedAgentName(session.agent))
             field("Authentication", session.authentication)
             field("Credential", session.credentialEntered ? "Detected · hidden by default" : "Not observed")
             field("Host key policy", session.hostKeyPolicy)
@@ -2268,7 +2271,7 @@ struct AgentOperationsCenterView: View {
             Text("Tools \(events.filter { $0.kind == "tool" }.count)")
             Text("Hosts \(externalServices.count)")
             Spacer()
-            Text("Local evidence · no cloud dependency").foregroundStyle(.secondary)
+            Text("Evidence stored locally · external analysis is optional").foregroundStyle(.secondary)
         }
         .font(.system(size: 9, weight: .medium))
         .padding(.horizontal, 15)
@@ -2359,6 +2362,142 @@ struct AgentOperationsCenterView: View {
     }
 }
 
+private struct FleetRowButtonStyle: ButtonStyle {
+    let selected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        FleetRowButtonBody(label: configuration.label, selected: selected,
+                           pressed: configuration.isPressed)
+    }
+}
+
+private struct FleetRowButtonBody<Label: View>: View {
+    let label: Label
+    let selected: Bool
+    let pressed: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        label
+            .frame(maxWidth: .infinity, minHeight: 28, alignment: .leading)
+            .contentShape(.interaction, Rectangle())
+            .background(selected ? Color.cyan.opacity(0.10) :
+                (hovering ? Color.white.opacity(0.055) : Color.clear))
+            .overlay(Rectangle().fill(Color.cyan).frame(width: 2)
+                .opacity(selected ? 1 : 0), alignment: .leading)
+            .opacity(pressed ? 0.78 : 1)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+private struct TabButtonStyle: ButtonStyle {
+    let selected: Bool
+
+    func makeBody(configuration: Configuration) -> some View {
+        TabButtonBody(label: configuration.label, selected: selected,
+                      pressed: configuration.isPressed)
+    }
+}
+
+private struct TabButtonBody<Label: View>: View {
+    let label: Label
+    let selected: Bool
+    let pressed: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        label
+            .frame(minHeight: 28)
+            .contentShape(.interaction, Capsule())
+            .background(selected ? Color.cyan.opacity(0.12) :
+                (hovering ? Color.white.opacity(0.065) : Color.clear), in: Capsule())
+            .overlay(Capsule().stroke(hovering && !selected ? Color.cyan.opacity(0.35) : Color.clear))
+            .opacity(pressed ? 0.76 : 1)
+            .accessibilityAddTraits(selected ? .isSelected : [])
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+private struct HoverCardButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        HoverCardButtonBody(label: configuration.label, pressed: configuration.isPressed)
+    }
+}
+
+private struct HoverCardButtonBody<Label: View>: View {
+    let label: Label
+    let pressed: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        label
+            .frame(maxWidth: .infinity, minHeight: 28)
+            .contentShape(.interaction, RoundedRectangle(cornerRadius: 8))
+            .background(hovering ? Color.white.opacity(0.045) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8)
+                .stroke(hovering ? Color.cyan.opacity(0.42) : Color.clear))
+            .opacity(pressed ? 0.76 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+private struct PillActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        PillActionButtonBody(label: configuration.label, pressed: configuration.isPressed)
+    }
+}
+
+private struct PillActionButtonBody<Label: View>: View {
+    let label: Label
+    let pressed: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        label
+            .frame(minHeight: 28)
+            .contentShape(.interaction, Capsule())
+            .overlay(Capsule().stroke(hovering ? Color.cyan.opacity(0.55) : Color.clear))
+            .brightness(hovering ? 0.08 : 0)
+            .opacity(pressed ? 0.74 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
+private struct TextActionButtonStyle: ButtonStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        TextActionButtonBody(label: configuration.label, pressed: configuration.isPressed)
+    }
+}
+
+private struct TextActionButtonBody<Label: View>: View {
+    let label: Label
+    let pressed: Bool
+    @State private var hovering = false
+
+    var body: some View {
+        label
+            .padding(.horizontal, 7).padding(.vertical, 5)
+            .frame(minHeight: 28)
+            .contentShape(.interaction, RoundedRectangle(cornerRadius: 6))
+            .background(hovering ? Color.cyan.opacity(0.10) : Color.clear,
+                        in: RoundedRectangle(cornerRadius: 6))
+            .opacity(pressed ? 0.72 : 1)
+            .onHover { hovering = $0 }
+            .animation(.easeOut(duration: 0.12), value: hovering)
+            .animation(.easeOut(duration: 0.08), value: pressed)
+    }
+}
+
 private extension View {
     func node(_ selected: Bool) -> some View {
         padding(10)
@@ -2371,13 +2510,13 @@ private extension View {
 
 private extension Text {
     func micro(_ color: Color) -> some View {
-        font(.system(size: 9, weight: .bold)).tracking(0.8).foregroundStyle(color)
+        font(.system(size: 10, weight: .bold)).tracking(0.8).foregroundStyle(color)
     }
     func mono() -> some View {
-        font(.system(size: 8, design: .monospaced)).foregroundStyle(.secondary)
+        font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
     }
     func badge(_ color: Color) -> some View {
-        font(.system(size: 8, weight: .bold))
+        font(.system(size: 10, weight: .bold))
             .foregroundStyle(color)
             .padding(.horizontal, 7).padding(.vertical, 4)
             .background(color.opacity(0.1), in: Capsule())
