@@ -5,3 +5,6 @@ AgentReins.app/
 *.dmg
 xcuserdata/
 DerivedData/
+.swiftpm/
+.workbuddy/
+__pycache__/
