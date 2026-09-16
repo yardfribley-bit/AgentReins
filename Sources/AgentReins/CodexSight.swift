@@ -19,6 +19,8 @@ final class CodexSight: ObservableObject {
     private var collectionFailures = 0
     private var malformedRows = 0
     private var partialRows = 0
+    private var isInitialPoll = true
+    private var isPolling = false
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
     func start() {
@@ -35,11 +37,15 @@ final class CodexSight: ObservableObject {
     func stop() { timer?.invalidate(); timer = nil }
 
     private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
         let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
         let previousSizes = fileSizes
         let database = evidenceDatabase
+        let baselineOtherStreams = isInitialPoll
         queue.async { [weak self] in
-            let batch = Self.readLiveEvents(root: root, previousSizes: previousSizes)
+            let batch = Self.readLiveEvents(root: root, previousSizes: previousSizes,
+                                            baselineOtherStreams: baselineOtherStreams)
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false
@@ -47,6 +53,8 @@ final class CodexSight: ObservableObject {
             DispatchQueue.main.async {
                 guard let self else { return }
                 let isConnected = FileManager.default.fileExists(atPath: root)
+                self.isPolling = false
+                if isConnected { self.isInitialPoll = false }
                 if self.connected != isConnected { self.connected = isConnected }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
@@ -59,24 +67,38 @@ final class CodexSight: ObservableObject {
                     self.onEvents?(fresh)
                     self.lastUpdate = Date()
                 }
-                // Advance only after delivery. A crash between delivery and this
-                // checkpoint causes a safe idempotent replay, never silent loss.
-                for (stream, offset) in batch.sizes {
-                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
-                        source: "codex", stream: stream, offset: Int64(offset),
-                        fingerprint: nil, updatedAt: Date()))
+                let checkpoints = batch.sizes.map { stream, offset in
+                    SourceCheckpoint(source: "codex", stream: stream, offset: Int64(offset),
+                                     fingerprint: nil, updatedAt: Date())
                 }
                 let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures + self.malformedRows > 0 ? .degraded : .healthy
-                try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                let health = CollectorHealthRecord(
                     source: "codex", state: state, lastSuccess: self.connected ? Date() : nil,
                     lagSeconds: nil, accepted: self.acceptedEvents,
                     malformed: self.collectionFailures + self.malformedRows, dropped: self.partialRows,
-                    detail: !self.connected ? "Codex session directory is unavailable" : self.collectionFailures > 0 || self.malformedRows > 0 ? "Raw read/write or malformed JSONL evidence detected" : self.partialRows > 0 ? "A trailing partial row is buffered for the next poll" : nil))
+                    detail: !self.connected ? "Codex session directory is unavailable" : self.collectionFailures > 0 || self.malformedRows > 0 ? "Raw read/write or malformed JSONL evidence detected" : self.partialRows > 0 ? "A trailing partial row is buffered for the next poll" : nil)
+                self.queue.async { [weak self] in
+                    guard let database else {
+                        DispatchQueue.main.async { self?.collectionFailures += 1 }
+                        return
+                    }
+                    var persistenceFailed = false
+                    for checkpoint in checkpoints {
+                        do { try database.saveCheckpoint(checkpoint) }
+                        catch { persistenceFailed = true }
+                    }
+                    do { try database.updateHealth(health) }
+                    catch { persistenceFailed = true }
+                    if persistenceFailed {
+                        DispatchQueue.main.async { self?.collectionFailures += 1 }
+                    }
+                }
             }
         }
     }
 
-    private nonisolated static func readLiveEvents(root: String, previousSizes: [String: UInt64])
+    nonisolated static func readLiveEvents(root: String, previousSizes: [String: UInt64],
+                                           baselineOtherStreams: Bool)
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
@@ -89,20 +111,25 @@ final class CodexSight: ObservableObject {
             let size = UInt64(values?.fileSize ?? 0)
             if mtime >= cutoff, previousSizes[url.path] != size { files.append((url, mtime, size)) }
         }
-        var sizes: [String: UInt64] = [:]
+        var sizes: [String: UInt64] = baselineOtherStreams
+            ? Dictionary(uniqueKeysWithValues: files.map { ($0.0.path, $0.2) }) : [:]
         var raw: [RawEvidenceRecord] = []
+        var rawFailures = 0
         // One latest rollout at startup, then byte-level increments only.
         let events = files.sorted { $0.1 > $1.1 }.prefix(1).flatMap { item -> [GuardEvent] in
             let (url, _, size) = item
             let previous = previousSizes[url.path]
             if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous) {
                 raw.append(record); sizes[url.path] = RawLogCapture.safeCheckpoint(for: record)
-            } else { sizes[url.path] = size }
+            } else {
+                sizes[url.path] = size
+                rawFailures += 1
+            }
             let start = previous.map { min($0, size) > 64 * 1_024 ? min($0, size) - 64 * 1_024 : 0 }
                 ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)
             return parseSession(url, liveStartOffset: start)
         }
-        return (events, sizes, raw, max(0, sizes.count - raw.count))
+        return (events, sizes, raw, rawFailures)
     }
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false) -> [GuardEvent] {

@@ -17,6 +17,8 @@ final class ClaudeSight: ObservableObject {
     private let database = try? EvidenceDatabase()
     private var accepted = 0
     private var malformed = 0
+    private var isInitialPoll = true
+    private var isPolling = false
 
     func start() {
         guard timer == nil else { return }
@@ -30,16 +32,22 @@ final class ClaudeSight: ObservableObject {
     func stop() { timer?.invalidate(); timer = nil }
 
     private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
         let root = ("~/.claude/projects" as NSString).expandingTildeInPath
         let previous = fileSizes
         let database = database
+        let baselineOtherStreams = isInitialPoll
         queue.async { [weak self] in
-            let batch = Self.readRecent(root: root, previousSizes: previous)
+            let batch = Self.readRecent(root: root, previousSizes: previous,
+                                        baselineOtherStreams: baselineOtherStreams)
             var writeFailed = false
             do { try database?.appendRaw(batch.raw) } catch { writeFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 let available = FileManager.default.fileExists(atPath: root)
+                self.isPolling = false
+                if available { self.isInitialPoll = false }
                 if self.connected != available { self.connected = available }
                 self.malformed += batch.malformed + (writeFailed ? 1 : 0)
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
@@ -47,20 +55,39 @@ final class ClaudeSight: ObservableObject {
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
                 for (stream, offset) in batch.sizes {
                     self.fileSizes[stream] = offset
-                    try? self.database?.saveCheckpoint(SourceCheckpoint(source: "claude", stream: stream,
-                        offset: Int64(offset), fingerprint: nil, updatedAt: Date()))
                 }
-                try? self.database?.updateHealth(CollectorHealthRecord(source: "claude",
+                let checkpoints = batch.sizes.map { stream, offset in
+                    SourceCheckpoint(source: "claude", stream: stream, offset: Int64(offset),
+                                     fingerprint: nil, updatedAt: Date())
+                }
+                let health = CollectorHealthRecord(source: "claude",
                     state: !available ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: available ? Date() : nil, lagSeconds: nil, accepted: self.accepted,
                     malformed: self.malformed, dropped: 0,
                     detail: available ? "Claude Code local session evidence connected" :
-                        "Claude Code project evidence directory is unavailable"))
+                        "Claude Code project evidence directory is unavailable")
+                self.queue.async { [weak self] in
+                    guard let database else {
+                        DispatchQueue.main.async { self?.malformed += 1 }
+                        return
+                    }
+                    var persistenceFailed = false
+                    for checkpoint in checkpoints {
+                        do { try database.saveCheckpoint(checkpoint) }
+                        catch { persistenceFailed = true }
+                    }
+                    do { try database.updateHealth(health) }
+                    catch { persistenceFailed = true }
+                    if persistenceFailed {
+                        DispatchQueue.main.async { self?.malformed += 1 }
+                    }
+                }
             }
         }
     }
 
-    private nonisolated static func readRecent(root: String, previousSizes: [String: UInt64])
+    nonisolated static func readRecent(root: String, previousSizes: [String: UInt64],
+                                      baselineOtherStreams: Bool)
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], malformed: Int) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
@@ -74,10 +101,13 @@ final class ClaudeSight: ObservableObject {
             }
         }
         guard let item = files.max(by: { $0.1 < $1.1 }) else { return ([], [:], [], 0) }
+        var sizes = baselineOtherStreams
+            ? Dictionary(uniqueKeysWithValues: files.map { ($0.0.path, $0.2) }) : [:]
         guard let raw = RawLogCapture.capture(url: item.0, source: "claude", previousOffset: previousSizes[item.0.path])
-        else { return ([], [item.0.path: item.2], [], 1) }
+        else { return ([], sizes, [], 1) }
         let parsed = parse(raw.payload, sourcePath: item.0.path)
-        return (parsed.events, [item.0.path: RawLogCapture.safeCheckpoint(for: raw)], [raw], parsed.malformed)
+        sizes[item.0.path] = RawLogCapture.safeCheckpoint(for: raw)
+        return (parsed.events, sizes, [raw], parsed.malformed)
     }
 
     nonisolated static func parse(_ data: Data, sourcePath: String = "claude.jsonl")
@@ -98,6 +128,7 @@ final class ClaudeSight: ObservableObject {
             let contents = message?["content"] as? [[String: Any]] ?? []
             let isToolResult = contents.contains { $0["type"] as? String == "tool_result" }
             if type == "user", !isToolResult, let text = userText(message?["content"]), !text.isEmpty {
+                guard let timestamp else { malformed += 1; continue }
                 let turn = row["promptId"] as? String ?? row["uuid"] as? String ?? UUID().uuidString
                 currentTurn[session] = turn
                 if let uuid = row["uuid"] as? String { turnByUUID[uuid] = turn }
@@ -111,24 +142,35 @@ final class ClaudeSight: ObservableObject {
             let model = message?["model"] as? String
             let usage = message?["usage"] as? [String: Any]
             if type == "assistant" {
+                guard let timestamp else { malformed += 1; continue }
                 let text = contents.filter { $0["type"] as? String == "text" }
                     .compactMap { $0["text"] as? String }.joined(separator: "\n")
-                let thinkingBytes = contents.filter { $0["type"] as? String == "thinking" }
-                    .compactMap { $0["thinking"] as? String }.reduce(0) { $0 + $1.utf8.count }
+                let thinking = contents.filter { $0["type"] as? String == "thinking" }
+                    .compactMap { $0["thinking"] as? String }.joined(separator: "\n")
                 if !text.isEmpty {
                     events.append(event(row, suffix: "response", kind: "model", op: "response",
                         action: message?["stop_reason"] as? String ?? "received", timestamp: timestamp,
                         session: session, turn: turn, modelResponse: bounded(text), model: model,
-                        inputTokens: int(usage?["input_tokens"]), outputTokens: int(usage?["output_tokens"]),
-                        cachedTokens: int(usage?["cache_read_input_tokens"]), sourcePath: sourcePath))
-                } else if thinkingBytes > 0 {
-                    events.append(event(row, suffix: "reasoning", kind: "context", op: "reasoning_observed",
-                        action: "observed", command: "{\"captured_bytes\":\(thinkingBytes),\"content_exposed\":false}",
-                        timestamp: timestamp, session: session, turn: turn, model: model, sourcePath: sourcePath))
+                        sourcePath: sourcePath))
+                }
+                if !thinking.isEmpty {
+                    events.append(reasoningEvent(row: row, timestamp: timestamp, session: session,
+                                                 turn: turn, model: model, reasoning: thinking,
+                                                 sourcePath: sourcePath))
+                }
+                if usage != nil {
+                    events.append(usageEvent(row: row, timestamp: timestamp, session: session,
+                                             turn: turn, model: model, usage: usage,
+                                             sourcePath: sourcePath))
                 }
             }
+            let hasToolEvidence = contents.contains {
+                ["tool_use", "tool_result"].contains($0["type"] as? String ?? "")
+            }
+            if hasToolEvidence, timestamp == nil { malformed += 1; continue }
             for content in contents {
-                if content["type"] as? String == "tool_use", let callID = content["id"] as? String {
+                if content["type"] as? String == "tool_use", let callID = content["id"] as? String,
+                   let timestamp {
                     let name = content["name"] as? String ?? "unknown_tool"
                     toolNames[callID] = name
                     let arguments = json(content["input"]).map(bounded)
@@ -138,7 +180,7 @@ final class ClaudeSight: ObservableObject {
                         codeFindings: CodeSecurityScanner.scanGenerated(toolName: name, arguments: arguments),
                         sourcePath: sourcePath))
                 } else if content["type"] as? String == "tool_result",
-                          let callID = content["tool_use_id"] as? String {
+                          let callID = content["tool_use_id"] as? String, let timestamp {
                     events.append(event(row, suffix: "result:\(callID)", kind: "tool", op: "result",
                         action: (content["is_error"] as? Bool) == true ? "failed" : "completed",
                         timestamp: timestamp, session: session, turn: turn, toolCallId: callID,
@@ -147,17 +189,70 @@ final class ClaudeSight: ObservableObject {
                 }
             }
             if type == "attachment" {
+                guard let timestamp else { malformed += 1; continue }
                 events.append(event(row, suffix: "attachment", kind: "context", op: "attachment",
                     action: "observed", command: attachmentSummary(row["attachment"]), timestamp: timestamp,
                     session: session, turn: turn, toolName: "claude.attachment", sourcePath: sourcePath))
             }
             if type == "permission-mode", let mode = row["permissionMode"] as? String {
+                guard let timestamp else { malformed += 1; continue }
                 events.append(event(row, suffix: "permission", kind: "context", op: "turn_context",
                     action: "observed", command: "{\"permission_mode\":\"\(mode)\"}", timestamp: timestamp,
                     session: session, turn: turn, sourcePath: sourcePath))
             }
+            if type == "system", let subtype = row["subtype"] as? String {
+                guard let timestamp else { malformed += 1; continue }
+                events.append(systemEvent(row: row, subtype: subtype, timestamp: timestamp,
+                                          session: session, turn: turn, sourcePath: sourcePath))
+            }
         }
         return (events, malformed)
+    }
+
+    private nonisolated static func reasoningEvent(row: [String: Any], timestamp: Date,
+        session: String, turn: String?, model: String?, reasoning: String,
+        sourcePath: String) -> GuardEvent {
+        let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        return GuardEvent(id: deterministicUUID("\(rawID):reasoning"), kind: "model",
+            ruleId: "claude_reasoning", path: row["cwd"] as? String ?? sourcePath,
+            command: nil, agent: "claude", op: "reasoning_summary", severity: "info",
+            ts: timestamp, action: "captured", sessionId: session, turnId: turn,
+            modelReasoning: bounded(reasoning), model: model, source: "agentsight:claude-local",
+            attributionConfidence: .confirmed,
+            attributionMethod: "Claude Code native project JSONL")
+    }
+
+    private nonisolated static func usageEvent(row: [String: Any], timestamp: Date,
+        session: String, turn: String?, model: String?, usage: [String: Any]?,
+        sourcePath: String) -> GuardEvent {
+        let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        return GuardEvent(id: deterministicUUID("\(rawID):usage"), kind: "model",
+            ruleId: "claude_usage", path: row["cwd"] as? String ?? sourcePath,
+            command: nil, agent: "claude", op: "usage", severity: "info",
+            ts: timestamp, action: "reported", sessionId: session,
+            traceId: (row["message"] as? [String: Any])?["id"] as? String, turnId: turn,
+            model: model, inputTokens: int(usage?["input_tokens"]),
+            outputTokens: int(usage?["output_tokens"]),
+            cachedTokens: int(usage?["cache_read_input_tokens"]),
+            source: "agentsight:claude-local", attributionConfidence: .confirmed,
+            attributionMethod: "Claude Code native project JSONL")
+    }
+
+    private nonisolated static func systemEvent(row: [String: Any], subtype: String,
+        timestamp: Date, session: String, turn: String?, sourcePath: String) -> GuardEvent {
+        let rawID = row["uuid"] as? String ?? "\(session):\(timestamp.timeIntervalSince1970)"
+        var fields = row.filter {
+            ["subtype", "entrypoint", "gitBranch", "version", "userType", "slug",
+             "isSidechain", "durationMs", "messageCount", "stopReason"].contains($0.key)
+        }
+        if let content = row["content"] as? String { fields["content"] = bounded(content) }
+        return GuardEvent(id: deterministicUUID("\(rawID):system:\(subtype)"), kind: "context",
+            ruleId: "claude_session_metadata", path: row["cwd"] as? String ?? sourcePath,
+            command: json(fields), agent: "claude", op: "session_metadata", severity: "info",
+            ts: timestamp, action: "observed", sessionId: session, turnId: turn,
+            toolName: "claude.system.\(subtype)", source: "agentsight:claude-local",
+            attributionConfidence: .confirmed,
+            attributionMethod: "Claude Code native project JSONL")
     }
 
     private nonisolated static func event(_ row: [String: Any], suffix: String, kind: String, op: String,
@@ -189,9 +284,11 @@ final class ClaudeSight: ObservableObject {
         return json(item.filter { ["type", "filePath", "filename", "mimeType"].contains($0.key) }) ??
             "Attachment metadata observed"
     }
-    private nonisolated static func date(_ value: Any?) -> Date {
-        guard let text = value as? String else { return Date() }
-        return ISO8601DateFormatter().date(from: text) ?? Date()
+    private nonisolated static func date(_ value: Any?) -> Date? {
+        guard let text = value as? String else { return nil }
+        let fractional = ISO8601DateFormatter()
+        fractional.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        return fractional.date(from: text) ?? ISO8601DateFormatter().date(from: text)
     }
     private nonisolated static func int(_ value: Any?) -> Int? { (value as? NSNumber)?.intValue }
     private nonisolated static func json(_ value: Any?) -> String? {
