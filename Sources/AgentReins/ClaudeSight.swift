@@ -2,6 +2,14 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
+enum ClaudeSightError: LocalizedError {
+    case databaseUnavailable
+
+    var errorDescription: String? {
+        "Claude Code 本地证据数据库不可用"
+    }
+}
+
 struct ClaudeProjectionState: Sendable {
     var currentTurn: [String: String] = [:]
     var turnByUUID: [String: String] = [:]
@@ -39,6 +47,7 @@ final class ClaudeSight: ObservableObject {
     private var isInitialPoll = true
     private var isPolling = false
     private var projectionStates: [String: ClaudeProjectionState] = [:]
+    private let projectionRecoveryKey = "agr_claude_projection_recovery_v1"
 
     func start() {
         guard timer == nil else { return }
@@ -59,7 +68,19 @@ final class ClaudeSight: ObservableObject {
         let database = database
         let baselineOtherStreams = isInitialPoll
         let previousStates = projectionStates
+        let shouldRecover = isInitialPoll && !UserDefaults.standard.bool(forKey: projectionRecoveryKey)
         queue.async { [weak self] in
+            var recovered: [GuardEvent] = []
+            var recoveryError: String?
+            if shouldRecover {
+                do {
+                    guard let database else { throw ClaudeSightError.databaseUnavailable }
+                    recovered = Self.recoverProjection(from: try database.rawRecords(source: "claude"))
+                    try database.append(recovered)
+                } catch {
+                    recoveryError = error.localizedDescription
+                }
+            }
             let batch = Self.readRecentStateful(root: root, previousSizes: previous,
                 baselineOtherStreams: baselineOtherStreams, previousStates: previousStates)
             var writeFailed = false
@@ -70,11 +91,15 @@ final class ClaudeSight: ObservableObject {
                 self.isPolling = false
                 if available { self.isInitialPoll = false }
                 if self.connected != available { self.connected = available }
-                self.malformed += batch.malformed + (writeFailed ? 1 : 0)
+                self.malformed += batch.malformed + (writeFailed || recoveryError != nil ? 1 : 0)
                 self.projectionStates = batch.states
-                let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                let fresh = Self.deduplicated(recovered + batch.events)
+                    .filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
+                if shouldRecover && recoveryError == nil {
+                    UserDefaults.standard.set(true, forKey: self.projectionRecoveryKey)
+                }
                 for (stream, offset) in batch.sizes {
                     self.fileSizes[stream] = offset
                 }
@@ -82,12 +107,14 @@ final class ClaudeSight: ObservableObject {
                     SourceCheckpoint(source: "claude", stream: stream, offset: Int64(offset),
                                      fingerprint: nil, updatedAt: Date())
                 }
+                let detail = recoveryError.map { "Claude Code 投影恢复失败：\($0)" } ??
+                    (available ? "Claude Code local session evidence connected" :
+                        "Claude Code project evidence directory is unavailable")
                 let health = CollectorHealthRecord(source: "claude",
                     state: !available ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: available ? Date() : nil, lagSeconds: nil, accepted: self.accepted,
                     malformed: self.malformed, dropped: 0,
-                    detail: available ? "Claude Code local session evidence connected" :
-                        "Claude Code project evidence directory is unavailable")
+                    detail: detail)
                 self.queue.async { [weak self] in
                     guard let database else {
                         DispatchQueue.main.async { self?.malformed += 1 }
@@ -138,7 +165,8 @@ final class ClaudeSight: ObservableObject {
         }
         var sizes = baselineOtherStreams
             ? Dictionary(uniqueKeysWithValues: files.map { ($0.0.path, $0.2) }) : [:]
-        guard let raw = RawLogCapture.capture(url: item.0, source: "claude", previousOffset: previousSizes[item.0.path])
+        guard let raw = RawLogCapture.capture(url: item.0, source: "claude",
+            previousOffset: previousSizes[item.0.path], maximumInitialBytes: 512 * 1_024)
         else { return ([], sizes, [], 1, previousStates) }
         let priorOffset = previousSizes[item.0.path]
         var state = priorOffset.map { $0 <= item.2 } == false ? ClaudeProjectionState() : previousStates[item.0.path]
@@ -147,7 +175,8 @@ final class ClaudeSight: ObservableObject {
             state = parseWithState(bootstrap, sourcePath: item.0.path,
                                    initialState: ClaudeProjectionState()).state
         }
-        let payload = completeProjectionLines(raw.payload, startsAtFileBeginning: raw.offsetStart == 0)
+        let startsAtLineBoundary = raw.offsetStart == 0 || priorOffset == UInt64(raw.offsetStart)
+        let payload = completeProjectionLines(raw.payload, startsAtLineBoundary: startsAtLineBoundary)
         let parsed = parseWithState(payload, sourcePath: item.0.path,
                                     initialState: state ?? ClaudeProjectionState())
         sizes[item.0.path] = RawLogCapture.safeCheckpoint(for: raw)
@@ -166,6 +195,21 @@ final class ClaudeSight: ObservableObject {
         state: ClaudeProjectionState)
         -> (events: [GuardEvent], malformed: Int, state: ClaudeProjectionState) {
         parseWithState(data, sourcePath: sourcePath, initialState: state)
+    }
+
+    nonisolated static func recoverProjection(from records: [RawEvidenceRecord]) -> [GuardEvent] {
+        var states: [String: ClaudeProjectionState] = [:]
+        var events: [GuardEvent] = []
+        let ordered = records.sorted {
+            $0.stream == $1.stream ? $0.offsetStart < $1.offsetStart : $0.stream < $1.stream
+        }
+        for record in ordered {
+            let parsed = parseWithState(record.payload, sourcePath: record.stream,
+                initialState: states[record.stream] ?? ClaudeProjectionState())
+            states[record.stream] = parsed.state
+            events.append(contentsOf: parsed.events)
+        }
+        return deduplicated(events)
     }
 
     private nonisolated static func parseWithState(_ data: Data, sourcePath: String,
@@ -429,8 +473,8 @@ final class ClaudeSight: ObservableObject {
     }
 
     private nonisolated static func completeProjectionLines(_ data: Data,
-        startsAtFileBeginning: Bool) -> Data {
-        guard !startsAtFileBeginning else { return data }
+        startsAtLineBoundary: Bool) -> Data {
+        guard !startsAtLineBoundary else { return data }
         guard let newline = data.firstIndex(of: 0x0A) else { return Data() }
         return Data(data[data.index(after: newline)...])
     }
@@ -443,7 +487,7 @@ final class ClaudeSight: ObservableObject {
         do {
             try handle.seek(toOffset: start)
             guard let data = try handle.read(upToCount: Int(beforeOffset - start)) else { return nil }
-            return completeProjectionLines(data, startsAtFileBeginning: start == 0)
+            return completeProjectionLines(data, startsAtLineBoundary: start == 0)
         } catch {
             return nil
         }

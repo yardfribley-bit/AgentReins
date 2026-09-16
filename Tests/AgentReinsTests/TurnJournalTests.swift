@@ -165,6 +165,25 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(code.coverage.contains(.prompt))
     }
 
+    func testClaudeNativeInstallPathIsRecognizedAcrossRuntimeLayers() throws {
+        let executable = "/Users/test/.local/share/claude/versions/2.1.269"
+        let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["claude-code"])
+        XCTAssertTrue(provider.isAgentRootExecutable(executable))
+
+        let agents = AgentDiscoveryEngine.discover(
+            processes: [ProcessSnapshotRecord(pid: "41", ppid: "1", command: executable)],
+            existingPaths: [AgentDiscoveryEngine.home + "/.claude/projects"],
+            webEvidenceActive: false)
+        let code = try XCTUnwrap(agents.first { $0.id == "claude-code" })
+        XCTAssertEqual(code.presence, .running)
+        XCTAssertEqual(code.processIds, [41])
+
+        let process = ProcessSnapshotRecord(pid: "41", ppid: "1", command: executable)
+        XCTAssertEqual(AgentRuntimeProfileRegistry.classify(process, agentHint: "claude-code").capability,
+                       .agentCore)
+        XCTAssertEqual(normalizedAgentIdentity("Claude Code"), normalizedAgentIdentity("claude-code"))
+    }
+
     func testAgentRootDiscoveryRejectsProductNamesInsideUserProjectPaths() {
         let provider = DarwinLibprocSnapshotProvider(agentMarkers: ["chatgpt", "codex", "workbuddy", "cursor"])
         XCTAssertTrue(provider.isAgentRootExecutable("/Applications/WorkBuddy.app/Contents/MacOS/Electron"))
@@ -535,6 +554,7 @@ final class TurnJournalTests: XCTestCase {
             offsetEnd: 8, fingerprint: "inode-1", observedAt: Date(), payload: Data("raw-line".utf8))
         try database.appendRaw([record, record])
         XCTAssertEqual(try database.rawRecordCount(), 1)
+        XCTAssertEqual(try database.rawRecords(source: "codex").first?.payload, record.payload)
         XCTAssertTrue(try database.verifyIntegrity())
         let backupURL = root.appendingPathComponent("evidence.backup.sqlite3")
         try database.backup(to: backupURL)
@@ -545,7 +565,8 @@ final class TurnJournalTests: XCTestCase {
         let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: file) }
         try "new\n".write(to: file, atomically: true, encoding: .utf8)
-        let record = try XCTUnwrap(RawLogCapture.capture(url: file, source: "workbuddy", previousOffset: 999))
+        let record = try XCTUnwrap(RawLogCapture.capture(url: file, source: "workbuddy",
+            previousOffset: 999, maximumInitialBytes: 512 * 1_024))
         XCTAssertEqual(record.offsetStart, 0)
         XCTAssertEqual(String(data: record.payload, encoding: .utf8), "new\n")
         XCTAssertEqual(RawLogCapture.safeCheckpoint(for: record), 4)
@@ -1992,6 +2013,46 @@ final class TurnJournalTests: XCTestCase {
         let result = try XCTUnwrap(thirdProjection.events.first { $0.op == "result" })
         XCTAssertEqual(result.turnId, "turn-1")
         XCTAssertEqual(result.toolName, "Read")
+    }
+
+    func testClaudeCheckpointReadKeepsFirstCompleteIncrementalRow() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("claude-checkpoint-\(UUID().uuidString)")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("session.jsonl")
+        let first = #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"t1","timestamp":"2026-09-13T00:00:00Z","message":{"content":"First"}}"# + "\n"
+        try first.write(to: file, atomically: true, encoding: .utf8)
+        let initial = ClaudeSight.readRecent(root: root.path, previousSizes: [:],
+                                             baselineOtherStreams: false)
+        let handle = try FileHandle(forWritingTo: file)
+        try handle.seekToEnd()
+        let second = #"{"type":"user","uuid":"u2","sessionId":"s1","promptId":"t2","timestamp":"2026-09-13T00:00:01Z","message":{"content":"Second"}}"# + "\n"
+        try handle.write(contentsOf: Data(second.utf8))
+        try handle.close()
+
+        let incremental = ClaudeSight.readRecent(root: root.path, previousSizes: initial.sizes,
+                                                  baselineOtherStreams: false)
+
+        XCTAssertEqual(incremental.events.compactMap(\.userIntent), ["Second"])
+    }
+
+    func testClaudeRawRecoveryKeepsValidFirstRowsAndIgnoresPartialPrefix() {
+        let firstLine = #"{"type":"user","uuid":"u1","sessionId":"s1","promptId":"t1","timestamp":"2026-09-13T00:00:00Z","message":{"content":"Recovered first"}}"#
+        let firstPayload = Data(("partial-prefix\n" + firstLine + "\n").utf8)
+        let first = RawEvidenceRecord(source: "claude", stream: "session.jsonl", offsetStart: 100,
+            offsetEnd: 100 + Int64(firstPayload.count), fingerprint: nil,
+            observedAt: Date(timeIntervalSince1970: 1), payload: firstPayload)
+        let secondLine = #"{"type":"user","uuid":"u2","sessionId":"s1","promptId":"t2","timestamp":"2026-09-13T00:00:01Z","message":{"content":"Recovered second"}}"#
+        let secondPayload = Data((secondLine + "\n").utf8)
+        let second = RawEvidenceRecord(source: "claude", stream: "session.jsonl",
+            offsetStart: Int64(RawLogCapture.safeCheckpoint(for: first)),
+            offsetEnd: Int64(RawLogCapture.safeCheckpoint(for: first)) + Int64(secondPayload.count),
+            fingerprint: nil, observedAt: Date(timeIntervalSince1970: 2), payload: secondPayload)
+
+        let recovered = ClaudeSight.recoverProjection(from: [second, first])
+
+        XCTAssertEqual(recovered.compactMap(\.userIntent), ["Recovered first", "Recovered second"])
     }
 
     func testClaudeAttachmentProjectionKeepsContextAndDropsReminderNoise() throws {

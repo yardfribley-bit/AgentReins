@@ -24,7 +24,7 @@ struct AnalysisModelSettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Analysis Model").font(.title2.bold())
                     Text("Use any OpenAI-compatible API. Credentials stay in macOS Keychain.")
-                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
                 }
                 Spacer()
                 Button("Done") { dismiss() }.buttonStyle(.bordered)
@@ -34,7 +34,7 @@ struct AnalysisModelSettingsView: View {
                 input("BASE URL", "https://api.openai.com/v1", text: $baseURL)
                 input("MODEL", "gpt-4o-mini", text: $model)
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("API KEY").font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+                    Text("API KEY").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
                     SecureField(analyzer.configured ? "Enter a new key to replace the saved key" : "sk-…", text: $apiKey)
                         .textFieldStyle(.plain).padding(10).background(raised, in: RoundedRectangle(cornerRadius: 8))
                 }
@@ -43,15 +43,15 @@ struct AnalysisModelSettingsView: View {
             HStack(alignment: .top, spacing: 9) {
                 Circle().fill(route.kind == .modelProvider ? green : amber).frame(width: 8, height: 8).padding(.top, 4)
                 VStack(alignment: .leading, spacing: 3) {
-                    Text(endpointHost ?? "Invalid endpoint").font(.system(size: 11, weight: .semibold, design: .monospaced))
-                    Text(route.kind.rawValue.uppercased()).font(.system(size: 8, weight: .bold))
+                    Text(endpointHost ?? "Invalid endpoint").font(.system(size: 13, weight: .semibold, design: .monospaced))
+                    Text(route.kind.rawValue.uppercased()).font(.system(size: 12, weight: .bold))
                         .foregroundStyle(route.kind == .modelProvider ? green : amber)
-                    Text(route.reason).font(.system(size: 9)).foregroundStyle(.secondary)
+                    Text(route.reason).font(.system(size: 13)).foregroundStyle(.secondary)
                 }
             }.padding(12).background(raised, in: RoundedRectangle(cornerRadius: 9))
 
             if let error = analyzer.lastError {
-                Label(error, systemImage: "exclamationmark.triangle.fill").font(.system(size: 10)).foregroundStyle(amber)
+                Label(error, systemImage: "exclamationmark.triangle.fill").font(.system(size: 12)).foregroundStyle(amber)
             }
 
             HStack {
@@ -79,9 +79,9 @@ struct AnalysisModelSettingsView: View {
 
     private func input(_ title: String, _ placeholder: String, text: Binding<String>) -> some View {
         VStack(alignment: .leading, spacing: 5) {
-            Text(title).font(.system(size: 8, weight: .bold)).foregroundStyle(.secondary)
+            Text(title).font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
             TextField(placeholder, text: text).textFieldStyle(.plain)
-                .font(.system(size: 11, design: .monospaced))
+                .font(.system(size: 13, design: .monospaced))
                 .padding(10).background(raised, in: RoundedRectangle(cornerRadius: 8))
         }
     }

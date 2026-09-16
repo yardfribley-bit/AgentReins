@@ -87,7 +87,7 @@ private struct SessionEvidenceSheet: View {
                             evidence("RECORDED REASONING SUMMARY", turn.recordedReasoning)
                             ForEach(turn.toolCalls) { call in
                                 VStack(alignment: .leading, spacing: 5) {
-                                    Text("TOOL / MCP · \(call.name)").font(.caption.bold()).foregroundStyle(.cyan)
+                                    Text("TOOL / MCP · \(call.name)").font(.system(size: 12, weight: .bold)).foregroundStyle(.cyan)
                                     evidence("ARGUMENTS", call.arguments)
                                     evidence("RESULT", call.result)
                                 }.padding(.vertical, 5)
@@ -115,8 +115,8 @@ private struct SessionEvidenceSheet: View {
 
     private func evidence(_ title: String, _ value: String?) -> some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text(title).font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
-            Text(value ?? "Not captured").font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+            Text(title).font(.system(size: 13, weight: .bold)).foregroundStyle(.secondary)
+            Text(value ?? "Not captured").font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }.padding(.top, 8)
     }
@@ -134,11 +134,11 @@ private struct IncidentEvidenceSheet: View {
                 LazyVStack(alignment: .leading, spacing: 10) {
                     ForEach(incident.events) { event in
                         VStack(alignment: .leading, spacing: 5) {
-                            Text("\(event.kind.uppercased()) · \(event.op)").font(.caption.bold())
+                            Text("\(event.kind.uppercased()) · \(event.op)").font(.system(size: 12, weight: .bold))
                             Text(event.command ?? event.modelResponse ?? event.modelPrompt ?? event.path)
-                                .font(.system(size: 10, design: .monospaced)).textSelection(.enabled)
+                                .font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
                             Text(event.attributionMethod ?? "Attribution unavailable")
-                                .font(.caption2).foregroundStyle(.secondary)
+                                .font(.system(size: 12)).foregroundStyle(.secondary)
                         }.padding(11).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
                     }
                 }

@@ -119,7 +119,8 @@ final class CodexSight: ObservableObject {
         let events = files.sorted { $0.1 > $1.1 }.prefix(1).flatMap { item -> [GuardEvent] in
             let (url, _, size) = item
             let previous = previousSizes[url.path]
-            if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous) {
+            if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous,
+                                                  maximumInitialBytes: 512 * 1_024) {
                 raw.append(record); sizes[url.path] = RawLogCapture.safeCheckpoint(for: record)
             } else {
                 sizes[url.path] = size
