@@ -31,6 +31,14 @@ struct AgentOperationsCenterView: View {
     @StateObject private var ipGeolocation = IPGeolocationStore()
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
     @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
+    @State private var globalTab: GlobalTab = .projects
+
+    private enum GlobalTab: String, CaseIterable, Identifiable {
+        case projects = "Projects"
+        case agents = "Agents"
+        case security = "Security"
+        var id: String { rawValue }
+    }
 
     private enum CenterTab: String, CaseIterable, Identifiable {
         case overview = "Overview"
@@ -181,6 +189,31 @@ struct AgentOperationsCenterView: View {
         guard !scopedEvents.isEmpty else { return "—" }
         return "\(Int(Double(confirmed) / Double(scopedEvents.count) * 100))%"
     }
+    private struct ProjectMission: Identifiable {
+        let id: String
+        let name: String
+        let path: String
+        let sessions: [AgentSessionSnapshot]
+        var lastActivity: Date { sessions.map(\.lastActivityAt).max() ?? .distantPast }
+    }
+    private var projectMissions: [ProjectMission] {
+        let grouped = Dictionary(grouping: sessions) { session -> String in
+            guard let workspace = session.workspace, workspace != "-", !workspace.isEmpty else { return "Unassigned" }
+            let url = URL(fileURLWithPath: workspace)
+            return url.pathExtension.isEmpty ? url.standardized.path : url.deletingLastPathComponent().standardized.path
+        }
+        return grouped.map { path, rows in
+            let name = path == "Unassigned" ? "Unassigned activity" : URL(fileURLWithPath: path).lastPathComponent
+            return ProjectMission(id: path, name: name.isEmpty ? path : name, path: path,
+                                  sessions: rows.sorted { $0.lastActivityAt > $1.lastActivityAt })
+        }.sorted { $0.lastActivity > $1.lastActivity }
+    }
+    private var activeTaskCount: Int {
+        sessions.filter { session in
+            guard let turn = session.turns.last else { return false }
+            return turn.finalResponse == nil || turn.toolCalls.contains { $0.completedAt == nil }
+        }.count
+    }
     private var rootPID: String? {
         let agent = activeSession?.agent ?? (selectedAgent == "All agents" ? nil : selectedAgent)
         let candidates = agent.map { owner in
@@ -199,6 +232,12 @@ struct AgentOperationsCenterView: View {
     }
 
     private func selectInitialAgentIfNeeded() {
+        // The product now opens as a global mission-control surface. Agent
+        // detail is an explicit drill-down, never an automatic redirect.
+        guard selectedAgent != "All agents" else {
+            didSelectInitialAgent = true
+            return
+        }
         guard !didUserSelectAgent else { return }
         let running = Set(discoveredAgents.filter { $0.presence == .running }
             .map { normalizedAgentIdentity($0.product) })
@@ -250,15 +289,19 @@ struct AgentOperationsCenterView: View {
                     fleet.frame(width: compactLayout ? 260 : 278)
                     Rectangle().fill(border).frame(width: 1)
                     ScrollView {
-                        VStack(alignment: .leading, spacing: 14) {
-                            taskHeader
-                            tabBar
-                            centerContent
-                            evidencePanel
-                            flowLegend
-                        }.padding(16)
+                        if selectedAgent == "All agents" {
+                            globalMissionControl.padding(16)
+                        } else {
+                            VStack(alignment: .leading, spacing: 14) {
+                                taskHeader
+                                tabBar
+                                centerContent
+                                evidencePanel
+                                flowLegend
+                            }.padding(16)
+                        }
                     }
-                    if !compactLayout {
+                    if !compactLayout && selectedAgent != "All agents" {
                         inspector.frame(width: 318)
                     }
                 }
@@ -370,8 +413,8 @@ struct AgentOperationsCenterView: View {
                 Text("\(discoveredAgents.count)").badge(cyan)
             }.padding(16)
             fleetRow(name: "All agents",
-                     title: "Unified live posture",
-                     detail: observing ? "Monitoring connected adapters" : "Paused",
+                     title: "Project mission control",
+                     detail: "\(activeTaskCount) active tasks · \(scopedIncidents.count) findings",
                      live: observing)
             ForEach(discoveredAgents) { item in
                 let session = sessions.filter { session in
@@ -430,6 +473,226 @@ struct AgentOperationsCenterView: View {
             .padding(.horizontal, 16).padding(.vertical, 12)
             .frame(maxWidth: .infinity, alignment: .leading)
         }.buttonStyle(FleetRowButtonStyle(selected: selected))
+    }
+
+    // MARK: - Global mission control
+
+    private var globalMissionControl: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            HStack(alignment: .top, spacing: 16) {
+                VStack(alignment: .leading, spacing: 5) {
+                    Text("LIVE MISSION CONTROL").micro(cyan)
+                    Text(globalHeadline).font(.system(size: 24, weight: .bold))
+                    Text("Track every project, task and safety decision across your AI agents.")
+                        .font(.system(size: 13)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                globalMetric("PROJECTS", projectMissions.count, cyan)
+                globalMetric("ACTIVE TASKS", activeTaskCount, .blue)
+                globalMetric("REVIEW", scopedIncidents.filter { $0.severity != "info" }.count, amber)
+                globalMetric("EVIDENCE", evidenceCoverage, green)
+            }
+            .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(border))
+
+            HStack(spacing: 4) {
+                ForEach(GlobalTab.allCases) { tab in
+                    Button { globalTab = tab } label: {
+                        Text(tab.rawValue.uppercased())
+                            .font(.system(size: 12, weight: .bold))
+                            .foregroundStyle(globalTab == tab ? cyan : .secondary)
+                            .padding(.horizontal, 15).padding(.vertical, 9)
+                    }.buttonStyle(TabButtonStyle(selected: globalTab == tab))
+                }
+                Spacer()
+                Text("REAL-TIME · RECENT ACTIVITY ONLY").micro(.secondary)
+            }
+            .overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
+
+            switch globalTab {
+            case .projects: globalProjectsView
+            case .agents: globalAgentsView
+            case .security: globalSecurityView
+            }
+        }
+    }
+
+    private var globalHeadline: String {
+        let critical = scopedIncidents.contains { $0.severity == "critical" || $0.severity == "high" }
+        if critical { return "Review required across active AI work" }
+        if activeTaskCount > 0 { return "\(activeTaskCount) AI task\(activeTaskCount == 1 ? "" : "s") running now" }
+        return observing ? "Monitoring for new Agent activity" : "Monitoring is paused"
+    }
+
+    private func globalMetric(_ label: String, _ value: Int, _ color: Color) -> some View {
+        globalMetric(label, String(value), color)
+    }
+
+    private func globalMetric(_ label: String, _ value: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 3) {
+            Text(label).micro(.secondary)
+            Text(value).font(.system(size: 20, weight: .bold, design: .rounded)).foregroundStyle(color)
+        }
+        .padding(.horizontal, 13).padding(.vertical, 9)
+        .background(raised, in: RoundedRectangle(cornerRadius: 8))
+        .overlay(RoundedRectangle(cornerRadius: 8).stroke(border.opacity(0.8)))
+    }
+
+    private var globalProjectsView: some View {
+        LazyVStack(spacing: 12) {
+            if projectMissions.isEmpty { empty("Waiting for an Agent task with a project workspace") }
+            ForEach(projectMissions) { project in projectMissionCard(project) }
+        }
+    }
+
+    private func projectMissionCard(_ project: ProjectMission) -> some View {
+        let projectIncidents = incidents.filter { incident in
+            project.sessions.contains { session in
+                incident.events.contains { $0.sessionId == session.id }
+            }
+        }
+        let changedFiles = Set(project.sessions.flatMap(\.events)
+            .filter { $0.kind == "file" && $0.op != "read" }.map(\.path)).count
+        return VStack(alignment: .leading, spacing: 13) {
+            HStack(alignment: .top, spacing: 12) {
+                Image(systemName: "folder.fill").font(.system(size: 20)).foregroundStyle(cyan)
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(project.name).font(.system(size: 17, weight: .bold))
+                    Text(project.path).font(.system(size: 12, design: .monospaced))
+                        .foregroundStyle(.secondary).lineLimit(1)
+                }
+                Spacer()
+                labelChip("\(project.sessions.count) AGENT\(project.sessions.count == 1 ? "" : "S")", color: cyan)
+                labelChip("\(changedFiles) FILES CHANGED", color: changedFiles > 0 ? .blue : .gray)
+                labelChip(projectIncidents.isEmpty ? "MONITORING" : "REVIEW REQUIRED",
+                          color: projectIncidents.isEmpty ? green : amber)
+            }
+            Divider().overlay(border)
+            ForEach(project.sessions) { session in
+                globalTaskRow(session, incidents: projectIncidents.filter { incident in
+                    incident.events.contains { $0.sessionId == session.id }
+                })
+            }
+        }
+        .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(projectIncidents.isEmpty ? border : amber.opacity(0.65)))
+    }
+
+    private func globalTaskRow(_ session: AgentSessionSnapshot, incidents: [SecurityIncident]) -> some View {
+        let turn = session.turns.last
+        let stage = liveStage(for: session)
+        let risk = incidents.max { severityRank($0.severity) < severityRank($1.severity) }
+        return Button {
+            didUserSelectAgent = true
+            selectedAgent = session.agentDisplayName
+            centerTab = .overview
+            followingLive = true
+        } label: {
+            VStack(alignment: .leading, spacing: 9) {
+                HStack(spacing: 9) {
+                    Circle().fill(stage.color).frame(width: 8, height: 8)
+                    Text(session.agentDisplayName).font(.system(size: 14, weight: .bold))
+                    Text(String((turn?.userInput ?? session.latestIntent ?? "Active Agent task").prefix(90)))
+                        .font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    if let risk { labelChip(risk.severity.uppercased(), color: incidentColor(risk.severity)) }
+                    Text(stage.label.uppercased()).font(.system(size: 11, weight: .bold)).foregroundStyle(stage.color)
+                    Text(clock(session.lastActivityAt)).font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
+                    Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                taskStageRail(session)
+                if let risk {
+                    HStack(spacing: 6) {
+                        Image(systemName: "exclamationmark.shield.fill").foregroundStyle(incidentColor(risk.severity))
+                        Text(risk.title).font(.system(size: 12, weight: .semibold)).lineLimit(1)
+                        Text("· \(risk.summary)").font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                }
+            }.padding(12).background(raised.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
+        }.buttonStyle(HoverCardButtonStyle())
+    }
+
+    private func taskStageRail(_ session: AgentSessionSnapshot) -> some View {
+        let rows = session.events
+        let turn = session.turns.last
+        let stages: [(String, Bool, Bool)] = [
+            ("Request", turn?.userInput != nil, false),
+            ("Context", rows.contains { $0.kind == "context" || $0.modelPrompt != nil }, false),
+            ("Model", rows.contains { $0.kind == "model" && $0.op == "response" }, false),
+            ("Tools", !((turn?.toolCalls ?? []).isEmpty), turn?.toolCalls.contains { $0.completedAt == nil } == true),
+            ("Changes", rows.contains { $0.kind == "file" && $0.op != "read" }, false),
+            ("Verified", rows.contains { $0.kind == "verification" && ["passed", "verified", "success"].contains($0.action.lowercased()) }, false)
+        ]
+        return HStack(spacing: 0) {
+            ForEach(Array(stages.enumerated()), id: \.offset) { index, item in
+                HStack(spacing: 5) {
+                    Circle().fill(item.2 ? amber : (item.1 ? green : Color.gray.opacity(0.45)))
+                        .frame(width: 7, height: 7)
+                    Text(item.0).font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(item.1 || item.2 ? .primary : .tertiary)
+                    if index < stages.count - 1 {
+                        Rectangle().fill(item.1 ? green.opacity(0.55) : border).frame(height: 1)
+                    }
+                }.frame(maxWidth: .infinity)
+            }
+        }
+    }
+
+    private var globalAgentsView: some View {
+        LazyVStack(spacing: 9) {
+            ForEach(discoveredAgents) { item in
+                let related = sessions.filter { normalizedAgentKey($0.agent) == normalizedAgentKey(item.product) }
+                let latest = related.max { $0.lastActivityAt < $1.lastActivityAt }
+                fleetRow(name: item.product, title: latest.map { readableActivity($0.turns.last) } ?? "No active task",
+                         detail: latest?.workspace ?? "No project attributed", live: item.presence == .running)
+            }
+        }
+    }
+
+    private var globalSecurityView: some View {
+        LazyVStack(spacing: 9) {
+            if scopedIncidents.isEmpty { empty("No security story requires attention in the live window") }
+            ForEach(scopedIncidents.filter { $0.severity != "info" }) { incident in
+                Button { onIncident(incident) } label: {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "exclamationmark.shield.fill")
+                            .foregroundStyle(incidentColor(incident.severity)).font(.system(size: 18))
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(incident.title).font(.system(size: 14, weight: .bold))
+                            Text(incident.summary).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                            Text("\(formattedAgentName(incident.agent ?? "Unknown Agent")) · \(clock(incident.ts)) · \(incident.events.count) evidence records")
+                                .font(.system(size: 11)).foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        labelChip(incident.severity.uppercased(), color: incidentColor(incident.severity))
+                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
+                    }.padding(13).background(panel, in: RoundedRectangle(cornerRadius: 10))
+                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(incidentColor(incident.severity).opacity(0.55)))
+                }.buttonStyle(HoverCardButtonStyle())
+            }
+        }
+    }
+
+    private func liveStage(for session: AgentSessionSnapshot) -> (label: String, color: Color) {
+        guard let turn = session.turns.last else { return ("Monitoring", .gray) }
+        if turn.toolCalls.contains(where: { $0.completedAt == nil }) { return (readableActivity(turn), amber) }
+        if session.events.contains(where: { $0.kind == "verification" && ["passed", "verified", "success"].contains($0.action.lowercased()) }) {
+            return ("Verified", green)
+        }
+        if turn.finalResponse != nil { return ("Reported complete", cyan) }
+        return ("Processing", .blue)
+    }
+
+    private func incidentColor(_ severity: String) -> Color {
+        switch severity.lowercased() {
+        case "critical": return .red
+        case "high", "medium": return amber
+        default: return cyan
+        }
+    }
+
+    private func severityRank(_ severity: String) -> Int {
+        ["info": 0, "low": 1, "medium": 2, "high": 3, "critical": 4][severity.lowercased()] ?? 0
     }
 
     private var taskHeader: some View {
