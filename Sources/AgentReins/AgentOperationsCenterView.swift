@@ -28,6 +28,7 @@ struct AgentOperationsCenterView: View {
     @State private var showingBrowserProtection = false
     @State private var showingAnalysisModel = false
     @State private var showingHistory = false
+    @StateObject private var ipGeolocation = IPGeolocationStore()
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
     @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
 
@@ -121,6 +122,9 @@ struct AgentOperationsCenterView: View {
         }
     }
     private var sshSessions: [SSHSessionEvidence] { SSHSessionEvidence.build(events: scopedEvents) }
+    private var networkFlows: [NetworkFlowEvidence] { NetworkFlowEvidence.build(events: scopedEvents) }
+    private var networkIPs: [String] { Array(Set(networkFlows.compactMap(\.ip))).sorted() }
+    private var networkIPFingerprint: String { networkIPs.joined(separator: "|") }
     private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
     private var memoryEvidenceRows: [GuardEvent] {
         guard let session = activeSession else { return [] }
@@ -268,9 +272,11 @@ struct AgentOperationsCenterView: View {
             selectInitialAgentIfNeeded()
             refreshRuntimeGraph()
             refreshMemoryCommits()
+            ipGeolocation.resolve(networkIPs)
         }
         .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
         .onChange(of: memoryEvidenceFingerprint) { _ in refreshMemoryCommits() }
+        .onChange(of: networkIPFingerprint) { _ in ipGeolocation.resolve(networkIPs) }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
@@ -1152,95 +1158,113 @@ struct AgentOperationsCenterView: View {
     }
 
     private var networkPanel: some View {
-        posturePanel("NETWORK EVIDENCE", "Who the Agent contacted, why, and how certain we are") {
-            VStack(spacing: 5) {
-                if !sshSessions.isEmpty {
-                    HStack {
-                        Text("SSH SESSIONS").micro(cyan)
-                        Spacer()
-                        Text("\(sshSessions.count)").mono()
-                    }.padding(.bottom, 2)
-                    ForEach(sshSessions) { session in
-                        Button {
-                            selectedEvent = session.sourceEvent
-                            selectedProcess = nil
-                            selectedProcessGroup = []
-                            selectedStageID = nil
-                            followingLive = false
-                        } label: {
-                            VStack(alignment: .leading, spacing: 7) {
-                                HStack(spacing: 8) {
-                                    Image(systemName: "terminal.fill")
-                                        .foregroundStyle(session.risk == "review required" ? amber : cyan)
-                                        .frame(width: 25, height: 25)
-                                        .background((session.risk == "review required" ? amber : cyan).opacity(0.12),
-                                                    in: RoundedRectangle(cornerRadius: 6))
-                                    VStack(alignment: .leading, spacing: 2) {
-                                        Text("\(session.username.map { "\($0)@" } ?? "")\(session.host):\(session.port)")
-                                            .font(.system(size: 13, weight: .semibold, design: .monospaced)).lineLimit(1)
-                                        Text("\(formattedAgentName(session.agent)) · Remote SSH session")
-                                            .font(.system(size: 12)).foregroundStyle(.secondary)
-                                    }
-                                    Spacer()
-                                    Text(session.risk.uppercased()).font(.system(size: 12, weight: .bold))
-                                        .foregroundStyle(session.risk == "review required" ? amber : cyan)
-                                }
-                                HStack(spacing: 10) {
-                                    Text("Auth: \(session.authentication)")
-                                    Text("Transfers: \(session.transfers.count)")
-                                    Text("Commands: \(session.remoteCommandCount)")
-                                }.font(.system(size: 12)).foregroundStyle(.tertiary).lineLimit(1)
-                            }
-                            .padding(.horizontal, 9).padding(.vertical, 8)
-                            .node(selectedEvent?.id == session.sourceEvent.id)
-                        }.buttonStyle(HoverCardButtonStyle())
+        posturePanel("NETWORK EVIDENCE", "Model routes, Agent web access, remote operations, and infrastructure") {
+            VStack(alignment: .leading, spacing: 10) {
+                if networkFlows.isEmpty {
+                    empty("No Agent-owned network evidence captured")
+                } else {
+                    HStack(spacing: 8) {
+                        networkMetric("MODEL", .model, cyan)
+                        networkMetric("WEB", .web, .blue)
+                        networkMetric("REMOTE", .remote, amber)
+                        networkMetric("UNKNOWN", .unknown, .gray)
                     }
-                    Divider().overlay(border).padding(.vertical, 5)
-                    Text("OTHER DESTINATIONS").micro(.secondary).frame(maxWidth: .infinity, alignment: .leading)
-                }
-                if externalServices.isEmpty {
-                    empty("No external destination captured")
-                }
-                ForEach(externalServices, id: \.host) { item in
-                    let assessment = NetworkDestinationAssessment.assess(domain: item.host, host: item.host)
-                    Button {
-                        selectedEvent = item.event
-                        selectedProcess = nil
-                        selectedProcessGroup = []
-                        selectedStageID = nil
-                        followingLive = false
-                    } label: {
-                        HStack(spacing: 9) {
-                            let isCandidate = assessment.kind == .unknown
-                            HStack(spacing: 8) {
-                                Image(systemName: serviceIcon(assessment.kind))
-                                    .foregroundStyle(assessment.needsAttention ? amber : cyan)
-                                    .frame(width: 25, height: 25)
-                                    .background((assessment.needsAttention ? amber : cyan).opacity(0.12),
-                                                in: RoundedRectangle(cornerRadius: 6))
-                                VStack(alignment: .leading, spacing: 2) {
-                                    Text(item.host).font(.system(size: 13, weight: .semibold, design: .monospaced)).lineLimit(1)
-                                    Text(networkPurpose(item.event, assessment: assessment))
-                                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
-                                }
-                            }
-                            Spacer(minLength: 4)
-                            if let event = item.event {
-                                VStack(alignment: .trailing, spacing: 2) {
-                                    Text(isCandidate ? "NETWORK CANDIDATE" : assessment.kind.rawValue.uppercased())
-                                        .font(.system(size: 12, weight: .bold))
-                                        .foregroundStyle(isCandidate ? Color.secondary : (assessment.needsAttention ? amber : cyan))
-                                    Text(networkActor(event)).font(.system(size: 12)).foregroundStyle(.secondary)
-                                    Text(clock(event.startedAt ?? event.ts))
-                                        .font(.system(size: 12, design: .monospaced)).foregroundStyle(.tertiary)
-                                }
-                            }
+                    ForEach(NetworkTrafficCategory.allCases, id: \.self) { category in
+                        let flows = networkFlows.filter { $0.category == category }
+                        if !flows.isEmpty {
+                            HStack {
+                                Text(category.rawValue).micro(networkCategoryColor(category))
+                                Spacer()
+                                Text("\(flows.count)").mono()
+                            }.padding(.top, 5)
+                            ForEach(flows) { flow in networkFlowRow(flow) }
                         }
-                        .padding(.horizontal, 9).padding(.vertical, 7)
-                        .node(focusedTaskEvent?.id == item.event?.id && item.event != nil)
-                    }.buttonStyle(HoverCardButtonStyle())
+                    }
                 }
             }
+        }
+    }
+
+    private func networkMetric(_ title: String, _ category: NetworkTrafficCategory, _ color: Color) -> some View {
+        let count = networkFlows.filter { $0.category == category }.count
+        return VStack(alignment: .leading, spacing: 2) {
+            Text("\(count)").font(.system(size: 16, weight: .bold)).foregroundStyle(color)
+            Text(title).font(.system(size: 9, weight: .bold)).foregroundStyle(.secondary)
+        }
+        .padding(.horizontal, 9).padding(.vertical, 7).frame(maxWidth: .infinity, alignment: .leading)
+        .background(raised, in: RoundedRectangle(cornerRadius: 7))
+        .overlay(RoundedRectangle(cornerRadius: 7).stroke(border))
+    }
+
+    private func networkFlowRow(_ flow: NetworkFlowEvidence) -> some View {
+        let color = networkCategoryColor(flow.category)
+        let geo = flow.ip.flatMap { ipGeolocation.records[$0] }
+        return Button {
+            selectedEvent = flow.sourceEvent
+            selectedProcess = nil
+            selectedProcessGroup = []
+            selectedStageID = nil
+            followingLive = false
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 9) {
+                    Image(systemName: networkCategoryIcon(flow.category))
+                        .foregroundStyle(color).frame(width: 26, height: 26)
+                        .background(color.opacity(0.12), in: RoundedRectangle(cornerRadius: 6))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("\(flow.destination)\(flow.port.map { ":\($0)" } ?? "")")
+                            .font(.system(size: 13, weight: .semibold, design: .monospaced)).lineLimit(1)
+                        Text(flow.purpose).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    }
+                    Spacer(minLength: 4)
+                    VStack(alignment: .trailing, spacing: 2) {
+                        Text(flow.grade.rawValue.uppercased()).font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(networkGradeColor(flow.grade))
+                        Text("\(formattedAgentName(flow.agent)) · \(flow.connectionCount) observed")
+                            .font(.system(size: 11)).foregroundStyle(.secondary)
+                    }
+                }
+                HStack(spacing: 12) {
+                    if let ip = flow.ip { Label(ip, systemImage: "number").lineLimit(1) }
+                    if let geo { Label(geo.locationLabel, systemImage: "mappin.and.ellipse").lineLimit(1) }
+                    if let owner = geo?.ownerLabel { Label(owner, systemImage: "building.2").lineLimit(1) }
+                    if flow.ip != nil && geo == nil {
+                        Text(ipGeolocation.pending.contains(flow.ip!) ? "Resolving IP intelligence…" : "IP intelligence unavailable")
+                    }
+                }.font(.system(size: 10)).foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 9).padding(.vertical, 8)
+            .background(raised, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(selectedEvent?.id == flow.sourceEvent.id ? color : border))
+        }.buttonStyle(HoverCardButtonStyle())
+    }
+
+    private func networkCategoryColor(_ category: NetworkTrafficCategory) -> Color {
+        switch category {
+        case .model: return cyan
+        case .web: return .blue
+        case .remote: return amber
+        case .infrastructure: return .purple
+        case .unknown: return .gray
+        }
+    }
+
+    private func networkCategoryIcon(_ category: NetworkTrafficCategory) -> String {
+        switch category {
+        case .model: return "sparkles"
+        case .web: return "globe"
+        case .remote: return "terminal.fill"
+        case .infrastructure: return "server.rack"
+        case .unknown: return "questionmark.circle"
+        }
+    }
+
+    private func networkGradeColor(_ grade: NetworkEvidenceGrade) -> Color {
+        switch grade {
+        case .correlated: return green
+        case .observed: return cyan
+        case .inferred: return .blue
+        case .unknown: return .gray
         }
     }
 
@@ -1501,6 +1525,10 @@ struct AgentOperationsCenterView: View {
                 sshSessionDetail(ssh)
                 Divider().overlay(border)
             }
+            if let flow = networkFlows.first(where: { $0.sourceEvent.id == e.id }) {
+                networkFlowDetail(flow)
+                Divider().overlay(border)
+            }
             Text("NODE DETAILS").micro(.secondary)
             Text(eventTitle(e)).font(.system(size: 15, weight: .semibold))
             field("Observed", e.ts.formatted(date: .abbreviated, time: .standard))
@@ -1522,6 +1550,31 @@ struct AgentOperationsCenterView: View {
                 field("Destination class", assessment.kind.rawValue)
                 field("Review reason", assessment.reason)
             }
+        }
+    }
+
+    private func networkFlowDetail(_ flow: NetworkFlowEvidence) -> some View {
+        let geo = flow.ip.flatMap { ipGeolocation.records[$0] }
+        return VStack(alignment: .leading, spacing: 9) {
+            Text("NETWORK ATTRIBUTION").micro(networkCategoryColor(flow.category))
+            Text("\(flow.destination)\(flow.port.map { ":\($0)" } ?? "")")
+                .font(.system(size: 16, weight: .bold, design: .monospaced))
+            HStack(spacing: 7) {
+                labelChip(flow.category.rawValue, color: networkCategoryColor(flow.category))
+                labelChip(flow.grade.rawValue.uppercased(), color: networkGradeColor(flow.grade))
+            }
+            field("Agent", formattedAgentName(flow.agent))
+            field("Purpose", flow.purpose)
+            field("Attribution evidence", flow.reason)
+            field("Observed connections", "\(flow.connectionCount)")
+            if let domain = flow.domain { field("Domain", domain) }
+            if let ip = flow.ip { field("IP address", ip) }
+            field("Estimated location", geo?.locationLabel ?? "Not resolved")
+            field("ASN / network owner", geo?.ownerLabel ?? "Not resolved")
+            field("First observed", flow.firstObservedAt.formatted(date: .abbreviated, time: .standard))
+            field("Last observed", flow.lastObservedAt.formatted(date: .abbreviated, time: .standard))
+            Text("Location and network ownership are third-party IP intelligence estimates. Network evidence proves the connection; encrypted payload contents require separate local Agent/tool evidence.")
+                .font(.system(size: 11)).foregroundStyle(.tertiary).fixedSize(horizontal: false, vertical: true)
         }
     }
 

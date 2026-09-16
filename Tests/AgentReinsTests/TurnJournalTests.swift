@@ -787,6 +787,42 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(grokWeb.kind, .modelProvider)
     }
 
+    func testNetworkFlowEvidenceSeparatesModelWebSSHAndUnknownTraffic() throws {
+        let now = Date()
+        let rows = [
+            GuardEvent(kind: "model", ruleId: "request", path: "-", command: nil,
+                agent: "codex", op: "request", severity: "info", ts: now, action: "sent",
+                sessionId: "s", turnId: "model-turn", model: "gpt-test"),
+            GuardEvent(kind: "network", ruleId: "socket", path: "-", command: nil,
+                agent: "codex", op: "connect", severity: "info", ts: now, action: "observed",
+                sessionId: "s", turnId: "model-turn", source: "lsof-network",
+                attributionConfidence: .confirmed, attributionMethod: "PID and turn join",
+                processId: 10, remoteHost: "104.18.3.115", remotePort: 443),
+            GuardEvent(kind: "network", ruleId: "tool_url", path: "-", command: nil,
+                agent: "codex", op: "request", severity: "medium", ts: now, action: "observed",
+                sessionId: "s", turnId: "web-turn", toolCallId: "web-1", toolName: "WebFetch",
+                source: "tool-intent", attributionConfidence: .confirmed,
+                remoteHost: "github.com", remotePort: 443, remoteDomain: "github.com"),
+            GuardEvent(kind: "network", ruleId: "ssh", path: "-", command: "ssh root@203.0.113.7",
+                agent: "codex", op: "connect", severity: "medium", ts: now, action: "observed",
+                sessionId: "s", turnId: "deploy-turn", source: "tool-intent",
+                attributionConfidence: .confirmed, remoteHost: "203.0.113.7", remotePort: 22),
+            GuardEvent(kind: "network", ruleId: "socket", path: "-", command: nil,
+                agent: "codex", op: "connect", severity: "medium", ts: now, action: "observed",
+                source: "lsof-network", attributionConfidence: .inferred,
+                processId: 11, remoteHost: "198.51.100.9", remotePort: 8443)
+        ]
+
+        let flows = NetworkFlowEvidence.build(events: rows)
+
+        XCTAssertEqual(flows.first { $0.category == .model }?.grade, .correlated)
+        XCTAssertEqual(flows.first { $0.category == .model }?.ip, "104.18.3.115")
+        XCTAssertNil(flows.first { $0.category == .model }?.domain)
+        XCTAssertEqual(flows.first { $0.category == .web }?.grade, .inferred)
+        XCTAssertEqual(flows.first { $0.category == .remote }?.purpose, "SSH remote operation")
+        XCTAssertEqual(flows.first { $0.category == .unknown }?.grade, .observed)
+    }
+
     func testModelRequestForensicsSeparatesEconomicsExposureAndTraffic() throws {
         let time = Date(timeIntervalSince1970: 1)
         let prompt = """
