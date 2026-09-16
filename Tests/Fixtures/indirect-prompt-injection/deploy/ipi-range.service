@@ -1,0 +1,49 @@
+[Unit]
+Description=AgentReins indirect-prompt-injection field-test range (lab.cyberstroll.top)
+Documentation=file:///opt/ipi-range/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# No persistent account is created: systemd allocates an ephemeral identity.
+# State (beacon log, path token) lives in /var/lib/ipi-range and survives
+# restarts, so the test URL stays stable across reboots.
+DynamicUser=yes
+StateDirectory=ipi-range
+WorkingDirectory=/opt/ipi-range
+
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+
+# Bound to loopback only. The sole ingress path is the nginx vhost, which
+# terminates TLS and is the only thing exposed to the internet.
+ExecStart=/usr/bin/python3 /opt/ipi-range/serve.py \
+    --host 127.0.0.1 \
+    --port 8790 \
+    --public-url https://lab.cyberstroll.top \
+    --log /var/lib/ipi-range/hits.jsonl \
+    --token-file /var/lib/ipi-range/.harness-token \
+    --quiet
+
+Restart=on-failure
+RestartSec=3
+
+# Hardening
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=true
+LockPersonality=true
+MemoryMax=128M
+MemoryDenyWriteExecute=true
+
+[Install]
+WantedBy=multi-user.target
