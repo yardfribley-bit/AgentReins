@@ -27,6 +27,7 @@ struct AgentOperationsCenterView: View {
     @State private var followingLive = true
     @State private var showingBrowserProtection = false
     @State private var showingAnalysisModel = false
+    @State private var showingHistory = false
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
     @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
     @StateObject private var ipGeolocation = IPGeolocationStore()
@@ -268,6 +269,9 @@ struct AgentOperationsCenterView: View {
         .onChange(of: discoveredAgents.map { "\($0.product):\($0.presence.rawValue)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
         }
+        .sheet(isPresented: $showingHistory) {
+            HistoryView()
+        }
         .sheet(isPresented: $showingBrowserProtection) {
             BrowserProtectionView(extensionConnected: webAgentSight.connected)
         }
@@ -308,6 +312,13 @@ struct AgentOperationsCenterView: View {
                 .font(.system(size: 9, weight: .bold)).foregroundStyle(observing ? green : amber)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background((observing ? green : amber).opacity(0.12), in: Capsule())
+            Button { showingHistory = true } label: {
+                Label("HISTORY", systemImage: "clock.arrow.circlepath")
+                    .font(.system(size: 9, weight: .bold))
+                    .foregroundStyle(cyan)
+                    .padding(.horizontal, 11).padding(.vertical, 7)
+                    .background(cyan.opacity(0.12), in: Capsule())
+            }.buttonStyle(.plain)
             Button { showingAnalysisModel = true } label: {
                 Label(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL",
                       systemImage: "brain.head.profile")
