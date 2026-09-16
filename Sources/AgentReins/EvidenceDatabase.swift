@@ -523,6 +523,87 @@ final class EvidenceDatabase: @unchecked Sendable {
         return result
     }
 
+    // MARK: - History review
+
+    /// Distinct collectors with row counts, for the history filter picker.
+    func historySources() throws -> [(source: String, count: Int)] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = "SELECT source, COUNT(*) FROM evidence_records GROUP BY source ORDER BY 2 DESC"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare sources") }
+        defer { sqlite3_finalize(statement) }
+        var result: [(String, Int)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let text = sqlite3_column_text(statement, 0) else { continue }
+            result.append((String(cString: text), Int(sqlite3_column_int64(statement, 1))))
+        }
+        return result
+    }
+
+    private func historyWhere(since: TimeInterval?, source: String?, keyword: String?) -> (sql: String, binds: [String]) {
+        var clauses: [String] = []
+        var binds: [String] = []
+        // Placeholder order matters: since -> source -> keyword. Numeric binds
+        // are appended by the caller after these text binds.
+        if let since {
+            clauses.append("observed_at >= ?")
+            binds.append(String(format: "%.3f", since))
+        }
+        if let source, !source.isEmpty {
+            clauses.append("source = ?")
+            binds.append(source)
+        }
+        if let keyword, !keyword.isEmpty {
+            clauses.append("payload LIKE ?")
+            binds.append("%\(keyword)%")
+        }
+        return (clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND "), binds)
+    }
+
+    func historyCount(since: TimeInterval?, source: String?, keyword: String?) throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        let whereClause = historyWhere(since: since, source: source, keyword: keyword)
+        let sql = "SELECT COUNT(*) FROM evidence_records \(whereClause.sql)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare history count") }
+        defer { sqlite3_finalize(statement) }
+        for (index, value) in whereClause.binds.enumerated() {
+            bind(value, at: Int32(index + 1), to: statement)
+        }
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw failure("history count") }
+        return Int(sqlite3_column_int64(statement, 0))
+    }
+
+    /// Ordered newest-first. Mirrors `recent` decoding: rows whose payload
+    /// does not decode into a GuardEvent are skipped.
+    func history(since: TimeInterval?, source: String?, keyword: String?,
+                 limit: Int, offset: Int) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let whereClause = historyWhere(since: since, source: source, keyword: keyword)
+        let sql = "SELECT payload FROM evidence_records \(whereClause.sql) " +
+            "ORDER BY observed_at DESC, ingested_at DESC LIMIT ? OFFSET ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare history") }
+        defer { sqlite3_finalize(statement) }
+        var index: Int32 = 1
+        for value in whereClause.binds {
+            bind(value, at: index, to: statement)
+            index += 1
+        }
+        sqlite3_bind_int(statement, index, Int32(limit)); index += 1
+        sqlite3_bind_int(statement, index, Int32(offset))
+        var result: [GuardEvent] = []
+        var ids = Set<UUID>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let event = try? decoder.decode(GuardEvent.self, from: data), ids.insert(event.id).inserted {
+                result.append(event)
+            }
+        }
+        return result
+    }
+
     func saveCheckpoint(_ checkpoint: SourceCheckpoint) throws {
         lock.lock(); defer { lock.unlock() }
         let sql = """
