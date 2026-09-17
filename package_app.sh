@@ -1,5 +1,6 @@
 #!/bin/bash
-# Build and package a Universal 2 macOS application.
+# Build and package the Intel development application by default.
+# Set AGENTREINS_ARCHS=universal explicitly for a release build.
 set -euo pipefail
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -12,7 +13,7 @@ BUILD_NUMBER="${AGENTREINS_BUILD_NUMBER:-$(date -u '+%Y%m%d.%H%M')}"
 BUILD_DATE="${AGENTREINS_BUILD_DATE:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 BUILD_JOBS="${AGENTREINS_BUILD_JOBS:-2}"
-TARGET_ARCHS="${AGENTREINS_ARCHS:-universal}"
+TARGET_ARCHS="${AGENTREINS_ARCHS:-x86_64}"
 
 ARM_SCRATCH="$PROJECT_DIR/.build/arm64"
 INTEL_SCRATCH="$PROJECT_DIR/.build/x86_64"
