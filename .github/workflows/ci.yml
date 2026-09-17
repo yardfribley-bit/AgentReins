@@ -33,6 +33,7 @@ jobs:
 
       - name: Build release app
         env:
+          AGENTREINS_ARCHS: universal
           AGENTREINS_VERSION: 0.0.0-ci
           AGENTREINS_BUILD_NUMBER: ${{ github.run_number }}
         run: ./package_app.sh

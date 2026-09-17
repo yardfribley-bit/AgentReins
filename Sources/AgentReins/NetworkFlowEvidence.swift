@@ -18,7 +18,7 @@ enum NetworkEvidenceGrade: String, Sendable {
 /// A user-facing projection of raw network evidence. It preserves the observed
 /// endpoint and keeps purpose/turn attribution separate so a socket is never
 /// presented as proof of encrypted payload contents.
-struct NetworkFlowEvidence: Identifiable {
+struct NetworkFlowEvidence: Identifiable, Sendable {
     let id: String
     let category: NetworkTrafficCategory
     let domain: String?

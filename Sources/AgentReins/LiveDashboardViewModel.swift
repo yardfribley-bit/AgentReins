@@ -7,6 +7,7 @@ import Foundation
 @MainActor
 final class LiveDashboardViewModel: ObservableObject {
     struct Snapshot {
+        var evidenceRevision: UInt64 = 0
         var sessions: [AgentSessionSnapshot] = []
         var events: [GuardEvent] = []
         var incidents: [SecurityIncident] = []
@@ -19,11 +20,14 @@ final class LiveDashboardViewModel: ObservableObject {
     private var pending = Snapshot()
     private var publishWork: DispatchWorkItem?
     private var notifiedIncidentIDs = Set<UUID>()
+    private var evidenceRevision: UInt64 = 0
     private let maximumEvents = 500
     private let publishDelay: TimeInterval = 0.20
 
     func updateEvidence(sessions: [AgentSessionSnapshot], events: [GuardEvent],
                         incidents: [SecurityIncident], health: [CollectorHealthRecord]) {
+        evidenceRevision &+= 1
+        pending.evidenceRevision = evidenceRevision
         pending.sessions = sessions
         pending.events = Array(events.prefix(maximumEvents))
         notifySecurityIncidents(incidents)

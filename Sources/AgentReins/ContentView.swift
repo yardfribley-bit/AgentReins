@@ -16,6 +16,7 @@ struct ContentView: View {
     private var observing: Bool { fileGuard.running || processGuard.running }
     var body: some View {
         AgentOperationsCenterView(
+            dataRevision: liveDashboard.snapshot.evidenceRevision,
             sessions: liveDashboard.snapshot.sessions,
             events: liveDashboard.snapshot.events,
             incidents: liveDashboard.snapshot.incidents,
@@ -36,7 +37,7 @@ struct ContentView: View {
         .onReceive(eventStore.$revision) { _ in refreshEvidence() }
         .onReceive(processGuard.$processInventory) { liveDashboard.updateProcesses($0) }
         .onReceive(agentDiscovery.$agents) { liveDashboard.updateAgents($0) }
-        .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth() }
+        .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true) }
         .sheet(item: $selectedSession) { SessionEvidenceSheet(session: $0) }
         .sheet(item: $selectedIncident) { IncidentEvidenceSheet(incident: $0) }
     }

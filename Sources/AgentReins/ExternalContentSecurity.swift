@@ -1,6 +1,6 @@
 import Foundation
 
-enum ExternalSourceKind: String {
+enum ExternalSourceKind: String, Sendable {
     case web = "Web"
     case mcp = "MCP"
     case skill = "Skill"
@@ -10,13 +10,13 @@ enum ExternalSourceKind: String {
     case unknown = "Unknown"
 }
 
-enum ContentTrust: String {
+enum ContentTrust: String, Sendable {
     case untrusted = "Untrusted"
     case localUnknown = "Local / unverified"
     case unknown = "Unknown"
 }
 
-enum InjectionCategory: String {
+enum InjectionCategory: String, Sendable {
     case instructionOverride = "Instruction override"
     case secretExfiltration = "Secret exfiltration"
     case unsafeExecution = "Unsafe execution"
@@ -26,7 +26,7 @@ enum InjectionCategory: String {
     case obfuscation = "Obfuscation"
 }
 
-struct InjectionFinding: Identifiable, Equatable {
+struct InjectionFinding: Identifiable, Equatable, Sendable {
     let id: String
     let category: InjectionCategory
     let severity: String
@@ -34,7 +34,7 @@ struct InjectionFinding: Identifiable, Equatable {
     let evidence: String
 }
 
-struct ExternalContentAssessment: Identifiable, Equatable {
+struct ExternalContentAssessment: Identifiable, Equatable, Sendable {
     let id: UUID
     let sourceKind: ExternalSourceKind
     let sourceIdentity: String
@@ -45,7 +45,7 @@ struct ExternalContentAssessment: Identifiable, Equatable {
     let findings: [InjectionFinding]
 }
 
-struct InfluenceChain: Identifiable, Equatable {
+struct InfluenceChain: Identifiable, Equatable, Sendable {
     let id: String
     let source: ExternalContentAssessment
     let nextActionName: String?

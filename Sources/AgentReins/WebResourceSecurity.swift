@@ -1,12 +1,12 @@
 import Foundation
 
-enum WebResourceRelation: String, Codable {
+enum WebResourceRelation: String, Codable, Sendable {
     case recommendedByModel
     case requestedByTool
     case contactedByProcess
 }
 
-struct WebResourceEvidence: Identifiable {
+struct WebResourceEvidence: Identifiable, Sendable {
     let id: String
     let url: String?
     let domain: String
@@ -22,7 +22,7 @@ struct WebResourceEvidence: Identifiable {
     }
 }
 
-struct WebResourceChain: Identifiable {
+struct WebResourceChain: Identifiable, Sendable {
     let id: String
     let sessionId: String
     let turnId: String

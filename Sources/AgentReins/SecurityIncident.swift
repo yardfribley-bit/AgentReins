@@ -1,8 +1,8 @@
 import Foundation
 
 /// 面向用户的安全事件：把同一次 Agent 操作触发的多个底层规则信号关联起来。
-struct SecurityIncident: Identifiable {
-    struct Stage: Identifiable {
+struct SecurityIncident: Identifiable, Sendable {
+    struct Stage: Identifiable, Sendable {
         let id: String
         let title: String
         let value: String

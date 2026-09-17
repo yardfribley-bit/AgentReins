@@ -5,6 +5,7 @@ struct AgentOperationsCenterView: View {
     @EnvironmentObject private var webAgentSight: WebAgentSight
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     @EnvironmentObject private var language: AppLanguageStore
+    let dataRevision: UInt64
     let sessions: [AgentSessionSnapshot]
     let events: [GuardEvent]
     let incidents: [SecurityIncident]
@@ -32,7 +33,8 @@ struct AgentOperationsCenterView: View {
     @StateObject private var ipGeolocation = IPGeolocationStore()
     @StateObject private var projectIndex = ProjectIndexStore()
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
-    @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
+    @State private var agentProjection: AgentDashboardProjection?
+    @State private var projectionError: String?
     @State private var globalTab: GlobalTab = .projects
     @State private var selectedProjectPath: String?
     @State private var projectView: ProjectView = .capabilities
@@ -74,24 +76,19 @@ struct AgentOperationsCenterView: View {
 
     private func L(_ english: String) -> String { language.text(english) }
 
-    private var scopedSessions: [AgentSessionSnapshot] {
-        sessions.filter { matchesSelectedAgent($0.agent) }
+    private var projectionKey: AgentDashboardProjectionKey {
+        AgentDashboardProjectionKey(selectedAgent: selectedAgent, dataRevision: dataRevision,
+            query: query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased())
     }
-    private var activeSession: AgentSessionSnapshot? { scopedSessions.max { $0.lastActivityAt < $1.lastActivityAt } }
+    private var currentProjection: AgentDashboardProjection? {
+        guard agentProjection?.key.selectedAgent == projectionKey.selectedAgent,
+              agentProjection?.key.query == projectionKey.query else { return nil }
+        return agentProjection
+    }
+    private var scopedSessions: [AgentSessionSnapshot] { currentProjection?.sessions ?? [] }
+    private var activeSession: AgentSessionSnapshot? { currentProjection?.activeSession }
     private var activeTurn: AgentTurn? { activeSession?.turns.last }
-    private var scopedEvents: [GuardEvent] {
-        let base = events.filter { event in
-            guard let agent = event.agent else { return selectedAgent == "All agents" }
-            return matchesSelectedAgent(agent)
-        }
-        let q = query.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-        guard !q.isEmpty else { return base }
-        return base.filter {
-            [$0.agent, $0.toolName, $0.remoteDomain, $0.remoteHost, $0.command, $0.path, $0.userIntent, $0.modelResponse]
-                .compactMap { $0?.lowercased() }
-                .contains { $0.contains(q) }
-        }
-    }
+    private var scopedEvents: [GuardEvent] { currentProjection?.events ?? [] }
     private var processes: [ProcessSnapshotRecord] {
         let agents = selectedAgent == "All agents"
             ? discoveredAgents.filter { $0.presence == .running }.map(\.product)
@@ -105,18 +102,12 @@ struct AgentOperationsCenterView: View {
         return list.filter { $0.command.lowercased().contains(q) || $0.pid.contains(q) }
     }
     private var processTree: [TreeNode] { Self.buildTree(processes) }
-    private var runtimeGraph: AgentRuntimeGraph { AgentRuntimeGraph.build(processes: processes, agent: selectedAgent) }
     private var runtimeTopologyFingerprint: String {
         let topology = processes.map { "\($0.pid):\($0.ppid):\($0.command.hashValue)" }.joined(separator: "|")
         return "\(selectedAgent)|\(topology)"
     }
     private var isWebAISelected: Bool { selectedAgent.caseInsensitiveCompare("Web AI") == .orderedSame }
-    private var scopedIncidents: [SecurityIncident] {
-        incidents.filter { incident in
-            guard let agent = incident.agent else { return selectedAgent == "All agents" }
-            return matchesSelectedAgent(agent)
-        }
-    }
+    private var scopedIncidents: [SecurityIncident] { currentProjection?.incidents ?? [] }
     private func matchesSelectedAgent(_ agent: String) -> Bool {
         if selectedAgent == "All agents" { return true }
         if isWebAISelected {
@@ -128,39 +119,10 @@ struct AgentOperationsCenterView: View {
     private func normalizedAgentKey(_ value: String) -> String {
         normalizedAgentIdentity(value)
     }
-    private var externalServices: [(host: String, event: GuardEvent?)] {
-        let hosts = Array(Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted { left, right in
-            let leftKind = NetworkDestinationAssessment.assess(domain: left, host: left).kind
-            let rightKind = NetworkDestinationAssessment.assess(domain: right, host: right).kind
-            let order: [NetworkDestinationKind: Int] = [.modelRelay: 0, .modelProvider: 1,
-                .developerService: 2, .externalContent: 3, .telemetry: 4,
-                .localInfrastructure: 5, .unknown: 6]
-            let lhs = order[leftKind] ?? 7, rhs = order[rightKind] ?? 7
-            return lhs == rhs ? left < right : lhs < rhs
-        }
-        let visibleHosts = centerTab == .network ? hosts : Array(hosts.prefix(6))
-        return visibleHosts.map { host in
-            (host, scopedEvents.filter { ($0.remoteDomain ?? $0.remoteHost) == host }.max { $0.ts < $1.ts })
-        }
-    }
-    private var sshSessions: [SSHSessionEvidence] { SSHSessionEvidence.build(events: scopedEvents) }
-    private var networkFlows: [NetworkFlowEvidence] { NetworkFlowEvidence.build(events: scopedEvents) }
-    private var networkIPs: [String] { Array(Set(networkFlows.compactMap(\.ip))).sorted() }
-    private var networkIPFingerprint: String { networkIPs.joined(separator: "|") }
-    private var findingCount: Int { scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count }
-    private var memoryEvidenceRows: [GuardEvent] {
-        guard let session = activeSession else { return [] }
-        let turnID = activeTurn?.id
-        return scopedEvents.filter { event in
-            event.sessionId == session.id && (turnID == nil || event.turnId == turnID)
-        }
-    }
-    private var memoryEvidenceFingerprint: String {
-        memoryEvidenceRows.map {
-            "\($0.id.uuidString):\($0.action):\($0.op):\($0.afterContent?.hashValue ?? 0):\($0.fileDiff?.hashValue ?? 0)"
-        }.joined(separator: "|")
-    }
-    private var memoryCommits: [MemoryCommitEvidence] { cachedMemoryCommits }
+    private var sshSessions: [SSHSessionEvidence] { currentProjection?.sshSessions ?? [] }
+    private var networkFlows: [NetworkFlowEvidence] { currentProjection?.networkFlows ?? [] }
+    private var findingCount: Int { currentProjection?.findingCount ?? 0 }
+    private var memoryCommits: [MemoryCommitEvidence] { currentProjection?.memoryCommits ?? [] }
     private var selectedMemoryCommit: MemoryCommitEvidence? {
         memoryCommits.first { $0.commitId == selectedMemoryCommitID }
     }
@@ -198,11 +160,7 @@ struct AgentOperationsCenterView: View {
         }
         return result
     }
-    private var evidenceCoverage: String {
-        let confirmed = scopedEvents.filter { $0.attributionConfidence == .confirmed }.count
-        guard !scopedEvents.isEmpty else { return "—" }
-        return "\(Int(Double(confirmed) / Double(scopedEvents.count) * 100))%"
-    }
+    private var evidenceCoverage: String { currentProjection?.evidenceCoverage ?? "—" }
     private struct ProjectMission: Identifiable {
         let id: String
         let name: String
@@ -224,11 +182,6 @@ struct AgentOperationsCenterView: View {
     }
     private var projectEvolution: [ProjectEvolutionSnapshot] {
         ProjectEvolution.build(sessions: sessions, incidents: incidents)
-    }
-    private var projectPathFingerprint: String { projectMissions.map(\.path).sorted().joined(separator: "|") }
-    private var projectMutationFingerprint: String {
-        scopedEvents.filter { $0.kind == "file" && $0.op != "read" }
-            .suffix(20).map { $0.id.uuidString }.joined(separator: "|")
     }
     private var activeTaskCount: Int {
         sessions.filter(sessionIsLive).count
@@ -320,8 +273,13 @@ struct AgentOperationsCenterView: View {
                     ScrollView {
                         if selectedAgent == "All agents" {
                             globalMissionControl.padding(16)
+                        } else if currentProjection == nil {
+                            projectionStatusView.padding(16)
                         } else {
                             VStack(alignment: .leading, spacing: 14) {
+                                if let projectionError {
+                                    projectionErrorView(projectionError)
+                                }
                                 taskHeader
                                 tabBar
                                 centerContent
@@ -343,13 +301,9 @@ struct AgentOperationsCenterView: View {
         .onAppear {
             selectInitialAgentIfNeeded()
             refreshRuntimeGraph()
-            refreshMemoryCommits()
-            ipGeolocation.resolve(networkIPs)
-            projectIndex.refresh(paths: projectMissions.map(\.path))
         }
+        .task(id: projectionKey) { await refreshAgentProjection(key: projectionKey) }
         .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
-        .onChange(of: memoryEvidenceFingerprint) { _ in refreshMemoryCommits() }
-        .onChange(of: networkIPFingerprint) { _ in ipGeolocation.resolve(networkIPs) }
         .onChange(of: sessions.count) { _ in selectInitialAgentIfNeeded() }
         .onChange(of: sessions.map { "\($0.agent):\($0.lastActivityAt.timeIntervalSince1970)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
@@ -358,8 +312,6 @@ struct AgentOperationsCenterView: View {
         .onChange(of: discoveredAgents.map { "\($0.product):\($0.presence.rawValue)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
         }
-        .onChange(of: projectPathFingerprint) { _ in projectIndex.refresh(paths: projectMissions.map(\.path)) }
-        .onChange(of: projectMutationFingerprint) { _ in projectIndex.refresh(paths: projectMissions.map(\.path), force: true) }
         .sheet(isPresented: $showingHistory) {
             HistoryView()
         }
@@ -371,12 +323,59 @@ struct AgentOperationsCenterView: View {
         }
     }
 
-    private func refreshMemoryCommits() {
-        cachedMemoryCommits = MemoryCommitEvidence.build(events: memoryEvidenceRows)
-        if let selectedMemoryCommitID,
-           !cachedMemoryCommits.contains(where: { $0.commitId == selectedMemoryCommitID }) {
-            self.selectedMemoryCommitID = nil
+    @MainActor
+    private func refreshAgentProjection(key: AgentDashboardProjectionKey) async {
+        projectionError = nil
+        let input = AgentDashboardProjectionInput(key: key, sessions: sessions, events: events,
+            incidents: incidents)
+        let worker = Task.detached(priority: .userInitiated) {
+            try AgentDashboardProjection.build(input: input)
         }
+        let result = await withTaskCancellationHandler {
+            await worker.result
+        } onCancel: {
+            worker.cancel()
+        }
+        guard !Task.isCancelled, key == projectionKey else { return }
+        switch result {
+        case .success(let projection):
+            projectionError = nil
+            agentProjection = projection
+            ipGeolocation.resolve(projection.networkIPs)
+            if let selectedMemoryCommitID,
+               !projection.memoryCommits.contains(where: { $0.commitId == selectedMemoryCommitID }) {
+                self.selectedMemoryCommitID = nil
+            }
+        case .failure(let error):
+            guard !(error is CancellationError) else { return }
+            projectionError = "Agent 投影构建失败：\(error.localizedDescription)"
+        }
+    }
+
+    @ViewBuilder
+    private var projectionStatusView: some View {
+        if let projectionError {
+            projectionErrorView(projectionError)
+        } else {
+            HStack(spacing: 10) {
+                ProgressView().controlSize(.small).tint(cyan)
+                Text(language.language == .english ? "Preparing Agent evidence…" : "正在准备智能体证据…")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 10))
+            .overlay(RoundedRectangle(cornerRadius: 10).stroke(border))
+        }
+    }
+
+    private func projectionErrorView(_ message: String) -> some View {
+        HStack(spacing: 10) {
+            Image(systemName: "exclamationmark.triangle.fill").foregroundStyle(amber)
+            Text(message).font(.system(size: 13, weight: .semibold)).foregroundStyle(.secondary)
+            Spacer()
+        }
+        .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(border))
     }
 
     // MARK: - Chrome
@@ -588,19 +587,19 @@ struct AgentOperationsCenterView: View {
 
     private func projectMissionCard(_ project: ProjectMission) -> some View {
         let evolution = projectEvolution.first { $0.path == project.path }
-        let intelligence = ProjectIntelligence.build(projectPath: project.path,
-            sessions: project.sessions, evolution: evolution, index: projectIndex.snapshot(for: project.path))
+        let index = projectIndex.snapshot(for: project.path)
         let projectIncidents = incidents.filter { incident in
             project.sessions.contains { session in
                 incident.events.contains { $0.sessionId == session.id }
             }
         }
         let changedFiles = evolution?.changedFileCount ?? 0
-        let isSelected = (selectedProjectPath ?? projectMissions.first?.id) == project.id
-        let indexProgress = projectIndex.progress(for: project.path)
+        let isSelected = selectedProjectPath == project.id
+        let latestGoal = project.sessions.max { $0.lastActivityAt < $1.lastActivityAt }?.latestIntent
         return VStack(alignment: .leading, spacing: 13) {
             Button {
-                selectedProjectPath = isSelected ? "" : project.id
+                selectedProjectPath = isSelected ? nil : project.id
+                if !isSelected { projectIndex.request(path: project.path) }
             } label: {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "square.3.layers.3d.top.filled").font(.system(size: 21)).foregroundStyle(cyan)
@@ -608,7 +607,7 @@ struct AgentOperationsCenterView: View {
                         Text(project.name).font(.system(size: 18, weight: .bold))
                         Text(project.path).font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.secondary).lineLimit(1)
-                        Text(String(intelligence.purpose.text.prefix(150)))
+                        Text(String((index?.purpose ?? "Open the project to index tracked files").prefix(150)))
                             .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                     }
                     Spacer()
@@ -620,29 +619,33 @@ struct AgentOperationsCenterView: View {
                         .foregroundStyle(.secondary).padding(.top, 4)
                 }
             }.buttonStyle(.plain)
-            if let indexProgress, indexProgress.phase != .complete {
-                HStack {
-                    projectIndexControl(project.path, progress: indexProgress)
-                    Text(indexProgress.currentPath ?? (language.language == .english ? "Preparing project index…" : "正在准备项目索引…"))
-                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
-                    Spacer()
-                    Text(language.language == .english ? "Available now · improving in background" : "现在即可使用 · 后台持续完善")
-                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
-                }
-            } else if let indexProgress {
-                HStack { projectIndexControl(project.path, progress: indexProgress); Spacer() }
-            }
             if isSelected {
+                HStack {
+                    projectIndexControl(project.path, snapshot: index)
+                    if let error = projectIndex.error(for: project.path) {
+                        Text(error).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2)
+                    } else {
+                        Text(language.language == .english
+                             ? "Only Git-tracked files are indexed on request"
+                             : "仅在请求时索引 Git 已跟踪文件")
+                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                    Spacer()
+                }
                 Divider().overlay(border)
+                let intelligence = ProjectIntelligence.build(projectPath: project.path,
+                    sessions: project.sessions, evolution: evolution, index: index)
                 projectCockpit(project, evolution: evolution, intelligence: intelligence,
                                projectIncidents: projectIncidents)
             } else {
                 HStack(spacing: 8) {
-                    Text(intelligence.currentGoal?.text ?? "No active goal captured")
+                    Text(latestGoal ?? "No active goal captured")
                         .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
-                    Text("\(intelligence.capabilities.count) capabilities · \(intelligence.architecture.count) areas · \(intelligence.drift.filter { $0.severity != .aligned }.count) reviews")
-                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    if let index {
+                        Text("\(index.featureNames.count) declared features · \(index.areas.count) areas")
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }
                 }
             }
         }
@@ -650,35 +653,38 @@ struct AgentOperationsCenterView: View {
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(projectIncidents.isEmpty ? border : amber.opacity(0.65)))
     }
 
-    private func projectIndexControl(_ path: String, progress: ProjectIndexProgress) -> some View {
-        Button {
-            if progress.phase == .paused { projectIndex.resume(path: path) }
-            else if progress.phase != .complete { projectIndex.pause(path: path) }
+    private func projectIndexControl(_ path: String, snapshot: ProjectIndexSnapshot?) -> some View {
+        let running = projectIndex.isIndexing(path)
+        return Button {
+            if running { projectIndex.cancel(path: path) }
+            else { projectIndex.refresh(path: path) }
         } label: {
             HStack(spacing: 5) {
-                if progress.phase == .indexing || progress.phase == .discovering {
+                if running {
                     ProgressView().controlSize(.mini).tint(cyan)
                 } else {
-                    Image(systemName: progress.phase == .complete ? "checkmark.circle.fill" : "play.circle.fill")
+                    Image(systemName: snapshot == nil ? "play.circle.fill" : "arrow.clockwise.circle.fill")
                 }
-                Text(projectIndexLabel(progress))
+                Text(projectIndexLabel(running: running, snapshot: snapshot))
                     .font(.system(size: 10, weight: .bold, design: .monospaced))
             }
-            .foregroundStyle(progress.phase == .complete ? green : cyan)
+            .foregroundStyle(snapshot != nil && !running ? green : cyan)
             .padding(.horizontal, 7).padding(.vertical, 4)
-            .background((progress.phase == .complete ? green : cyan).opacity(0.10), in: Capsule())
+            .background((snapshot != nil && !running ? green : cyan).opacity(0.10), in: Capsule())
         }
         .buttonStyle(.plain)
-        .help(language.language == .english ? "The complete first-party project is indexed gradually. Click to pause or resume." : "项目的一方代码会在后台渐进式完整索引。点击可暂停或继续。")
+        .help(language.language == .english
+              ? "Index up to 2,500 Git-tracked files. Click again to cancel or refresh."
+              : "最多索引 2,500 个 Git 已跟踪文件；再次点击可取消或刷新。")
     }
 
-    private func projectIndexLabel(_ progress: ProjectIndexProgress) -> String {
-        switch progress.phase {
-        case .discovering: return language.language == .english ? "DISCOVERING" : "正在发现"
-        case .indexing: return language.language == .english ? "INDEXING \(progress.scannedFiles)" : "已索引 \(progress.scannedFiles)"
-        case .paused: return language.language == .english ? "PAUSED \(progress.scannedFiles)" : "已暂停 \(progress.scannedFiles)"
-        case .complete: return language.language == .english ? "INDEXED \(progress.scannedFiles)" : "已完成 \(progress.scannedFiles)"
-        }
+    private func projectIndexLabel(running: Bool, snapshot: ProjectIndexSnapshot?) -> String {
+        if running { return language.language == .english ? "INDEXING" : "正在索引" }
+        guard let snapshot else { return language.language == .english ? "INDEX PROJECT" : "索引项目" }
+        let suffix = snapshot.complete ? "" : "+"
+        return language.language == .english
+            ? "INDEXED \(snapshot.files.count)\(suffix)"
+            : "已索引 \(snapshot.files.count)\(suffix)"
     }
 
     private func projectCockpit(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
@@ -1333,7 +1339,8 @@ struct AgentOperationsCenterView: View {
     /// Builds the complete graph presentation from one immutable process snapshot.
     /// SwiftUI may evaluate a view body many times; keeping grouping, classification,
     /// and PID-edge projection in one pass prevents multiplicative recomputation.
-    private func makeRuntimeGraphPresentation() -> RuntimeGraphPresentation {
+    private func makeRuntimeGraphPresentation(processes: [ProcessSnapshotRecord],
+                                              selectedAgent: String) -> RuntimeGraphPresentation {
         let snapshot = processes
         let visible = Self.buildTree(snapshot).filter { !isOverviewInfrastructureNoise($0.process) }
         let parentPIDs = Set(visible.map { $0.process.ppid })
@@ -1389,7 +1396,8 @@ struct AgentOperationsCenterView: View {
     }
 
     private func refreshRuntimeGraph() {
-        cachedRuntimeGraph = makeRuntimeGraphPresentation()
+        cachedRuntimeGraph = makeRuntimeGraphPresentation(processes: processes,
+            selectedAgent: selectedAgent)
     }
 
     private struct RuntimeDisplayEdge: Identifiable {
@@ -2943,7 +2951,7 @@ struct AgentOperationsCenterView: View {
             Text("Processes \(processInventory.count)")
             Text("Sessions \(sessions.count)")
             Text("Tools \(events.filter { $0.kind == "tool" }.count)")
-            Text("Hosts \(externalServices.count)")
+            Text("Hosts \(currentProjection?.hostCount ?? 0)")
             Spacer()
             Text("Evidence stored locally · external analysis is optional").foregroundStyle(.secondary)
         }
