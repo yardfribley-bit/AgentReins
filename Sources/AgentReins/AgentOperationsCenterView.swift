@@ -590,6 +590,7 @@ struct AgentOperationsCenterView: View {
         }
         let changedFiles = evolution?.changedFileCount ?? 0
         let isSelected = (selectedProjectPath ?? projectMissions.first?.id) == project.id
+        let indexProgress = projectIndex.progress(for: project.path)
         return VStack(alignment: .leading, spacing: 13) {
             Button {
                 selectedProjectPath = isSelected ? "" : project.id
@@ -612,6 +613,18 @@ struct AgentOperationsCenterView: View {
                         .foregroundStyle(.secondary).padding(.top, 4)
                 }
             }.buttonStyle(.plain)
+            if let indexProgress, indexProgress.phase != .complete {
+                HStack {
+                    projectIndexControl(project.path, progress: indexProgress)
+                    Text(indexProgress.currentPath ?? (language.language == .english ? "Preparing project index…" : "正在准备项目索引…"))
+                        .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                    Spacer()
+                    Text(language.language == .english ? "Available now · improving in background" : "现在即可使用 · 后台持续完善")
+                        .font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
+                }
+            } else if let indexProgress {
+                HStack { projectIndexControl(project.path, progress: indexProgress); Spacer() }
+            }
             if isSelected {
                 Divider().overlay(border)
                 projectCockpit(project, evolution: evolution, intelligence: intelligence,
@@ -628,6 +641,37 @@ struct AgentOperationsCenterView: View {
         }
         .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(projectIncidents.isEmpty ? border : amber.opacity(0.65)))
+    }
+
+    private func projectIndexControl(_ path: String, progress: ProjectIndexProgress) -> some View {
+        Button {
+            if progress.phase == .paused { projectIndex.resume(path: path) }
+            else if progress.phase != .complete { projectIndex.pause(path: path) }
+        } label: {
+            HStack(spacing: 5) {
+                if progress.phase == .indexing || progress.phase == .discovering {
+                    ProgressView().controlSize(.mini).tint(cyan)
+                } else {
+                    Image(systemName: progress.phase == .complete ? "checkmark.circle.fill" : "play.circle.fill")
+                }
+                Text(projectIndexLabel(progress))
+                    .font(.system(size: 10, weight: .bold, design: .monospaced))
+            }
+            .foregroundStyle(progress.phase == .complete ? green : cyan)
+            .padding(.horizontal, 7).padding(.vertical, 4)
+            .background((progress.phase == .complete ? green : cyan).opacity(0.10), in: Capsule())
+        }
+        .buttonStyle(.plain)
+        .help(language.language == .english ? "The complete first-party project is indexed gradually. Click to pause or resume." : "项目的一方代码会在后台渐进式完整索引。点击可暂停或继续。")
+    }
+
+    private func projectIndexLabel(_ progress: ProjectIndexProgress) -> String {
+        switch progress.phase {
+        case .discovering: return language.language == .english ? "DISCOVERING" : "正在发现"
+        case .indexing: return language.language == .english ? "INDEXING \(progress.scannedFiles)" : "已索引 \(progress.scannedFiles)"
+        case .paused: return language.language == .english ? "PAUSED \(progress.scannedFiles)" : "已暂停 \(progress.scannedFiles)"
+        case .complete: return language.language == .english ? "INDEXED \(progress.scannedFiles)" : "已完成 \(progress.scannedFiles)"
+        }
     }
 
     private func projectCockpit(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,

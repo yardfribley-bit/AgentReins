@@ -8,7 +8,7 @@ struct ProjectIndexSnapshot: Sendable {
     let files: [String]
     let areas: [ProjectIndexArea]
     let technologies: [String]
-    let truncated: Bool
+    let complete: Bool
 }
 
 struct ProjectIndexArea: Sendable {
@@ -20,11 +20,15 @@ struct ProjectIndexArea: Sendable {
 final class ProjectIndexStore: ObservableObject {
     @Published private(set) var snapshots: [String: ProjectIndexSnapshot] = [:]
     @Published private(set) var indexing: Set<String> = []
+    @Published private(set) var progress: [String: ProjectIndexProgress] = [:]
+    @Published private(set) var paused: Set<String> = []
 
     private var lastRequested: [String: Date] = [:]
+    private var tasks: [String: Task<Void, Never>] = [:]
     private let minimumRefreshInterval: TimeInterval = 20
 
     func snapshot(for path: String) -> ProjectIndexSnapshot? { snapshots[path] }
+    func progress(for path: String) -> ProjectIndexProgress? { progress[path] }
 
     func refresh(paths: [String], force: Bool = false) {
         let now = Date()
@@ -33,57 +37,116 @@ final class ProjectIndexStore: ObservableObject {
             if !force, let last = lastRequested[path], now.timeIntervalSince(last) < minimumRefreshInterval { continue }
             lastRequested[path] = now
             indexing.insert(path)
-            Task { [weak self] in
-                let result = await Task.detached(priority: .utility) {
-                    ProjectIndexer.index(path: path)
-                }.value
+            paused.remove(path)
+            tasks[path] = Task { [weak self] in
+                let updates = ProjectIndexer.updates(path: path)
+                for await update in updates {
+                    guard !Task.isCancelled, let self else { return }
+                    switch update {
+                    case .partial(let snapshot): self.snapshots[path] = snapshot
+                    case .progress(let value): self.progress[path] = value
+                    case .complete(let snapshot): self.snapshots[path] = snapshot
+                    }
+                }
                 guard let self else { return }
                 self.indexing.remove(path)
-                if let result { self.snapshots[path] = result }
+                self.tasks[path] = nil
             }
         }
     }
+
+    func pause(path: String) {
+        tasks[path]?.cancel()
+        tasks[path] = nil
+        indexing.remove(path)
+        paused.insert(path)
+        if let current = progress[path] {
+            progress[path] = ProjectIndexProgress(scannedFiles: current.scannedFiles,
+                currentPath: current.currentPath, phase: .paused)
+        }
+    }
+
+    func resume(path: String) {
+        paused.remove(path)
+        refresh(paths: [path], force: true)
+    }
+}
+
+struct ProjectIndexProgress: Sendable {
+    enum Phase: String, Sendable { case discovering, indexing, paused, complete }
+    let scannedFiles: Int
+    let currentPath: String?
+    let phase: Phase
+}
+
+fileprivate enum ProjectIndexUpdate: Sendable {
+    case partial(ProjectIndexSnapshot)
+    case progress(ProjectIndexProgress)
+    case complete(ProjectIndexSnapshot)
 }
 
 enum ProjectIndexer {
-    private static let maximumFiles = 2_500
+    private static let batchSize = 75
+    private static let batchDelay = Duration.milliseconds(120)
     private static let ignoredDirectories: Set<String> = [
         ".git", ".build", "build", "dist", "deriveddata", "node_modules", "pods",
         ".next", ".cache", "coverage", "vendor", "target"
     ]
 
-    static func index(path: String) -> ProjectIndexSnapshot? {
-        let root = URL(fileURLWithPath: path).standardized
-        var isDirectory: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else { return nil }
-
-        let keys: [URLResourceKey] = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
-        guard let enumerator = FileManager.default.enumerator(at: root, includingPropertiesForKeys: keys,
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]) else { return nil }
-
-        var files: [String] = []
-        var truncated = false
-        while let url = enumerator.nextObject() as? URL {
-            if (try? url.resourceValues(forKeys: Set(keys)))?.isDirectory == true {
-                if ignoredDirectories.contains(url.lastPathComponent.lowercased()) { enumerator.skipDescendants() }
-                continue
+    fileprivate static func updates(path: String) -> AsyncStream<ProjectIndexUpdate> {
+        AsyncStream { continuation in
+            let worker = Task.detached(priority: .utility) {
+                let root = URL(fileURLWithPath: path).standardized
+                var isDirectory: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+                    continuation.finish(); return
+                }
+                let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
+                guard let enumerator = FileManager.default.enumerator(at: root,
+                    includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
+                    continuation.finish(); return
+                }
+                var files: [String] = []
+                var readme: String?
+                continuation.yield(.progress(ProjectIndexProgress(scannedFiles: 0, currentPath: nil, phase: .discovering)))
+                while !Task.isCancelled, let url = enumerator.nextObject() as? URL {
+                    let values = try? url.resourceValues(forKeys: keys)
+                    if values?.isDirectory == true {
+                        if ignoredDirectories.contains(url.lastPathComponent.lowercased()) { enumerator.skipDescendants() }
+                        continue
+                    }
+                    guard values?.isRegularFile == true else { continue }
+                    let relative = relativePath(url.path, root: root.path)
+                    guard !relative.isEmpty else { continue }
+                    files.append(relative)
+                    if readme == nil, ["readme.md", "readme", "readme.txt"].contains(url.lastPathComponent.lowercased()) {
+                        readme = readText(url)
+                    }
+                    if files.count == 250 {
+                        continuation.yield(.partial(snapshot(root: root, files: files, readme: readme, complete: false)))
+                    }
+                    if files.count.isMultiple(of: batchSize) {
+                        continuation.yield(.progress(ProjectIndexProgress(scannedFiles: files.count,
+                            currentPath: relative, phase: .indexing)))
+                        try? await Task.sleep(for: batchDelay)
+                    }
+                }
+                guard !Task.isCancelled else { continuation.finish(); return }
+                files.sort()
+                let result = snapshot(root: root, files: files, readme: readme, complete: true)
+                continuation.yield(.complete(result))
+                continuation.yield(.progress(ProjectIndexProgress(scannedFiles: files.count,
+                    currentPath: nil, phase: .complete)))
+                continuation.finish()
             }
-            guard (try? url.resourceValues(forKeys: Set(keys)))?.isRegularFile == true else { continue }
-            let relative = relativePath(url.path, root: root.path)
-            guard !relative.isEmpty else { continue }
-            files.append(relative)
-            if files.count >= maximumFiles { truncated = true; break }
+            continuation.onTermination = { _ in worker.cancel() }
         }
-        files.sort()
+    }
 
-        let readmeURL = files.first(where: { file in
-            let name = URL(fileURLWithPath: file).lastPathComponent.lowercased()
-            return name == "readme.md" || name == "readme" || name == "readme.txt"
-        }).map { root.appendingPathComponent($0) }
-        let readme = readmeURL.flatMap(readText)
-        return ProjectIndexSnapshot(projectPath: root.path, indexedAt: Date(),
+    private static func snapshot(root: URL, files: [String], readme: String?, complete: Bool) -> ProjectIndexSnapshot {
+        ProjectIndexSnapshot(projectPath: root.path, indexedAt: Date(),
             purpose: readme.flatMap(readmePurpose), featureNames: readme.map(readmeFeatures) ?? [],
-            files: files, areas: architectureAreas(files), technologies: technologies(files), truncated: truncated)
+            files: files, areas: architectureAreas(files), technologies: technologies(files), complete: complete)
     }
 
     private static func readText(_ url: URL) -> String? {
