@@ -46,6 +46,7 @@ struct AgentReinsApp: App {
     @StateObject private var liveMemoryMonitor = LiveMemoryMonitor()
     @StateObject private var attributionResolver = EventAttributionResolver()
     @StateObject private var activityProjector = ToolActivityEvidenceProjector()
+    @StateObject private var appLanguage = AppLanguageStore()
 
     var body: some Scene {
         WindowGroup("AgentReins", id: "security-center") {
@@ -65,6 +66,8 @@ struct AgentReinsApp: App {
                 .environmentObject(semanticAnalyzer)
                 .environmentObject(memoryScan)
                 .environmentObject(memoryRuleStore)
+                .environmentObject(appLanguage)
+                .environment(\.locale, appLanguage.language.locale)
                 .onReceive(store.$rules) { rules in
                     fileGuard.setRules(rules)
                     processGuard.setRules(rules)
@@ -157,6 +160,8 @@ struct AgentReinsApp: App {
                 .environmentObject(processGuard)
                 .environmentObject(eventStore)
                 .environmentObject(workBuddySight)
+                .environmentObject(appLanguage)
+                .environment(\.locale, appLanguage.language.locale)
         } label: {
             Image(systemName: "shield.lefthalf.filled")
         }
@@ -186,23 +191,24 @@ struct StatusMenuView: View {
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
+    @EnvironmentObject private var language: AppLanguageStore
 
     private var isRunning: Bool { fileGuard.running || processGuard.running }
     private var eventCount: Int { eventStore.events.count }
 
     var body: some View {
-        Text(isRunning ? "AgentReins is protecting you" : "AgentReins is paused")
-        Text("\(eventCount) important activities recorded")
+        Text(language.text(isRunning ? "AgentReins is protecting you" : "AgentReins is paused"))
+        Text(language.language == .english ? "\(eventCount) important activities recorded" : "已记录 \(eventCount) 条重要活动")
         Divider()
-        Button("Open AgentReins") {
+        Button(language.text("Open AgentReins")) {
             openWindow(id: "security-center")
             NSApplication.shared.activate(ignoringOtherApps: true)
         }
-        Button(isRunning ? "Pause protection" : "Resume protection") {
+        Button(language.text(isRunning ? "Pause protection" : "Resume protection")) {
             if isRunning { fileGuard.stop(); processGuard.stop() }
             else { fileGuard.start(); processGuard.start() }
         }
         Divider()
-        Button("Quit AgentReins") { NSApplication.shared.terminate(nil) }
+        Button(language.text("Quit AgentReins")) { NSApplication.shared.terminate(nil) }
     }
 }

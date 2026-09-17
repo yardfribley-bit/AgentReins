@@ -4,6 +4,7 @@ import SwiftUI
 struct AgentOperationsCenterView: View {
     @EnvironmentObject private var webAgentSight: WebAgentSight
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
+    @EnvironmentObject private var language: AppLanguageStore
     let sessions: [AgentSessionSnapshot]
     let events: [GuardEvent]
     let incidents: [SecurityIncident]
@@ -29,14 +30,25 @@ struct AgentOperationsCenterView: View {
     @State private var showingAnalysisModel = false
     @State private var showingHistory = false
     @StateObject private var ipGeolocation = IPGeolocationStore()
+    @StateObject private var projectIndex = ProjectIndexStore()
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
     @State private var cachedMemoryCommits: [MemoryCommitEvidence] = []
     @State private var globalTab: GlobalTab = .projects
+    @State private var selectedProjectPath: String?
+    @State private var projectView: ProjectView = .capabilities
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
         case projects = "Projects"
         case agents = "Agents"
         case security = "Security"
+        var id: String { rawValue }
+    }
+
+    private enum ProjectView: String, CaseIterable, Identifiable {
+        case capabilities = "Capabilities"
+        case architecture = "Architecture"
+        case evolution = "Evolution"
+        case memory = "Understanding"
         var id: String { rawValue }
     }
 
@@ -59,6 +71,8 @@ struct AgentOperationsCenterView: View {
     private let cyan = Color(red: 48/255, green: 211/255, blue: 229/255)
     private let green = Color(red: 57/255, green: 214/255, blue: 117/255)
     private let amber = Color(red: 255/255, green: 177/255, blue: 45/255)
+
+    private func L(_ english: String) -> String { language.text(english) }
 
     private var scopedSessions: [AgentSessionSnapshot] {
         sessions.filter { matchesSelectedAgent($0.agent) }
@@ -211,6 +225,11 @@ struct AgentOperationsCenterView: View {
     private var projectEvolution: [ProjectEvolutionSnapshot] {
         ProjectEvolution.build(sessions: sessions, incidents: incidents)
     }
+    private var projectPathFingerprint: String { projectMissions.map(\.path).sorted().joined(separator: "|") }
+    private var projectMutationFingerprint: String {
+        scopedEvents.filter { $0.kind == "file" && $0.op != "read" }
+            .suffix(20).map { $0.id.uuidString }.joined(separator: "|")
+    }
     private var activeTaskCount: Int {
         sessions.filter { session in
             guard let turn = session.turns.last else { return false }
@@ -319,6 +338,7 @@ struct AgentOperationsCenterView: View {
             refreshRuntimeGraph()
             refreshMemoryCommits()
             ipGeolocation.resolve(networkIPs)
+            projectIndex.refresh(paths: projectMissions.map(\.path))
         }
         .onChange(of: runtimeTopologyFingerprint) { _ in refreshRuntimeGraph() }
         .onChange(of: memoryEvidenceFingerprint) { _ in refreshMemoryCommits() }
@@ -331,6 +351,8 @@ struct AgentOperationsCenterView: View {
         .onChange(of: discoveredAgents.map { "\($0.product):\($0.presence.rawValue)" }.joined(separator: "|")) { _ in
             selectInitialAgentIfNeeded()
         }
+        .onChange(of: projectPathFingerprint) { _ in projectIndex.refresh(paths: projectMissions.map(\.path)) }
+        .onChange(of: projectMutationFingerprint) { _ in projectIndex.refresh(paths: projectMissions.map(\.path), force: true) }
         .sheet(isPresented: $showingHistory) {
             HistoryView()
         }
@@ -358,33 +380,42 @@ struct AgentOperationsCenterView: View {
             VStack(alignment: .leading, spacing: 2) {
                 Text("AgentReins").font(.system(size: 20, weight: .bold))
                 if !compactLayout {
-                    Text("See what your AI agents are doing — and whether it is safe.")
+                    Text(language.language == .english ? "See what your AI agents are doing — and whether it is safe." : "看清 AI 智能体正在做什么，以及它是否安全。")
                         .font(.system(size: 13)).foregroundStyle(cyan.opacity(0.9)).lineLimit(1)
                 }
             }
             Spacer(minLength: compactLayout ? 10 : 18)
             HStack(spacing: 8) {
                 Image(systemName: "magnifyingglass").foregroundStyle(.secondary)
-                TextField(compactLayout ? "Search…" : "Search agents, processes, or domains", text: $query)
+                TextField(language.language == .english ? (compactLayout ? "Search…" : "Search agents, processes, or domains") : "搜索智能体、进程或域名", text: $query)
                     .textFieldStyle(.plain)
                     .font(.system(size: 14))
             }
             .padding(.horizontal, 12).frame(width: compactLayout ? 230 : 280, height: 40)
             .background(raised, in: RoundedRectangle(cornerRadius: 8))
             .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
-            Label(observing ? "MONITORING LIVE" : "PAUSED", systemImage: "circle.fill")
+            Button { language.toggle() } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: "globe")
+                    Text(language.language == .english ? "中文" : "EN")
+                }
+                .font(.system(size: 12, weight: .bold)).foregroundStyle(cyan)
+                .padding(.horizontal, 9).padding(.vertical, 7)
+                .background(cyan.opacity(0.10), in: Capsule())
+            }.buttonStyle(.plain).help(language.language == .english ? "Switch to Chinese" : "切换到英文")
+            Label(L(observing ? "MONITORING LIVE" : "PAUSED"), systemImage: "circle.fill")
                 .font(.system(size: 13, weight: .bold)).foregroundStyle(observing ? green : amber)
                 .padding(.horizontal, 12).padding(.vertical, 7)
                 .background((observing ? green : amber).opacity(0.12), in: Capsule())
             Button { showingHistory = true } label: {
-                Label("HISTORY", systemImage: "clock.arrow.circlepath")
+                Label(L("HISTORY"), systemImage: "clock.arrow.circlepath")
                     .font(.system(size: 9, weight: .bold))
                     .foregroundStyle(cyan)
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background(cyan.opacity(0.12), in: Capsule())
             }.buttonStyle(.plain)
             Button { showingAnalysisModel = true } label: {
-                Label(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL",
+                Label(L(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL"),
                       systemImage: "brain.head.profile")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(semanticAnalyzer.configured ? green : cyan)
@@ -393,7 +424,7 @@ struct AgentOperationsCenterView: View {
             }.buttonStyle(PillActionButtonStyle())
                 .help("Configure the optional external analysis model")
             Button { showingBrowserProtection = true } label: {
-                Label(webAgentSight.connected ? "WEB PROTECTED" : "PROTECT WEB AI",
+                Label(L(webAgentSight.connected ? "WEB PROTECTED" : "PROTECT WEB AI"),
                       systemImage: webAgentSight.connected ? "checkmark.shield.fill" : "shield.lefthalf.filled")
                     .font(.system(size: 13, weight: .bold))
                     .foregroundStyle(webAgentSight.connected ? green : cyan)
@@ -411,12 +442,12 @@ struct AgentOperationsCenterView: View {
     private var fleet: some View {
         VStack(alignment: .leading, spacing: 0) {
             HStack {
-                Text("AI AGENT FLEET").micro(cyan)
+                Text(L("AI AGENT FLEET")).micro(cyan)
                 Spacer()
                 Text("\(discoveredAgents.count)").badge(cyan)
             }.padding(16)
             fleetRow(name: "All agents",
-                     title: "Project mission control",
+                     title: L("Project mission control"),
                      detail: "\(activeTaskCount) active tasks · \(scopedIncidents.count) findings",
                      live: observing)
             ForEach(discoveredAgents) { item in
@@ -437,8 +468,8 @@ struct AgentOperationsCenterView: View {
             }
             Spacer()
             VStack(alignment: .leading, spacing: 9) {
-                Text("NODE STATUS").micro(.secondary)
-                legend(green, "Confirmed"); legend(.blue, "Inferred"); legend(.gray, "Unknown")
+                Text(L("NODE STATUS")).micro(.secondary)
+                legend(green, L("Confirmed")); legend(.blue, L("Inferred")); legend(.gray, L("Unknown"))
             }.padding(16)
         }.background(panel)
     }
@@ -460,8 +491,8 @@ struct AgentOperationsCenterView: View {
                 Circle().fill(live ? green : Color.gray.opacity(0.55)).frame(width: 8, height: 8)
                 VStack(alignment: .leading, spacing: 3) {
                     HStack(spacing: 6) {
-                        Text(name).font(.system(size: 15, weight: .semibold))
-                        Text(live ? "Running" : "Idle")
+                        Text(name == "All agents" ? L(name) : name).font(.system(size: 15, weight: .semibold))
+                        Text(L(live ? "Running" : "Idle"))
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(live ? green : .secondary)
                             .padding(.horizontal, 6).padding(.vertical, 2)
@@ -484,16 +515,16 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 14) {
             HStack(alignment: .top, spacing: 16) {
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("LIVE MISSION CONTROL").micro(cyan)
+                    Text(L("LIVE MISSION CONTROL")).micro(cyan)
                     Text(globalHeadline).font(.system(size: 24, weight: .bold))
-                    Text("Track every project, task and safety decision across your AI agents.")
+                    Text(L("Track every project, task and safety decision across your AI agents."))
                         .font(.system(size: 13)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                globalMetric("PROJECTS", projectMissions.count, cyan)
-                globalMetric("ACTIVE TASKS", activeTaskCount, .blue)
-                globalMetric("REVIEW", scopedIncidents.filter { $0.severity != "info" }.count, amber)
-                globalMetric("EVIDENCE", evidenceCoverage, green)
+                globalMetric(L("PROJECTS"), projectMissions.count, cyan)
+                globalMetric(L("ACTIVE TASKS"), activeTaskCount, .blue)
+                globalMetric(L("REVIEW"), scopedIncidents.filter { $0.severity != "info" }.count, amber)
+                globalMetric(L("EVIDENCE"), evidenceCoverage, green)
             }
             .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
             .overlay(RoundedRectangle(cornerRadius: 12).stroke(border))
@@ -501,14 +532,14 @@ struct AgentOperationsCenterView: View {
             HStack(spacing: 4) {
                 ForEach(GlobalTab.allCases) { tab in
                     Button { globalTab = tab } label: {
-                        Text(tab.rawValue.uppercased())
+                        Text(L(tab.rawValue).uppercased())
                             .font(.system(size: 12, weight: .bold))
                             .foregroundStyle(globalTab == tab ? cyan : .secondary)
                             .padding(.horizontal, 15).padding(.vertical, 9)
                     }.buttonStyle(TabButtonStyle(selected: globalTab == tab))
                 }
                 Spacer()
-                Text("REAL-TIME · RECENT ACTIVITY ONLY").micro(.secondary)
+                Text(L("REAL-TIME · RECENT ACTIVITY ONLY")).micro(.secondary)
             }
             .overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
 
@@ -522,9 +553,9 @@ struct AgentOperationsCenterView: View {
 
     private var globalHeadline: String {
         let critical = scopedIncidents.contains { $0.severity == "critical" || $0.severity == "high" }
-        if critical { return "Review required across active AI work" }
-        if activeTaskCount > 0 { return "\(activeTaskCount) AI task\(activeTaskCount == 1 ? "" : "s") running now" }
-        return observing ? "Monitoring for new Agent activity" : "Monitoring is paused"
+        if critical { return language.language == .english ? "Review required across active AI work" : "当前 AI 工作存在需要审查的风险" }
+        if activeTaskCount > 0 { return language.language == .english ? "\(activeTaskCount) AI task\(activeTaskCount == 1 ? "" : "s") running now" : "\(activeTaskCount) 个 AI 任务正在运行" }
+        return L(observing ? "Monitoring for new Agent activity" : "Monitoring is paused")
     }
 
     private func globalMetric(_ label: String, _ value: Int, _ color: Color) -> some View {
@@ -550,39 +581,252 @@ struct AgentOperationsCenterView: View {
 
     private func projectMissionCard(_ project: ProjectMission) -> some View {
         let evolution = projectEvolution.first { $0.path == project.path }
+        let intelligence = ProjectIntelligence.build(projectPath: project.path,
+            sessions: project.sessions, evolution: evolution, index: projectIndex.snapshot(for: project.path))
         let projectIncidents = incidents.filter { incident in
             project.sessions.contains { session in
                 incident.events.contains { $0.sessionId == session.id }
             }
         }
         let changedFiles = evolution?.changedFileCount ?? 0
+        let isSelected = (selectedProjectPath ?? projectMissions.first?.id) == project.id
         return VStack(alignment: .leading, spacing: 13) {
-            HStack(alignment: .top, spacing: 12) {
-                Image(systemName: "folder.fill").font(.system(size: 20)).foregroundStyle(cyan)
-                VStack(alignment: .leading, spacing: 3) {
-                    Text(project.name).font(.system(size: 17, weight: .bold))
-                    Text(project.path).font(.system(size: 12, design: .monospaced))
-                        .foregroundStyle(.secondary).lineLimit(1)
-                    if let evolution {
-                        Text("\(evolution.origin.rawValue) \(relativeAge(evolution.firstObservedAt)) · \(evolution.changeSets.count) observed change set(s)")
-                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+            Button {
+                selectedProjectPath = isSelected ? "" : project.id
+            } label: {
+                HStack(alignment: .top, spacing: 12) {
+                    Image(systemName: "square.3.layers.3d.top.filled").font(.system(size: 21)).foregroundStyle(cyan)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(project.name).font(.system(size: 18, weight: .bold))
+                        Text(project.path).font(.system(size: 12, design: .monospaced))
+                            .foregroundStyle(.secondary).lineLimit(1)
+                        Text(String(intelligence.purpose.text.prefix(150)))
+                            .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                     }
+                    Spacer()
+                    labelChip("\(project.sessions.count) AGENT\(project.sessions.count == 1 ? "" : "S")", color: cyan)
+                    labelChip("\(changedFiles) CHANGED", color: changedFiles > 0 ? .blue : .gray)
+                    labelChip(L(projectIncidents.isEmpty ? "MONITORING" : "REVIEW REQUIRED"),
+                              color: projectIncidents.isEmpty ? green : amber)
+                    Image(systemName: isSelected ? "chevron.up" : "chevron.down")
+                        .foregroundStyle(.secondary).padding(.top, 4)
+                }
+            }.buttonStyle(.plain)
+            if isSelected {
+                Divider().overlay(border)
+                projectCockpit(project, evolution: evolution, intelligence: intelligence,
+                               projectIncidents: projectIncidents)
+            } else {
+                HStack(spacing: 8) {
+                    Text(intelligence.currentGoal?.text ?? "No active goal captured")
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Text("\(intelligence.capabilities.count) capabilities · \(intelligence.architecture.count) areas · \(intelligence.drift.filter { $0.severity != .aligned }.count) reviews")
+                        .font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+            }
+        }
+        .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(projectIncidents.isEmpty ? border : amber.opacity(0.65)))
+    }
+
+    private func projectCockpit(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
+                                intelligence: ProjectIntelligenceSnapshot,
+                                projectIncidents: [SecurityIncident]) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            projectBrief(project, evolution: evolution, intelligence: intelligence,
+                         projectIncidents: projectIncidents)
+
+            HStack(spacing: 4) {
+                ForEach(ProjectView.allCases) { tab in
+                    Button { projectView = tab } label: {
+                        Text(L(tab.rawValue).uppercased()).font(.system(size: 11, weight: .bold))
+                            .foregroundStyle(projectView == tab ? cyan : .secondary)
+                            .padding(.horizontal, 12).padding(.vertical, 7)
+                    }.buttonStyle(TabButtonStyle(selected: projectView == tab))
                 }
                 Spacer()
-                labelChip("\(project.sessions.count) AGENT\(project.sessions.count == 1 ? "" : "S")", color: cyan)
-                labelChip("\(changedFiles) FILES CHANGED", color: changedFiles > 0 ? .blue : .gray)
-                labelChip(projectIncidents.isEmpty ? "MONITORING" : "REVIEW REQUIRED",
-                          color: projectIncidents.isEmpty ? green : amber)
+                evidenceTag(intelligence.purpose.confidence)
+            }.overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
+
+            switch projectView {
+            case .capabilities:
+                projectCapabilityMap(intelligence)
+            case .architecture:
+                projectArchitectureMap(intelligence)
+            case .evolution:
+                projectEvolutionView(evolution)
+            case .memory:
+                projectUnderstandingView(intelligence)
             }
-            Divider().overlay(border)
-            ForEach(project.sessions) { session in
+
+            Text(L("LIVE AGENT WORK")).micro(cyan)
+            ForEach(project.sessions.prefix(4)) { session in
                 globalTaskRow(session, incidents: projectIncidents.filter { incident in
                     incident.events.contains { $0.sessionId == session.id }
                 }, changeSet: evolution?.changeSets.first { $0.sessionId == session.id })
             }
         }
-        .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
-        .overlay(RoundedRectangle(cornerRadius: 12).stroke(projectIncidents.isEmpty ? border : amber.opacity(0.65)))
+    }
+
+    private func projectBrief(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
+                              intelligence: ProjectIntelligenceSnapshot,
+                              projectIncidents: [SecurityIncident]) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 7) {
+                Text(L("PROJECT BRIEF")).micro(cyan)
+                Text(intelligence.purpose.text).font(.system(size: 15, weight: .semibold)).lineLimit(3)
+                HStack(spacing: 7) {
+                    evidenceTag(intelligence.purpose.confidence)
+                    Text(intelligence.purpose.source).font(.system(size: 11)).foregroundStyle(.tertiary)
+                }
+                if let goal = intelligence.currentGoal {
+                    Divider().overlay(border)
+                    Text(L("CURRENT GOAL")).micro(.secondary)
+                    Text(goal.text).font(.system(size: 13)).foregroundStyle(.secondary).lineLimit(3)
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading)
+            projectBriefMetric(L("CAPABILITIES"), "\(intelligence.capabilities.count)", cyan)
+            projectBriefMetric(L("FILES SEEN"), "\(intelligence.observedFileCount)", .blue)
+            projectBriefMetric(L("Memory").uppercased(), "\(intelligence.memoryReads)R · \(intelligence.memoryWrites)W", cyan)
+            projectBriefMetric(L("DRIFT"), "\(intelligence.drift.filter { $0.severity != .aligned }.count)",
+                               intelligence.drift.contains { $0.severity == .conflict } ? .red : amber)
+        }.padding(13).background(raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func projectBriefMetric(_ title: String, _ value: String, _ color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Text(title).micro(.secondary)
+            Text(value).font(.system(size: 17, weight: .bold, design: .rounded)).foregroundStyle(color)
+        }.frame(minWidth: 76, alignment: .leading).padding(10)
+            .background(panel, in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private func projectCapabilityMap(_ intelligence: ProjectIntelligenceSnapshot) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(L("WHAT THIS PROJECT DOES")).micro(cyan)
+                if intelligence.capabilities.isEmpty { empty(L("No capabilities can be grounded in recent evidence yet")) }
+                ForEach(intelligence.capabilities) { capability in
+                    HStack(spacing: 9) {
+                        Image(systemName: capabilityIcon(capability.name)).foregroundStyle(cyan).frame(width: 25)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(capability.name).font(.system(size: 13, weight: .bold))
+                            Text(capability.explanation).font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                        Text("\(capability.files.count) files").font(.system(size: 11)).foregroundStyle(.tertiary)
+                        evidenceTag(capability.confidence)
+                    }.padding(9).background(panel, in: RoundedRectangle(cornerRadius: 8))
+                }
+            }.frame(maxWidth: .infinity)
+            projectDriftPanel(intelligence.drift).frame(width: 330)
+        }
+    }
+
+    private func projectArchitectureMap(_ intelligence: ProjectIntelligenceSnapshot) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L("HOW THE PROJECT IS ORGANIZED")).micro(cyan)
+            Text(language.language == .english ? "Responsibility areas derived from the local project index and Agent evidence. Select evidence before trusting inferred boundaries." : "职责区域来自本地项目索引和智能体证据；在信任推断边界前请查看证据。")
+                .font(.system(size: 11)).foregroundStyle(.secondary)
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 210), spacing: 9)], spacing: 9) {
+                ForEach(intelligence.architecture) { area in
+                    VStack(alignment: .leading, spacing: 6) {
+                        HStack {
+                            Image(systemName: "cube.transparent").foregroundStyle(.blue)
+                            Text(area.name).font(.system(size: 13, weight: .bold)).lineLimit(1)
+                            Spacer(); Text("\(area.files.count)").badge(.blue)
+                        }
+                        Text(area.responsibility).font(.system(size: 11)).foregroundStyle(.secondary)
+                        ForEach(area.files.prefix(3), id: \.self) { file in
+                            Text(URL(fileURLWithPath: file).lastPathComponent)
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                        }
+                    }.padding(11).frame(maxWidth: .infinity, minHeight: 100, alignment: .topLeading)
+                        .background(panel, in: RoundedRectangle(cornerRadius: 9))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(border))
+                }
+            }
+        }
+    }
+
+    private func projectEvolutionView(_ evolution: ProjectEvolutionSnapshot?) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text(L("WHY THE PROJECT CHANGED")).micro(cyan)
+            if let evolution {
+                ForEach(evolution.changeSets.prefix(6)) { change in
+                    HStack(alignment: .top, spacing: 10) {
+                        Circle().fill(verificationColor(change.verification)).frame(width: 8, height: 8).padding(.top, 5)
+                        VStack(alignment: .leading, spacing: 3) {
+                            Text(change.requirement).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                            Text("\(change.summary) · \(change.verification.rawValue)")
+                                .font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        Spacer(); Text(relativeAge(change.lastActivityAt)).font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }.padding(9).background(panel, in: RoundedRectangle(cornerRadius: 8))
+                }
+            } else { empty(L("No project evolution has been attributed yet")) }
+        }
+    }
+
+    private func projectUnderstandingView(_ intelligence: ProjectIntelligenceSnapshot) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            knowledgeColumn(L("AGENT'S PROJECT MODEL"), icon: "brain.head.profile", rows:
+                ([intelligence.currentGoal].compactMap { $0 } + intelligence.constraints + intelligence.decisions))
+            knowledgeColumn(L("UNRESOLVED & UNVERIFIED"), icon: "questionmark.diamond",
+                            rows: intelligence.openQuestions)
+            projectDriftPanel(intelligence.drift)
+        }
+    }
+
+    private func knowledgeColumn(_ title: String, icon: String, rows: [ProjectKnowledgeItem]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(title, systemImage: icon).font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+            if rows.isEmpty { Text(L("No grounded knowledge captured yet")).font(.system(size: 12)).foregroundStyle(.tertiary) }
+            ForEach(rows.prefix(7)) { row in
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(row.text).font(.system(size: 12, weight: .medium)).lineLimit(3)
+                    HStack { evidenceTag(row.confidence); Text(row.source).font(.system(size: 10)).foregroundStyle(.tertiary).lineLimit(1) }
+                }.padding(8).background(panel, in: RoundedRectangle(cornerRadius: 7))
+            }
+        }.frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func projectDriftPanel(_ findings: [ProjectDriftFinding]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Label(L("REALITY VS AGENT UNDERSTANDING"), systemImage: "arrow.left.arrow.right.square")
+                .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+            ForEach(findings) { finding in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack {
+                        Circle().fill(driftColor(finding.severity)).frame(width: 7, height: 7)
+                        Text(L(finding.title)).font(.system(size: 12, weight: .bold)).lineLimit(2)
+                    }
+                    Text(finding.detail).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(4)
+                }.padding(9).background(driftColor(finding.severity).opacity(0.07), in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(driftColor(finding.severity).opacity(0.35)))
+            }
+        }.frame(maxWidth: .infinity, alignment: .topLeading)
+    }
+
+    private func evidenceTag(_ confidence: ProjectKnowledgeConfidence) -> some View {
+        let color: Color = confidence == .observed ? green : (confidence == .declared ? cyan : .blue)
+        return Text(L(confidence.rawValue).uppercased()).font(.system(size: 9, weight: .bold)).foregroundStyle(color)
+            .padding(.horizontal, 5).padding(.vertical, 2).background(color.opacity(0.11), in: Capsule())
+    }
+
+    private func driftColor(_ severity: ProjectDriftSeverity) -> Color {
+        switch severity { case .aligned: return green; case .review: return amber; case .conflict: return .red }
+    }
+
+    private func capabilityIcon(_ name: String) -> String {
+        if name.contains("Network") { return "network" }
+        if name.contains("Memory") { return "brain" }
+        if name.contains("Web") { return "globe" }
+        if name.contains("Evidence") { return "externaldrive" }
+        if name.contains("Code") { return "chevron.left.forwardslash.chevron.right" }
+        if name.contains("Runtime") { return "point.3.connected.trianglepath.dotted" }
+        return "rectangle.3.group"
     }
 
     private func globalTaskRow(_ session: AgentSessionSnapshot, incidents: [SecurityIncident],
