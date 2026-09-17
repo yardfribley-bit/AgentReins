@@ -1352,6 +1352,38 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(SecurityIncident.correlate([result, projected]).first?.severity, "high")
     }
 
+    func testProjectEvolutionBuildsTaskChangeSetFromAgentEvidence() throws {
+        let base = Date(timeIntervalSince1970: 100)
+        let events = [
+            GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/harbor",
+                command: nil, agent: "codex", op: "prompt", severity: "info", ts: base,
+                action: "sent", sessionId: "s", turnId: "t", userIntent: "Add authentication"),
+            GuardEvent(kind: "file", ruleId: "write", path: "/tmp/harbor/Auth.swift",
+                command: "write", agent: "codex", op: "create", severity: "info",
+                ts: base.addingTimeInterval(1), action: "completed", sessionId: "s", turnId: "t",
+                toolCallId: "write", toolName: "Write"),
+            GuardEvent(kind: "network", ruleId: "connect", path: "/tmp/harbor",
+                command: nil, agent: "codex", op: "connect", severity: "high",
+                ts: base.addingTimeInterval(2), action: "observed", sessionId: "s", turnId: "t",
+                remoteHost: "unknown.example", remotePort: 443, remoteDomain: "unknown.example"),
+            GuardEvent(kind: "verification", ruleId: "tests", path: "/tmp/harbor",
+                command: "swift test", agent: "codex", op: "verify", severity: "info",
+                ts: base.addingTimeInterval(3), action: "passed", sessionId: "s", turnId: "t")
+        ]
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: events).first)
+        let incidents = SecurityIncident.correlate(events)
+        let project = try XCTUnwrap(ProjectEvolution.build(sessions: [session], incidents: incidents).first)
+        let change = try XCTUnwrap(project.changeSets.first)
+
+        XCTAssertEqual(project.path, "/tmp/harbor")
+        XCTAssertEqual(project.origin, .firstObserved)
+        XCTAssertEqual(change.requirement, "Add authentication")
+        XCTAssertEqual(change.createdFiles, ["/tmp/harbor/Auth.swift"])
+        XCTAssertEqual(change.externalDestinations, ["unknown.example"])
+        XCTAssertFalse(change.securityFindings.isEmpty)
+        XCTAssertEqual(change.verification, .verified)
+    }
+
     func testBenignExternalContentDoesNotProduceInjectionFinding() {
         let findings = ExternalContentSecurity.scan("Run swift test and confirm the validator rejects short passwords.")
         XCTAssertTrue(findings.isEmpty)

@@ -208,6 +208,9 @@ struct AgentOperationsCenterView: View {
                                   sessions: rows.sorted { $0.lastActivityAt > $1.lastActivityAt })
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
+    private var projectEvolution: [ProjectEvolutionSnapshot] {
+        ProjectEvolution.build(sessions: sessions, incidents: incidents)
+    }
     private var activeTaskCount: Int {
         sessions.filter { session in
             guard let turn = session.turns.last else { return false }
@@ -546,13 +549,13 @@ struct AgentOperationsCenterView: View {
     }
 
     private func projectMissionCard(_ project: ProjectMission) -> some View {
+        let evolution = projectEvolution.first { $0.path == project.path }
         let projectIncidents = incidents.filter { incident in
             project.sessions.contains { session in
                 incident.events.contains { $0.sessionId == session.id }
             }
         }
-        let changedFiles = Set(project.sessions.flatMap(\.events)
-            .filter { $0.kind == "file" && $0.op != "read" }.map(\.path)).count
+        let changedFiles = evolution?.changedFileCount ?? 0
         return VStack(alignment: .leading, spacing: 13) {
             HStack(alignment: .top, spacing: 12) {
                 Image(systemName: "folder.fill").font(.system(size: 20)).foregroundStyle(cyan)
@@ -560,6 +563,10 @@ struct AgentOperationsCenterView: View {
                     Text(project.name).font(.system(size: 17, weight: .bold))
                     Text(project.path).font(.system(size: 12, design: .monospaced))
                         .foregroundStyle(.secondary).lineLimit(1)
+                    if let evolution {
+                        Text("\(evolution.origin.rawValue) \(relativeAge(evolution.firstObservedAt)) · \(evolution.changeSets.count) observed change set(s)")
+                            .font(.system(size: 11)).foregroundStyle(.tertiary)
+                    }
                 }
                 Spacer()
                 labelChip("\(project.sessions.count) AGENT\(project.sessions.count == 1 ? "" : "S")", color: cyan)
@@ -571,14 +578,15 @@ struct AgentOperationsCenterView: View {
             ForEach(project.sessions) { session in
                 globalTaskRow(session, incidents: projectIncidents.filter { incident in
                     incident.events.contains { $0.sessionId == session.id }
-                })
+                }, changeSet: evolution?.changeSets.first { $0.sessionId == session.id })
             }
         }
         .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
         .overlay(RoundedRectangle(cornerRadius: 12).stroke(projectIncidents.isEmpty ? border : amber.opacity(0.65)))
     }
 
-    private func globalTaskRow(_ session: AgentSessionSnapshot, incidents: [SecurityIncident]) -> some View {
+    private func globalTaskRow(_ session: AgentSessionSnapshot, incidents: [SecurityIncident],
+                               changeSet: ProjectChangeSet?) -> some View {
         let turn = session.turns.last
         let stage = liveStage(for: session)
         let risk = incidents.max { severityRank($0.severity) < severityRank($1.severity) }
@@ -601,6 +609,28 @@ struct AgentOperationsCenterView: View {
                     Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(.secondary)
                 }
                 taskStageRail(session)
+                if let changeSet {
+                    HStack(spacing: 7) {
+                        changeChip("+\(changeSet.createdFiles.count)", "new", green)
+                        changeChip("~\(changeSet.modifiedFiles.count)", "modified", .blue)
+                        changeChip("−\(changeSet.deletedFiles.count)", "deleted", .red)
+                        if !changeSet.externalDestinations.isEmpty {
+                            changeChip("\(changeSet.externalDestinations.count)", "external", amber)
+                        }
+                        if changeSet.memoryReads + changeSet.memoryWrites > 0 {
+                            changeChip("\(changeSet.memoryReads + changeSet.memoryWrites)", "memory", cyan)
+                        }
+                        Text(changeSet.summary).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        Spacer()
+                        Text(changeSet.verification.rawValue.uppercased())
+                            .font(.system(size: 10, weight: .bold))
+                            .foregroundStyle(verificationColor(changeSet.verification))
+                    }
+                    if let file = (changeSet.modifiedFiles + changeSet.createdFiles + changeSet.deletedFiles).first {
+                        Text("Latest project change · \(file)")
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary).lineLimit(1)
+                    }
+                }
                 if let risk {
                     HStack(spacing: 6) {
                         Image(systemName: "exclamationmark.shield.fill").foregroundStyle(incidentColor(risk.severity))
@@ -610,6 +640,31 @@ struct AgentOperationsCenterView: View {
                 }
             }.padding(12).background(raised.opacity(0.72), in: RoundedRectangle(cornerRadius: 9))
         }.buttonStyle(HoverCardButtonStyle())
+    }
+
+    private func changeChip(_ value: String, _ label: String, _ color: Color) -> some View {
+        HStack(spacing: 3) {
+            Text(value).font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(color)
+            Text(label).font(.system(size: 10)).foregroundStyle(.secondary)
+        }.padding(.horizontal, 6).padding(.vertical, 3)
+            .background(color.opacity(0.09), in: RoundedRectangle(cornerRadius: 5))
+    }
+
+    private func verificationColor(_ state: ProjectVerificationState) -> Color {
+        switch state {
+        case .verified: return green
+        case .failed: return .red
+        case .agentReported: return amber
+        case .pending: return .secondary
+        }
+    }
+
+    private func relativeAge(_ date: Date) -> String {
+        let seconds = max(0, Date().timeIntervalSince(date))
+        if seconds < 60 { return "just now" }
+        if seconds < 3_600 { return "\(Int(seconds / 60))m ago" }
+        if seconds < 86_400 { return "\(Int(seconds / 3_600))h ago" }
+        return "\(Int(seconds / 86_400))d ago"
     }
 
     private func taskStageRail(_ session: AgentSessionSnapshot) -> some View {
