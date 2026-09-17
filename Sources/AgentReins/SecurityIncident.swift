@@ -26,6 +26,7 @@ struct SecurityIncident: Identifiable, Sendable {
     var ruleIDs: [String] { Array(Set(events.map(\.ruleId))).sorted() }
 
     var title: String {
+        if primary.kind == "alert" { return primary.command ?? "Agent policy violation" }
         if primary.kind == "external-content" {
             let source = primary.command ?? primary.toolName ?? "external content"
             return "Prompt injection detected · \(source)"
@@ -58,6 +59,9 @@ struct SecurityIncident: Identifiable, Sendable {
     }
 
     var summary: String {
+        if primary.kind == "alert" {
+            return "\(primary.ruleId.replacingOccurrences(of: "_", with: " ")) · review required · evidence \(primary.attributionConfidence?.rawValue ?? "unknown")"
+        }
         if primary.kind == "external-content" {
             return "Untrusted content attempted to direct the Agent · \(primary.modelResponse ?? "Review captured evidence.")"
         }

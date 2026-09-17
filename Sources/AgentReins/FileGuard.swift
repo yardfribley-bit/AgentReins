@@ -20,6 +20,14 @@ final class FileGuard: ObservableObject {
     private var timer: Timer?
     private var lastMtime: [String: Date] = [:]
     private var lastContent: [String: String] = [:]
+    private struct PendingAnalysis {
+        let token: UUID
+        let rule: Rule
+        let path: String
+        let before: String?
+        let after: String?
+    }
+    private var pendingAnalyses: [String: PendingAnalysis] = [:]
     private let lock = NSLock()
     private let evidenceDatabase = try? EvidenceDatabase()
     private var acceptedEvents = 0
@@ -53,6 +61,7 @@ final class FileGuard: ObservableObject {
         DispatchQueue.main.async { self.running = false }
         timer?.invalidate()
         timer = nil
+        bgQueue.async { self.settleAllPendingAnalyses() }
     }
 
     // MARK: - 后台文件 I/O（均在 bgQueue 串行执行，不碰主线程）
@@ -121,9 +130,9 @@ final class FileGuard: ObservableObject {
                     lock.unlock()
                     if let last, last != now {
                         if rule.opsSet.contains("modify") {
-                            let diff = makeDiff(before: before, after: current)
-                            let findings = CodeSecurityScanner.scan(path: url.path, before: before, after: current)
                             if rule.restore == true, fm.fileExists(atPath: backup.path) {
+                                let diff = makeDiff(before: before, after: current)
+                                let findings = CodeSecurityScanner.scan(path: url.path, before: before, after: current)
                                 try? fm.removeItem(at: url)
                                 try? fm.copyItem(at: backup, to: url)   // 还原修改
                                 lock.lock()
@@ -132,7 +141,11 @@ final class FileGuard: ObservableObject {
                                 lock.unlock()
                                 pending.append((rule, url.path, "modify", "restored", before, current, diff, findings))
                             } else {
-                                pending.append((rule, url.path, "modify", "alert", before, current, diff, findings))
+                                // Preserve the lightweight observation now, but
+                                // defer content diffing and scanning until this
+                                // particular file has been quiet for 1.5 s.
+                                pending.append((rule, url.path, "modify", "observed", nil, nil, nil, []))
+                                scheduleAnalysis(rule: rule, path: url.path, before: before, after: current)
                             }
                         }
                     }
@@ -157,6 +170,35 @@ final class FileGuard: ObservableObject {
                 source: "file", state: .healthy, lastSuccess: Date(), lagSeconds: nil,
                 accepted: acceptedEvents, malformed: 0, dropped: 0,
                 detail: "Only explicitly protected paths are observed; rapid intermediate writes may be missed"))
+        }
+    }
+
+    private func scheduleAnalysis(rule: Rule, path: String, before: String?, after: String?) {
+        let token = UUID()
+        let initialBefore = pendingAnalyses[path]?.before ?? before
+        pendingAnalyses[path] = PendingAnalysis(token: token, rule: rule, path: path,
+                                                before: initialBefore, after: after)
+        bgQueue.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, let analysis = self.pendingAnalyses[path], analysis.token == token else { return }
+            self.pendingAnalyses[path] = nil
+            self.finishAnalysis(analysis)
+        }
+    }
+
+    private func settleAllPendingAnalyses() {
+        let analyses = Array(pendingAnalyses.values)
+        pendingAnalyses.removeAll()
+        for analysis in analyses { finishAnalysis(analysis) }
+    }
+
+    private func finishAnalysis(_ analysis: PendingAnalysis) {
+        let diff = makeDiff(before: analysis.before, after: analysis.after)
+        let findings = CodeSecurityScanner.scan(path: analysis.path,
+                                                before: analysis.before,
+                                                after: analysis.after)
+        DispatchQueue.main.async {
+            self.emit(rule: analysis.rule, path: analysis.path, op: "modify", action: "analyzed",
+                      before: analysis.before, after: analysis.after, diff: diff, findings: findings)
         }
     }
 
@@ -198,7 +240,9 @@ final class FileGuard: ObservableObject {
                       before: String?, after: String?, diff: String?, findings: [CodeFinding]) {
         let rank = ["medium": 1, "high": 2, "critical": 3]
         let findingSeverity = findings.max { rank[$0.severity, default: 0] < rank[$1.severity, default: 0] }?.severity
-        let sev = findingSeverity ?? (rule.severity.isEmpty ? "high" : rule.severity)
+        let sev = action == "observed"
+            ? "info"
+            : (findingSeverity ?? (rule.severity.isEmpty ? "high" : rule.severity))
         let ev = GuardEvent(kind: "file", ruleId: rule.id, path: path, command: nil, agent: nil,
                             op: op, severity: sev, ts: Date(), action: action,
                             beforeContent: before, afterContent: after, fileDiff: diff,
@@ -208,7 +252,9 @@ final class FileGuard: ObservableObject {
         events.insert(ev, at: 0)
         if events.count > 200 { events.removeLast() }
         onEvent?(ev)
-        notify(title: "AgentReins 已干预", body: "\(action) · \(op) · \(path)")
+        if action != "observed" {
+            notify(title: "AgentReins 已干预", body: "\(action) · \(op) · \(path)")
+        }
     }
 
     private func notify(title: String, body: String) {

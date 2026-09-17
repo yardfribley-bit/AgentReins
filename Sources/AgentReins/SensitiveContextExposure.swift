@@ -17,6 +17,16 @@ struct SensitiveExposureFinding: Codable, Equatable, Sendable {
 }
 
 enum SensitiveContextExposure {
+    static func scan(text: String, source: String) -> [SensitiveExposureFinding] {
+        patterns.flatMap { pattern in
+            matches(pattern.regex, in: text).compactMap { match in
+                guard pattern.validate(match) else { return nil }
+                return SensitiveExposureFinding(category: pattern.category, source: source,
+                    evidence: boundedEvidence(match), severity: pattern.severity)
+            }
+        }
+    }
+
     static func scan(events: [GuardEvent]) -> [SensitiveExposureFinding] {
         var inputs: [(String, String)] = events.compactMap {
             guard let prompt = $0.modelPrompt, !prompt.isEmpty else { return nil }
@@ -29,13 +39,7 @@ enum SensitiveContextExposure {
                   events.contains(where: { $0.inputTokens != nil && $0.ts > event.ts }) else { continue }
             inputs.append(("tool result · \(event.toolName ?? "unknown tool")", content))
         }
-        return inputs.flatMap { source, text in patterns.flatMap { pattern in
-            matches(pattern.regex, in: text).compactMap { match in
-                guard pattern.validate(match) else { return nil }
-                return SensitiveExposureFinding(category: pattern.category, source: source,
-                    evidence: boundedEvidence(match), severity: pattern.severity)
-            }
-        }}
+        return inputs.flatMap { source, text in scan(text: text, source: source) }
     }
 
     private struct Pattern {

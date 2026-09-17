@@ -14,7 +14,8 @@ struct EventDerivedProjection: Sendable {
     static func build(events: [GuardEvent]) -> EventDerivedProjection {
         let recent = Array(events.prefix(400))
         let contentFindings = ExternalContentSecurity.findingEvents(events: recent)
-        let incidents = SecurityIncident.correlate(recent + contentFindings)
+        let policyAlerts = AgentPolicyAlertEngine.findings(events: recent)
+        let incidents = SecurityIncident.correlate(recent + contentFindings + policyAlerts)
         let sessionEvents = liveSessionEvents(events)
         return EventDerivedProjection(incidents: incidents,
             sessions: AgentSessionSnapshot.build(from: sessionEvents),

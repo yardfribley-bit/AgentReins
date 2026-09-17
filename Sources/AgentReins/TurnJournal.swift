@@ -10,7 +10,7 @@ enum TurnJournalStatus: String, Codable, Sendable {
     case stuck
 }
 
-enum EvidenceConfidence: String, Codable, Sendable, Equatable {
+enum EvidenceConfidence: String, Codable, Sendable, Equatable, Hashable {
     case confirmed
     case inferred
     case unknown

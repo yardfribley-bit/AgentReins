@@ -42,11 +42,11 @@ final class LiveDashboardViewModel: ObservableObject {
     private func notifySecurityIncidents(_ incidents: [SecurityIncident]) {
         for incident in incidents
         where ((incident.primary.kind == "network" && incident.networkDestination.needsAttention)
-               || incident.primary.kind == "external-content")
+               || incident.primary.kind == "external-content" || incident.primary.kind == "alert")
             && !notifiedIncidentIDs.contains(incident.id) {
             notifiedIncidentIDs.insert(incident.id)
             if notifiedIncidentIDs.count > 200 { notifiedIncidentIDs.removeAll() }
-            if incident.primary.kind == "external-content" {
+            if incident.primary.kind == "external-content" || incident.primary.kind == "alert" {
                 AppNotifier.send(title: incident.title, body: incident.summary)
             } else {
                 let site = incident.primary.remoteDomain ?? incident.primary.remoteHost ?? "unknown destination"

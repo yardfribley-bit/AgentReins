@@ -184,6 +184,10 @@ final class ToolActivityEvidenceProjector: ObservableObject {
             let resolved = absolute(path, workspace: workspace)
             if !resolved.isEmpty { result.append(.file(op: "delete", path: resolved, relatedPath: nil)) }
         }
+        if result.isEmpty, let path = firstMatch(#"(?:^|[;&|]\s*)(?:cat|head|tail|less|more)\s+(?:-[^\s]+\s+)*(\S+)"#, in: command) {
+            let resolved = absolute(path, workspace: workspace)
+            if !resolved.isEmpty { result.append(.file(op: "read", path: resolved, relatedPath: nil)) }
+        }
         return result
     }
 

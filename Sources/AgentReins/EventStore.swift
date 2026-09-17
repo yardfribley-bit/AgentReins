@@ -34,6 +34,7 @@ final class EventStore: ObservableObject {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let database: EvidenceDatabase?
+    private let evidenceBuffer: EvidenceBufferActor?
     private let persistenceQueue = DispatchQueue(label: "com.agentspec.eventstore.persistence", qos: .utility)
     private let projectionWorker = EventDerivedProjectionWorker()
     private let maximumEvents = 500
@@ -47,7 +48,9 @@ final class EventStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         let databaseURL = fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
-        database = try? EvidenceDatabase.openRecovering(url: databaseURL)
+        let openedDatabase = try? EvidenceDatabase.openRecovering(url: databaseURL)
+        database = openedDatabase
+        evidenceBuffer = openedDatabase.map(EvidenceBufferActor.init(database:))
         load()
         refreshCollectorHealth(publish: false)
     }
@@ -162,7 +165,7 @@ final class EventStore: ObservableObject {
         if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
         events = snapshot
         scheduleDerivedProjection(events: snapshot)
-        if let database {
+        if let database, let evidenceBuffer {
             let affectedEvidence = evidenceForAffectedTurns(evidence)
             let affectedTurns = Array(Set(evidence.compactMap { event -> String? in
                 guard let session = event.sessionId, let turn = event.turnId else { return nil }
@@ -174,7 +177,6 @@ final class EventStore: ObservableObject {
             }
             persistenceQueue.async { [weak self] in
                 do {
-                    try database.append(evidence)
                     try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
                     try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence),
                                                     turns: affectedTurns)
@@ -190,6 +192,10 @@ final class EventStore: ObservableObject {
                     DispatchQueue.main.async { [weak self] in self?.persistenceError = message }
                 }
             }
+            let urgent = evidence.contains { event in
+                event.severity == "critical" || event.action == "blocked" || event.kind == "verification"
+            }
+            Task { await evidenceBuffer.enqueue(evidence, urgent: urgent) }
         } else {
             persistenceError = "SQLite evidence database is unavailable"
         }

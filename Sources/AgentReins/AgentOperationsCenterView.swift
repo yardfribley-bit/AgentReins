@@ -816,15 +816,43 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 8) {
             Text(L("WHY THE PROJECT CHANGED")).micro(cyan)
             if let evolution {
-                ForEach(evolution.changeSets.prefix(6)) { change in
-                    HStack(alignment: .top, spacing: 10) {
-                        Circle().fill(verificationColor(change.verification)).frame(width: 8, height: 8).padding(.top, 5)
+                let families = TaskAttemptHistory.build(changeSets: evolution.changeSets)
+                ForEach(families.prefix(6)) { family in
+                    VStack(alignment: .leading, spacing: 7) {
+                      HStack(alignment: .top, spacing: 10) {
+                        Circle().fill(family.succeeded ? green : verificationColor(family.attempts.last?.verification ?? .pending))
+                            .frame(width: 8, height: 8).padding(.top, 5)
                         VStack(alignment: .leading, spacing: 3) {
-                            Text(change.requirement).font(.system(size: 13, weight: .semibold)).lineLimit(2)
-                            Text("\(change.summary) · \(change.verification.rawValue)")
+                            Text(family.requirement).font(.system(size: 13, weight: .semibold)).lineLimit(2)
+                            Text(family.attempts.count == 1
+                                 ? (family.attempts.first?.summary ?? "No activity summary")
+                                 : "\(family.attempts.count) attempts · \(family.agents.joined(separator: ", ")) · \(family.succeeded ? "Latest attempt verified" : "Final deliverable not verified")")
                                 .font(.system(size: 11)).foregroundStyle(.secondary)
                         }
-                        Spacer(); Text(relativeAge(change.lastActivityAt)).font(.system(size: 11)).foregroundStyle(.tertiary)
+                        Spacer()
+                        if family.attempts.count > 1 {
+                            Text(family.confidence.rawValue.uppercased()).font(.system(size: 9, weight: .bold))
+                                .foregroundStyle(family.confidence == .confirmed ? green : amber)
+                        }
+                        Text(relativeAge(family.lastAttemptAt)).font(.system(size: 11)).foregroundStyle(.tertiary)
+                      }
+                      if family.attempts.count > 1 {
+                        if family.hadEarlierVerifiedAttempt && !family.succeeded {
+                            Label("Earlier success was superseded; the final attempt is not verified",
+                                  systemImage: "arrow.uturn.backward.circle.fill")
+                                .font(.system(size: 10, weight: .semibold)).foregroundStyle(amber)
+                                .padding(.leading, 18)
+                        }
+                        ForEach(Array(family.attempts.enumerated()), id: \.element.id) { index, attempt in
+                            HStack(spacing: 7) {
+                                Text("#\(index + 1)").font(.system(size: 10, weight: .bold, design: .monospaced)).foregroundStyle(cyan)
+                                Text(formattedAgentName(attempt.agent)).font(.system(size: 10, weight: .semibold))
+                                Text(attempt.verification.rawValue).font(.system(size: 10)).foregroundStyle(verificationColor(attempt.verification))
+                                Spacer()
+                                Text(relativeAge(attempt.lastActivityAt)).font(.system(size: 10)).foregroundStyle(.tertiary)
+                            }.padding(.leading, 18)
+                        }
+                      }
                     }.padding(9).background(panel, in: RoundedRectangle(cornerRadius: 8))
                 }
             } else { empty(L("No project evolution has been attributed yet")) }

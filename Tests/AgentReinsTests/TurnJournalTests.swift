@@ -593,7 +593,9 @@ final class TurnJournalTests: XCTestCase {
                                  message: "benchmark", naturalLanguage: nil)])
         let observed = expectation(description: "persistent file modification observed")
         guardrail.onEvent = { event in
-            if event.path == watched.path, event.op == "modify" { observed.fulfill() }
+            if event.path == watched.path, event.op == "modify", event.action == "observed" {
+                observed.fulfill()
+            }
         }
         guardrail.start()
         defer { guardrail.stop() }
@@ -601,6 +603,38 @@ final class TurnJournalTests: XCTestCase {
         try await Task.sleep(for: .milliseconds(400))
         try "let value = 2\n".write(to: watched, atomically: true, encoding: .utf8)
         await fulfillment(of: [observed], timeout: 2.5)
+    }
+
+    @MainActor
+    func testFileCollectorDefersContentAnalysisUntilQuietWindow() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let watched = root.appendingPathComponent("debounced.swift")
+        let backups = root.appendingPathComponent("backups", isDirectory: true)
+        try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try "let token = \"safe\"\n".write(to: watched, atomically: true, encoding: .utf8)
+        let guardrail = FileGuard(backupRoot: backups)
+        guardrail.setRules([Rule(id: "file-debounce", kind: "file", watch: [watched.path], pattern: nil,
+                                 ops: ["modify"], severity: "high", action: "protect", restore: false,
+                                 message: "debounce", naturalLanguage: nil)])
+        let observed = expectation(description: "lightweight activity is observed")
+        let analyzed = expectation(description: "settled content is analyzed")
+        var observedAt: Date?
+        var analyzedAt: Date?
+        guardrail.onEvent = { event in
+            guard event.path == watched.path else { return }
+            if event.action == "observed" { observedAt = Date(); observed.fulfill() }
+            if event.action == "analyzed" { analyzedAt = Date(); analyzed.fulfill() }
+        }
+        guardrail.start()
+        defer { guardrail.stop() }
+
+        try await Task.sleep(for: .milliseconds(400))
+        try "let token = \"changed\"\n".write(to: watched, atomically: true, encoding: .utf8)
+        await fulfillment(of: [observed], timeout: 2.5)
+        XCTAssertNil(analyzedAt)
+        await fulfillment(of: [analyzed], timeout: 2.5)
+        XCTAssertGreaterThanOrEqual(analyzedAt?.timeIntervalSince(observedAt ?? .distantFuture) ?? 0, 1.4)
     }
 
     func testEvidenceDatabaseRecoversFromIntegrityFailure() throws {
@@ -622,6 +656,67 @@ final class TurnJournalTests: XCTestCase {
         let recovered = try EvidenceDatabase.verifyAndRecover(url: url)
         XCTAssertTrue(try recovered.verifyIntegrity())
         XCTAssertEqual(try recovered.rawRecordCount(), 1)
+    }
+
+    func testEvidenceBufferFlushesAtBatchBoundary() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("buffer.sqlite3"))
+        let buffer = EvidenceBufferActor(database: database)
+        let events = (0..<EvidenceBufferActor.maximumBatchSize).map { index in
+            GuardEvent(kind: "cmd", ruleId: "buffer-\(index)", path: "-", command: "true",
+                       agent: "test", op: "exec", severity: "info", ts: Date(), action: "observed")
+        }
+
+        await buffer.enqueue(events)
+
+        XCTAssertEqual(try database.recent(limit: events.count).count, events.count)
+        let snapshot = await buffer.snapshot()
+        XCTAssertEqual(snapshot.bufferedEvents, 0)
+    }
+
+    func testEvidenceBufferRetainsSmallBatchUntilExplicitFlush() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("buffer.sqlite3"))
+        let buffer = EvidenceBufferActor(database: database)
+        let event = GuardEvent(kind: "file", ruleId: "buffered", path: "/tmp/example",
+                               command: nil, agent: "test", op: "modify", severity: "info",
+                               ts: Date(), action: "observed")
+
+        await buffer.enqueue([event])
+        XCTAssertEqual(try database.recent(limit: 1).count, 0)
+        await buffer.flush()
+
+        XCTAssertEqual(try database.recent(limit: 1).first?.id, event.id)
+    }
+
+    func testPolicyAlertsOnCrossProjectCredentialReadAndToolResult() {
+        let timestamp = Date()
+        let call = GuardEvent(kind: "tool", ruleId: "workbuddy_Bash", path: "/projects/agentreins",
+            command: "cat /projects/fleet/config/servers.yaml", agent: "workbuddy", op: "call",
+            severity: "info", ts: timestamp, action: "requested", sessionId: "session",
+            turnId: "turn", toolCallId: "call", toolName: "Bash", source: "agentsight:workbuddy-local",
+            attributionConfidence: .confirmed, attributionMethod: "native")
+        let file = GuardEvent(kind: "file", ruleId: "tool_file_intent",
+            path: "/projects/fleet/config/servers.yaml", command: call.command, agent: "workbuddy",
+            op: "read", severity: "info", ts: timestamp, action: "completed", sessionId: "session",
+            turnId: "turn", toolCallId: "call", toolName: "Bash", source: "tool-intent",
+            attributionConfidence: .confirmed, attributionMethod: "native Agent tool arguments")
+        let result = GuardEvent(kind: "tool", ruleId: "workbuddy_Bash", path: "/projects/agentreins",
+            command: nil, agent: "workbuddy", op: "result", severity: "info", ts: timestamp,
+            action: "completed", sessionId: "session", turnId: "turn", toolCallId: "call",
+            modelResponse: "host: example.invalid\nusername: root\npassword: test-password-123",
+            toolName: "Bash", source: "agentsight:workbuddy-local",
+            attributionConfidence: .confirmed, attributionMethod: "native")
+
+        let findings = AgentPolicyAlertEngine.findings(events: [call, file, result])
+
+        XCTAssertEqual(Set(findings.map(\.ruleId)),
+                       Set(["cross_project_sensitive_file_read", "credential_in_tool_result"]))
+        XCTAssertTrue(findings.allSatisfy { $0.severity == "critical" && $0.action == "needs_review" })
     }
 
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
@@ -1382,6 +1477,170 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(change.externalDestinations, ["unknown.example"])
         XCTAssertFalse(change.securityFindings.isEmpty)
         XCTAssertEqual(change.verification, .verified)
+    }
+
+    func testTaskAttemptHistoryGroupsExactRepeatedRequirements() {
+        let first = projectChangeSet(id: "s1:t1", requirement: "Add authentication", session: "s1",
+                                     startedAt: Date(timeIntervalSince1970: 100), verification: .failed)
+        let second = projectChangeSet(id: "s2:t2", requirement: "Add authentication", session: "s2",
+                                      startedAt: Date(timeIntervalSince1970: 200), verification: .verified)
+
+        let families = TaskAttemptHistory.build(changeSets: [second, first])
+
+        XCTAssertEqual(families.count, 1)
+        XCTAssertEqual(families[0].attempts.map(\.id), ["s1:t1", "s2:t2"])
+        XCTAssertEqual(families[0].confidence, .confirmed)
+        XCTAssertTrue(families[0].succeeded)
+    }
+
+    func testTaskAttemptHistoryKeepsUnrelatedRequirementsSeparate() {
+        let first = projectChangeSet(id: "s1:t1", requirement: "Add authentication", session: "s1",
+                                     startedAt: Date(timeIntervalSince1970: 100), verification: .failed)
+        let second = projectChangeSet(id: "s2:t2", requirement: "Redesign the network dashboard", session: "s2",
+                                      startedAt: Date(timeIntervalSince1970: 200), verification: .pending)
+
+        XCTAssertEqual(TaskAttemptHistory.build(changeSets: [first, second]).count, 2)
+    }
+
+    func testTaskAttemptHistoryUsesFinalAttemptAsTaskOutcome() throws {
+        let earlier = projectChangeSet(id: "s1:t1", requirement: "Deploy VMess", session: "s1",
+                                       startedAt: Date(timeIntervalSince1970: 100), verification: .verified)
+        let final = projectChangeSet(id: "s2:t2", requirement: "Deploy VMess", session: "s2",
+                                     startedAt: Date(timeIntervalSince1970: 200), verification: .failed)
+
+        let family = try XCTUnwrap(TaskAttemptHistory.build(changeSets: [earlier, final]).first)
+
+        XCTAssertFalse(family.succeeded)
+        XCTAssertTrue(family.hadEarlierVerifiedAttempt)
+        XCTAssertEqual(family.attempts.last?.verification, .failed)
+    }
+
+    func testTaskExecutionRequiresModelSwitchAfterThreeFailedAttempts() {
+        let engine = EngineIdentity(agent: "WorkBuddy", engine: "workbuddy", model: "deepseek",
+                                    provider: "OpenRouter", relay: "relay.example")
+        let attempts = (1...3).map { sequence in
+            engineAttempt(sequence: sequence, engine: engine, state: .failed, verdict: .failed)
+        }
+        let task = TaskExecution(id: "task-vmess", projectId: "project", title: "Deploy VMess",
+            originalRequirement: "Configure VMess on Tencent Cloud", createdAt: Date(), updatedAt: Date(),
+            state: .failed, attempts: attempts)
+
+        XCTAssertEqual(task.attemptsUsed(for: engine), 3)
+        XCTAssertEqual(task.attemptsRemaining(for: engine), 0)
+        XCTAssertTrue(task.requiresModelSwitch)
+        XCTAssertFalse(task.finalOutcomeIsVerified)
+    }
+
+    func testTaskExecutionContinuesRecordingBeyondSwitchThreshold() {
+        let engine = EngineIdentity(agent: "WorkBuddy", engine: "workbuddy", model: "deepseek",
+                                    provider: nil, relay: nil)
+        let attempts = (1...5).map {
+            engineAttempt(sequence: $0, engine: engine, state: .failed, verdict: .failed)
+        }
+        let task = TaskExecution(id: "task", projectId: nil, title: "Task", originalRequirement: "Do it",
+            createdAt: Date(), updatedAt: Date(), state: .failed, attempts: attempts)
+
+        XCTAssertEqual(task.attemptsUsed(for: engine), 5)
+        XCTAssertEqual(task.attemptsRemaining(for: engine), 0)
+        XCTAssertEqual(task.attemptsBeyondSwitchThreshold(for: engine), 2)
+        XCTAssertTrue(task.requiresModelSwitch)
+    }
+
+    func testTaskExecutionCountsAttemptsSeparatelyAfterModelSwitch() {
+        let deepseek = EngineIdentity(agent: "WorkBuddy", engine: "workbuddy", model: "deepseek",
+                                      provider: "OpenRouter", relay: nil)
+        let gpt = EngineIdentity(agent: "WorkBuddy", engine: "workbuddy", model: "gpt",
+                                 provider: "OpenAI", relay: nil)
+        var attempts = (1...3).map {
+            engineAttempt(sequence: $0, engine: deepseek, state: .failed, verdict: .failed)
+        }
+        attempts.append(engineAttempt(sequence: 4, engine: gpt, state: .running, verdict: .pending))
+        let task = TaskExecution(id: "task", projectId: nil, title: "Task", originalRequirement: "Do it",
+            createdAt: Date(), updatedAt: Date(), state: .running, attempts: attempts)
+
+        XCTAssertEqual(task.attemptsUsed(for: deepseek), 3)
+        XCTAssertEqual(task.attemptsUsed(for: gpt), 1)
+        XCTAssertEqual(task.attemptsRemaining(for: gpt), 2)
+        XCTAssertFalse(task.requiresModelSwitch)
+    }
+
+    func testRunningThirdAttemptDoesNotSwitchBeforeOutcome() {
+        let engine = EngineIdentity(agent: "Codex", engine: "codex", model: "gpt", provider: nil, relay: nil)
+        let attempts = [
+            engineAttempt(sequence: 1, engine: engine, state: .failed, verdict: .failed),
+            engineAttempt(sequence: 2, engine: engine, state: .failed, verdict: .failed),
+            engineAttempt(sequence: 3, engine: engine, state: .running, verdict: .pending)
+        ]
+        let task = TaskExecution(id: "task", projectId: nil, title: "Task", originalRequirement: "Do it",
+            createdAt: Date(), updatedAt: Date(), state: .running, attempts: attempts)
+
+        XCTAssertFalse(task.requiresModelSwitch)
+    }
+
+    func testTaskExecutionRoundTripsThroughJSON() throws {
+        let engine = EngineIdentity(agent: "WorkBuddy", engine: "workbuddy", model: "deepseek",
+                                    provider: "OpenRouter", relay: "relay.example")
+        let task = TaskExecution(id: "task", projectId: "project", title: "Deploy VMess",
+            originalRequirement: "Configure VMess", createdAt: Date(timeIntervalSince1970: 100),
+            updatedAt: Date(timeIntervalSince1970: 200), state: .failed,
+            attempts: [engineAttempt(sequence: 1, engine: engine, state: .failed, verdict: .failed)])
+
+        let restored = try JSONDecoder().decode(TaskExecution.self, from: JSONEncoder().encode(task))
+
+        XCTAssertEqual(restored, task)
+        XCTAssertEqual(restored.schemaVersion, TaskExecution.schemaVersion)
+    }
+
+    func testAgentReportedCompletionDoesNotCountAsSuccess() {
+        let engine = EngineIdentity(agent: "WorkBuddy", engine: "workbuddy", model: "deepseek",
+                                    provider: nil, relay: nil)
+        let attempt = engineAttempt(sequence: 1, engine: engine,
+                                    state: .agentReportedComplete, verdict: .pending)
+        let task = TaskExecution(id: "task", projectId: nil, title: "Task", originalRequirement: "Do it",
+            createdAt: Date(), updatedAt: Date(), state: .running, attempts: [attempt])
+
+        XCTAssertFalse(attempt.isSuccessful)
+        XCTAssertFalse(task.finalOutcomeIsVerified)
+        XCTAssertFalse(task.requiresModelSwitch)
+    }
+
+    func testVerifiedFinalAttemptCompletesTaskWithoutModelSwitch() {
+        let engine = EngineIdentity(agent: "Codex", engine: "codex", model: "gpt", provider: "OpenAI", relay: nil)
+        var attempt = engineAttempt(sequence: 1, engine: engine, state: .verified, verdict: .passed)
+        attempt.acceptanceCriteria = [AttemptAcceptanceCriterion(id: "criterion", statement: "Endpoint is reachable",
+                                                                  state: .passed, evidence: [])]
+        let verification = IndependentVerification(verdict: .passed, method: "End-to-end test",
+            summary: "Reachable", performedAt: Date(), evidence: [])
+        attempt.verification = verification
+        let task = TaskExecution(id: "task", projectId: nil, title: "Task", originalRequirement: "Do it",
+            createdAt: Date(), updatedAt: Date(), state: .succeeded, attempts: [attempt],
+            finalVerification: verification)
+
+        XCTAssertTrue(attempt.isSuccessful)
+        XCTAssertTrue(task.finalOutcomeIsVerified)
+        XCTAssertFalse(task.requiresModelSwitch)
+    }
+
+    private func engineAttempt(sequence: Int, engine: EngineIdentity, state: EngineAttemptState,
+                               verdict: VerificationVerdict) -> EngineAttempt {
+        EngineAttempt(id: "attempt-\(sequence)", taskId: "task", sequence: sequence,
+            engineAttemptNumber: sequence, engine: engine,
+            trigger: sequence == 1 ? .initial : .retryAfterFailure, startedAt: Date(), endedAt: Date(),
+            state: state, planSummary: nil, contextHash: nil, acceptanceCriteria: [], correctiveRetries: [],
+            toolCallIds: [], changedFiles: [], networkDestinations: [], memoryOperationIds: [],
+            failureSignatures: [], agentReportedOutcome: nil,
+            verification: IndependentVerification(verdict: verdict, method: "test", summary: "test",
+                                                  performedAt: Date(), evidence: []),
+            usage: .zero, evidence: [], decision: nil)
+    }
+
+    private func projectChangeSet(id: String, requirement: String, session: String,
+                                  startedAt: Date, verification: ProjectVerificationState) -> ProjectChangeSet {
+        ProjectChangeSet(id: id, projectPath: "/tmp/harbor", sessionId: session, turnId: id,
+            agent: "codex", requirement: requirement, startedAt: startedAt,
+            lastActivityAt: startedAt.addingTimeInterval(10), createdFiles: [], modifiedFiles: [],
+            deletedFiles: [], readFiles: [], tools: [], externalDestinations: [], memoryReads: 0,
+            memoryWrites: 0, securityFindings: [], verification: verification)
     }
 
     func testBenignExternalContentDoesNotProduceInjectionFinding() {
