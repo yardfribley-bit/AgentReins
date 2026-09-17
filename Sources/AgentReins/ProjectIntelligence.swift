@@ -62,15 +62,16 @@ enum ProjectIntelligence {
         let orderedSessions = sessions.sorted { $0.startedAt < $1.startedAt }
         let changes = evolution?.changeSets ?? []
         let allEvents = sessions.flatMap(\.events)
-        let intents = sessions.flatMap { session in
-            session.turns.compactMap(\.userInput) + session.exchanges.compactMap(\.userIntent)
-        }.map(clean).filter(isUsefulText)
-        let latestIntent = orderedSessions.last?.turns.last?.userInput.map(clean)
-            ?? orderedSessions.last?.latestIntent.map(clean)
-        let purposeText = index?.purpose ?? intents.first ?? "Purpose has not been declared in captured Agent activity."
+        let latestSession = orderedSessions.last
+        let latestIsLive = latestSession.map { Date().timeIntervalSince($0.lastActivityAt) <= 90 } == true
+        let latestIntent = latestIsLive ? (latestSession?.turns.last?.userInput.map(clean)
+            ?? latestSession?.latestIntent.map(clean)) : nil
+        // A task request is not the project's purpose. Project Brief accepts
+        // project-owned documentation only; missing evidence stays missing.
+        let purposeText = index?.purpose ?? "Project purpose has not been established from project-owned evidence."
         let purpose = ProjectKnowledgeItem(id: "purpose", text: purposeText,
-            source: index?.purpose != nil ? "README · local project index" : (intents.isEmpty ? "No captured requirement" : "Earliest captured requirement"),
-            confidence: index?.purpose != nil ? .observed : (intents.isEmpty ? .inferred : .declared))
+            source: index?.purpose != nil ? "README · local project index" : "README or project documentation not indexed",
+            confidence: index?.purpose != nil ? .observed : .inferred)
 
         let changedFiles = Array(Set(changes.flatMap { $0.createdFiles + $0.modifiedFiles + $0.deletedFiles })).sorted()
         let readFiles = Array(Set(changes.flatMap(\.readFiles))).sorted()
@@ -97,7 +98,7 @@ enum ProjectIntelligence {
             purpose: purpose,
             currentGoal: latestIntent.map { ProjectKnowledgeItem(id: "goal", text: $0,
                 source: "Latest captured user request", confidence: .declared) },
-            capabilities: capabilities(files: files, intents: intents, declaredFeatures: index?.featureNames ?? []),
+            capabilities: capabilities(files: files, declaredFeatures: index?.featureNames ?? []),
             architecture: architecture(files: files, projectPath: projectPath, index: index),
             constraints: constraints,
             decisions: Array(decisions),
@@ -109,7 +110,7 @@ enum ProjectIntelligence {
             lastVerifiedAt: verifiedEvents.map(\.ts).max())
     }
 
-    private static func capabilities(files: [String], intents: [String], declaredFeatures: [String]) -> [ProjectCapability] {
+    private static func capabilities(files: [String], declaredFeatures: [String]) -> [ProjectCapability] {
         struct Rule { let name: String; let explanation: String; let tokens: [String] }
         let rules = [
             Rule(name: "User Experience", explanation: "Application views and interaction surfaces", tokens: ["view", "ui", "screen", "dashboard", "content"]),
@@ -120,12 +121,11 @@ enum ProjectIntelligence {
             Rule(name: "Evidence Store", explanation: "Durable raw evidence and activity history", tokens: ["database", "store", "evidence", "journal", "history"]),
             Rule(name: "Web Agent Protection", explanation: "Browser Agent activity and untrusted external content", tokens: ["web", "browser", "externalcontent"])
         ]
-        let lowerIntents = intents.joined(separator: " ").lowercased()
         let inferred = rules.compactMap { rule -> ProjectCapability? in
             let matched = files.filter { path in rule.tokens.contains { path.lowercased().contains($0) } }
-            guard !matched.isEmpty || rule.tokens.contains(where: lowerIntents.contains) else { return nil }
+            guard !matched.isEmpty else { return nil }
             return ProjectCapability(id: rule.name, name: rule.name, explanation: rule.explanation,
-                files: Array(matched.prefix(8)), confidence: matched.isEmpty ? .inferred : .observed)
+                files: Array(matched.prefix(8)), confidence: .observed)
         }
         let declared = declaredFeatures.map { name in
             ProjectCapability(id: "readme:\(name)", name: name,

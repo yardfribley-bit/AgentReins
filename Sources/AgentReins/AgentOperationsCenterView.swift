@@ -231,10 +231,17 @@ struct AgentOperationsCenterView: View {
             .suffix(20).map { $0.id.uuidString }.joined(separator: "|")
     }
     private var activeTaskCount: Int {
-        sessions.filter { session in
-            guard let turn = session.turns.last else { return false }
-            return turn.finalResponse == nil || turn.toolCalls.contains { $0.completedAt == nil }
-        }.count
+        sessions.filter(sessionIsLive).count
+    }
+
+    private func sessionIsLive(_ session: AgentSessionSnapshot) -> Bool {
+        guard Date().timeIntervalSince(session.lastActivityAt) <= 90,
+              let turn = session.turns.last else { return false }
+        if turn.finalResponse != nil { return false }
+        if turn.toolCalls.contains(where: { $0.completedAt == nil }) { return true }
+        return session.events.suffix(5).contains {
+            ["running", "requested", "started"].contains($0.action.lowercased())
+        }
     }
     private var rootPID: String? {
         let agent = activeSession?.agent ?? (selectedAgent == "All agents" ? nil : selectedAgent)
@@ -677,7 +684,8 @@ struct AgentOperationsCenterView: View {
     private func projectCockpit(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
                                 intelligence: ProjectIntelligenceSnapshot,
                                 projectIncidents: [SecurityIncident]) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
+        let liveSessions = project.sessions.filter(sessionIsLive)
+        return VStack(alignment: .leading, spacing: 12) {
             projectBrief(project, evolution: evolution, intelligence: intelligence,
                          projectIncidents: projectIncidents)
 
@@ -705,10 +713,14 @@ struct AgentOperationsCenterView: View {
             }
 
             Text(L("LIVE AGENT WORK")).micro(cyan)
-            ForEach(project.sessions.prefix(4)) { session in
-                globalTaskRow(session, incidents: projectIncidents.filter { incident in
-                    incident.events.contains { $0.sessionId == session.id }
-                }, changeSet: evolution?.changeSets.first { $0.sessionId == session.id })
+            if liveSessions.isEmpty {
+                empty(language.language == .english ? "No Agent task has current execution evidence" : "当前没有具备实时执行证据的智能体任务")
+            } else {
+                ForEach(liveSessions.prefix(4)) { session in
+                    globalTaskRow(session, incidents: projectIncidents.filter { incident in
+                        incident.events.contains { $0.sessionId == session.id }
+                    }, changeSet: evolution?.changeSets.first { $0.sessionId == session.id })
+                }
             }
         }
     }
@@ -1018,12 +1030,12 @@ struct AgentOperationsCenterView: View {
 
     private func liveStage(for session: AgentSessionSnapshot) -> (label: String, color: Color) {
         guard let turn = session.turns.last else { return ("Monitoring", .gray) }
-        if turn.toolCalls.contains(where: { $0.completedAt == nil }) { return (readableActivity(turn), amber) }
         if session.events.contains(where: { $0.kind == "verification" && ["passed", "verified", "success"].contains($0.action.lowercased()) }) {
             return ("Verified", green)
         }
         if turn.finalResponse != nil { return ("Reported complete", cyan) }
-        return ("Processing", .blue)
+        if sessionIsLive(session) { return (readableActivity(turn), amber) }
+        return ("Last observed", .gray)
     }
 
     private func incidentColor(_ severity: String) -> Color {
