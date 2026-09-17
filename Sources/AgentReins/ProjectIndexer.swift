@@ -16,131 +16,124 @@ struct ProjectIndexArea: Sendable {
     let files: [String]
 }
 
+enum ProjectIndexError: LocalizedError {
+    case invalidPath(String)
+    case gitUnavailable(String)
+    case gitFailed(path: String, status: Int32, detail: String)
+    case invalidGitOutput(String)
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidPath(let path):
+            return "项目路径不可用：\(path)"
+        case .gitUnavailable(let path):
+            return "无法读取项目 Git 索引：\(path)"
+        case .gitFailed(let path, let status, let detail):
+            return "Git 索引失败：\(path)，退出码 \(status)，\(detail)"
+        case .invalidGitOutput(let path):
+            return "Git 返回了无法解析的文件列表：\(path)"
+        }
+    }
+}
+
 @MainActor
 final class ProjectIndexStore: ObservableObject {
     @Published private(set) var snapshots: [String: ProjectIndexSnapshot] = [:]
     @Published private(set) var indexing: Set<String> = []
-    @Published private(set) var progress: [String: ProjectIndexProgress] = [:]
-    @Published private(set) var paused: Set<String> = []
+    @Published private(set) var errors: [String: String] = [:]
 
-    private var lastRequested: [String: Date] = [:]
     private var tasks: [String: Task<Void, Never>] = [:]
-    private let minimumRefreshInterval: TimeInterval = 20
+    private let maximumFiles = 2_500
 
     func snapshot(for path: String) -> ProjectIndexSnapshot? { snapshots[path] }
-    func progress(for path: String) -> ProjectIndexProgress? { progress[path] }
+    func error(for path: String) -> String? { errors[path] }
+    func isIndexing(_ path: String) -> Bool { indexing.contains(path) }
 
-    func refresh(paths: [String], force: Bool = false) {
-        let now = Date()
-        for path in Set(paths) where path.hasPrefix("/") {
-            if indexing.contains(path) { continue }
-            if !force, let last = lastRequested[path], now.timeIntervalSince(last) < minimumRefreshInterval { continue }
-            lastRequested[path] = now
-            indexing.insert(path)
-            paused.remove(path)
-            tasks[path] = Task { [weak self] in
-                let updates = ProjectIndexer.updates(path: path)
-                for await update in updates {
-                    guard !Task.isCancelled, let self else { return }
-                    switch update {
-                    case .partial(let snapshot): self.snapshots[path] = snapshot
-                    case .progress(let value): self.progress[path] = value
-                    case .complete(let snapshot): self.snapshots[path] = snapshot
-                    }
-                }
-                guard let self else { return }
-                self.indexing.remove(path)
-                self.tasks[path] = nil
-            }
-        }
+    func request(path: String) {
+        guard snapshots[path] == nil, errors[path] == nil else { return }
+        start(path: path)
     }
 
-    func pause(path: String) {
+    func refresh(path: String) {
+        start(path: path)
+    }
+
+    func cancel(path: String) {
         tasks[path]?.cancel()
         tasks[path] = nil
         indexing.remove(path)
-        paused.insert(path)
-        if let current = progress[path] {
-            progress[path] = ProjectIndexProgress(scannedFiles: current.scannedFiles,
-                currentPath: current.currentPath, phase: .paused)
+    }
+
+    private func start(path: String) {
+        guard path.hasPrefix("/"), !indexing.contains(path) else { return }
+        indexing.insert(path)
+        errors[path] = nil
+        let maximumFiles = maximumFiles
+        tasks[path] = Task { [weak self] in
+            let worker = Task.detached(priority: .utility) {
+                try ProjectIndexer.index(path: path, maximumFiles: maximumFiles)
+            }
+            let result = await withTaskCancellationHandler {
+                await worker.result
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled, let self else { return }
+            switch result {
+            case .success(let snapshot):
+                self.snapshots[path] = snapshot
+            case .failure(let error):
+                self.errors[path] = error.localizedDescription
+            }
+            self.indexing.remove(path)
+            self.tasks[path] = nil
         }
     }
-
-    func resume(path: String) {
-        paused.remove(path)
-        refresh(paths: [path], force: true)
-    }
-}
-
-struct ProjectIndexProgress: Sendable {
-    enum Phase: String, Sendable { case discovering, indexing, paused, complete }
-    let scannedFiles: Int
-    let currentPath: String?
-    let phase: Phase
-}
-
-fileprivate enum ProjectIndexUpdate: Sendable {
-    case partial(ProjectIndexSnapshot)
-    case progress(ProjectIndexProgress)
-    case complete(ProjectIndexSnapshot)
 }
 
 enum ProjectIndexer {
-    private static let batchSize = 75
-    private static let batchDelay = Duration.milliseconds(120)
-    private static let ignoredDirectories: Set<String> = [
-        ".git", ".build", "build", "dist", "deriveddata", "node_modules", "pods",
-        ".next", ".cache", "coverage", "vendor", "target"
-    ]
-
-    fileprivate static func updates(path: String) -> AsyncStream<ProjectIndexUpdate> {
-        AsyncStream { continuation in
-            let worker = Task.detached(priority: .utility) {
-                let root = URL(fileURLWithPath: path).standardized
-                var isDirectory: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
-                    continuation.finish(); return
-                }
-                let keys: Set<URLResourceKey> = [.isRegularFileKey, .isDirectoryKey, .fileSizeKey]
-                guard let enumerator = FileManager.default.enumerator(at: root,
-                    includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles, .skipsPackageDescendants]) else {
-                    continuation.finish(); return
-                }
-                var files: [String] = []
-                var readme: String?
-                continuation.yield(.progress(ProjectIndexProgress(scannedFiles: 0, currentPath: nil, phase: .discovering)))
-                while !Task.isCancelled, let url = enumerator.nextObject() as? URL {
-                    let values = try? url.resourceValues(forKeys: keys)
-                    if values?.isDirectory == true {
-                        if ignoredDirectories.contains(url.lastPathComponent.lowercased()) { enumerator.skipDescendants() }
-                        continue
-                    }
-                    guard values?.isRegularFile == true else { continue }
-                    let relative = relativePath(url.path, root: root.path)
-                    guard !relative.isEmpty else { continue }
-                    files.append(relative)
-                    if readme == nil, ["readme.md", "readme", "readme.txt"].contains(url.lastPathComponent.lowercased()) {
-                        readme = readText(url)
-                    }
-                    if files.count == 250 {
-                        continuation.yield(.partial(snapshot(root: root, files: files, readme: readme, complete: false)))
-                    }
-                    if files.count.isMultiple(of: batchSize) {
-                        continuation.yield(.progress(ProjectIndexProgress(scannedFiles: files.count,
-                            currentPath: relative, phase: .indexing)))
-                        try? await Task.sleep(for: batchDelay)
-                    }
-                }
-                guard !Task.isCancelled else { continuation.finish(); return }
-                files.sort()
-                let result = snapshot(root: root, files: files, readme: readme, complete: true)
-                continuation.yield(.complete(result))
-                continuation.yield(.progress(ProjectIndexProgress(scannedFiles: files.count,
-                    currentPath: nil, phase: .complete)))
-                continuation.finish()
-            }
-            continuation.onTermination = { _ in worker.cancel() }
+    static func index(path: String, maximumFiles: Int) throws -> ProjectIndexSnapshot {
+        let root = URL(fileURLWithPath: path).standardized
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: root.path, isDirectory: &isDirectory), isDirectory.boolValue else {
+            throw ProjectIndexError.invalidPath(path)
         }
+        let allFiles = try gitTrackedFiles(root: root)
+        guard !Task.isCancelled else { throw CancellationError() }
+        let files = Array(allFiles.prefix(maximumFiles)).sorted()
+        let readmeURL = files.first { file in
+            ["readme.md", "readme", "readme.txt"].contains(URL(fileURLWithPath: file).lastPathComponent.lowercased())
+        }.map { root.appendingPathComponent($0) }
+        let readme = readmeURL.flatMap(readText)
+        return snapshot(root: root, files: files, readme: readme,
+                        complete: allFiles.count <= maximumFiles)
+    }
+
+    private static func gitTrackedFiles(root: URL) throws -> [String] {
+        let process = Process()
+        let output = Pipe()
+        let error = Pipe()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/git")
+        process.arguments = ["-C", root.path, "ls-files", "-z"]
+        process.standardOutput = output
+        process.standardError = error
+        do {
+            try process.run()
+        } catch {
+            throw ProjectIndexError.gitUnavailable(root.path)
+        }
+        let data = output.fileHandleForReading.readDataToEndOfFile()
+        let errorData = error.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        guard process.terminationStatus == 0 else {
+            let detail = String(data: errorData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ?? "Git 未返回错误详情"
+            throw ProjectIndexError.gitFailed(path: root.path, status: process.terminationStatus, detail: detail)
+        }
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw ProjectIndexError.invalidGitOutput(root.path)
+        }
+        return text.split(separator: "\0").map(String.init)
     }
 
     private static func snapshot(root: URL, files: [String], readme: String?, complete: Bool) -> ProjectIndexSnapshot {
@@ -213,8 +206,4 @@ enum ProjectIndexer {
         })).sorted()
     }
 
-    private static func relativePath(_ path: String, root: String) -> String {
-        guard path.hasPrefix(root) else { return path }
-        return String(path.dropFirst(root.count)).trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-    }
 }

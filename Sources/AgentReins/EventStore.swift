@@ -35,7 +35,9 @@ final class EventStore: ObservableObject {
     private let decoder: JSONDecoder
     private let database: EvidenceDatabase?
     private let persistenceQueue = DispatchQueue(label: "com.agentspec.eventstore.persistence", qos: .utility)
+    private let projectionWorker = EventDerivedProjectionWorker()
     private let maximumEvents = 500
+    private var projectionGeneration: UInt64 = 0
 
     init(fileURL: URL = EventStore.defaultURL()) {
         self.fileURL = fileURL
@@ -47,7 +49,7 @@ final class EventStore: ObservableObject {
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
         database = try? EvidenceDatabase.openRecovering(url: databaseURL)
         load()
-        refreshCollectorHealth()
+        refreshCollectorHealth(publish: false)
     }
 
     nonisolated static func defaultURL() -> URL {
@@ -146,7 +148,6 @@ final class EventStore: ObservableObject {
         // into the live product. Native adapters provide exactly their latest
         // conversation, followed only by incremental changes.
         events = []
-        rebuildViews()
     }
 
     private func trimAndSave() {
@@ -160,7 +161,7 @@ final class EventStore: ObservableObject {
         var snapshot = incoming.sorted { $0.ts > $1.ts }
         if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
         events = snapshot
-        rebuildViews()
+        scheduleDerivedProjection(events: snapshot)
         if let database {
             let affectedEvidence = evidenceForAffectedTurns(evidence)
             let affectedTurns = Array(Set(evidence.compactMap { event -> String? in
@@ -192,7 +193,6 @@ final class EventStore: ObservableObject {
         } else {
             persistenceError = "SQLite evidence database is unavailable"
         }
-        revision &+= 1
     }
 
     private func evidenceForAffectedTurns(_ incoming: [GuardEvent]) -> [GuardEvent] {
@@ -207,37 +207,44 @@ final class EventStore: ObservableObject {
         }
     }
 
-    func refreshCollectorHealth(publish: Bool = true) {
+    func refreshCollectorHealth(publish: Bool) {
         guard let database else { return }
-        do {
-            let snapshot = try database.healthRecords()
-            if snapshot != collectorHealth {
-                collectorHealth = snapshot
-                if publish { revision &+= 1 }
+        persistenceQueue.async { [weak self] in
+            let result: Result<[CollectorHealthRecord], Error>
+            do {
+                result = .success(try database.healthRecords())
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                switch result {
+                case .success(let snapshot):
+                    if snapshot != self.collectorHealth {
+                        self.collectorHealth = snapshot
+                        if publish { self.revision &+= 1 }
+                    }
+                case .failure(let error):
+                    self.persistenceError = error.localizedDescription
+                }
             }
         }
-        catch { persistenceError = error.localizedDescription }
     }
 
-    private func rebuildViews() {
-        // 首页/时间线只物化最近窗口，完整原始记录仍保留在本地事件库。
-        let recent = Array(events.prefix(400))
-        let contentFindings = ExternalContentSecurity.findingEvents(events: recent)
-        incidents = SecurityIncident.correlate(recent + contentFindings)
-        sessions = AgentSessionSnapshot.build(from: liveSessionEvents())
-        influenceChains = ExternalContentSecurity.influenceChains(events: recent)
-        webResourceChains = WebResourceSecurity.build(events: recent)
-        externalResources = []
-    }
-
-    private func liveSessionEvents() -> [GuardEvent] {
-        let sessionEvents = events.prefix(400).filter { $0.sessionId != nil }
-        guard let newest = sessionEvents.first else { return [] }
-        let cutoff = newest.ts.addingTimeInterval(-10 * 60)
-        let activeIds = Set(sessionEvents.filter { $0.ts >= cutoff }.compactMap(\.sessionId))
-        return sessionEvents.filter { event in
-            guard let id = event.sessionId else { return false }
-            return activeIds.contains(id)
+    private func scheduleDerivedProjection(events: [GuardEvent]) {
+        projectionGeneration &+= 1
+        let request = EventDerivedProjectionRequest(generation: projectionGeneration, events: events)
+        Task { [weak self] in
+            guard let self else { return }
+            await projectionWorker.submit(request) { [weak self] generation, projection in
+                guard let self, generation == self.projectionGeneration else { return }
+                self.incidents = projection.incidents
+                self.sessions = projection.sessions
+                self.influenceChains = projection.influenceChains
+                self.webResourceChains = projection.webResourceChains
+                self.externalResources = []
+                self.revision &+= 1
+            }
         }
     }
 

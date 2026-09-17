@@ -1,6 +1,6 @@
 import Foundation
 
-struct CodeFinding: Codable, Hashable, Identifiable {
+struct CodeFinding: Codable, Hashable, Identifiable, Sendable {
     var id: String { "\(ruleId):\(line):\(evidence)" }
     let ruleId: String
     let title: String

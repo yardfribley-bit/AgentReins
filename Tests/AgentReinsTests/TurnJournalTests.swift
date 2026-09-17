@@ -2028,6 +2028,80 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertNotEqual(commit.beforeHash, commit.afterHash)
     }
 
+    func testProjectIndexerUsesTrackedFilesAndAppliesLimit() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-index-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Sources"),
+            withIntermediateDirectories: true)
+        try runGit(["init", "-q"], at: root)
+        try "# Sample\n\nA tracked project purpose long enough for indexing.\n".write(
+            to: root.appendingPathComponent("README.md"), atomically: true, encoding: .utf8)
+        try "struct App {}\n".write(to: root.appendingPathComponent("Sources/App.swift"),
+            atomically: true, encoding: .utf8)
+        try "struct Feature {}\n".write(to: root.appendingPathComponent("Sources/Feature.swift"),
+            atomically: true, encoding: .utf8)
+        try "private\n".write(to: root.appendingPathComponent("credentials.txt"),
+            atomically: true, encoding: .utf8)
+        try runGit(["add", "README.md", "Sources/App.swift", "Sources/Feature.swift"], at: root)
+
+        let complete = try ProjectIndexer.index(path: root.path, maximumFiles: 10)
+        XCTAssertEqual(complete.files, ["README.md", "Sources/App.swift", "Sources/Feature.swift"])
+        XCTAssertFalse(complete.files.contains("credentials.txt"))
+        XCTAssertTrue(complete.complete)
+
+        let limited = try ProjectIndexer.index(path: root.path, maximumFiles: 2)
+        XCTAssertEqual(limited.files.count, 2)
+        XCTAssertFalse(limited.complete)
+    }
+
+    func testAgentDashboardProjectionScopesSelectedAgentEvidence() throws {
+        let codex = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "codex", op: "connect", severity: "info", ts: Date(), action: "observed",
+            sessionId: "codex-session", turnId: "codex-turn", remoteHost: "1.1.1.1",
+            remotePort: 443)
+        let claude = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "claude-code", op: "connect", severity: "info", ts: Date(), action: "observed",
+            sessionId: "claude-session", turnId: "claude-turn", remoteHost: "8.8.8.8",
+            remotePort: 443)
+        let events = [codex, claude]
+        let input = AgentDashboardProjectionInput(
+            key: AgentDashboardProjectionKey(selectedAgent: "Claude Code", dataRevision: 1, query: ""),
+            sessions: AgentSessionSnapshot.build(from: events), events: events,
+            incidents: SecurityIncident.correlate(events))
+
+        let projection = try AgentDashboardProjection.build(input: input)
+
+        XCTAssertEqual(projection.events.map(\.agent), ["claude-code"])
+        XCTAssertEqual(projection.sessions.map(\.id), ["claude-session"])
+        XCTAssertEqual(projection.networkFlows.map(\.ip), ["8.8.8.8"])
+        XCTAssertEqual(projection.hostCount, 1)
+    }
+
+    @MainActor
+    func testEventStorePublishesLatestDerivedProjection() async throws {
+        let file = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-derived-projection-\(UUID().uuidString).json")
+        defer {
+            try? FileManager.default.removeItem(at: file)
+            try? FileManager.default.removeItem(at: file.appendingPathExtension("sqlite3"))
+        }
+        let store = EventStore(fileURL: file)
+        store.record(GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/one", command: nil,
+            agent: "codex", op: "prompt", severity: "info", ts: Date(), action: "sent",
+            sessionId: "session-one", turnId: "turn-one", userIntent: "First"))
+        store.record(GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/two", command: nil,
+            agent: "claude-code", op: "prompt", severity: "info", ts: Date(), action: "sent",
+            sessionId: "session-two", turnId: "turn-two", userIntent: "Second"))
+
+        let deadline = Date().addingTimeInterval(2)
+        while store.sessions.count < 2, Date() < deadline {
+            try await Task.sleep(for: .milliseconds(20))
+        }
+        XCTAssertEqual(Set(store.sessions.map(\.id)), ["session-one", "session-two"])
+        XCTAssertGreaterThan(store.revision, 0)
+    }
+
     private func runGit(_ arguments: [String], at root: URL) throws {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/git")

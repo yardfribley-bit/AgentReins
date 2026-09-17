@@ -1,6 +1,6 @@
 import Foundation
 
-struct AgentToolCall: Identifiable {
+struct AgentToolCall: Identifiable, Sendable {
     let id: String
     let name: String
     let arguments: String?
@@ -49,7 +49,7 @@ struct AgentToolCall: Identifiable {
     }
 }
 
-struct AgentTurn: Identifiable {
+struct AgentTurn: Identifiable, Sendable {
     let id: String
     let index: Int
     let userInput: String?
@@ -122,7 +122,7 @@ struct AgentTurn: Identifiable {
     }
 }
 
-struct ContextUsageSample: Identifiable, Equatable {
+struct ContextUsageSample: Identifiable, Equatable, Sendable {
     let id: String
     let timestamp: Date
     let inputTokens: Int
@@ -133,7 +133,7 @@ struct ContextUsageSample: Identifiable, Equatable {
     let model: String?
 }
 
-struct ContextGrowthMetrics: Equatable {
+struct ContextGrowthMetrics: Equatable, Sendable {
     let requestCount: Int
     let initialInputTokens: Int
     let latestInputTokens: Int
@@ -166,7 +166,7 @@ struct ContextGrowthMetrics: Equatable {
     var needsAttention: Bool { growthPercent >= 25 || latestInputTokens >= 50_000 }
 }
 
-struct ModelExchange: Identifiable {
+struct ModelExchange: Identifiable, Sendable {
     let id: String
     let traceId: String?
     let turnId: String?
@@ -184,7 +184,7 @@ struct ModelExchange: Identifiable {
     let reasoningTokens: Int?
 }
 
-struct AgentSessionSnapshot: Identifiable {
+struct AgentSessionSnapshot: Identifiable, Sendable {
     let id: String
     let agent: String
     let model: String?
