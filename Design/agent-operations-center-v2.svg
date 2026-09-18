@@ -1,0 +1,123 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="1000" viewBox="0 0 1600 1000">
+<defs>
+  <linearGradient id="brand" x1="0" x2="1" y1="0" y2="1"><stop stop-color="#48D8CD" stop-opacity=".24"/><stop offset="1" stop-color="#64A7FF" stop-opacity=".07"/></linearGradient>
+  <linearGradient id="live" x1="0" x2="1"><stop stop-color="#48D8CD" stop-opacity=".1"/><stop offset=".46" stop-color="#101C2D"/></linearGradient>
+  <filter id="shadow"><feDropShadow dx="0" dy="18" stdDeviation="26" flood-color="#000" flood-opacity=".18"/></filter>
+  <style>
+    .ui{font-family:Inter,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}.mono{font-family:"SFMono-Regular",Consolas,monospace}
+    .t{fill:#EDF4FF}.m{fill:#9BACC2}.d{fill:#71839A}.cyan{fill:#48D8CD}.green{fill:#70D6A1}.amber{fill:#F6C66E}.red{fill:#FF7F89}.blue{fill:#64A7FF}
+    .h1{font-size:25px;font-weight:750}.h2{font-size:15px;font-weight:700}.body{font-size:12px}.small{font-size:10px}.tiny{font-size:9px}.caps{font-size:9px;font-weight:800;letter-spacing:1.25px}
+    .panel{fill:#101C2D;stroke:#1D3048}.panel2{fill:#142238;stroke:#293D58}.row{fill:#101C2D}.row:hover{fill:#142238}
+  </style>
+</defs>
+<rect width="1600" height="1000" fill="#07101D"/>
+<circle cx="460" cy="-100" r="420" fill="#48D8CD" opacity=".035"/>
+
+<!-- sidebar -->
+<rect width="218" height="1000" fill="#0A1422"/><line x1="218" x2="218" y2="1000" stroke="#1D3048"/>
+<rect x="18" y="20" width="36" height="36" rx="11" fill="url(#brand)" stroke="#48D8CD" stroke-opacity=".55"/>
+<path d="M29 45V31h7.5c5.5 0 8 2.2 8 6 0 2.4-1.2 4.1-3.5 5l4 6h-5l-3.3-5.3H34V45zm5-6h2.4c2 0 3-.7 3-2.1s-1-2-3-2H34z" fill="#48D8CD"/>
+<text class="ui t" x="66" y="36" font-size="15" font-weight="750">AgentReins</text><text class="ui d caps" x="66" y="51">LOCAL SECURITY</text>
+<text class="ui d caps" x="22" y="96">OPERATIONS</text>
+<rect x="12" y="110" width="194" height="42" rx="9" fill="#48D8CD" opacity=".1"/><rect x="12" y="110" width="3" height="42" rx="2" fill="#48D8CD"/>
+<circle cx="31" cy="131" r="6" fill="none" stroke="#48D8CD" stroke-width="2"/><path d="M31 121v4M31 137v4M21 131h4M37 131h4" stroke="#48D8CD"/>
+<text class="ui cyan body" x="50" y="136" font-weight="700">Live posture</text><rect x="169" y="122" width="25" height="18" rx="9" fill="#48D8CD" opacity=".12"/><text class="ui cyan tiny" x="181.5" y="134.5" text-anchor="middle">3</text>
+<g class="ui m body"><text x="50" y="183">Sessions</text><text x="50" y="225">Evidence</text><text x="50" y="267">Context security</text><text x="50" y="309">External access</text><text x="50" y="351">Code security</text></g>
+<g fill="none" stroke="#71839A" opacity=".8"><path d="M25 176h13v13H25zM28 173h13v13"/><path d="M25 218h16M25 224h12M25 230h14"/><circle cx="33" cy="262" r="8"/><path d="M33 257v6l4 2"/><circle cx="33" cy="304" r="8"/><path d="M25 304h16M33 296c3 3 3 13 0 16"/><path d="M25 342h16v16H25zM29 346l8 8M37 346l-8 8"/></g>
+<text class="ui d caps" x="22" y="405">SYSTEM</text><text class="ui m body" x="50" y="442">Coverage &amp; health</text><text class="ui m body" x="50" y="484">Protection policy</text>
+<rect x="14" y="852" width="190" height="122" rx="12" fill="#101C2D" stroke="#293D58"/>
+<circle cx="31" cy="875" r="4" fill="#48D8CD"/><text class="ui t small" x="43" y="879" font-weight="700">OBSERVE MODE</text>
+<text class="ui d small" x="28" y="906">Records and explains behavior.</text><text class="ui d small" x="28" y="923">No agent action is changed.</text>
+<line x1="28" x2="190" y1="941" y2="941" stroke="#1D3048"/><circle cx="31" cy="958" r="3.5" fill="#70D6A1"/><text class="ui m tiny" x="42" y="961">Evidence database healthy</text>
+
+<!-- top bar -->
+<rect x="219" y="0" width="1381" height="66" fill="#091321" opacity=".96"/><line x1="219" x2="1600" y1="66" y2="66" stroke="#1D3048"/>
+<text class="ui d caps" x="246" y="25">LIVE POSTURE</text><text class="ui t" x="246" y="49" font-size="19" font-weight="750">Agent Operations Center</text>
+<g class="ui body"><rect x="935" y="16" width="104" height="34" rx="9" fill="#142238" stroke="#293D58"/><text class="t" x="953" y="37"><tspan font-weight="750">4</tspan><tspan class="m"> agents</tspan></text>
+<rect x="1048" y="16" width="116" height="34" rx="9" fill="#142238" stroke="#293D58"/><text class="t" x="1066" y="37"><tspan font-weight="750">3</tspan><tspan class="m"> tasks live</tspan></text>
+<rect x="1173" y="16" width="139" height="34" rx="9" fill="#2B261E" stroke="#6E5730"/><text x="1191" y="37"><tspan class="amber" font-weight="750">1</tspan><tspan class="m"> context risk</tspan></text>
+<rect x="1321" y="16" width="120" height="34" rx="9" fill="#142238" stroke="#293D58"/><text class="t" x="1339" y="37"><tspan class="green" font-weight="750">0</tspan><tspan class="m"> blind spots</tspan></text></g>
+<rect x="1460" y="19" width="116" height="28" rx="14" fill="#48D8CD" opacity=".09" stroke="#48D8CD" stroke-opacity=".25"/><circle cx="1478" cy="33" r="4" fill="#48D8CD"/><text class="ui cyan caps" x="1490" y="36">OBSERVING</text>
+
+<!-- column headers -->
+<rect x="219" y="67" width="254" height="42" fill="#142238"/><rect x="474" y="67" width="716" height="42" fill="#142238"/><rect x="1191" y="67" width="409" height="42" fill="#142238"/>
+<line x1="473" x2="473" y1="67" y2="958" stroke="#1D3048"/><line x1="1190" x2="1190" y1="67" y2="958" stroke="#1D3048"/>
+<text class="ui t caps" x="237" y="93">AGENT FLEET</text><text class="ui d small" x="450" y="93" text-anchor="end">4 detected</text>
+<text class="ui t caps" x="494" y="93">LIVE TASK OPERATIONS</text><text class="ui d small" x="1168" y="93" text-anchor="end">streaming · 18 events/min</text>
+<text class="ui t caps" x="1211" y="93">SECURITY POSTURE</text><text class="ui d small" x="1578" y="93" text-anchor="end">live assessment</text>
+
+<!-- fleet -->
+<rect x="219" y="109" width="254" height="61" fill="#48D8CD" opacity=".075"/><rect x="219" y="109" width="3" height="61" fill="#48D8CD"/>
+<circle cx="244" cy="139" r="5" fill="#48D8CD"/><text class="ui t body" x="260" y="136" font-weight="700">All agents</text><text class="ui d small" x="260" y="153">Unified live activity</text><text class="ui cyan small" x="448" y="143" text-anchor="end">LIVE</text>
+<g class="ui">
+ <rect x="233" y="187" width="36" height="36" rx="10" fill="#3155A7"/><text class="t" x="251" y="211" text-anchor="middle" font-size="14" font-weight="800">C</text><circle cx="449" cy="198" r="4" fill="#70D6A1"/><text class="t body" x="280" y="201" font-weight="700">Codex</text><text class="d small" x="280" y="218">Refactoring network collector</text><text class="d tiny mono" x="280" y="234">PID 18421 · 00:43</text>
+ <line x1="233" x2="458" y1="248" y2="248" stroke="#1D3048"/>
+ <rect x="233" y="264" width="36" height="36" rx="10" fill="#6653A6"/><text class="t" x="251" y="288" text-anchor="middle" font-size="14" font-weight="800">W</text><circle cx="449" cy="275" r="4" fill="#64A7FF"/><text class="t body" x="280" y="278" font-weight="700">WorkBuddy</text><text class="d small" x="280" y="295">Shanghai weather research</text><text class="amber tiny mono" x="280" y="311">MODEL RELAY · 00:18</text>
+ <line x1="233" x2="458" y1="325" y2="325" stroke="#1D3048"/>
+ <rect x="233" y="341" width="36" height="36" rx="10" fill="#276F72"/><text class="t" x="251" y="365" text-anchor="middle" font-size="14" font-weight="800">Q</text><circle cx="449" cy="352" r="4" fill="#F6C66E"/><text class="t body" x="280" y="355" font-weight="700">Qoder</text><text class="d small" x="280" y="372">Writing src/main.c</text><text class="d tiny mono" x="280" y="388">TOOL RUNNING · 00:06</text>
+ <line x1="233" x2="458" y1="402" y2="402" stroke="#1D3048"/>
+ <rect x="233" y="418" width="36" height="36" rx="10" fill="#303C50"/><text class="t" x="251" y="442" text-anchor="middle" font-size="14" font-weight="800">G</text><circle cx="449" cy="429" r="4" fill="#71839A"/><text class="t body" x="280" y="432" font-weight="700">Grok Web</text><text class="d small" x="280" y="449">Browser session observed</text><text class="d tiny mono" x="280" y="465">IDLE · 03:12</text>
+</g>
+<text class="ui d caps" x="237" y="516">ACTIVE WORKSPACES</text><text class="ui m small mono" x="237" y="542">AgentSpec</text><text class="ui d tiny" x="237" y="558">Codex · 12 changed files</text><text class="ui m small mono" x="237" y="586">WorkBuddy/2026-09-12</text><text class="ui d tiny" x="237" y="602">WorkBuddy · no file changes</text><text class="ui m small mono" x="237" y="630">Qoder/demo-c</text><text class="ui d tiny" x="237" y="646">Qoder · 1 changed file</text>
+<rect x="231" y="841" width="230" height="101" rx="11" fill="#142238" stroke="#293D58"/><circle cx="249" cy="862" r="4" fill="#70D6A1"/><text class="ui t small" x="261" y="866" font-weight="700">COLLECTORS HEALTHY</text><text class="ui d tiny" x="247" y="888">Process  326/s</text><text class="ui d tiny" x="247" y="906">Network  14 active</text><text class="ui d tiny" x="347" y="888">Logs  3 sources</text><text class="ui d tiny" x="347" y="906">Files  4 changed</text><text class="ui green tiny" x="247" y="928">No known collection blind spots</text>
+
+<!-- operation stream -->
+<g class="ui">
+ <rect x="474" y="109" width="716" height="78" fill="#48D8CD" opacity=".045"/><rect x="474" y="109" width="3" height="78" fill="#48D8CD"/>
+ <text class="mono d small" x="494" y="132">14:32:18.421</text><circle cx="581" cy="129" r="4" fill="#48D8CD"/><text class="t small" x="596" y="132" font-weight="700">Codex</text><text class="cyan caps" x="660" y="132">TOOL · APPLY_PATCH</text><rect x="1091" y="119" width="73" height="20" rx="10" fill="#70D6A1" opacity=".1"/><text class="green tiny" x="1127.5" y="132" text-anchor="middle" font-weight="700">CONFIRMED</text>
+ <text class="t body" x="596" y="154" font-weight="650">Updating NetworkDestinationSecurity.swift</text><text class="d small mono" x="596" y="173">call_WAavuorZ… · 1,842 bytes · result pending</text>
+ <line x1="494" x2="1170" y1="187" y2="187" stroke="#1D3048"/>
+
+ <text class="mono d small" x="494" y="211">14:32:17.906</text><circle cx="581" cy="208" r="4" fill="#F6C66E"/><text class="t small" x="596" y="211" font-weight="700">WorkBuddy</text><text class="amber caps" x="683" y="211">MODEL REQUEST</text><rect x="1099" y="198" width="65" height="20" rx="10" fill="#70D6A1" opacity=".1"/><text class="green tiny" x="1131.5" y="211" text-anchor="middle" font-weight="700">NATIVE</text>
+ <text class="t body" x="596" y="233" font-weight="650">DeepSeek request sent through OpenRouter</text><text class="d small mono" x="596" y="252">10,199 bytes · 7,842 input tokens · api.openrouter.ai:443</text>
+ <line x1="494" x2="1170" y1="266" y2="266" stroke="#1D3048"/>
+
+ <text class="mono d small" x="494" y="290">14:32:16.744</text><circle cx="581" cy="287" r="4" fill="#64A7FF"/><text class="t small" x="596" y="290" font-weight="700">Qoder</text><text class="blue caps" x="650" y="290">TOOL · WRITE</text><rect x="1091" y="277" width="73" height="20" rx="10" fill="#70D6A1" opacity=".1"/><text class="green tiny" x="1127.5" y="290" text-anchor="middle" font-weight="700">CONFIRMED</text>
+ <text class="t body" x="596" y="312" font-weight="650">Creating src/main.c</text><text class="d small mono" x="596" y="331">call_ef502714… · C source · scan queued</text>
+ <line x1="494" x2="1170" y1="345" y2="345" stroke="#1D3048"/>
+
+ <text class="mono d small" x="494" y="369">14:32:15.183</text><circle cx="581" cy="366" r="4" fill="#FF7F89"/><text class="t small" x="596" y="369" font-weight="700">Codex</text><text class="red caps" x="649" y="369">CONTEXT RISK</text><rect x="1096" y="356" width="68" height="20" rx="10" fill="#F6C66E" opacity=".1"/><text class="amber tiny" x="1130" y="369" text-anchor="middle" font-weight="700">INFERRED</text>
+ <text class="t body" x="596" y="391" font-weight="650">Context reached 82% of the model window</text><text class="amber small" x="596" y="410">History dominates current requirement · 3 memory files included</text>
+ <line x1="494" x2="1170" y1="424" y2="424" stroke="#1D3048"/>
+
+ <text class="mono d small" x="494" y="448">14:32:14.502</text><circle cx="581" cy="445" r="4" fill="#64A7FF"/><text class="t small" x="596" y="448" font-weight="700">WorkBuddy</text><text class="blue caps" x="683" y="448">TOOL · WEBFETCH</text><rect x="1096" y="435" width="68" height="20" rx="10" fill="#F6C66E" opacity=".1"/><text class="amber tiny" x="1130" y="448" text-anchor="middle" font-weight="700">INFERRED</text>
+ <text class="t body" x="596" y="470" font-weight="650">Accessed a non-model weather website</text><text class="d small mono" x="596" y="489">43.156.86.223:443 · Tencent Cloud · page content inspected</text>
+ <line x1="494" x2="1170" y1="503" y2="503" stroke="#1D3048"/>
+
+ <text class="mono d small" x="494" y="527">14:32:13.221</text><circle cx="581" cy="524" r="4" fill="#70D6A1"/><text class="t small" x="596" y="527" font-weight="700">Codex</text><text class="green caps" x="649" y="527">TOOL RESULT</text><rect x="1091" y="514" width="73" height="20" rx="10" fill="#70D6A1" opacity=".1"/><text class="green tiny" x="1127.5" y="527" text-anchor="middle" font-weight="700">CONFIRMED</text>
+ <text class="t body" x="596" y="549" font-weight="650">Swift build completed successfully</text><text class="d small mono" x="596" y="568">exit 0 · 38.35s · stdout and stderr retained</text>
+</g>
+
+<!-- selected trace -->
+<rect x="490" y="606" width="684" height="314" rx="13" fill="url(#live)" stroke="#48D8CD" stroke-opacity=".28" filter="url(#shadow)"/>
+<text class="ui cyan caps" x="510" y="633">SELECTED TASK · CODEX</text><text class="ui t h2" x="510" y="658">Refactor network attribution without increasing CPU usage</text><text class="ui d small" x="510" y="678">Session 01a07fa6… · AgentSpec · started 14:29:08</text>
+<line x1="510" x2="1154" y1="697" y2="697" stroke="#293D58"/>
+<g class="ui" text-anchor="middle"><line x1="548" x2="1116" y1="742" y2="742" stroke="#293D58" stroke-width="2"/>
+ <circle cx="548" cy="742" r="14" fill="#70D6A1"/><text class="t small" x="548" y="746">✓</text><text class="m tiny" x="548" y="774">REQUEST</text>
+ <circle cx="662" cy="742" r="14" fill="#F6C66E"/><text class="t small" x="662" y="746">!</text><text class="m tiny" x="662" y="774">CONTEXT</text>
+ <circle cx="776" cy="742" r="14" fill="#70D6A1"/><text class="t small" x="776" y="746">✓</text><text class="m tiny" x="776" y="774">MODEL</text>
+ <circle cx="890" cy="742" r="14" fill="#48D8CD"/><circle cx="890" cy="742" r="5" fill="#07101D"/><text class="m tiny" x="890" y="774">TOOLS</text>
+ <circle cx="1004" cy="742" r="14" fill="#293D58"/><text class="d tiny" x="1004" y="774">CODE</text>
+ <circle cx="1118" cy="742" r="14" fill="#293D58"/><text class="d tiny" x="1118" y="774">VERIFY</text></g>
+<rect x="510" y="800" width="644" height="98" rx="9" fill="#0C1726" stroke="#1D3048"/><text class="ui d caps" x="526" y="823">CURRENT OPERATION</text><text class="ui t body" x="526" y="849" font-weight="650">apply_patch · NetworkDestinationSecurity.swift</text><text class="ui d small mono" x="526" y="872">PID 24781 → zsh → swift-build · 1 file pending attribution</text><rect x="1029" y="826" width="105" height="34" rx="8" fill="#48D8CD" opacity=".12" stroke="#48D8CD" stroke-opacity=".35"/><text class="ui cyan small" x="1081.5" y="847" text-anchor="middle" font-weight="700">OPEN TRACE →</text>
+
+<!-- posture -->
+<g class="ui">
+<rect x="1208" y="126" width="374" height="156" rx="12" fill="#2A221A" stroke="#72562F"/><text class="amber caps" x="1225" y="151">CONTEXT SECURITY</text><rect x="1515" y="138" width="48" height="20" rx="10" fill="#F6C66E" opacity=".12"/><text class="amber tiny" x="1539" y="151" text-anchor="middle" font-weight="700">REVIEW</text>
+<text class="t" x="1225" y="184" font-size="20" font-weight="750">82% occupied</text><text class="m small" x="1225" y="205">211,888 / 258,400 tokens</text><rect x="1225" y="219" width="338" height="7" rx="3.5" fill="#1D3048"/><rect x="1225" y="219" width="277" height="7" rx="3.5" fill="#F6C66E"/>
+<text class="amber small" x="1225" y="251">Current request is only 0.03% of context</text><text class="d tiny" x="1225" y="269">12 compactions · 3 memory files · 7 skills</text>
+
+<rect x="1208" y="297" width="374" height="123" rx="12" fill="#142238" stroke="#293D58"/><text class="d caps" x="1225" y="322">EXTERNAL ACCESS</text><text class="t" x="1225" y="351" font-size="18" font-weight="750">6 destinations</text><text class="m small" x="1225" y="371">2 model · 1 relay · 3 tool websites</text><text class="amber small" x="1225" y="397">OpenRouter receives the full model context</text>
+
+<rect x="1208" y="435" width="374" height="123" rx="12" fill="#142238" stroke="#293D58"/><text class="d caps" x="1225" y="460">TOOL / SKILL / MCP</text><text class="t" x="1225" y="489" font-size="18" font-weight="750">8 active capabilities</text><text class="m small" x="1225" y="509">5 tools · 1 MCP · 2 skills</text><text class="green small" x="1225" y="535">All manifests and arguments captured</text>
+
+<rect x="1208" y="573" width="374" height="124" rx="12" fill="#142238" stroke="#293D58"/><text class="d caps" x="1225" y="598">CODE &amp; FILE CHANGES</text><text class="t" x="1225" y="627" font-size="18" font-weight="750">13 files changed</text><text class="m small" x="1225" y="647">12 Codex · 1 Qoder · 0 WorkBuddy</text><text class="amber small" x="1225" y="674">1 generated C file waiting for scan</text>
+
+<rect x="1208" y="712" width="374" height="208" rx="12" fill="#0D1929" stroke="#48D8CD" stroke-opacity=".32" filter="url(#shadow)"/><text class="cyan caps" x="1225" y="738">EVIDENCE INSPECTOR</text><text class="d tiny" x="1557" y="738" text-anchor="end">CONFIRMED</text>
+<line x1="1225" x2="1564" y1="752" y2="752" stroke="#1D3048"/><text class="d tiny" x="1225" y="774">EVENT</text><text class="t small" x="1308" y="774">Tool call requested</text><text class="d tiny" x="1225" y="797">AGENT</text><text class="t small" x="1308" y="797">Codex</text><text class="d tiny" x="1225" y="820">TOOL</text><text class="t small mono" x="1308" y="820">apply_patch</text><text class="d tiny" x="1225" y="843">CALL ID</text><text class="t small mono" x="1308" y="843">call_WAavuorZTV…</text><text class="d tiny" x="1225" y="866">SOURCE</text><text class="t small mono" x="1308" y="866">agentsight:codex-native</text><text class="d tiny" x="1225" y="889">RESULT</text><text class="amber small" x="1308" y="889">Pending</text>
+</g>
+
+<!-- footer telemetry -->
+<rect x="219" y="958" width="1381" height="42" fill="#142238"/><line x1="219" x2="1600" y1="958" y2="958" stroke="#293D58"/>
+<circle cx="240" cy="979" r="4" fill="#48D8CD"/><text class="ui cyan caps" x="252" y="982">LIVE EVIDENCE</text><text class="ui m small" x="365" y="982">Process <tspan class="t" font-weight="700">326/s</tspan></text><text class="ui m small" x="466" y="982">Network <tspan class="t" font-weight="700">14</tspan></text><text class="ui m small" x="558" y="982">Tools <tspan class="t" font-weight="700">8</tspan></text><text class="ui m small" x="632" y="982">Files <tspan class="t" font-weight="700">13</tspan></text><text class="ui m small" x="706" y="982">Context <tspan class="amber" font-weight="700">82%</tspan></text><text class="ui d small" x="1574" y="982" text-anchor="end">Local only · raw evidence retained · updated 14:32:18.421</text>
+</svg>

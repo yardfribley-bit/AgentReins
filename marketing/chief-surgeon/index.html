@@ -1,0 +1,524 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>AgentReins — From Passive Monitor to Chief Surgeon · Visual Pack</title>
+<style>
+  :root {
+    --ink:#0f172a; --muted:#64748b; --line:#e2e8f0; --panel:#f8fafc;
+    --teal:#0f766e; --teal-soft:#f0fdfa; --amber:#92400e; --amber-soft:#fffbeb;
+  }
+  * { box-sizing:border-box; }
+  body {
+    margin:0; background:#f1f5f9; color:var(--ink);
+    font:16px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:1080px; margin:0 auto; padding:56px 24px 96px; }
+  header.hero {
+    background:#0f172a; color:#fff; border-radius:18px; padding:44px 44px 38px; margin-bottom:40px;
+  }
+  header.hero .eyebrow { font-size:12px; letter-spacing:3px; color:#5eead4; font-weight:700; }
+  header.hero h1 { font-size:34px; line-height:1.25; margin:14px 0 12px; }
+  header.hero p { margin:0; color:#94a3b8; font-size:15.5px; max-width:760px; }
+  .meta { margin-top:22px; display:flex; gap:10px; flex-wrap:wrap; }
+  .meta span { background:rgba(255,255,255,.08); border:1px solid rgba(255,255,255,.14);
+    border-radius:999px; padding:5px 13px; font-size:12.5px; color:#cbd5e1; }
+
+  h2 { font-size:20px; margin:0 0 8px; letter-spacing:-.2px; }
+  .desc { color:var(--muted); font-size:14.5px; margin:0 0 18px; max-width:820px; }
+
+  .fig { background:#fff; border:1px solid var(--line); border-radius:16px;
+    padding:30px 30px 24px; margin-bottom:28px; }
+  .canvas { border:1px solid var(--line); border-radius:12px; overflow:hidden; background:#fff; }
+  .canvas svg { display:block; width:100%; height:auto; }
+  .dl { margin-top:14px; display:flex; gap:10px; }
+  .dl a { font-size:12.5px; color:var(--teal); text-decoration:none; border:1px solid #99f6e4;
+    background:var(--teal-soft); border-radius:8px; padding:5px 14px; font-weight:600; }
+  .dl a:hover { background:#ccfbf1; }
+
+  table { width:100%; border-collapse:collapse; background:#fff; font-size:14.5px; }
+  th, td { text-align:left; padding:13px 16px; border-bottom:1px solid var(--line); vertical-align:top; }
+  thead th { background:#0f172a; color:#fff; font-size:12px; letter-spacing:1.5px; text-transform:uppercase; }
+  td.k { font-weight:700; width:170px; background:var(--panel); }
+  td.hi { color:var(--teal); font-weight:600; }
+
+  .post { background:#fff; border:1px solid var(--line); border-radius:16px; padding:30px 32px; }
+  .post pre { white-space:pre-wrap; font:15px/1.75 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; margin:0; }
+
+  .tw { background:#fff; border:1px solid var(--line); border-radius:14px; padding:18px 20px; margin-bottom:12px;
+    display:flex; gap:16px; }
+  .tw-n { flex:0 0 30px; height:30px; border-radius:8px; background:var(--teal-soft); color:var(--teal);
+    font-weight:700; font-size:13px; display:flex; align-items:center; justify-content:center; }
+  .tw pre { margin:0; white-space:pre-wrap; font:14.5px/1.7 -apple-system,BlinkMacSystemFont,"Segoe UI",Helvetica,Arial,sans-serif; }
+
+  .note { background:var(--amber-soft); border:1px solid #fcd34d; border-radius:14px;
+    padding:20px 24px; color:#78350f; font-size:14px; }
+  .note b { color:var(--amber); }
+  .note ul { margin:10px 0 0; padding-left:20px; }
+  .note li { margin:5px 0; }
+  h3 { font-size:16px; margin:34px 0 14px; }
+  footer { margin-top:44px; color:var(--muted); font-size:13px; text-align:center; }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <div class="eyebrow">VISUAL PACK · AGENTREINS</div>
+    <h1>From “Passive Monitor” to “Chief Surgeon”</h1>
+    <p>Four diagrams for the thread that explains why a local-first observability console should grow into a
+       control plane — and how Brooks’ Surgical Team gives multi-agent orchestration its conceptual integrity back.
+       All artwork text is English-only, ready to post.</p>
+    <div class="meta">
+      <span>4 diagrams</span><span>SVG + PNG</span><span>1200×720 / 1200×800</span><span>English only</span>
+    </div>
+  </header>
+
+  
+    <section class="fig">
+      <h2>Figure 1 — Today: AgentReins as a Passive Monitor</h2>
+      <p class="desc">Use this to open the thread. It shows what the Alpha does now: capture process lineage, file changes and sockets from every agent, then write them to an append-only SQLite WAL. The punchline is the amber bar — it records everything and controls nothing.</p>
+      <div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#64748b" font-weight="600">BEFORE</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">AgentReins as a Passive Monitor</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">It watches every agent. It cannot stop, steer, or scope any of them.</text>
+
+  <!-- agents -->
+  <text x="60" y="168" font-size="11" letter-spacing="2" fill="#94a3b8" font-weight="600">UNCOORDINATED AGENTS</text>
+
+  <rect x="60" y="182" width="210" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="214" font-size="18" font-weight="700" fill="#0f172a">Cursor</text>
+  <text x="80" y="238" font-size="13" fill="#64748b">local code mutation</text>
+
+  <rect x="60" y="282" width="210" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="314" font-size="18" font-weight="700" fill="#0f172a">Codex</text>
+  <text x="80" y="338" font-size="13" fill="#64748b">agentic edit sessions</text>
+
+  <rect x="60" y="382" width="210" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="414" font-size="18" font-weight="700" fill="#0f172a">Workbuddy</text>
+  <text x="80" y="438" font-size="13" fill="#64748b">builds, tests, tooling</text>
+
+  <path d="M270 222 L330 222" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#a1)"/>
+  <path d="M270 322 L330 322" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#a1)"/>
+  <path d="M270 422 L330 422" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#a1)"/>
+
+  <!-- event stream -->
+  <text x="344" y="168" font-size="11" letter-spacing="2" fill="#94a3b8" font-weight="600">EVIDENCE STREAM</text>
+
+  <rect x="344" y="190" width="256" height="64" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="364" y="216" font-size="15" font-weight="700" fill="#0f172a">Process Lineage</text>
+  <text x="364" y="238" font-size="12.5" fill="#64748b">PID / PPID tree, spawn order</text>
+
+  <rect x="344" y="290" width="256" height="64" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="364" y="316" font-size="15" font-weight="700" fill="#0f172a">File Changes</text>
+  <text x="364" y="338" font-size="12.5" fill="#64748b">create · modify · delete</text>
+
+  <rect x="344" y="390" width="256" height="64" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="364" y="416" font-size="15" font-weight="700" fill="#0f172a">Network Sockets</text>
+  <text x="364" y="438" font-size="12.5" fill="#64748b">destination host · port</text>
+
+  <path d="M600 222 L688 222" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+  <path d="M600 322 L688 322" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+  <path d="M600 422 L688 422" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+
+  <!-- console -->
+  <rect x="700" y="150" width="440" height="300" rx="14" fill="#f0fdfa" stroke="#0f766e" stroke-width="2"/>
+  <text x="728" y="196" font-size="22" font-weight="700" fill="#0f766e">AgentReins</text>
+  <text x="728" y="222" font-size="13" fill="#115e59">PASSIVE MONITOR · READ-ONLY</text>
+
+  <rect x="728" y="242" width="384" height="52" rx="8" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="748" y="266" font-size="14.5" font-weight="600" fill="#0f172a">Observe</text>
+  <text x="748" y="285" font-size="12.5" fill="#64748b">collect lineage, files, sockets across all agents</text>
+
+  <rect x="728" y="306" width="384" height="52" rx="8" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="748" y="330" font-size="14.5" font-weight="600" fill="#0f172a">Correlate</text>
+  <text x="748" y="349" font-size="12.5" fill="#64748b">stitch events into one timeline per session</text>
+
+  <rect x="728" y="370" width="384" height="52" rx="8" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="748" y="394" font-size="14.5" font-weight="600" fill="#0f172a">Record</text>
+  <text x="748" y="413" font-size="12.5" fill="#64748b">append structured evidence, never rewrite history</text>
+
+  <path d="M920 450 L920 486" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+
+  <!-- evidence spine -->
+  <rect x="700" y="490" width="440" height="86" rx="12" fill="#0f172a"/>
+  <text x="728" y="526" font-size="16" font-weight="700" fill="#5eead4">Evidence Spine</text>
+  <text x="728" y="550" font-size="13" fill="#94a3b8">SQLite WAL · append-only · local-first</text>
+
+  <!-- banner -->
+  <rect x="60" y="614" width="1080" height="66" rx="12" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="84" y="648" font-size="17" font-weight="700" fill="#92400e">Records everything. Controls nothing.</text>
+  <text x="84" y="670" font-size="13.5" fill="#a16207">No authority to stop a runaway agent, narrow its scope, or reject an unsafe change.</text>
+</svg>
+</div>
+      <div class="dl"><a href="svg/01-passive-monitor.svg" download>SVG</a><a href="png/01-passive-monitor.png" download>PNG</a></div>
+    </section>
+    <section class="fig">
+      <h2>Figure 2 — The Bottleneck: Many Agents, One Codebase, No Owner</h2>
+      <p class="desc">The problem statement. Four agents mutate one repository with no shared memory. The crossing arrows are the argument: competence does not compose. Context collapse, hallucinated APIs, conflicting edits, spaghetti code.</p>
+      <div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#b91c1c" font-weight="600">THE BOTTLENECK</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">Many Agents, One Codebase, No Owner</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">Every agent is competent alone. Together they destroy conceptual integrity.</text>
+
+  <!-- agents -->
+  <text x="60" y="166" font-size="11" letter-spacing="2" fill="#94a3b8" font-weight="600">PARALLEL AGENTS</text>
+
+  <rect x="60" y="180" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="212" font-size="17" font-weight="700" fill="#0f172a">Cursor</text>
+  <text x="82" y="234" font-size="12.5" fill="#64748b">editing from its own view</text>
+
+  <rect x="60" y="272" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="304" font-size="17" font-weight="700" fill="#0f172a">Codex</text>
+  <text x="82" y="326" font-size="12.5" fill="#64748b">editing from its own view</text>
+
+  <rect x="60" y="364" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="396" font-size="17" font-weight="700" fill="#0f172a">Workbuddy</text>
+  <text x="82" y="418" font-size="12.5" fill="#64748b">editing from its own view</text>
+
+  <rect x="60" y="456" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="488" font-size="17" font-weight="700" fill="#0f172a">Other Agents</text>
+  <text x="82" y="510" font-size="12.5" fill="#64748b">no shared memory</text>
+
+  <!-- crossing curves into codebase -->
+  <path d="M260 215 C 350 215, 340 400, 430 400" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+  <path d="M260 307 C 350 307, 340 340, 430 340" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+  <path d="M260 399 C 350 399, 340 280, 430 280" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+  <path d="M260 491 C 350 491, 340 440, 430 440" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+
+  <!-- shared codebase -->
+  <rect x="430" y="240" width="300" height="230" rx="14" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="580" y="290" font-size="19" font-weight="700" fill="#0f172a" text-anchor="middle">Shared Codebase</text>
+  <text x="580" y="320" font-size="13" fill="#64748b" text-anchor="middle">no global owner</text>
+  <text x="580" y="344" font-size="13" fill="#64748b" text-anchor="middle">no call graph</text>
+  <text x="580" y="368" font-size="13" fill="#64748b" text-anchor="middle">no intent stream</text>
+  <text x="580" y="392" font-size="13" fill="#64748b" text-anchor="middle">no acceptance gate</text>
+  <line x1="462" y1="412" x2="698" y2="412" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="580" y="440" font-size="12.5" fill="#94a3b8" text-anchor="middle">last write wins</text>
+
+  <!-- outcomes -->
+  <text x="790" y="166" font-size="11" letter-spacing="2" fill="#b91c1c" font-weight="600">FAILURE MODES</text>
+
+  <path d="M730 300 L784 300" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+  <path d="M730 340 L784 340" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+  <path d="M730 380 L784 380" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+  <path d="M730 420 L784 420" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+
+  <rect x="790" y="192" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="222" font-size="15.5" font-weight="700" fill="#991b1b">Context Collapse</text>
+  <text x="812" y="246" font-size="12.5" fill="#b91c1c">each agent sees only its own slice</text>
+
+  <rect x="790" y="288" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="318" font-size="15.5" font-weight="700" fill="#991b1b">Hallucinated APIs</text>
+  <text x="812" y="342" font-size="12.5" fill="#b91c1c">symbols invented, never defined</text>
+
+  <rect x="790" y="384" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="414" font-size="15.5" font-weight="700" fill="#991b1b">Conflicting Edits</text>
+  <text x="812" y="438" font-size="12.5" fill="#b91c1c">two agents rewrite the same block</text>
+
+  <rect x="790" y="480" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="510" font-size="15.5" font-weight="700" fill="#991b1b">Spaghetti Code</text>
+  <text x="812" y="534" font-size="12.5" fill="#b91c1c">it compiles, but nobody owns the design</text>
+
+  <!-- banner -->
+  <rect x="60" y="614" width="1080" height="66" rx="12" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="84" y="648" font-size="17" font-weight="700" fill="#991b1b">Nobody owns the architecture. Everyone edits it.</text>
+  <text x="84" y="670" font-size="13.5" fill="#b91c1c">This is the exact failure Brooks named in 1975 — and it is back, with agents.</text>
+</svg>
+</div>
+      <div class="dl"><a href="svg/02-bottleneck.svg" download>SVG</a><a href="png/02-bottleneck.png" download>PNG</a></div>
+    </section>
+    <section class="fig">
+      <h2>Figure 3 — The Classic Pattern: Brooks&#x27; Surgical Team (1975)</h2>
+      <p class="desc">The credibility slide. You are not inventing a new org chart, you are reviving a proven one. One surgeon owns the architecture; specialists and clerks remove every obstacle from his path.</p>
+      <div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#cbd5e1"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#64748b" font-weight="600">THE CLASSIC PATTERN</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">Brooks&#39; Surgical Team, 1975</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">From The Mythical Man-Month: one surgeon operates, the team clears the path.</text>
+
+  <!-- ring links -->
+  <path d="M350 193 L456 330" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M850 193 L744 330" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M350 303 L456 350" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M850 303 L744 350" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M350 413 L456 422" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M850 413 L744 422" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M600 500 L600 456" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+
+  <!-- left column -->
+  <rect x="130" y="160" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="152" y="190" font-size="16" font-weight="700" fill="#0f172a">Copilot</text>
+  <text x="152" y="212" font-size="12.5" fill="#64748b">second mind, same design</text>
+
+  <rect x="130" y="270" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="152" y="300" font-size="16" font-weight="700" fill="#0f172a">Editor</text>
+  <text x="152" y="322" font-size="12.5" fill="#64748b">reworks the surgeon&#39;s draft</text>
+
+  <rect x="130" y="380" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="152" y="410" font-size="16" font-weight="700" fill="#0f172a">Toolsmith</text>
+  <text x="152" y="432" font-size="12.5" fill="#64748b">builds the instruments</text>
+
+  <!-- right column -->
+  <rect x="850" y="160" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="872" y="190" font-size="16" font-weight="700" fill="#0f172a">Administrator</text>
+  <text x="872" y="212" font-size="12.5" fill="#64748b">handles money, people, space</text>
+
+  <rect x="850" y="270" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="872" y="300" font-size="16" font-weight="700" fill="#0f172a">Program Clerk</text>
+  <text x="872" y="322" font-size="12.5" fill="#64748b">keeps records and versions</text>
+
+  <rect x="850" y="380" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="872" y="410" font-size="16" font-weight="700" fill="#0f172a">Tester</text>
+  <text x="872" y="432" font-size="12.5" fill="#64748b">designs hostile cases</text>
+
+  <rect x="470" y="500" width="260" height="62" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="492" y="528" font-size="16" font-weight="700" fill="#0f172a">Language Lawyer</text>
+  <text x="492" y="550" font-size="12.5" fill="#64748b">settles obscure semantics</text>
+
+  <!-- center: surgeon -->
+  <rect x="456" y="288" width="288" height="166" rx="16" fill="#0f172a"/>
+  <text x="600" y="336" font-size="26" font-weight="700" fill="#ffffff" text-anchor="middle">The Surgeon</text>
+  <text x="600" y="364" font-size="13.5" fill="#94a3b8" text-anchor="middle">CHIEF PROGRAMMER</text>
+  <line x1="496" y1="382" x2="704" y2="382" stroke="#334155" stroke-width="1"/>
+  <text x="600" y="408" font-size="13" fill="#e2e8f0" text-anchor="middle">owns the architecture</text>
+  <text x="600" y="430" font-size="13" fill="#e2e8f0" text-anchor="middle">holds conceptual integrity</text>
+
+  <!-- banner -->
+  <rect x="60" y="614" width="1080" height="66" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="84" y="648" font-size="17" font-weight="700" fill="#0f172a">One architect decides. Everyone else executes within that decision.</text>
+  <text x="84" y="670" font-size="13.5" fill="#64748b">Brooks argued this scales better than a committee — and it is the missing layer in agent workflows today.</text>
+</svg>
+</div>
+      <div class="dl"><a href="svg/03-surgical-team.svg" download>SVG</a><a href="png/03-surgical-team.png" download>PNG</a></div>
+    </section>
+    <section class="fig">
+      <h2>Figure 4 — AgentReins as the AI Chief Surgeon (hero image)</h2>
+      <p class="desc">The payoff. Control plane on top, scoped task envelope in the middle, execution layer at the bottom, and a dashed telemetry line closing the loop on the right. If the reader only saves one image, it is this one.</p>
+      <div class="canvas"><svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="800" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#0f766e" font-weight="600">THE ARCHITECTURE</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">AgentReins as the AI Chief Surgeon</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">From a monitoring plane to a control plane: observe, decide, delegate, verify, record.</text>
+
+  <!-- ===== CONTROL PLANE ===== -->
+  <rect x="60" y="150" width="980" height="210" rx="16" fill="#f0fdfa" stroke="#0f766e" stroke-width="2"/>
+  <text x="84" y="182" font-size="11" letter-spacing="2" fill="#0f766e" font-weight="700">CONTROL PLANE</text>
+  <text x="214" y="183" font-size="20" font-weight="700" fill="#0f766e">AgentReins — The Surgeon</text>
+  <text x="486" y="182" font-size="13" fill="#115e59">holds global context, owns conceptual integrity</text>
+
+  <rect x="84" y="232" width="300" height="62" rx="9" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="104" y="258" font-size="14.5" font-weight="700" fill="#0f172a">Global Repo Tree</text>
+  <text x="104" y="280" font-size="12.5" fill="#64748b">every file, module, owner</text>
+
+  <rect x="400" y="232" width="300" height="62" rx="9" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="420" y="258" font-size="14.5" font-weight="700" fill="#0f172a">Call Graph</text>
+  <text x="420" y="280" font-size="12.5" fill="#64748b">who calls what, blast radius</text>
+
+  <rect x="716" y="232" width="300" height="62" rx="9" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="736" y="258" font-size="14.5" font-weight="700" fill="#0f172a">Intent Stream</text>
+  <text x="736" y="280" font-size="12.5" fill="#64748b">what each agent is trying to do</text>
+
+  <rect x="84" y="306" width="300" height="42" rx="8" fill="#0f766e"/>
+  <text x="234" y="333" font-size="13.5" font-weight="700" fill="#ffffff" text-anchor="middle">Refine top-level spec</text>
+
+  <rect x="400" y="306" width="300" height="42" rx="8" fill="#0f766e"/>
+  <text x="550" y="333" font-size="13.5" font-weight="700" fill="#ffffff" text-anchor="middle">Issue scoped tasks</text>
+
+  <rect x="716" y="306" width="300" height="42" rx="8" fill="#0f766e"/>
+  <text x="866" y="333" font-size="13.5" font-weight="700" fill="#ffffff" text-anchor="middle">Enforce acceptance gate</text>
+
+  <!-- delegation arrows -->
+  <path d="M234 348 L234 396" stroke="#0f766e" stroke-width="1.8" marker-end="url(#d1)"/>
+  <path d="M550 348 L550 396" stroke="#0f766e" stroke-width="1.8" marker-end="url(#d1)"/>
+  <path d="M866 348 L866 396" stroke="#0f766e" stroke-width="1.8" marker-end="url(#d1)"/>
+  <text x="600" y="382" font-size="12" fill="#0f766e" font-weight="600">scoped task envelope</text>
+
+  <!-- ===== CONSTRAINTS ===== -->
+  <rect x="84" y="400" width="300" height="56" rx="9" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="104" y="424" font-size="13.5" font-weight="700" fill="#92400e">Scope</text>
+  <text x="104" y="444" font-size="12.5" fill="#a16207">allowed paths only</text>
+
+  <rect x="400" y="400" width="300" height="56" rx="9" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="420" y="424" font-size="13.5" font-weight="700" fill="#92400e">Budget</text>
+  <text x="420" y="444" font-size="12.5" fill="#a16207">max tool calls, max files touched</text>
+
+  <rect x="716" y="400" width="300" height="56" rx="9" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="736" y="424" font-size="13.5" font-weight="700" fill="#92400e">Gate</text>
+  <text x="736" y="444" font-size="12.5" fill="#a16207">tests must pass before merge</text>
+
+  <path d="M234 456 L234 532" stroke="#64748b" stroke-width="1.8" marker-end="url(#d2)"/>
+  <path d="M550 456 L550 532" stroke="#64748b" stroke-width="1.8" marker-end="url(#d2)"/>
+  <path d="M866 456 L866 532" stroke="#64748b" stroke-width="1.8" marker-end="url(#d2)"/>
+
+  <!-- ===== EXECUTION LAYER ===== -->
+  <rect x="60" y="490" width="980" height="170" rx="16" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="84" y="520" font-size="11" letter-spacing="2" fill="#64748b" font-weight="700">EXECUTION LAYER</text>
+  <text x="260" y="520" font-size="13" fill="#94a3b8">specialised tools — they execute, they do not decide</text>
+
+  <rect x="84" y="536" width="300" height="100" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="104" y="566" font-size="17" font-weight="700" fill="#0f172a">Cursor</text>
+  <text x="104" y="590" font-size="12.5" fill="#64748b">local code mutation</text>
+  <text x="104" y="610" font-size="12.5" fill="#64748b">narrow file blocks only</text>
+
+  <rect x="400" y="536" width="300" height="100" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="420" y="566" font-size="17" font-weight="700" fill="#0f172a">Codex</text>
+  <text x="420" y="590" font-size="12.5" fill="#64748b">focused patches</text>
+  <text x="420" y="610" font-size="12.5" fill="#64748b">no architecture decisions</text>
+
+  <rect x="716" y="536" width="300" height="100" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="736" y="566" font-size="17" font-weight="700" fill="#0f172a">Workbuddy</text>
+  <text x="736" y="590" font-size="12.5" fill="#64748b">independent builds &amp; tests</text>
+  <text x="736" y="610" font-size="12.5" fill="#64748b">verifies, does not design</text>
+
+  <!-- ===== FEEDBACK LOOP ===== -->
+  <path d="M1040 570 C 1112 570, 1112 250, 1048 250" fill="none" stroke="#0f766e" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#d1)"/>
+  <text x="1150" y="412" font-size="12.5" font-weight="600" fill="#0f766e" text-anchor="middle" transform="rotate(-90 1150 412)">evidence · telemetry</text>
+
+  <!-- banner -->
+  <rect x="60" y="690" width="980" height="66" rx="12" fill="#0f172a"/>
+  <text x="84" y="724" font-size="17" font-weight="700" fill="#5eead4">The loop is closed: observe → decide → delegate → verify → record.</text>
+  <text x="84" y="746" font-size="13.5" fill="#94a3b8">Every agent stays powerful locally. Only one mind owns the architecture globally.</text>
+</svg>
+</div>
+      <div class="dl"><a href="svg/04-chief-surgeon-architecture.svg" download>SVG</a><a href="png/04-chief-surgeon-architecture.png" download>PNG</a></div>
+    </section>
+
+  <section class="fig">
+    <h2>Figure 5 — Monitor Plane vs Control Plane</h2>
+    <p class="desc">A plain-language table for readers who skim. The single most quotable line:
+       “Same telemetry. New authority.”</p>
+    <div class="canvas" style="padding:0">
+      <table>
+        <thead><tr><th>Role</th><th>Monitor plane (today)</th><th>Control plane (next)</th></tr></thead>
+        <tbody><tr><td class='k'>Authority</td><td>read-only observer</td><td class='hi'>issues and revokes tasks</td></tr>
+<tr><td class='k'>Knowledge</td><td>per-event telemetry</td><td class='hi'>global repo tree + call graph + intent stream</td></tr>
+<tr><td class='k'>Unit of work</td><td>an event (write, spawn, connect)</td><td class='hi'>a scoped, budgeted task envelope</td></tr>
+<tr><td class='k'>Failure handling</td><td>records it after the fact</td><td class='hi'>blocks it before it lands</td></tr>
+<tr><td class='k'>Agents&#x27; job</td><td>each agent decides for itself</td><td class='hi'>each agent executes a narrow slice</td></tr>
+<tr><td class='k'>Outcome</td><td>transparency</td><td class='hi'>transparency + conceptual integrity</td></tr></tbody>
+      </table>
+    </div>
+  </section>
+
+  <h3>The post (opening, verbatim)</h3>
+  <section class="post"><pre>Lately I&#x27;ve been building AgentReins, a local-first safety and transparency console for macOS.
+
+Its initial goal was simple: track the process lineage (PID/PPID), file changes, and network sockets of tools like Cursor, Codex, and Workbuddy — to see exactly what these AI agents are doing.
+
+It&#x27;s still an early, fragile Alpha. But staring at our structured SQLite WAL evidence spine, a radical idea hit me:
+
+Since AgentReins already understands the global context, live states, and intents of every sub-agent... why limit it to being a spectator?
+
+Time to pull the reins and make it the Surgeon.</pre></section>
+
+  <h3>Suggested thread — 7 posts, one image each</h3>
+  <div class='tw'><div class='tw-n'>1</div><pre>1/ Your agents are not dumb. They are unmanaged.
+
+I&#x27;ve been building AgentReins — a local-first console that watches Cursor, Codex and Workbuddy at the syscall level: process lineage, file writes, network sockets.
+
+Here&#x27;s what the evidence made obvious. 🧵</pre></div>
+<div class='tw'><div class='tw-n'>2</div><pre>2/ This is what AgentReins sees today.
+
+Every agent. Every spawn. Every file touched. Every socket opened.
+
+Written to an append-only SQLite WAL evidence spine.
+
+It records everything.
+
+And it controls nothing.</pre></div>
+<div class='tw'><div class='tw-n'>3</div><pre>3/ The bottleneck is not model quality.
+
+It is ownership.
+
+Four agents, one codebase, no shared memory:
+→ context collapse
+→ hallucinated APIs
+→ conflicting edits
+→ spaghetti code
+
+Nobody owns the architecture. Everyone edits it.</pre></div>
+<div class='tw'><div class='tw-n'>4</div><pre>4/ Fred Brooks solved this in 1975.
+
+The Surgical Team: one Chief Programmer owns the design so the system keeps its conceptual integrity. Everyone else is a specialist clearing his path.
+
+We forgot this. Agents made us forget it faster.</pre></div>
+<div class='tw'><div class='tw-n'>5</div><pre>5/ So AgentReins stops being a spectator and becomes the Surgeon.
+
+Control plane on top: global repo tree, call graph, intent stream.
+Scoped task envelope in the middle: paths, budget, gates.
+Execution layer below: your agents, powerful but narrow.
+
+Loop closed.</pre></div>
+<div class='tw'><div class='tw-n'>6</div><pre>6/ The execution layer does not need to know WHY the architecture changed.
+
+Cursor: local mutation in narrow file blocks.
+Codex: focused patches, no design calls.
+Workbuddy: independent builds and tests.
+
+They execute. One mind decides.</pre></div>
+<div class='tw'><div class='tw-n'>7</div><pre>7/ Passive monitor → Chief Surgeon.
+
+Same telemetry. New authority.
+
+AgentReins is early and fragile, but the direction is set: transparency first, then control — and never control without evidence.
+
+Repo in reply. ⬇️</pre></div>
+
+  <h3>How to use this pack</h3>
+  <div class="note">
+    <b>发文建议（中文备注，不会出现在图片里）</b>
+    <ul>
+      <li><b>配图顺序</b>：Fig 1 开场 → Fig 2 抛问题 → Fig 3 立论（Brooks）→ Fig 4 收尾（主图）。Fig 5 表格单独发一条，适合给不看图的人。</li>
+      <li><b>主图</b>用 Fig 4：信息最完整，单张就能讲完整个架构。</li>
+      <li>PNG 是 2× 分辨率（2400×1600 左右），X 上会被压缩，建议直接传 PNG；SVG 用于 GitHub README / 官网。</li>
+      <li>Fig 1 里出现了 SQLite WAL、PID/PPID 这些真实实现细节——这是你的可信度来源，别删。</li>
+      <li>Alpha 阶段的事实在第 7 条里明说了，保持诚实，比吹牛更容易被转发。</li>
+    </ul>
+  </div>
+
+  <footer>AgentReins visual pack · generated 2026-09-17 · all diagram text in English</footer>
+</div>
+</body>
+</html>

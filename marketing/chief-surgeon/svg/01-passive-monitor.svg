@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="a2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#64748b" font-weight="600">BEFORE</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">AgentReins as a Passive Monitor</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">It watches every agent. It cannot stop, steer, or scope any of them.</text>
+
+  <!-- agents -->
+  <text x="60" y="168" font-size="11" letter-spacing="2" fill="#94a3b8" font-weight="600">UNCOORDINATED AGENTS</text>
+
+  <rect x="60" y="182" width="210" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="214" font-size="18" font-weight="700" fill="#0f172a">Cursor</text>
+  <text x="80" y="238" font-size="13" fill="#64748b">local code mutation</text>
+
+  <rect x="60" y="282" width="210" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="314" font-size="18" font-weight="700" fill="#0f172a">Codex</text>
+  <text x="80" y="338" font-size="13" fill="#64748b">agentic edit sessions</text>
+
+  <rect x="60" y="382" width="210" height="80" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="80" y="414" font-size="18" font-weight="700" fill="#0f172a">Workbuddy</text>
+  <text x="80" y="438" font-size="13" fill="#64748b">builds, tests, tooling</text>
+
+  <path d="M270 222 L330 222" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#a1)"/>
+  <path d="M270 322 L330 322" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#a1)"/>
+  <path d="M270 422 L330 422" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#a1)"/>
+
+  <!-- event stream -->
+  <text x="344" y="168" font-size="11" letter-spacing="2" fill="#94a3b8" font-weight="600">EVIDENCE STREAM</text>
+
+  <rect x="344" y="190" width="256" height="64" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="364" y="216" font-size="15" font-weight="700" fill="#0f172a">Process Lineage</text>
+  <text x="364" y="238" font-size="12.5" fill="#64748b">PID / PPID tree, spawn order</text>
+
+  <rect x="344" y="290" width="256" height="64" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="364" y="316" font-size="15" font-weight="700" fill="#0f172a">File Changes</text>
+  <text x="364" y="338" font-size="12.5" fill="#64748b">create · modify · delete</text>
+
+  <rect x="344" y="390" width="256" height="64" rx="8" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="364" y="416" font-size="15" font-weight="700" fill="#0f172a">Network Sockets</text>
+  <text x="364" y="438" font-size="12.5" fill="#64748b">destination host · port</text>
+
+  <path d="M600 222 L688 222" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+  <path d="M600 322 L688 322" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+  <path d="M600 422 L688 422" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+
+  <!-- console -->
+  <rect x="700" y="150" width="440" height="300" rx="14" fill="#f0fdfa" stroke="#0f766e" stroke-width="2"/>
+  <text x="728" y="196" font-size="22" font-weight="700" fill="#0f766e">AgentReins</text>
+  <text x="728" y="222" font-size="13" fill="#115e59">PASSIVE MONITOR · READ-ONLY</text>
+
+  <rect x="728" y="242" width="384" height="52" rx="8" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="748" y="266" font-size="14.5" font-weight="600" fill="#0f172a">Observe</text>
+  <text x="748" y="285" font-size="12.5" fill="#64748b">collect lineage, files, sockets across all agents</text>
+
+  <rect x="728" y="306" width="384" height="52" rx="8" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="748" y="330" font-size="14.5" font-weight="600" fill="#0f172a">Correlate</text>
+  <text x="748" y="349" font-size="12.5" fill="#64748b">stitch events into one timeline per session</text>
+
+  <rect x="728" y="370" width="384" height="52" rx="8" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="748" y="394" font-size="14.5" font-weight="600" fill="#0f172a">Record</text>
+  <text x="748" y="413" font-size="12.5" fill="#64748b">append structured evidence, never rewrite history</text>
+
+  <path d="M920 450 L920 486" stroke="#0f766e" stroke-width="1.6" marker-end="url(#a2)"/>
+
+  <!-- evidence spine -->
+  <rect x="700" y="490" width="440" height="86" rx="12" fill="#0f172a"/>
+  <text x="728" y="526" font-size="16" font-weight="700" fill="#5eead4">Evidence Spine</text>
+  <text x="728" y="550" font-size="13" fill="#94a3b8">SQLite WAL · append-only · local-first</text>
+
+  <!-- banner -->
+  <rect x="60" y="614" width="1080" height="66" rx="12" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="84" y="648" font-size="17" font-weight="700" fill="#92400e">Records everything. Controls nothing.</text>
+  <text x="84" y="670" font-size="13.5" fill="#a16207">No authority to stop a runaway agent, narrow its scope, or reject an unsafe change.</text>
+</svg>

@@ -1,0 +1,4 @@
+file '/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/build/seg-01.mp4'
+file '/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/build/seg-02.mp4'
+file '/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/build/seg-03.mp4'
+file '/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/build/seg-04.mp4'

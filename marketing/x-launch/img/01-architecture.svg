@@ -1,0 +1,103 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg2" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#040E1A"/><stop offset="100%" stop-color="#08192B"/>
+    </linearGradient>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#30D3E5"/>
+    </marker>
+    <marker id="arrowDim" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#3D6B8C"/>
+    </marker>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg2)"/>
+
+  <text x="80" y="86" font-size="42" font-weight="700" fill="#EAF6FF">从一次请求，到一份可验证的证据</text>
+  <text x="80" y="126" font-size="22" fill="#7FA3BC">五路采集汇聚到同一条本地证据脊梁，再还原成人类可读的任务时间线</text>
+
+  <!-- Left: agent activity -->
+  <g>
+    <text x="80" y="196" font-size="19" font-weight="700" fill="#30D3E5" letter-spacing="1.5">AGENT 的行为面</text>
+
+    <g fill="#0D243B" stroke="#1B4260">
+      <rect x="80" y="230" width="300" height="86" rx="12" fill="#123049" stroke="#2E7FA0"/>
+      <rect x="80" y="342" width="300" height="86" rx="12"/>
+      <rect x="80" y="454" width="300" height="86" rx="12"/>
+      <rect x="80" y="566" width="300" height="86" rx="12"/>
+      <rect x="80" y="678" width="300" height="86" rx="12"/>
+    </g>
+    <g font-size="25" font-weight="600" fill="#EAF6FF">
+      <text x="108" y="274">上下文与模型交互</text>
+      <text x="108" y="386">工具 / MCP / Skills</text>
+      <text x="108" y="498">进程树（PID/PPID）</text>
+      <text x="108" y="610">网络套接字</text>
+      <text x="108" y="722">文件与仓库变更</text>
+    </g>
+    <g font-size="17" fill="#7FA3BC">
+      <text x="108" y="300">提示词、工具结果、模型响应</text>
+      <text x="108" y="412">调用意图与返回结果</text>
+      <text x="108" y="524">谁拉起了谁</text>
+      <text x="108" y="636">数据去了哪个域名</text>
+      <text x="108" y="748">改了什么、能否还原</text>
+    </g>
+  </g>
+
+  <!-- Middle: evidence spine -->
+  <g>
+    <rect x="560" y="230" width="300" height="534" rx="16" fill="#0A2036" stroke="#30D3E5" stroke-opacity="0.55" stroke-width="2"/>
+    <text x="710" y="286" text-anchor="middle" font-size="26" font-weight="700" fill="#30D3E5">本地证据脊梁</text>
+    <text x="710" y="318" text-anchor="middle" font-size="18" fill="#7FA3BC">SQLite · 全量留在本机</text>
+    <g font-size="19" fill="#CDE3F2">
+      <text x="710" y="384" text-anchor="middle">原始证据</text>
+      <text x="710" y="430" text-anchor="middle" fill="#4E7A96">—— 与派生结论分离 ——</text>
+      <text x="710" y="476" text-anchor="middle">会话 / 回合绑定</text>
+      <text x="710" y="514" text-anchor="middle">采集器健康度</text>
+      <text x="710" y="552" text-anchor="middle">丢失样本与盲点</text>
+    </g>
+    <line x1="586" y1="580" x2="834" y2="580" stroke="#1B4260"/>
+    <text x="710" y="622" text-anchor="middle" font-size="18" fill="#39D675">进程树归因 · 45 秒窗口</text>
+    <text x="710" y="662" text-anchor="middle" font-size="18" fill="#39D675">工具调用 ID 绑定</text>
+    <text x="710" y="726" text-anchor="middle" font-size="17" fill="#7FA3BC">数万条真实事件</text>
+  </g>
+
+  <!-- Right: conclusions -->
+  <g>
+    <text x="960" y="196" font-size="19" font-weight="700" fill="#39D675" letter-spacing="1.5">人可以读懂的结论</text>
+    <g fill="#0D243B" stroke="#1B4260">
+      <rect x="960" y="230" width="520" height="112" rx="12" fill="#123049" stroke="#2E7FA0"/>
+      <rect x="960" y="372" width="520" height="112" rx="12"/>
+      <rect x="960" y="514" width="520" height="112" rx="12"/>
+      <rect x="960" y="656" width="520" height="108" rx="12" fill="#0E3A2C" stroke="#39D675" stroke-opacity="0.6"/>
+    </g>
+    <g font-size="25" font-weight="600" fill="#EAF6FF">
+      <text x="988" y="274">Agent Fleet</text>
+      <text x="988" y="416">Runtime Map</text>
+      <text x="988" y="558">Live Task 时间线</text>
+      <text x="988" y="700">独立验证结果</text>
+    </g>
+    <g font-size="17" fill="#7FA3BC">
+      <text x="988" y="300">谁在跑、在做什么任务</text>
+      <text x="988" y="442">把晦涩进程翻译成稳定职责</text>
+      <text x="988" y="584">从请求到完成的可视路径</text>
+      <text x="988" y="726" fill="#39D675">不采信 Agent 自述的“已完成”</text>
+    </g>
+  </g>
+
+  <!-- arrows left -> spine -->
+  <g stroke="#30D3E5" stroke-width="1.8" stroke-dasharray="6 5" marker-end="url(#arrow)" opacity="0.8">
+    <line x1="386" y1="273" x2="552" y2="330"/>
+    <line x1="386" y1="385" x2="552" y2="380"/>
+    <line x1="386" y1="497" x2="552" y2="430"/>
+    <line x1="386" y1="609" x2="552" y2="480"/>
+    <line x1="386" y1="721" x2="552" y2="530"/>
+  </g>
+  <!-- spine -> right -->
+  <g stroke="#39D675" stroke-width="2" marker-end="url(#arrow)" opacity="0.85">
+    <line x1="868" y1="330" x2="952" y2="290"/>
+    <line x1="868" y1="430" x2="952" y2="432"/>
+    <line x1="868" y1="530" x2="952" y2="574"/>
+    <line x1="868" y1="620" x2="952" y2="712"/>
+  </g>
+
+  <text x="80" y="846" font-size="20" fill="#4E7893">采集到结论的方向是单向的：原始证据保持中立，解释与判定始终可追溯回证据本身</text>
+</svg>

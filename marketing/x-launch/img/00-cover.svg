@@ -1,0 +1,63 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Display', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#040E1A"/>
+      <stop offset="55%" stop-color="#071B2E"/>
+      <stop offset="100%" stop-color="#0A273F"/>
+    </linearGradient>
+    <linearGradient id="accent" x1="0" y1="0" x2="1" y2="0">
+      <stop offset="0%" stop-color="#30D3E5"/>
+      <stop offset="100%" stop-color="#39D675"/>
+    </linearGradient>
+    <radialGradient id="glow" cx="0.5" cy="0.5" r="0.5">
+      <stop offset="0%" stop-color="#30D3E5" stop-opacity="0.28"/>
+      <stop offset="100%" stop-color="#30D3E5" stop-opacity="0"/>
+    </radialGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M40 0H0V40" fill="none" stroke="#1B4260" stroke-width="0.8" stroke-opacity="0.5"/>
+    </pattern>
+  </defs>
+
+  <rect width="1600" height="900" fill="url(#bg)"/>
+  <rect width="1600" height="900" fill="url(#grid)" opacity="0.55"/>
+  <ellipse cx="800" cy="330" rx="520" ry="300" fill="url(#glow)"/>
+
+  <!-- reins glyph: three bridle lines converging -->
+  <g stroke="url(#accent)" stroke-width="3" fill="none" stroke-linecap="round" opacity="0.95">
+    <path d="M690 250 C 760 300, 800 340, 800 420"/>
+    <path d="M800 250 C 800 320, 800 360, 800 420"/>
+    <path d="M910 250 C 840 300, 800 340, 800 420"/>
+    <rect x="770" y="420" width="60" height="8" rx="4" fill="url(#accent)" stroke="none"/>
+  </g>
+
+  <text x="800" y="540" text-anchor="middle" font-size="86" font-weight="700" fill="#EAF6FF" letter-spacing="-1.5">AgentReins</text>
+  <text x="800" y="606" text-anchor="middle" font-size="34" font-weight="500" fill="#9FC4DC">
+    让每一个 AI Agent 可被理解、可验证、可信任
+  </text>
+
+  <g font-size="20" font-weight="600">
+    <g>
+      <rect x="512" y="656" width="176" height="44" rx="22" fill="#30D3E5" fill-opacity="0.14" stroke="#30D3E5" stroke-opacity="0.55"/>
+      <text x="600" y="684" text-anchor="middle" fill="#30D3E5">Local-first</text>
+    </g>
+    <g>
+      <rect x="708" y="656" width="184" height="44" rx="22" fill="#39D675" fill-opacity="0.12" stroke="#39D675" stroke-opacity="0.5"/>
+      <text x="800" y="684" text-anchor="middle" fill="#39D675">macOS 13+</text>
+    </g>
+    <g>
+      <rect x="912" y="656" width="176" height="44" rx="22" fill="#FFB12D" fill-opacity="0.12" stroke="#FFB12D" stroke-opacity="0.5"/>
+      <text x="1000" y="684" text-anchor="middle" fill="#FFB12D">Swift 6 · Alpha</text>
+    </g>
+  </g>
+
+  <line x1="600" y1="748" x2="1000" y2="748" stroke="#1B4260" stroke-width="1.5"/>
+  <text x="800" y="790" text-anchor="middle" font-size="26" font-weight="600" fill="#CDE3F2">
+    我们造了一个钓鱼网页，鱼饵是给 AI 吃的
+  </text>
+  <text x="800" y="826" text-anchor="middle" font-size="21" fill="#7FA3BC">
+    一次针对自家产品的实战红队测试，暴露了一个谁都没想到的盲点
+  </text>
+
+  <text x="60" y="852" font-size="19" fill="#4E7893">github.com/yardfribley-bit/AgentReins</text>
+  <text x="1540" y="852" text-anchor="end" font-size="19" fill="#4E7893">本地优先 · 不出本机</text>
+</svg>

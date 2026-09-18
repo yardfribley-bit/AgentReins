@@ -1,0 +1,112 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 900" width="1600" height="900" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', Arial, sans-serif">
+  <defs>
+    <linearGradient id="bg6" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#040E1A"/><stop offset="100%" stop-color="#0A1B2C"/>
+    </linearGradient>
+  </defs>
+  <rect width="1600" height="900" fill="url(#bg6)"/>
+
+  <text x="80" y="82" font-size="42" font-weight="700" fill="#EAF6FF">安装之后的每一步，都要能回看</text>
+  <text x="80" y="120" font-size="22" fill="#7FA3BC">实时仪表盘只有 500 条内存窗口；历史回溯把本地证据库里数万条记录变成可检索的时间线</text>
+
+  <!-- filter bar -->
+  <g>
+    <rect x="80" y="164" width="1440" height="66" rx="10" fill="#0A2036" stroke="#1B4260"/>
+    <g font-size="16" font-weight="600">
+      <rect x="100" y="180" width="62" height="34" rx="7" fill="#123049" stroke="#2E7FA0"/>
+      <text x="131" y="202" text-anchor="middle" fill="#8FA6B8">1H</text>
+      <rect x="170" y="180" width="62" height="34" rx="7" fill="#123049" stroke="#2E7FA0"/>
+      <text x="201" y="202" text-anchor="middle" fill="#8FA6B8">6H</text>
+      <rect x="240" y="180" width="70" height="34" rx="7" fill="#30D3E5" fill-opacity="0.18" stroke="#30D3E5"/>
+      <text x="275" y="202" text-anchor="middle" fill="#30D3E5">24H</text>
+      <rect x="318" y="180" width="62" height="34" rx="7" fill="#123049" stroke="#2E7FA0"/>
+      <text x="349" y="202" text-anchor="middle" fill="#8FA6B8">7D</text>
+      <rect x="388" y="180" width="70" height="34" rx="7" fill="#123049" stroke="#2E7FA0"/>
+      <text x="423" y="202" text-anchor="middle" fill="#8FA6B8">30D</text>
+      <rect x="466" y="180" width="62" height="34" rx="7" fill="#123049" stroke="#2E7FA0"/>
+      <text x="497" y="202" text-anchor="middle" fill="#8FA6B8">ALL</text>
+    </g>
+    <rect x="560" y="180" width="300" height="34" rx="7" fill="#0D243B" stroke="#1B4260"/>
+    <text x="580" y="202" font-size="16" fill="#7FA3BC">全部来源 ▾</text>
+    <rect x="880" y="180" width="620" height="34" rx="7" fill="#0D243B" stroke="#1B4260"/>
+    <text x="900" y="202" font-size="16" font-family="ui-monospace, Menlo, monospace" fill="#30D3E5">lab.cyberstroll</text>
+    <text x="900" y="202" font-size="16" fill="#4E7893" opacity="0"> </text>
+  </g>
+
+  <!-- timeline rows -->
+  <g>
+    <line x1="126" y1="250" x2="126" y2="790" stroke="#1B4260" stroke-width="2"/>
+
+    <!-- row 1 high -->
+    <g>
+      <circle cx="126" cy="288" r="9" fill="#FFB12D"/>
+      <circle cx="126" cy="288" r="16" fill="none" stroke="#FFB12D" stroke-opacity="0.35" stroke-width="3"/>
+      <rect x="164" y="256" width="1356" height="64" rx="9" fill="#1E1608" stroke="#FFB12D" stroke-opacity="0.55"/>
+      <rect x="184" y="272" width="66" height="26" rx="13" fill="#FFB12D" fill-opacity="0.16"/>
+      <text x="217" y="290" text-anchor="middle" font-size="12" font-weight="700" fill="#FFB12D">NETWORK</text>
+      <text x="266" y="290" font-size="18" font-weight="600" fill="#EAF6FF">Connection → lab.cyberstroll.top:443</text>
+      <text x="1500" y="290" text-anchor="end" font-size="15" fill="#FFB12D">HIGH</text>
+      <text x="1364" y="290" text-anchor="end" font-size="14" font-family="ui-monospace, Menlo, monospace" fill="#7FA3BC">09-16 20:23:32</text>
+    </g>
+
+    <!-- row 2 medium -->
+    <g>
+      <circle cx="126" cy="372" r="7" fill="#30D3E5"/>
+      <rect x="164" y="344" width="1356" height="56" rx="9" fill="#0D243B" stroke="#1B4260"/>
+      <rect x="184" y="358" width="66" height="26" rx="13" fill="#30D3E5" fill-opacity="0.14"/>
+      <text x="217" y="376" text-anchor="middle" font-size="12" font-weight="700" fill="#30D3E5">TOOL</text>
+      <text x="266" y="376" font-size="17" fill="#CDE3F2">Bash · curl https://lab.cyberstroll.top/…/beacon/01-html-comment</text>
+      <text x="1500" y="376" text-anchor="end" font-size="15" fill="#30D3E5">MEDIUM</text>
+      <text x="1352" y="376" text-anchor="end" font-size="14" font-family="ui-monospace, Menlo, monospace" fill="#7FA3BC">09-16 20:10:12</text>
+    </g>
+
+    <!-- row 3 expanded -->
+    <g>
+      <circle cx="126" cy="460" r="7" fill="#39D675"/>
+      <rect x="164" y="420" width="1356" height="212" rx="9" fill="#0E3A2C" stroke="#39D675" stroke-opacity="0.5"/>
+      <rect x="184" y="434" width="66" height="26" rx="13" fill="#39D675" fill-opacity="0.16"/>
+      <text x="217" y="452" text-anchor="middle" font-size="12" font-weight="700" fill="#39D675">MODEL</text>
+      <text x="266" y="452" font-size="17" fill="#CDE3F2">Model response received · attribution confirmed</text>
+      <text x="1500" y="452" text-anchor="end" font-size="15" fill="#39D675">VERIFIED</text>
+      <text x="1352" y="452" text-anchor="end" font-size="14" font-family="ui-monospace, Menlo, monospace" fill="#7FA3BC">09-16 20:09:58</text>
+
+      <g font-size="14" font-family="ui-monospace, Menlo, monospace">
+        <text x="184" y="492" fill="#30D3E5">SESSION</text>
+        <text x="300" y="492" fill="#B7EBCA">eda4ccd9-96a6-497a-96c9-bd63ef55f619</text>
+        <text x="184" y="518" fill="#30D3E5">TURN</text>
+        <text x="300" y="518" fill="#B7EBCA">a1f2c3…</text>
+        <text x="184" y="544" fill="#30D3E5">RULE</text>
+        <text x="300" y="544" fill="#B7EBCA">tool_network_intent</text>
+        <text x="184" y="570" fill="#30D3E5">ATTRIBUTION</text>
+        <text x="300" y="570" fill="#B7EBCA">process-tree · 45s window · confirmed</text>
+      </g>
+      <rect x="184" y="588" width="1316" height="30" rx="6" fill="#04121F" stroke="#1B4260"/>
+      <text x="196" y="608" font-size="13" font-family="ui-monospace, Menlo, monospace" fill="#7FA3BC">{"kind":"network","remoteDomain":"lab.cyberstroll.top","severity":"high","action":"connect"…}</text>
+    </g>
+
+    <!-- row 4 info -->
+    <g>
+      <circle cx="126" cy="676" r="6" fill="#5A778C"/>
+      <rect x="164" y="652" width="1356" height="48" rx="9" fill="#0D243B" stroke="#1B4260"/>
+      <rect x="184" y="664" width="66" height="24" rx="12" fill="#5A778C" fill-opacity="0.14"/>
+      <text x="217" y="681" text-anchor="middle" font-size="12" font-weight="700" fill="#8FA6B8">FILE</text>
+      <text x="266" y="681" font-size="16" fill="#9FB8C9">write Sources/AgentReins/HistoryView.swift</text>
+      <text x="1500" y="681" text-anchor="end" font-size="15" fill="#5A778C">INFO</text>
+      <text x="1352" y="681" text-anchor="end" font-size="14" font-family="ui-monospace, Menlo, monospace" fill="#7FA3BC">09-16 21:12:04</text>
+    </g>
+
+    <!-- row 5 -->
+    <g>
+      <circle cx="126" cy="746" r="6" fill="#5A778C"/>
+      <rect x="164" y="722" width="1356" height="48" rx="9" fill="#0D243B" stroke="#1B4260"/>
+      <rect x="184" y="734" width="66" height="24" rx="12" fill="#5A778C" fill-opacity="0.14"/>
+      <text x="217" y="751" text-anchor="middle" font-size="12" font-weight="700" fill="#8FA6B8">CMD</text>
+      <text x="266" y="751" font-size="16" fill="#9FB8C9">swift build 2&gt;&amp;1 | grep error</text>
+      <text x="1500" y="751" text-anchor="end" font-size="15" fill="#5A778C">INFO</text>
+      <text x="1352" y="751" text-anchor="end" font-size="14" font-family="ui-monospace, Menlo, monospace" fill="#7FA3BC">09-16 21:15:41</text>
+    </g>
+  </g>
+
+  <text x="80" y="848" font-size="19" fill="#4E7893">每一条都可展开：会话 ID · 回合 ID · 命中规则 · 原始命令 · 用户意图 · 归因方式 · 完整 JSON（可复制）</text>
+  <text x="1520" y="848" text-anchor="end" font-size="19" fill="#4E7893">分页 300 条 · 后台查询</text>
+</svg>

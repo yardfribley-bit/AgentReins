@@ -1,0 +1,65 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="c1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#cbd5e1"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#64748b" font-weight="600">THE CLASSIC PATTERN</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">Brooks&#39; Surgical Team, 1975</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">From The Mythical Man-Month: one surgeon operates, the team clears the path.</text>
+
+  <!-- ring links -->
+  <path d="M350 193 L456 330" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M850 193 L744 330" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M350 303 L456 350" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M850 303 L744 350" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M350 413 L456 422" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M850 413 L744 422" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+  <path d="M600 500 L600 456" stroke="#cbd5e1" stroke-width="1.6" marker-end="url(#c1)"/>
+
+  <!-- left column -->
+  <rect x="130" y="160" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="152" y="190" font-size="16" font-weight="700" fill="#0f172a">Copilot</text>
+  <text x="152" y="212" font-size="12.5" fill="#64748b">second mind, same design</text>
+
+  <rect x="130" y="270" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="152" y="300" font-size="16" font-weight="700" fill="#0f172a">Editor</text>
+  <text x="152" y="322" font-size="12.5" fill="#64748b">reworks the surgeon&#39;s draft</text>
+
+  <rect x="130" y="380" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="152" y="410" font-size="16" font-weight="700" fill="#0f172a">Toolsmith</text>
+  <text x="152" y="432" font-size="12.5" fill="#64748b">builds the instruments</text>
+
+  <!-- right column -->
+  <rect x="850" y="160" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="872" y="190" font-size="16" font-weight="700" fill="#0f172a">Administrator</text>
+  <text x="872" y="212" font-size="12.5" fill="#64748b">handles money, people, space</text>
+
+  <rect x="850" y="270" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="872" y="300" font-size="16" font-weight="700" fill="#0f172a">Program Clerk</text>
+  <text x="872" y="322" font-size="12.5" fill="#64748b">keeps records and versions</text>
+
+  <rect x="850" y="380" width="220" height="66" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="872" y="410" font-size="16" font-weight="700" fill="#0f172a">Tester</text>
+  <text x="872" y="432" font-size="12.5" fill="#64748b">designs hostile cases</text>
+
+  <rect x="470" y="500" width="260" height="62" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="492" y="528" font-size="16" font-weight="700" fill="#0f172a">Language Lawyer</text>
+  <text x="492" y="550" font-size="12.5" fill="#64748b">settles obscure semantics</text>
+
+  <!-- center: surgeon -->
+  <rect x="456" y="288" width="288" height="166" rx="16" fill="#0f172a"/>
+  <text x="600" y="336" font-size="26" font-weight="700" fill="#ffffff" text-anchor="middle">The Surgeon</text>
+  <text x="600" y="364" font-size="13.5" fill="#94a3b8" text-anchor="middle">CHIEF PROGRAMMER</text>
+  <line x1="496" y1="382" x2="704" y2="382" stroke="#334155" stroke-width="1"/>
+  <text x="600" y="408" font-size="13" fill="#e2e8f0" text-anchor="middle">owns the architecture</text>
+  <text x="600" y="430" font-size="13" fill="#e2e8f0" text-anchor="middle">holds conceptual integrity</text>
+
+  <!-- banner -->
+  <rect x="60" y="614" width="1080" height="66" rx="12" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="84" y="648" font-size="17" font-weight="700" fill="#0f172a">One architect decides. Everyone else executes within that decision.</text>
+  <text x="84" y="670" font-size="13.5" fill="#64748b">Brooks argued this scales better than a committee — and it is the missing layer in agent workflows today.</text>
+</svg>

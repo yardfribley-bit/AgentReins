@@ -8,3 +8,4 @@ DerivedData/
 .swiftpm/
 .workbuddy/
 __pycache__/
+.atlas/

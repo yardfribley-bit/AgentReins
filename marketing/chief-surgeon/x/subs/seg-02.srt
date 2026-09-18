@@ -1,0 +1,35 @@
+1
+00:00:00,050 --> 00:00:03,568
+Meanwhile, the real bottleneck is not model quality.
+
+2
+00:00:03,568 --> 00:00:04,818
+It is ownership.
+
+3
+00:00:04,818 --> 00:00:07,826
+Four competent agents, one shared repository,
+
+4
+00:00:07,826 --> 00:00:10,902
+and no shared model of what anyone is actually
+
+5
+00:00:10,902 --> 00:00:11,771
+trying to do.
+
+6
+00:00:11,771 --> 00:00:13,216
+Context collapse.
+
+7
+00:00:13,216 --> 00:00:14,596
+Conflicting edits.
+
+8
+00:00:14,596 --> 00:00:15,755
+Spaghetti code.
+
+9
+00:00:15,755 --> 00:00:17,747
+Competence does not compose.

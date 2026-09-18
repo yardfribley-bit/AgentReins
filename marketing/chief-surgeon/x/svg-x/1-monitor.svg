@@ -1,0 +1,50 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#a1a1aa"/>
+    </marker>
+  </defs>
+  <rect width="1080" height="1350" fill="#ffffff"/>
+
+  <text x="72" y="112" font-size="24" letter-spacing="3" fill="#a1a1aa" font-weight="700">01 · THE MONITOR</text>
+  <text x="72" y="204" font-size="46" font-weight="700" fill="#0f172a" letter-spacing="-1">What AgentReins does today</text>
+  <text x="72" y="262" font-size="30" fill="#71717a">Process lineage, file writes, sockets — recorded, never steered.</text>
+
+  <!-- agents -->
+  <g fill="#ffffff" stroke="#d4d4d8" stroke-width="2">
+    <rect x="72" y="340" width="296" height="110" rx="10"/>
+    <rect x="392" y="340" width="296" height="110" rx="10"/>
+    <rect x="712" y="340" width="296" height="110" rx="10"/>
+  </g>
+  <g font-size="34" font-weight="600" fill="#18181b" text-anchor="middle">
+    <text x="220" y="410">Cursor</text>
+    <text x="540" y="410">Codex</text>
+    <text x="860" y="410">Workbuddy</text>
+  </g>
+
+  <g stroke="#a1a1aa" stroke-width="2">
+    <line x1="220" y1="450" x2="220" y2="540" marker-end="url(#a)"/>
+    <line x1="540" y1="450" x2="540" y2="540" marker-end="url(#a)"/>
+    <line x1="860" y1="450" x2="860" y2="540" marker-end="url(#a)"/>
+  </g>
+
+  <!-- evidence spine -->
+  <rect x="72" y="556" width="936" height="92" rx="10" fill="#ffffff" stroke="#a1a1aa" stroke-width="2" stroke-dasharray="8 6"/>
+  <text x="540" y="613" font-size="30" fill="#18181b" text-anchor="middle">evidence spine · SQLite WAL (append-only)</text>
+
+  <line x1="540" y1="648" x2="540" y2="700" stroke="#a1a1aa" stroke-width="2" marker-end="url(#a)"/>
+
+  <!-- AgentReins -->
+  <rect x="72" y="710" width="936" height="152" rx="10" fill="#ffffff" stroke="#0f766e" stroke-width="2"/>
+  <text x="108" y="772" font-size="40" font-weight="700" fill="#0f766e">AgentReins</text>
+  <text x="108" y="820" font-size="26" fill="#71717a">PID / PPID · file changes · network sockets</text>
+  <rect x="848" y="742" width="128" height="46" rx="23" fill="#f0fdfa" stroke="#99f6e4" stroke-width="2"/>
+  <text x="912" y="773" font-size="22" fill="#0f766e" text-anchor="middle" font-weight="700">read-only</text>
+
+  <!-- punch -->
+  <rect x="72" y="930" width="5" height="106" fill="#0f766e"/>
+  <text x="104" y="978" font-size="36" font-weight="700" fill="#0f172a">It records every action.</text>
+  <text x="104" y="1024" font-size="36" font-weight="700" fill="#a1a1aa">It can stop none of them.</text>
+
+  <text x="72" y="1240" font-size="24" fill="#a1a1aa">Alpha · macOS · local-first</text>
+</svg>

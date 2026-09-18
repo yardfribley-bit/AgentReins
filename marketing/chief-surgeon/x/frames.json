@@ -1,0 +1,26 @@
+[
+  {
+    "n": 1,
+    "list": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/frames/seg-01.txt",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-01.mp3",
+    "dur": 27.8
+  },
+  {
+    "n": 2,
+    "list": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/frames/seg-02.txt",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-02.mp3",
+    "dur": 18.55
+  },
+  {
+    "n": 3,
+    "list": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/frames/seg-03.txt",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-03.mp3",
+    "dur": 22.38
+  },
+  {
+    "n": 4,
+    "list": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/frames/seg-04.txt",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-04.mp3",
+    "dur": 25.2
+  }
+]

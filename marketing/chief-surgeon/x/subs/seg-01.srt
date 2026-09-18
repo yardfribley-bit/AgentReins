@@ -1,0 +1,51 @@
+1
+00:00:00,050 --> 00:00:03,561
+Every agent on your machine — Cursor, Codex,
+
+2
+00:00:03,561 --> 00:00:07,151
+Workbuddy — spawns processes, rewrites files,
+
+3
+00:00:07,151 --> 00:00:08,268
+opens sockets.
+
+4
+00:00:08,268 --> 00:00:10,299
+AgentReins records all of it.
+
+5
+00:00:10,299 --> 00:00:11,784
+Process lineage.
+
+6
+00:00:11,784 --> 00:00:13,190
+File mutations.
+
+7
+00:00:13,190 --> 00:00:14,922
+Network destinations.
+
+8
+00:00:14,922 --> 00:00:18,976
+Everything lands in an append-only SQLite WAL,
+
+9
+00:00:18,976 --> 00:00:20,651
+the evidence spine.
+
+10
+00:00:20,651 --> 00:00:22,005
+But here is the limit.
+
+11
+00:00:22,005 --> 00:00:23,591
+It records every action,
+
+12
+00:00:23,591 --> 00:00:25,508
+and it can stop none of them.
+
+13
+00:00:25,508 --> 00:00:27,005
+That is a monitor plane.

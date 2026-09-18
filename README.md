@@ -133,6 +133,14 @@ Codex → Shell → ssh deploy@example.com:22 → remote deployment → result
 - Changed text and generated code can be scanned locally for common security patterns.
 - Git snapshots preserve repository head, staged and unstaged diff, file status, and verification context for recovery work.
 
+### Project understanding and supervision
+
+- Project Brief separates declared purpose, observed implementation, inferred meaning, and unknowns instead of presenting model guesses as facts.
+- A deterministic local structural index records source language, imports, symbols, content hashes, and import-based importance for Git-tracked files.
+- Existing [Atlas](https://github.com/pacifio/atlas) `.atlas/codebase-index/docs.json` indexes are imported directly when present; AgentReins' native fallback additionally understands Swift projects.
+- Requirements, code structure, agent memory, runtime activity, and security evidence are compared at project scope so users can see both the current implementation and where it has drifted from intent.
+- Indexing runs at utility priority, is bounded and cancellable, and yields between file batches to protect the live console.
+
 ### Evidence reliability
 
 - SQLite WAL is the durable local evidence spine; live UI state is kept separate from historical reconstruction.
@@ -245,6 +253,7 @@ See [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) for the
 | Document | Purpose |
 | --- | --- |
 | [Architecture](docs/ARCHITECTURE.md) | Runtime flow, source map, trust model, and integration contract. |
+| [Atlas code-index attribution](docs/ATLAS_CODE_INDEX_ATTRIBUTION.md) | Upstream inspiration, compatibility boundary, license, and AgentReins-specific changes. |
 | [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) | Collection flow, reliability principles, and the native-versus-Beats architecture decision. |
 | [Collection Reliability Assessment](docs/COLLECTION-RELIABILITY-ASSESSMENT.md) | Measured gaps, honest product claims, and hardening acceptance gates. |
 | [Collection Acceptance — 2026-09-11](docs/COLLECTION-ACCEPTANCE-2026-09-11.md) | Latest measured short-term results, failures, blind spots, and deferred soak test. |

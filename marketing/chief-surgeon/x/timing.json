@@ -1,0 +1,34 @@
+[
+  {
+    "n": 1,
+    "img": "1-monitor",
+    "title": "01 · THE MONITOR",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-01.mp3",
+    "dur": 27.096,
+    "cues": 13
+  },
+  {
+    "n": 2,
+    "img": "2-bottleneck",
+    "title": "02 · THE BOTTLENECK",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-02.mp3",
+    "dur": 17.832,
+    "cues": 9
+  },
+  {
+    "n": 3,
+    "img": "3-brooks",
+    "title": "03 · THE PATTERN",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-03.mp3",
+    "dur": 21.648,
+    "cues": 9
+  },
+  {
+    "n": 4,
+    "img": "4-shift",
+    "title": "04 · THE SHIFT",
+    "audio": "/Users/jatsmith/AgentSpec/AgentGuardApp/marketing/chief-surgeon/x/audio/seg-04.mp3",
+    "dur": 24.48,
+    "cues": 10
+  }
+]

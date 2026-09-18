@@ -1,0 +1,35 @@
+1
+00:00:00,050 --> 00:00:04,388
+Fred Brooks solved this exact problem in 1975.
+
+2
+00:00:04,388 --> 00:00:06,021
+In The Mythical Man-Month,
+
+3
+00:00:06,021 --> 00:00:07,969
+he described the Surgical Team.
+
+4
+00:00:07,969 --> 00:00:11,253
+One chief programmer owns conceptual integrity,
+
+5
+00:00:11,253 --> 00:00:14,397
+while co-pilots, testers and toolsmiths clear
+
+6
+00:00:14,397 --> 00:00:15,026
+his path.
+
+7
+00:00:15,026 --> 00:00:16,940
+Now map that onto agents.
+
+8
+00:00:16,940 --> 00:00:19,063
+AgentReins becomes the surgeon.
+
+9
+00:00:19,063 --> 00:00:21,576
+Your coding tools become the specialists.

@@ -1,0 +1,39 @@
+1
+00:00:00,050 --> 00:00:02,630
+So the monitor plane becomes a control plane.
+
+2
+00:00:02,630 --> 00:00:05,673
+AgentReins holds the global repository tree,
+
+3
+00:00:05,673 --> 00:00:08,646
+the call graph, and the live intent stream.
+
+4
+00:00:08,646 --> 00:00:12,240
+It issues scoped task envelopes — scope, budget,
+
+5
+00:00:12,240 --> 00:00:15,684
+gate — and Cursor, Codex and Workbuddy execute
+
+6
+00:00:15,684 --> 00:00:17,930
+strictly inside that boundary.
+
+7
+00:00:17,930 --> 00:00:20,558
+Every result flows back as evidence,
+
+8
+00:00:20,558 --> 00:00:22,018
+and the loop closes.
+
+9
+00:00:22,018 --> 00:00:23,281
+Same telemetry.
+
+10
+00:00:23,281 --> 00:00:24,401
+New authority.

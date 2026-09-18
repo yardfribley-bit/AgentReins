@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1080 1350" width="1080" height="1350" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#0f766e"/>
+    </marker>
+  </defs>
+  <rect width="1080" height="1350" fill="#ffffff"/>
+
+  <text x="72" y="112" font-size="24" letter-spacing="3" fill="#a1a1aa" font-weight="700">03 · THE PATTERN</text>
+  <text x="72" y="204" font-size="46" font-weight="700" fill="#0f172a" letter-spacing="-1">Brooks solved this in 1975</text>
+  <text x="72" y="262" font-size="30" fill="#71717a">The Surgical Team, mapped onto an agent stack.</text>
+
+  <!-- column headers -->
+  <text x="72" y="360" font-size="22" letter-spacing="2" fill="#a1a1aa" font-weight="700">SURGICAL TEAM · 1975</text>
+  <text x="588" y="360" font-size="22" letter-spacing="2" fill="#a1a1aa" font-weight="700">AGENT STACK · TODAY</text>
+
+  <!-- surgeon -->
+  <rect x="72" y="392" width="420" height="112" rx="10" fill="#ffffff" stroke="#0f766e" stroke-width="2"/>
+  <text x="104" y="444" font-size="34" font-weight="700" fill="#0f766e">The Surgeon</text>
+  <text x="104" y="480" font-size="24" fill="#71717a">owns conceptual integrity</text>
+
+  <rect x="588" y="392" width="420" height="112" rx="10" fill="#ffffff" stroke="#0f766e" stroke-width="2"/>
+  <text x="620" y="444" font-size="34" font-weight="700" fill="#0f766e">AgentReins</text>
+  <text x="620" y="480" font-size="24" fill="#71717a">owns the architecture</text>
+
+  <line x1="500" y1="448" x2="580" y2="448" stroke="#0f766e" stroke-width="2" marker-end="url(#c)"/>
+  <text x="540" y="424" font-size="18" fill="#a1a1aa" text-anchor="middle">maps to</text>
+
+  <!-- specialists left -->
+  <g fill="#ffffff" stroke="#d4d4d8" stroke-width="2">
+    <rect x="72" y="560" width="420" height="100" rx="10"/>
+    <rect x="72" y="684" width="420" height="100" rx="10"/>
+    <rect x="72" y="808" width="420" height="100" rx="10"/>
+  </g>
+  <g font-size="30" font-weight="600" fill="#18181b">
+    <text x="104" y="606">Co-pilot</text>
+    <text x="104" y="730">Tester</text>
+    <text x="104" y="854">Toolsmith</text>
+  </g>
+  <g font-size="24" fill="#a1a1aa">
+    <text x="104" y="640">reviews, never overrides</text>
+    <text x="104" y="764">verifies against the spec</text>
+    <text x="104" y="888">builds the surgeon's tools</text>
+  </g>
+
+  <!-- agents right -->
+  <g fill="#ffffff" stroke="#d4d4d8" stroke-width="2">
+    <rect x="588" y="560" width="420" height="100" rx="10"/>
+    <rect x="588" y="684" width="420" height="100" rx="10"/>
+    <rect x="588" y="808" width="420" height="100" rx="10"/>
+  </g>
+  <g font-size="30" font-weight="600" fill="#18181b">
+    <text x="620" y="606">Cursor</text>
+    <text x="620" y="730">Codex</text>
+    <text x="620" y="854">Workbuddy</text>
+  </g>
+  <g font-size="24" fill="#a1a1aa">
+    <text x="620" y="640">mutates narrow file blocks</text>
+    <text x="620" y="764">produces focused patches</text>
+    <text x="620" y="888">runs independent builds</text>
+  </g>
+
+  <rect x="72" y="980" width="5" height="106" fill="#0f766e"/>
+  <text x="104" y="1028" font-size="36" font-weight="700" fill="#0f172a">One mind decides.</text>
+  <text x="104" y="1074" font-size="30" fill="#71717a">Everyone else executes inside the boundary it sets.</text>
+
+  <text x="72" y="1240" font-size="24" fill="#a1a1aa">F. P. Brooks · The Mythical Man-Month (1975)</text>
+</svg>

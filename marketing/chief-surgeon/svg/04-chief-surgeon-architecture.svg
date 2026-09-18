@@ -1,0 +1,95 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 800" width="1200" height="800" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="d1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#0f766e"/>
+    </marker>
+    <marker id="d2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#64748b"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="800" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#0f766e" font-weight="600">THE ARCHITECTURE</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">AgentReins as the AI Chief Surgeon</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">From a monitoring plane to a control plane: observe, decide, delegate, verify, record.</text>
+
+  <!-- ===== CONTROL PLANE ===== -->
+  <rect x="60" y="150" width="980" height="210" rx="16" fill="#f0fdfa" stroke="#0f766e" stroke-width="2"/>
+  <text x="84" y="182" font-size="11" letter-spacing="2" fill="#0f766e" font-weight="700">CONTROL PLANE</text>
+  <text x="214" y="183" font-size="20" font-weight="700" fill="#0f766e">AgentReins — The Surgeon</text>
+  <text x="486" y="182" font-size="13" fill="#115e59">holds global context, owns conceptual integrity</text>
+
+  <rect x="84" y="232" width="300" height="62" rx="9" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="104" y="258" font-size="14.5" font-weight="700" fill="#0f172a">Global Repo Tree</text>
+  <text x="104" y="280" font-size="12.5" fill="#64748b">every file, module, owner</text>
+
+  <rect x="400" y="232" width="300" height="62" rx="9" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="420" y="258" font-size="14.5" font-weight="700" fill="#0f172a">Call Graph</text>
+  <text x="420" y="280" font-size="12.5" fill="#64748b">who calls what, blast radius</text>
+
+  <rect x="716" y="232" width="300" height="62" rx="9" fill="#ffffff" stroke="#99f6e4" stroke-width="1.5"/>
+  <text x="736" y="258" font-size="14.5" font-weight="700" fill="#0f172a">Intent Stream</text>
+  <text x="736" y="280" font-size="12.5" fill="#64748b">what each agent is trying to do</text>
+
+  <rect x="84" y="306" width="300" height="42" rx="8" fill="#0f766e"/>
+  <text x="234" y="333" font-size="13.5" font-weight="700" fill="#ffffff" text-anchor="middle">Refine top-level spec</text>
+
+  <rect x="400" y="306" width="300" height="42" rx="8" fill="#0f766e"/>
+  <text x="550" y="333" font-size="13.5" font-weight="700" fill="#ffffff" text-anchor="middle">Issue scoped tasks</text>
+
+  <rect x="716" y="306" width="300" height="42" rx="8" fill="#0f766e"/>
+  <text x="866" y="333" font-size="13.5" font-weight="700" fill="#ffffff" text-anchor="middle">Enforce acceptance gate</text>
+
+  <!-- delegation arrows -->
+  <path d="M234 348 L234 396" stroke="#0f766e" stroke-width="1.8" marker-end="url(#d1)"/>
+  <path d="M550 348 L550 396" stroke="#0f766e" stroke-width="1.8" marker-end="url(#d1)"/>
+  <path d="M866 348 L866 396" stroke="#0f766e" stroke-width="1.8" marker-end="url(#d1)"/>
+  <text x="600" y="382" font-size="12" fill="#0f766e" font-weight="600">scoped task envelope</text>
+
+  <!-- ===== CONSTRAINTS ===== -->
+  <rect x="84" y="400" width="300" height="56" rx="9" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="104" y="424" font-size="13.5" font-weight="700" fill="#92400e">Scope</text>
+  <text x="104" y="444" font-size="12.5" fill="#a16207">allowed paths only</text>
+
+  <rect x="400" y="400" width="300" height="56" rx="9" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="420" y="424" font-size="13.5" font-weight="700" fill="#92400e">Budget</text>
+  <text x="420" y="444" font-size="12.5" fill="#a16207">max tool calls, max files touched</text>
+
+  <rect x="716" y="400" width="300" height="56" rx="9" fill="#fffbeb" stroke="#fcd34d" stroke-width="1.5"/>
+  <text x="736" y="424" font-size="13.5" font-weight="700" fill="#92400e">Gate</text>
+  <text x="736" y="444" font-size="12.5" fill="#a16207">tests must pass before merge</text>
+
+  <path d="M234 456 L234 532" stroke="#64748b" stroke-width="1.8" marker-end="url(#d2)"/>
+  <path d="M550 456 L550 532" stroke="#64748b" stroke-width="1.8" marker-end="url(#d2)"/>
+  <path d="M866 456 L866 532" stroke="#64748b" stroke-width="1.8" marker-end="url(#d2)"/>
+
+  <!-- ===== EXECUTION LAYER ===== -->
+  <rect x="60" y="490" width="980" height="170" rx="16" fill="#f8fafc" stroke="#cbd5e1" stroke-width="2"/>
+  <text x="84" y="520" font-size="11" letter-spacing="2" fill="#64748b" font-weight="700">EXECUTION LAYER</text>
+  <text x="260" y="520" font-size="13" fill="#94a3b8">specialised tools — they execute, they do not decide</text>
+
+  <rect x="84" y="536" width="300" height="100" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="104" y="566" font-size="17" font-weight="700" fill="#0f172a">Cursor</text>
+  <text x="104" y="590" font-size="12.5" fill="#64748b">local code mutation</text>
+  <text x="104" y="610" font-size="12.5" fill="#64748b">narrow file blocks only</text>
+
+  <rect x="400" y="536" width="300" height="100" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="420" y="566" font-size="17" font-weight="700" fill="#0f172a">Codex</text>
+  <text x="420" y="590" font-size="12.5" fill="#64748b">focused patches</text>
+  <text x="420" y="610" font-size="12.5" fill="#64748b">no architecture decisions</text>
+
+  <rect x="716" y="536" width="300" height="100" rx="10" fill="#ffffff" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="736" y="566" font-size="17" font-weight="700" fill="#0f172a">Workbuddy</text>
+  <text x="736" y="590" font-size="12.5" fill="#64748b">independent builds &amp; tests</text>
+  <text x="736" y="610" font-size="12.5" fill="#64748b">verifies, does not design</text>
+
+  <!-- ===== FEEDBACK LOOP ===== -->
+  <path d="M1040 570 C 1112 570, 1112 250, 1048 250" fill="none" stroke="#0f766e" stroke-width="2" stroke-dasharray="6 5" marker-end="url(#d1)"/>
+  <text x="1150" y="412" font-size="12.5" font-weight="600" fill="#0f766e" text-anchor="middle" transform="rotate(-90 1150 412)">evidence · telemetry</text>
+
+  <!-- banner -->
+  <rect x="60" y="690" width="980" height="66" rx="12" fill="#0f172a"/>
+  <text x="84" y="724" font-size="17" font-weight="700" fill="#5eead4">The loop is closed: observe → decide → delegate → verify → record.</text>
+  <text x="84" y="746" font-size="13.5" fill="#94a3b8">Every agent stays powerful locally. Only one mind owns the architecture globally.</text>
+</svg>

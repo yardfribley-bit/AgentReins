@@ -1,0 +1,80 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 720" width="1200" height="720" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif">
+  <defs>
+    <marker id="b1" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#94a3b8"/>
+    </marker>
+    <marker id="b2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M 0 0 L 10 5 L 0 10 z" fill="#b91c1c"/>
+    </marker>
+  </defs>
+
+  <rect width="1200" height="720" fill="#ffffff"/>
+
+  <text x="60" y="52" font-size="13" letter-spacing="3" fill="#b91c1c" font-weight="600">THE BOTTLENECK</text>
+  <text x="60" y="92" font-size="30" font-weight="700" fill="#0f172a">Many Agents, One Codebase, No Owner</text>
+  <text x="60" y="120" font-size="15" fill="#64748b">Every agent is competent alone. Together they destroy conceptual integrity.</text>
+
+  <!-- agents -->
+  <text x="60" y="166" font-size="11" letter-spacing="2" fill="#94a3b8" font-weight="600">PARALLEL AGENTS</text>
+
+  <rect x="60" y="180" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="212" font-size="17" font-weight="700" fill="#0f172a">Cursor</text>
+  <text x="82" y="234" font-size="12.5" fill="#64748b">editing from its own view</text>
+
+  <rect x="60" y="272" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="304" font-size="17" font-weight="700" fill="#0f172a">Codex</text>
+  <text x="82" y="326" font-size="12.5" fill="#64748b">editing from its own view</text>
+
+  <rect x="60" y="364" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="396" font-size="17" font-weight="700" fill="#0f172a">Workbuddy</text>
+  <text x="82" y="418" font-size="12.5" fill="#64748b">editing from its own view</text>
+
+  <rect x="60" y="456" width="200" height="70" rx="10" fill="#f8fafc" stroke="#cbd5e1" stroke-width="1.5"/>
+  <text x="82" y="488" font-size="17" font-weight="700" fill="#0f172a">Other Agents</text>
+  <text x="82" y="510" font-size="12.5" fill="#64748b">no shared memory</text>
+
+  <!-- crossing curves into codebase -->
+  <path d="M260 215 C 350 215, 340 400, 430 400" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+  <path d="M260 307 C 350 307, 340 340, 430 340" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+  <path d="M260 399 C 350 399, 340 280, 430 280" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+  <path d="M260 491 C 350 491, 340 440, 430 440" fill="none" stroke="#94a3b8" stroke-width="1.6" marker-end="url(#b1)"/>
+
+  <!-- shared codebase -->
+  <rect x="430" y="240" width="300" height="230" rx="14" fill="#f1f5f9" stroke="#64748b" stroke-width="2"/>
+  <text x="580" y="290" font-size="19" font-weight="700" fill="#0f172a" text-anchor="middle">Shared Codebase</text>
+  <text x="580" y="320" font-size="13" fill="#64748b" text-anchor="middle">no global owner</text>
+  <text x="580" y="344" font-size="13" fill="#64748b" text-anchor="middle">no call graph</text>
+  <text x="580" y="368" font-size="13" fill="#64748b" text-anchor="middle">no intent stream</text>
+  <text x="580" y="392" font-size="13" fill="#64748b" text-anchor="middle">no acceptance gate</text>
+  <line x1="462" y1="412" x2="698" y2="412" stroke="#cbd5e1" stroke-width="1"/>
+  <text x="580" y="440" font-size="12.5" fill="#94a3b8" text-anchor="middle">last write wins</text>
+
+  <!-- outcomes -->
+  <text x="790" y="166" font-size="11" letter-spacing="2" fill="#b91c1c" font-weight="600">FAILURE MODES</text>
+
+  <path d="M730 300 L784 300" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+  <path d="M730 340 L784 340" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+  <path d="M730 380 L784 380" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+  <path d="M730 420 L784 420" stroke="#b91c1c" stroke-width="1.6" marker-end="url(#b2)"/>
+
+  <rect x="790" y="192" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="222" font-size="15.5" font-weight="700" fill="#991b1b">Context Collapse</text>
+  <text x="812" y="246" font-size="12.5" fill="#b91c1c">each agent sees only its own slice</text>
+
+  <rect x="790" y="288" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="318" font-size="15.5" font-weight="700" fill="#991b1b">Hallucinated APIs</text>
+  <text x="812" y="342" font-size="12.5" fill="#b91c1c">symbols invented, never defined</text>
+
+  <rect x="790" y="384" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="414" font-size="15.5" font-weight="700" fill="#991b1b">Conflicting Edits</text>
+  <text x="812" y="438" font-size="12.5" fill="#b91c1c">two agents rewrite the same block</text>
+
+  <rect x="790" y="480" width="350" height="76" rx="10" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="812" y="510" font-size="15.5" font-weight="700" fill="#991b1b">Spaghetti Code</text>
+  <text x="812" y="534" font-size="12.5" fill="#b91c1c">it compiles, but nobody owns the design</text>
+
+  <!-- banner -->
+  <rect x="60" y="614" width="1080" height="66" rx="12" fill="#fef2f2" stroke="#fca5a5" stroke-width="1.5"/>
+  <text x="84" y="648" font-size="17" font-weight="700" fill="#991b1b">Nobody owns the architecture. Everyone edits it.</text>
+  <text x="84" y="670" font-size="13.5" fill="#b91c1c">This is the exact failure Brooks named in 1975 — and it is back, with agents.</text>
+</svg>
