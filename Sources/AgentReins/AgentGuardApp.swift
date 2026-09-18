@@ -43,6 +43,7 @@ struct AgentReinsApp: App {
     @StateObject private var semanticAnalyzer = SemanticAnalyzer()
     @StateObject private var memoryScan = MemoryScanManager()
     @StateObject private var memoryRuleStore = MemoryRuleStore()
+    @StateObject private var alertPolicyStore = AlertPolicyStore()
     @StateObject private var liveMemoryMonitor = LiveMemoryMonitor()
     @StateObject private var attributionResolver = EventAttributionResolver()
     @StateObject private var activityProjector = ToolActivityEvidenceProjector()
@@ -66,11 +67,15 @@ struct AgentReinsApp: App {
                 .environmentObject(semanticAnalyzer)
                 .environmentObject(memoryScan)
                 .environmentObject(memoryRuleStore)
+                .environmentObject(alertPolicyStore)
                 .environmentObject(appLanguage)
                 .environment(\.locale, appLanguage.language.locale)
                 .onReceive(store.$rules) { rules in
                     fileGuard.setRules(rules)
                     processGuard.setRules(rules)
+                }
+                .onReceive(alertPolicyStore.$policies.dropFirst()) { _ in
+                    eventStore.refreshAlertPolicies()
                 }
                 .onReceive(workBuddySight.$connected) { agentDiscovery.setAdapterConnected("workbuddy", connected: $0) }
                 .onReceive(codexSight.$connected) { agentDiscovery.setAdapterConnected("codex", connected: $0) }
