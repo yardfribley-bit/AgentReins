@@ -15,12 +15,24 @@ struct EventDerivedProjection: Sendable {
         let recent = Array(events.prefix(400))
         let contentFindings = ExternalContentSecurity.findingEvents(events: recent)
         let policyAlerts = AgentPolicyAlertEngine.findings(events: recent)
-        let incidents = SecurityIncident.correlate(recent + contentFindings + policyAlerts)
+        // Security is a policy decision, not a second copy of the activity log.
+        // Raw network/model/tool/activity evidence remains available in its own
+        // views and may support a finding, but it must never become an incident
+        // merely because its destination or meaning is still unknown.
+        let directFindings = recent.filter(isDirectSecurityFinding)
+        let incidents = SecurityIncident.correlate(directFindings + contentFindings + policyAlerts)
         let sessionEvents = liveSessionEvents(events)
         return EventDerivedProjection(incidents: incidents,
             sessions: AgentSessionSnapshot.build(from: sessionEvents),
             influenceChains: ExternalContentSecurity.influenceChains(events: recent),
             webResourceChains: WebResourceSecurity.build(events: recent))
+    }
+
+    private static func isDirectSecurityFinding(_ event: GuardEvent) -> Bool {
+        if event.kind == "alert" || event.kind == "external-content" { return true }
+        if ["blocked", "restored"].contains(event.action.lowercased()) { return true }
+        guard ["cmd", "file", "memory"].contains(event.kind) else { return false }
+        return ["critical", "high", "medium"].contains(event.severity.lowercased())
     }
 
     private static func liveSessionEvents(_ events: [GuardEvent]) -> [GuardEvent] {

@@ -5,6 +5,8 @@ struct AgentOperationsCenterView: View {
     @EnvironmentObject private var webAgentSight: WebAgentSight
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     @EnvironmentObject private var language: AppLanguageStore
+    @EnvironmentObject private var alertPolicyStore: AlertPolicyStore
+    @EnvironmentObject private var eventStore: EventStore
     let dataRevision: UInt64
     let sessions: [AgentSessionSnapshot]
     let events: [GuardEvent]
@@ -30,6 +32,7 @@ struct AgentOperationsCenterView: View {
     @State private var showingBrowserProtection = false
     @State private var showingAnalysisModel = false
     @State private var showingHistory = false
+    @State private var showingAlertPolicies = false
     @StateObject private var ipGeolocation = IPGeolocationStore()
     @StateObject private var projectIndex = ProjectIndexStore()
     @State private var cachedRuntimeGraph = RuntimeGraphPresentation(groups: [], edges: [])
@@ -38,6 +41,9 @@ struct AgentOperationsCenterView: View {
     @State private var globalTab: GlobalTab = .projects
     @State private var selectedProjectPath: String?
     @State private var projectView: ProjectView = .capabilities
+    @State private var projectHistoricalIncidents: [String: [SecurityIncident]] = [:]
+    @State private var projectHistoryLoading = Set<String>()
+    @State private var projectHistoryErrors: [String: String] = [:]
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
         case projects = "Projects"
@@ -51,6 +57,7 @@ struct AgentOperationsCenterView: View {
         case architecture = "Architecture"
         case evolution = "Evolution"
         case memory = "Understanding"
+        case security = "Security"
         var id: String { rawValue }
     }
 
@@ -321,6 +328,9 @@ struct AgentOperationsCenterView: View {
         .sheet(isPresented: $showingAnalysisModel) {
             AnalysisModelSettingsView().environmentObject(semanticAnalyzer)
         }
+        .sheet(isPresented: $showingAlertPolicies) {
+            AlertPolicySettingsView().environmentObject(alertPolicyStore)
+        }
     }
 
     @MainActor
@@ -420,6 +430,12 @@ struct AgentOperationsCenterView: View {
                     .padding(.horizontal, 11).padding(.vertical, 7)
                     .background(cyan.opacity(0.12), in: Capsule())
             }.buttonStyle(.plain)
+            Button { showingAlertPolicies = true } label: {
+                Label(L("ALERT RULES"), systemImage: "slider.horizontal.3")
+                    .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+                    .padding(.horizontal, 10).padding(.vertical, 7)
+                    .background(cyan.opacity(0.12), in: Capsule())
+            }.buttonStyle(.plain).help("Configure local alert policies")
             Button { showingAnalysisModel = true } label: {
                 Label(L(semanticAnalyzer.configured ? "ANALYSIS READY" : "ANALYSIS MODEL"),
                       systemImage: "brain.head.profile")
@@ -588,18 +604,23 @@ struct AgentOperationsCenterView: View {
     private func projectMissionCard(_ project: ProjectMission) -> some View {
         let evolution = projectEvolution.first { $0.path == project.path }
         let index = projectIndex.snapshot(for: project.path)
-        let projectIncidents = incidents.filter { incident in
+        let liveProjectIncidents = incidents.filter { incident in
             project.sessions.contains { session in
                 incident.events.contains { $0.sessionId == session.id }
             }
         }
+        let projectIncidents = mergeIncidents(liveProjectIncidents,
+            projectHistoricalIncidents[project.path] ?? [])
         let changedFiles = evolution?.changedFileCount ?? 0
         let isSelected = selectedProjectPath == project.id
         let latestGoal = project.sessions.max { $0.lastActivityAt < $1.lastActivityAt }?.latestIntent
         return VStack(alignment: .leading, spacing: 13) {
             Button {
                 selectedProjectPath = isSelected ? nil : project.id
-                if !isSelected { projectIndex.request(path: project.path) }
+                if !isSelected {
+                    projectIndex.request(path: project.path)
+                    loadProjectHistory(project)
+                }
             } label: {
                 HStack(alignment: .top, spacing: 12) {
                     Image(systemName: "square.3.layers.3d.top.filled").font(.system(size: 21)).foregroundStyle(cyan)
@@ -619,16 +640,23 @@ struct AgentOperationsCenterView: View {
                         .foregroundStyle(.secondary).padding(.top, 4)
                 }
             }.buttonStyle(.plain)
-            if isSelected {
+                if isSelected {
                 HStack {
                     projectIndexControl(project.path, snapshot: index)
                     if let error = projectIndex.error(for: project.path) {
                         Text(error).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2)
                     } else {
                         Text(language.language == .english
-                             ? "Only Git-tracked files are indexed on request"
-                             : "仅在请求时索引 Git 已跟踪文件")
+                             ? "Git-tracked source is indexed into structural evidence; Atlas indexes are imported when present"
+                             : "Git 已跟踪源码会转为结构证据；如存在 Atlas 索引则直接导入")
                             .font(.system(size: 10)).foregroundStyle(.tertiary)
+                    }
+                    if projectHistoryLoading.contains(project.path) {
+                        ProgressView().controlSize(.mini).tint(cyan)
+                        Text(L("Restoring project security history…"))
+                            .font(.system(size: 10)).foregroundStyle(.secondary)
+                    } else if let historyError = projectHistoryErrors[project.path] {
+                        Text(historyError).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2)
                     }
                     Spacer()
                 }
@@ -716,6 +744,8 @@ struct AgentOperationsCenterView: View {
                 projectEvolutionView(evolution)
             case .memory:
                 projectUnderstandingView(intelligence)
+            case .security:
+                projectSecurityView(projectIncidents)
             }
 
             Text(L("LIVE AGENT WORK")).micro(cyan)
@@ -731,9 +761,86 @@ struct AgentOperationsCenterView: View {
         }
     }
 
+    private func loadProjectHistory(_ project: ProjectMission) {
+        guard !projectHistoryLoading.contains(project.path),
+              projectHistoricalIncidents[project.path] == nil else { return }
+        let sessionIDs = project.sessions.map(\.id)
+        guard !sessionIDs.isEmpty else { return }
+        projectHistoryLoading.insert(project.path)
+        projectHistoryErrors[project.path] = nil
+        eventStore.loadProjectHistory(sessionIDs: sessionIDs, limitPerSession: 500) { result in
+            projectHistoryLoading.remove(project.path)
+            switch result {
+            case .success(let rows):
+                let policy = AgentPolicyAlertEngine.findings(events: rows, policies: alertPolicyStore.policies)
+                let direct = rows.filter { event in
+                    event.kind == "alert" || event.kind == "external-content"
+                        || ["blocked", "restored"].contains(event.action.lowercased())
+                        || (["cmd", "file", "memory"].contains(event.kind)
+                            && ["critical", "high", "medium"].contains(event.severity.lowercased()))
+                }
+                projectHistoricalIncidents[project.path] = SecurityIncident.correlate(direct + policy)
+                projectHistoryErrors[project.path] = nil
+            case .failure(let error):
+                projectHistoryErrors[project.path] = error.localizedDescription
+            }
+        }
+    }
+
+    private func mergeIncidents(_ first: [SecurityIncident], _ second: [SecurityIncident]) -> [SecurityIncident] {
+        Array(Dictionary((first + second).map { ($0.id, $0) }, uniquingKeysWith: { live, _ in live }).values)
+            .sorted { $0.lastTs > $1.lastTs }
+    }
+
+    private func projectSecurityView(_ incidents: [SecurityIncident]) -> some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(L("PROJECT SECURITY SUPERVISOR")).micro(cyan)
+                    Text(language.language == .english
+                         ? "Live and historical findings are restored automatically from local evidence."
+                         : "实时与历史问题会从本地证据自动还原，无需单独运行历史分析。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                labelChip("\(incidents.count) \(L("FINDINGS"))", color: incidents.isEmpty ? green : amber)
+            }
+            if incidents.isEmpty {
+                empty(L("No project security finding is supported by current evidence"))
+            } else {
+                ForEach(incidents.prefix(30)) { incident in
+                    let copy = SecurityIncidentPresentation.make(incident,
+                        chinese: language.language == .simplifiedChinese)
+                    let assessment = SecurityIncidentAssessment.make(incident,
+                        chinese: language.language == .simplifiedChinese)
+                    Button { onIncident(incident) } label: {
+                        VStack(alignment: .leading, spacing: 8) {
+                            HStack {
+                                Circle().fill(incidentColor(incident.severity)).frame(width: 8, height: 8)
+                                Text(copy.title).font(.system(size: 13, weight: .bold)).lineLimit(2)
+                                Spacer()
+                                Text(clock(incident.ts)).font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(.tertiary)
+                            }
+                            securityAssessmentGrid(assessment)
+                            HStack {
+                                Text(L("RESPONSE")).micro(.secondary)
+                                Text(assessment.disposition).font(.system(size: 11)).foregroundStyle(.secondary)
+                                Spacer()
+                                Text(L("View evidence")).font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
+                            }
+                        }.padding(11).background(panel, in: RoundedRectangle(cornerRadius: 9))
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(incidentColor(incident.severity).opacity(0.45)))
+                    }.buttonStyle(.plain)
+                }
+            }
+        }
+    }
+
     private func projectBrief(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
                               intelligence: ProjectIntelligenceSnapshot,
                               projectIncidents: [SecurityIncident]) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
         HStack(alignment: .top, spacing: 10) {
             VStack(alignment: .leading, spacing: 7) {
                 Text(L("PROJECT BRIEF")).micro(cyan)
@@ -750,10 +857,32 @@ struct AgentOperationsCenterView: View {
             }.frame(maxWidth: .infinity, alignment: .leading)
             projectBriefMetric(L("CAPABILITIES"), "\(intelligence.capabilities.count)", cyan)
             projectBriefMetric(L("FILES SEEN"), "\(intelligence.observedFileCount)", .blue)
+            projectBriefMetric(L("SYMBOLS"), "\(intelligence.indexedSymbolCount)", .purple)
             projectBriefMetric(L("Memory").uppercased(), "\(intelligence.memoryReads)R · \(intelligence.memoryWrites)W", cyan)
             projectBriefMetric(L("DRIFT"), "\(intelligence.drift.filter { $0.severity != .aligned }.count)",
                                intelligence.drift.contains { $0.severity == .conflict } ? .red : amber)
         }.padding(13).background(raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
+            .overlay(alignment: .bottomLeading) {
+                if let engine = intelligence.indexEngine {
+                    Text(engine.uppercased()).font(.system(size: 9, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(.tertiary).padding(.leading, 13).padding(.bottom, 4)
+                }
+            }
+        if intelligence.atlasEventCount > 0 {
+            VStack(alignment: .leading, spacing: 3) {
+                HStack(spacing: 6) {
+                    Image(systemName: "square.stack.3d.up.fill").foregroundStyle(.purple)
+                    Text("ATLAS PROJECT EVIDENCE").font(.system(size: 9, weight: .bold, design: .monospaced))
+                    Text("\(intelligence.atlasEventCount) events").font(.system(size: 10)).foregroundStyle(.secondary)
+                    Spacer()
+                    if intelligence.atlasLastFailure != nil { labelChip("REVIEW", color: amber) }
+                }
+                Text(intelligence.atlasLastFailure ?? "Atlas project lifecycle and agent binding events are available in evidence.")
+                    .font(.system(size: 11)).foregroundStyle(intelligence.atlasLastFailure == nil ? .secondary : amber)
+                    .lineLimit(2)
+            }.padding(9).background(panel, in: RoundedRectangle(cornerRadius: 8))
+        }
+        }
     }
 
     private func projectBriefMetric(_ title: String, _ value: String, _ color: Color) -> some View {
@@ -1039,25 +1168,201 @@ struct AgentOperationsCenterView: View {
     }
 
     private var globalSecurityView: some View {
-        LazyVStack(spacing: 9) {
-            if scopedIncidents.isEmpty { empty("No security story requires attention in the live window") }
-            ForEach(scopedIncidents.filter { $0.severity != "info" }) { incident in
+        let visible = scopedIncidents.filter { $0.severity != "info" }
+        return LazyVStack(alignment: .leading, spacing: 12) {
+            if let analysis = semanticAnalyzer.historicalAnalysis {
+                aiHistoricalFindings(analysis)
+            }
+            if visible.isEmpty {
+                empty(language.language == .english
+                    ? "No action is needed in the live window"
+                    : "当前实时范围内没有需要处理的风险")
+            } else {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(language.language == .english ? "WHAT NEEDS YOUR ATTENTION" : "需要你关注的事情")
+                        .font(.system(size: 12, weight: .bold)).foregroundStyle(cyan)
+                    Text(language.language == .english
+                         ? "Start with the decision. Open an item only when you need its technical evidence."
+                         : "先看结论和建议；需要核实时，再打开技术证据。")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }.padding(.bottom, 2)
+            }
+            ForEach(visible) { incident in
+                let copy = SecurityIncidentPresentation.make(incident, chinese: language.language == .simplifiedChinese)
+                let assessment = SecurityIncidentAssessment.make(incident, chinese: language.language == .simplifiedChinese)
                 Button { onIncident(incident) } label: {
-                    HStack(alignment: .top, spacing: 10) {
+                    HStack(alignment: .top, spacing: 12) {
                         Image(systemName: "exclamationmark.shield.fill")
-                            .foregroundStyle(incidentColor(incident.severity)).font(.system(size: 18))
-                        VStack(alignment: .leading, spacing: 4) {
-                            Text(incident.title).font(.system(size: 14, weight: .bold))
-                            Text(incident.summary).font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
-                            Text("\(formattedAgentName(incident.agent ?? "Unknown Agent")) · \(clock(incident.ts)) · \(incident.events.count) evidence records")
-                                .font(.system(size: 11)).foregroundStyle(.tertiary)
+                            .foregroundStyle(incidentColor(incident.severity)).font(.system(size: 20))
+                            .frame(width: 26)
+                        VStack(alignment: .leading, spacing: 9) {
+                            HStack(spacing: 8) {
+                                Text(copy.title).font(.system(size: 15, weight: .bold)).lineLimit(2)
+                                Spacer(minLength: 8)
+                                labelChip(copy.status.uppercased(), color: incidentColor(incident.severity))
+                            }
+                            securityAssessmentGrid(assessment)
+                            securityExplanationRow(language.language == .english ? "RESPONSE" : "处置建议",
+                                                   assessment.disposition, icon: "checklist")
+                            HStack(spacing: 7) {
+                                Text("\(formattedAgentName(incident.agent ?? (language.language == .english ? "Unknown Agent" : "未识别智能体"))) · \(clock(incident.ts))")
+                                Text("·")
+                                Text(copy.confidence)
+                                Spacer()
+                                Text(language.language == .english ? "View evidence" : "查看证据")
+                                    .fontWeight(.semibold).foregroundStyle(cyan)
+                                Image(systemName: "chevron.right").foregroundStyle(cyan)
+                            }.font(.system(size: 11)).foregroundStyle(.tertiary)
                         }
-                        Spacer()
-                        labelChip(incident.severity.uppercased(), color: incidentColor(incident.severity))
-                        Image(systemName: "chevron.right").foregroundStyle(.secondary)
-                    }.padding(13).background(panel, in: RoundedRectangle(cornerRadius: 10))
+                    }.padding(15).background(panel, in: RoundedRectangle(cornerRadius: 10))
                         .overlay(RoundedRectangle(cornerRadius: 10).stroke(incidentColor(incident.severity).opacity(0.55)))
                 }.buttonStyle(HoverCardButtonStyle())
+            }
+        }
+    }
+
+    private func securityAssessmentGrid(_ assessment: SecurityIncidentAssessment) -> some View {
+        LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading),
+                            GridItem(.flexible(), alignment: .topLeading)], spacing: 8) {
+            ForEach(assessment.fields) { field in
+                VStack(alignment: .leading, spacing: 3) {
+                    HStack(spacing: 5) {
+                        Circle().fill(assessmentColor(field.level)).frame(width: 6, height: 6)
+                        Text(field.label.uppercased())
+                            .font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                        Text(assessmentLevel(field.level))
+                            .font(.system(size: 8, weight: .semibold))
+                            .foregroundStyle(assessmentColor(field.level))
+                    }
+                    Text(field.value).font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(.secondary).lineLimit(3)
+                }
+                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                .background(raised, in: RoundedRectangle(cornerRadius: 7))
+            }
+        }
+    }
+
+    private func assessmentColor(_ level: SecurityIncidentAssessment.EvidenceLevel) -> Color {
+        switch level { case .confirmed: return green; case .inferred: return amber; case .unknown: return .gray }
+    }
+
+    private func assessmentLevel(_ level: SecurityIncidentAssessment.EvidenceLevel) -> String {
+        switch level {
+        case .confirmed: return language.language == .english ? "CONFIRMED" : "已确认"
+        case .inferred: return language.language == .english ? "INFERRED" : "关联推断"
+        case .unknown: return language.language == .english ? "UNKNOWN" : "未知"
+        }
+    }
+
+    private var aiHistoryControls: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(language.language == .english ? "AI HISTORICAL REVIEW" : "AI 历史安全复核")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+                    Text(language.language == .english
+                         ? "Two-pass review: discovery first, independent llm_self_examine second."
+                         : "两阶段复核：先发现风险，再由独立的 llm_self_examine 二次审查。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button {
+                    guard semanticAnalyzer.canStartHistoricalAnalysis() else { return }
+                    eventStore.loadHistoricalSecurityEvidence { result in
+                        switch result {
+                        case .success(let rows):
+                            Task { await semanticAnalyzer.analyzeHistory(rows, policies: alertPolicyStore.policies) }
+                        case .failure(let error): semanticAnalyzer.lastError = error.localizedDescription
+                        }
+                    }
+                } label: {
+                    Label(semanticAnalyzer.analyzingHistory
+                          ? (language.language == .english ? "Analyzing…" : "分析中…")
+                          : (language.language == .english ? "Analyze history" : "分析历史"),
+                          systemImage: "brain.head.profile")
+                }.buttonStyle(.borderedProminent).tint(cyan)
+                    .disabled(!semanticAnalyzer.configured || semanticAnalyzer.analyzingHistory)
+            }
+            if let error = semanticAnalyzer.lastError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11)).foregroundStyle(amber)
+            } else if semanticAnalyzer.configured {
+                Text("\(semanticAnalyzer.model) · API configuration ready")
+                    .font(.system(size: 10, design: .monospaced)).foregroundStyle(green)
+            } else {
+                Text(language.language == .english
+                     ? "Configure and verify an analysis model before scanning history."
+                     : "请先配置并验证分析模型，再扫描历史证据。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+        }.padding(13).background(raised, in: RoundedRectangle(cornerRadius: 10))
+    }
+
+    private func aiHistoricalFindings(_ analysis: HistoricalSecurityAnalysis) -> some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text(language.language == .english ? "HISTORICAL AI FINDINGS" : "AI 历史发现")
+                    .font(.system(size: 11, weight: .bold)).foregroundStyle(.purple)
+                Spacer()
+                Text("\(analysis.findings.count) findings · \(analysis.rules.count) rules · \(analysis.examinationPasses ?? 0) passes")
+                    .font(.system(size: 10)).foregroundStyle(.secondary)
+            }
+            ForEach(analysis.findings) { finding in
+                VStack(alignment: .leading, spacing: 6) {
+                    HStack {
+                        Text(finding.title).font(.system(size: 14, weight: .bold))
+                        Spacer()
+                        labelChip(finding.severity.uppercased(), color: incidentColor(finding.severity))
+                    }
+                    Text(finding.summary).font(.system(size: 12)).foregroundStyle(.secondary)
+                    Text(finding.recommendedAction).font(.system(size: 12, weight: .semibold))
+                    HStack {
+                        Text("llm_self_examine · \(finding.llmSelfExamine.verdict)")
+                        Text("· \(Int(finding.llmSelfExamine.confidence * 100))%")
+                        Text("· \(finding.evidenceEventIds.count) evidence")
+                    }.font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary)
+                    Text(finding.llmSelfExamine.rationale).font(.system(size: 11)).foregroundStyle(.secondary)
+                }.padding(13).background(panel, in: RoundedRectangle(cornerRadius: 10))
+                    .overlay(RoundedRectangle(cornerRadius: 10).stroke(Color.purple.opacity(0.5)))
+            }
+            DisclosureGroup {
+                VStack(alignment: .leading, spacing: 8) {
+                    ForEach(analysis.rules) { rule in
+                        VStack(alignment: .leading, spacing: 5) {
+                            HStack(spacing: 8) {
+                                Text(rule.name).font(.system(size: 12, weight: .semibold))
+                                labelChip(rule.origin == "built_in"
+                                          ? (language.language == .english ? "BUILT-IN" : "内置")
+                                          : (language.language == .english ? "AI PROPOSED" : "AI 建议"),
+                                          color: rule.origin == "built_in" ? cyan : .purple)
+                                Spacer()
+                                Text("\(rule.llmSelfExamine.verdict) · \(Int(rule.llmSelfExamine.confidence * 100))%")
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(rule.llmSelfExamine.verdict == "rejected" ? amber : green)
+                            }
+                            Text(rule.condition).font(.system(size: 11)).foregroundStyle(.secondary)
+                            Text(rule.llmSelfExamine.rationale).font(.system(size: 10)).foregroundStyle(.tertiary)
+                        }
+                        .padding(10)
+                        .background(raised, in: RoundedRectangle(cornerRadius: 8))
+                    }
+                }.padding(.top, 8)
+            } label: {
+                Text(language.language == .english
+                     ? "Rule self-examination (\(analysis.rules.count))"
+                     : "规则自检（\(analysis.rules.count)）")
+                    .font(.system(size: 12, weight: .semibold))
+            }
+        }
+    }
+
+    private func securityExplanationRow(_ label: String, _ value: String, icon: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Image(systemName: icon).font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 14)
+            VStack(alignment: .leading, spacing: 2) {
+                Text(label).font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                Text(value).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
         }
     }

@@ -115,6 +115,10 @@ final class EventStore: ObservableObject {
         events.filter { calendar.isDate($0.ts, inSameDayAs: date) }
     }
 
+    func refreshAlertPolicies() {
+        scheduleDerivedProjection(events: events)
+    }
+
     func loadSession(_ sessionId: String,
                      completion: @escaping (Result<AgentSessionSnapshot, Error>) -> Void) {
         guard let database else {
@@ -134,6 +138,111 @@ final class EventStore: ObservableObject {
             }
             DispatchQueue.main.async { completion(result) }
         }
+    }
+
+    func loadHistoricalSecurityEvidence(limit: Int = 1_500,
+                                        completion: @escaping (Result<[GuardEvent], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable)); return
+        }
+        persistenceQueue.async {
+            let result = Result { try database.historicalSecurityCandidates(limit: limit) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func loadProjectHistory(sessionIDs: [String], limitPerSession: Int = 500,
+                            completion: @escaping (Result<[GuardEvent], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable)); return
+        }
+        persistenceQueue.async {
+            let result = Result { try database.projectEvidence(sessionIDs: sessionIDs, limitPerSession: limitPerSession) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func findFeatureProvenance(projectID: String, query: String, limit: Int = 20,
+                               completion: @escaping (Result<[FeatureProvenanceRecord], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable)); return
+        }
+        persistenceQueue.async {
+            let result = Result {
+                try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                return FeatureProvenanceIndex.search(query: query, projectID: projectID,
+                                                     events: try database.agentEvents(projectID: projectID),
+                                                     limit: limit)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func loadCodeChanges(projectID: String, path: String? = nil, limit: Int = 2_000,
+                         completion: @escaping (Result<[IndexedCodeChange], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable)); return
+        }
+        persistenceQueue.async {
+            let result = Result {
+                try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                return try database.codeChanges(projectID: projectID, path: path, limit: limit)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func loadChangeSets(projectID: String, limit: Int = 500,
+                        completion: @escaping (Result<[IndexedChangeSet], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable)); return
+        }
+        persistenceQueue.async {
+            let result = Result {
+                try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                return try database.changeSets(projectID: projectID, limit: limit)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func findFeatureProvenance(projectID: String, query: String,
+                               using analyzer: SemanticAnalyzer,
+                               limit: Int = 20) async throws -> [FeatureProvenanceRecord] {
+        let understanding = await analyzer.understandFeatureQuery(query)
+        guard let database else { throw EventStoreReadError.databaseUnavailable }
+        return try await withCheckedThrowingContinuation { continuation in
+            persistenceQueue.async {
+                do {
+                    try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                    let records = FeatureProvenanceIndex.search(
+                        query: query, projectID: projectID,
+                        events: try database.agentEvents(projectID: projectID),
+                        additionalTerms: understanding?.searchTerms ?? [], limit: limit)
+                    continuation.resume(returning: records)
+                } catch {
+                    continuation.resume(throwing: error)
+                }
+            }
+        }
+    }
+
+    nonisolated private static func restoreCanonicalProjectHistoryIfNeeded(
+        projectID: String, database: EvidenceDatabase
+    ) throws {
+        guard try database.agentEvents(projectID: projectID, limit: 1).isEmpty else { return }
+        let legacy = try database.legacyProjectEvents(projectID: projectID)
+        for (sessionID, rows) in Dictionary(grouping: legacy.filter { $0.sessionId != nil },
+                                             by: { $0.sessionId! }) {
+            let canonical = LegacyGuardEventAdapter.project(rows, projectID: projectID,
+                startingSequence: try database.nextAgentEventSequence(sessionID: sessionID) - 1)
+            try database.appendAgentEvents(canonical)
+            try database.upsertCodeChanges(CodeChangeIndexer.build(events: canonical))
+        }
+        let changes = try database.codeChanges(projectID: projectID)
+        try database.replaceChangeSets(projectID: projectID,
+            values: ChangeSetIndexer.build(projectID: projectID,
+                events: try database.agentEvents(projectID: projectID), changes: changes))
     }
 
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {
@@ -177,6 +286,41 @@ final class EventStore: ObservableObject {
             }
             persistenceQueue.async { [weak self] in
                 do {
+                    let grouped = Dictionary(grouping: evidence.filter { $0.sessionId != nil },
+                                             by: { $0.sessionId! })
+                    for (sessionID, sessionEvidence) in grouped {
+                        let session = AgentSessionSnapshot.build(from: sessionEvidence).first
+                        let projectID = Self.canonicalProjectID(session: session, sessionID: sessionID)
+                        let next = try database.nextAgentEventSequence(sessionID: sessionID)
+                        let canonical = LegacyGuardEventAdapter.project(
+                            sessionEvidence, projectID: projectID, startingSequence: next - 1)
+                        try database.appendAgentEvents(canonical)
+                        if GitCheckpointIntegration.shouldInspect(sessionEvidence),
+                           let workspace = session?.workspace,
+                           let repository = GitRepositoryInspector.capture(workspace: workspace) {
+                            let sessionEvents = try database.agentEvents(sessionID: sessionID)
+                            let existingHashes = Set(sessionEvents.compactMap { event -> String? in
+                                guard case let .checkpoint(value) = event.payload else { return nil }
+                                return value.commitHash
+                            })
+                            let checkpointEvents = GitCheckpointIntegration.checkpointEvents(
+                                projectID: repository.repositoryRoot,
+                                agentID: session?.agent ?? sessionEvidence.compactMap(\.agent).last ?? "unknown",
+                                sessionID: sessionID,
+                                turnID: sessionEvidence.compactMap(\.turnId).last,
+                                events: sessionEvents,
+                                commits: GitCommitInspector.recent(repositoryRoot: repository.repositoryRoot, limit: 5),
+                                existingCommitHashes: existingHashes,
+                                startingSequence: try database.nextAgentEventSequence(sessionID: sessionID))
+                            try database.appendAgentEvents(checkpointEvents)
+                        }
+                        try database.upsertCodeChanges(CodeChangeIndexer.build(
+                            events: try database.agentEvents(sessionID: sessionID)))
+                        let projectChanges = try database.codeChanges(projectID: projectID)
+                        try database.replaceChangeSets(projectID: projectID,
+                            values: ChangeSetIndexer.build(projectID: projectID,
+                                events: try database.agentEvents(projectID: projectID), changes: projectChanges))
+                    }
                     try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
                     try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence),
                                                     turns: affectedTurns)
@@ -211,6 +355,13 @@ final class EventStore: ObservableObject {
             guard let session = event.sessionId, let turn = event.turnId else { return false }
             return keys.contains("\(session):\(turn)")
         }
+    }
+
+    nonisolated private static func canonicalProjectID(session: AgentSessionSnapshot?,
+                                                       sessionID: String) -> String {
+        guard let raw = session?.workspace?.trimmingCharacters(in: .whitespacesAndNewlines),
+              !raw.isEmpty, raw != "-" else { return "unattributed:\(sessionID)" }
+        return URL(fileURLWithPath: raw).standardizedFileURL.path
     }
 
     func refreshCollectorHealth(publish: Bool) {

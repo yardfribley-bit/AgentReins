@@ -36,23 +36,16 @@ final class LiveDashboardViewModel: ObservableObject {
         schedulePublish()
     }
 
-    /// Network incidents touching an untrusted destination are the one class
-    /// of finding that must not stay buried in the timeline: surface them as
-    /// a system notification the first time they are observed.
+    /// Notify only policy-produced findings. Unknown telemetry is evidence,
+    /// not a security conclusion, and remains visible in the Network view.
     private func notifySecurityIncidents(_ incidents: [SecurityIncident]) {
         for incident in incidents
-        where ((incident.primary.kind == "network" && incident.networkDestination.needsAttention)
-               || incident.primary.kind == "external-content" || incident.primary.kind == "alert")
+        where (incident.primary.kind == "external-content"
+               || (incident.primary.kind == "alert" && incident.primary.action == "needs_review"))
             && !notifiedIncidentIDs.contains(incident.id) {
             notifiedIncidentIDs.insert(incident.id)
             if notifiedIncidentIDs.count > 200 { notifiedIncidentIDs.removeAll() }
-            if incident.primary.kind == "external-content" || incident.primary.kind == "alert" {
-                AppNotifier.send(title: incident.title, body: incident.summary)
-            } else {
-                let site = incident.primary.remoteDomain ?? incident.primary.remoteHost ?? "unknown destination"
-                AppNotifier.send(title: "Untrusted website accessed · \(site)",
-                                 body: incident.networkDestination.reason)
-            }
+            AppNotifier.send(title: incident.title, body: incident.summary)
         }
     }
 

@@ -496,6 +496,25 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(try database.events(sessionId: "session-a").map(\.id), [first.id, second.id])
     }
 
+    func testProjectHistoryIsBoundedPerSessionAndExcludesOtherProjects() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let a1 = GuardEvent(kind: "alert", ruleId: "old", path: "/project-a", command: nil,
+            agent: "codex", op: "policy", severity: "high", ts: Date(timeIntervalSince1970: 1),
+            action: "needs_review", sessionId: "session-a")
+        let a2 = GuardEvent(kind: "alert", ruleId: "new", path: "/project-a", command: nil,
+            agent: "codex", op: "policy", severity: "high", ts: Date(timeIntervalSince1970: 2),
+            action: "needs_review", sessionId: "session-a")
+        let other = GuardEvent(kind: "alert", ruleId: "other", path: "/project-b", command: nil,
+            agent: "cursor", op: "policy", severity: "high", ts: Date(timeIntervalSince1970: 3),
+            action: "needs_review", sessionId: "session-b")
+        try database.append([a1, a2, other])
+
+        XCTAssertEqual(try database.projectEvidence(sessionIDs: ["session-a"], limitPerSession: 1).map(\.id), [a2.id])
+    }
+
     func testEvidenceDatabaseAcceptsOneHundredThousandEventsWithinBudget() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -719,6 +738,100 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(findings.allSatisfy { $0.severity == "critical" && $0.action == "needs_review" })
     }
 
+    func testPolicyDetectsPlaintextSSHPasswordInToolArguments() throws {
+        let call = GuardEvent(kind: "tool", ruleId: "workbuddy_Bash",
+            path: "/projects/agentreins",
+            command: "Bash({\"command\":\"SSHPASS='example-secret-123' sshpass -e ssh root@203.0.113.10\"})",
+            agent: "workbuddy", op: "call", severity: "info", ts: Date(), action: "requested",
+            sessionId: "session", turnId: "turn", toolCallId: "ssh-call", toolName: "Bash",
+            source: "agentsight:workbuddy-local", attributionConfidence: .confirmed,
+            attributionMethod: "native Agent tool arguments")
+
+        let findings = AgentPolicyAlertEngine.findings(events: [call])
+        let finding = try XCTUnwrap(findings.first)
+
+        XCTAssertEqual(findings.count, 1)
+        XCTAssertEqual(finding.ruleId, "credential_in_tool_arguments")
+        XCTAssertEqual(finding.severity, "critical")
+        XCTAssertEqual(finding.action, "needs_review")
+        XCTAssertFalse(finding.command?.contains("example-secret-123") == true)
+    }
+
+    func testOpenRouterModelCatalogDecodesFriendlyModelMetadata() throws {
+        let data = Data(#"{"data":[{"id":"deepseek/deepseek-chat","name":"DeepSeek Chat","context_length":64000,"pricing":{"prompt":"0.0000002","completion":"0.0000008"},"description":"Test"}]}"#.utf8)
+
+        let model = try XCTUnwrap(OpenRouterModelCatalog.decode(data).first)
+
+        XCTAssertEqual(model.id, "deepseek/deepseek-chat")
+        XCTAssertEqual(model.name, "DeepSeek Chat")
+        XCTAssertEqual(model.contextLabel, "64K context")
+        XCTAssertTrue(model.priceLabel.contains("Input $0.200"))
+    }
+
+    func testHistoricalRiskPriorityKeepsOldCredentialToolCallAheadOfRecentNoise() {
+        let oldCredential = GuardEvent(kind: "tool", ruleId: "call", path: "/project",
+            command: "SSHPASS='example-secret-123' sshpass -e ssh root@203.0.113.10",
+            agent: "workbuddy", op: "call", severity: "info",
+            ts: Date(timeIntervalSince1970: 100), action: "requested")
+        let recentNoise = GuardEvent(kind: "tool", ruleId: "call", path: "/project",
+            command: "ls -la", agent: "workbuddy", op: "call", severity: "info",
+            ts: Date(timeIntervalSince1970: 10_000), action: "requested")
+
+        XCTAssertGreaterThan(SemanticAnalyzer.historicalRiskScore(oldCredential),
+                             SemanticAnalyzer.historicalRiskScore(recentNoise))
+    }
+
+    func testSecurityAssessmentDoesNotTurnLocalCredentialEvidenceIntoConfirmedExfiltration() throws {
+        let result = GuardEvent(kind: "tool", ruleId: "credential_in_tool_result", path: "/project",
+            command: nil, agent: "workbuddy", op: "result", severity: "critical", ts: Date(),
+            action: "needs_review", sessionId: "s", turnId: "t", toolCallId: "c",
+            modelResponse: "password=[REDACTED]", toolName: "shell", source: "policy")
+        let incident = try XCTUnwrap(SecurityIncident.correlate([result]).first)
+
+        let assessment = SecurityIncidentAssessment.make(incident, chinese: true)
+        let destination = try XCTUnwrap(assessment.fields.first { $0.id == "destination" })
+
+        XCTAssertEqual(destination.level, .confirmed)
+        XCTAssertTrue(destination.value.contains("本地工具会话"))
+        XCTAssertTrue(destination.value.contains("未发现外发证据"))
+        XCTAssertFalse(destination.value.contains("已外泄"))
+    }
+
+    func testDisabledAlertPolicySuppressesFindingWithoutDeletingEvidence() {
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/projects/app", command: "cat /tmp/.env",
+            agent: "workbuddy", op: "call", severity: "info", ts: Date(), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "Bash")
+        let read = GuardEvent(kind: "file", ruleId: "read", path: "/tmp/.env", command: nil,
+            agent: "workbuddy", op: "read", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "Bash")
+        var policies = AlertPolicy.defaults
+        let index = policies.firstIndex { $0.id == "cross_project_sensitive_file_read" }!
+        policies[index].enabled = false
+
+        XCTAssertTrue(AgentPolicyAlertEngine.findings(events: [call, read], policies: policies).isEmpty)
+        XCTAssertEqual([call, read].count, 2)
+    }
+
+    func testAlertPolicyAppliesSeverityNotificationAndExcludedPath() throws {
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/projects/app", command: "cat /shared/file.txt",
+            agent: "codex", op: "call", severity: "info", ts: Date(), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "Shell")
+        let read = GuardEvent(kind: "file", ruleId: "read", path: "/shared/file.txt", command: nil,
+            agent: "codex", op: "read", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "Shell")
+        var policies = AlertPolicy.defaults
+        let index = policies.firstIndex { $0.id == "cross_project_file_read" }!
+        policies[index].severity = "medium"
+        policies[index].notify = false
+
+        let finding = try XCTUnwrap(AgentPolicyAlertEngine.findings(events: [call, read], policies: policies).first)
+        XCTAssertEqual(finding.severity, "medium")
+        XCTAssertEqual(finding.action, "recorded")
+
+        policies[index].excludedPaths = ["/shared"]
+        XCTAssertTrue(AgentPolicyAlertEngine.findings(events: [call, read], policies: policies).isEmpty)
+    }
+
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
         setenv("AGENTREINS_TEST_SECRET", "must-not-enter-process-evidence", 1)
         defer { unsetenv("AGENTREINS_TEST_SECRET") }
@@ -880,6 +993,37 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(external.needsAttention)
         XCTAssertEqual(geminiWeb.kind, .modelProvider)
         XCTAssertEqual(grokWeb.kind, .modelProvider)
+    }
+
+    func testUnknownNetworkEvidenceDoesNotBecomeSecurityIncident() {
+        let socket = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+            command: nil, agent: "workbuddy", op: "connect", severity: "medium",
+            ts: Date(), action: "observed", source: "lsof-network",
+            attributionConfidence: .inferred, attributionMethod: "process tree",
+            processId: 42, remoteHost: "2409:8c20:818:115::b4", remotePort: 443)
+
+        let projection = EventDerivedProjection.build(events: [socket])
+
+        XCTAssertTrue(projection.incidents.isEmpty)
+        XCTAssertEqual(projection.sessions.count, 0)
+    }
+
+    func testPolicyFindingIsTheSecurityIncidentAdmissionBoundary() throws {
+        let now = Date()
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/tmp/project",
+            command: "cat ~/.ssh/id_rsa", agent: "workbuddy", op: "call", severity: "info",
+            ts: now, action: "started", sessionId: "s", turnId: "t", toolCallId: "c")
+        let read = GuardEvent(kind: "file", ruleId: "read", path: "/Users/test/.ssh/id_rsa",
+            command: nil, agent: "workbuddy", op: "read", severity: "info",
+            ts: now.addingTimeInterval(0.1), action: "observed", sessionId: "s", turnId: "t",
+            toolCallId: "c", attributionConfidence: .confirmed)
+
+        let projection = EventDerivedProjection.build(events: [read, call])
+        let incident = try XCTUnwrap(projection.incidents.first)
+
+        XCTAssertEqual(projection.incidents.count, 1)
+        XCTAssertEqual(incident.primary.kind, "alert")
+        XCTAssertEqual(incident.primary.ruleId, "cross_project_sensitive_file_read")
     }
 
     func testNetworkFlowEvidenceSeparatesModelWebSSHAndUnknownTraffic() throws {
@@ -2308,10 +2452,69 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(complete.files, ["README.md", "Sources/App.swift", "Sources/Feature.swift"])
         XCTAssertFalse(complete.files.contains("credentials.txt"))
         XCTAssertTrue(complete.complete)
+        XCTAssertEqual(complete.engine, .structural)
+        XCTAssertEqual(complete.documents.first { $0.rel == "Sources/App.swift" }?.language, "Swift")
+        XCTAssertEqual(complete.documents.first { $0.rel == "Sources/App.swift" }?.symbols.first?.name, "App")
+        XCTAssertGreaterThanOrEqual(complete.documents.reduce(0) { $0 + $1.symbols.count }, 2)
 
         let limited = try ProjectIndexer.index(path: root.path, maximumFiles: 2)
         XCTAssertEqual(limited.files.count, 2)
         XCTAssertFalse(limited.complete)
+    }
+
+    func testProjectIndexerImportsAtlasCodebaseDocumentsWhenPresent() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-atlas-index-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root.appendingPathComponent("Sources"),
+            withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: root.appendingPathComponent(".atlas/codebase-index"),
+            withIntermediateDirectories: true)
+        try runGit(["init", "-q"], at: root)
+        try "struct Runtime {}\n".write(to: root.appendingPathComponent("Sources/Runtime.swift"),
+            atomically: true, encoding: .utf8)
+        try runGit(["add", "Sources/Runtime.swift"], at: root)
+        let atlas = #"{"builtAtMs":1,"docs":[{"rel":"Sources/Runtime.swift","absPath":"/tmp/Runtime.swift","language":"Swift","imports":["Foundation"],"symbols":[{"name":"Runtime","kind":"struct","line":1}],"hash":"abc","mtimeMs":1,"summary":"Owns the runtime.","text":"Runtime","importRank":7}]}"#
+        try atlas.write(to: root.appendingPathComponent(".atlas/codebase-index/docs.json"),
+            atomically: true, encoding: .utf8)
+
+        let snapshot = try ProjectIndexer.index(path: root.path, maximumFiles: 10)
+
+        XCTAssertEqual(snapshot.engine, .atlasImport)
+        XCTAssertEqual(snapshot.documents.first?.summary, "Owns the runtime.")
+        XCTAssertEqual(snapshot.documents.first?.importRank, 7)
+    }
+
+    func testProjectStructuralIndexerSupportsMultipleLanguageFamilies() throws {
+        let root = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-multilang-index-test-\(UUID().uuidString)")
+        defer { try? FileManager.default.removeItem(at: root) }
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let fixtures: [String: String] = [
+            "main.go": "package main\nimport \"net/http\"\ntype Server struct {}\nfunc Start() {}\n",
+            "worker.py": "from pathlib import Path\nclass Worker:\n    pass\ndef run():\n    pass\n",
+            "service.ts": "import { readFile } from 'node:fs'\nexport class Service {}\nexport function start() {}\n",
+            "lib.rs": "use std::path::Path;\npub struct Engine;\npub fn run() {}\n",
+            "Bridge.swift": "import Foundation\nactor Bridge {}\n",
+            "engine.cpp": "#include <vector>\nclass Engine {};\n",
+            "Controller.kt": "import java.time.Instant\nclass Controller\nfun start() {}\n"
+        ]
+        for (path, source) in fixtures {
+            try source.write(to: root.appendingPathComponent(path), atomically: true, encoding: .utf8)
+        }
+
+        let documents = ProjectStructuralIndexer.scan(root: root, files: fixtures.keys.sorted())
+
+        XCTAssertEqual(Set(documents.map(\.language)),
+            Set(["Go", "Python", "TypeScript", "Rust", "Swift", "C++", "JVM"]))
+        XCTAssertTrue(documents.first { $0.rel == "main.go" }?.symbols.contains { $0.name == "Server" } == true)
+        XCTAssertTrue(documents.first { $0.rel == "main.go" }?.imports.contains("net/http") == true)
+        XCTAssertTrue(documents.first { $0.rel == "worker.py" }?.symbols.contains { $0.name == "Worker" } == true)
+        XCTAssertTrue(documents.first { $0.rel == "service.ts" }?.symbols.contains { $0.name == "Service" } == true)
+        XCTAssertTrue(documents.first { $0.rel == "lib.rs" }?.symbols.contains { $0.name == "Engine" } == true)
+        XCTAssertTrue(documents.first { $0.rel == "Bridge.swift" }?.symbols.contains { $0.name == "Bridge" } == true)
+        XCTAssertTrue(documents.first { $0.rel == "engine.cpp" }?.imports.contains("vector") == true)
+        XCTAssertTrue(documents.first { $0.rel == "Controller.kt" }?.symbols.contains { $0.name == "Controller" } == true)
     }
 
     func testAgentDashboardProjectionScopesSelectedAgentEvidence() throws {
