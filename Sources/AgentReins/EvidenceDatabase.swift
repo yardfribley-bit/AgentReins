@@ -151,6 +151,52 @@ final class EvidenceDatabase: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS memory_commit_turn ON memory_commits(session_id,turn_id,observed_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS memory_commit_agent ON memory_commits(agent,observed_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS agent_event_stream (
+              event_id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              agent_id TEXT NOT NULL,
+              session_id TEXT NOT NULL,
+              turn_id TEXT,
+              sequence INTEGER NOT NULL,
+              occurred_at REAL NOT NULL,
+              observed_at REAL NOT NULL,
+              source TEXT NOT NULL,
+              confidence TEXT NOT NULL,
+              payload BLOB NOT NULL,
+              payload_sha256 TEXT NOT NULL,
+              UNIQUE(session_id, sequence)
+            ) WITHOUT ROWID
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS agent_event_project_time ON agent_event_stream(project_id,occurred_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS agent_event_session_sequence ON agent_event_stream(session_id,sequence)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS code_change_index (
+              change_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+              session_id TEXT NOT NULL, turn_id TEXT, path TEXT NOT NULL, operation TEXT NOT NULL,
+              started_at REAL NOT NULL, last_observed_at REAL NOT NULL, attribution TEXT NOT NULL,
+              payload BLOB NOT NULL, payload_sha256 TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS code_change_project_time ON code_change_index(project_id,last_observed_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS code_change_project_path ON code_change_index(project_id,path,last_observed_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS code_change_session_turn ON code_change_index(session_id,turn_id,last_observed_at)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS change_set_index (
+              change_set_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, title TEXT NOT NULL,
+              started_at REAL NOT NULL, last_activity_at REAL NOT NULL, state TEXT NOT NULL,
+              confidence TEXT NOT NULL, payload BLOB NOT NULL, payload_sha256 TEXT NOT NULL
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS change_set_project_time ON change_set_index(project_id,last_activity_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS requirement_documents (
+              document_id TEXT PRIMARY KEY, change_set_id TEXT NOT NULL, version INTEGER NOT NULL,
+              generated_at REAL NOT NULL, model TEXT NOT NULL, payload BLOB NOT NULL,
+              payload_sha256 TEXT NOT NULL, UNIQUE(change_set_id,version)
+            )
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS requirement_document_change_set ON requirement_documents(change_set_id,version DESC)")
     }
 
     deinit { sqlite3_close(handle) }
@@ -283,6 +329,299 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
             try executeUnlocked("COMMIT")
         } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    /// Appends canonical Agent events atomically. The `(session_id, sequence)`
+    /// constraint makes replay idempotent and turns competing payloads for one
+    /// sequence into a visible capture error instead of silently rewriting
+    /// evidence.
+    func appendAgentEvents(_ events: [AgentEventEnvelope]) throws {
+        guard !events.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            let sql = """
+              INSERT OR IGNORE INTO agent_event_stream(event_id,project_id,agent_id,session_id,
+              turn_id,sequence,occurred_at,observed_at,source,confidence,payload,payload_sha256)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+              """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw failure("prepare agent event append")
+            }
+            defer { sqlite3_finalize(statement) }
+            for event in events {
+                let payload = try encoder.encode(event)
+                let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                bind(event.id, at: 1, to: statement)
+                bind(event.projectID, at: 2, to: statement)
+                bind(event.agentID, at: 3, to: statement)
+                bind(event.sessionID, at: 4, to: statement)
+                bindOptional(event.turnID, at: 5, to: statement)
+                sqlite3_bind_int64(statement, 6, Int64(event.sequence))
+                sqlite3_bind_double(statement, 7, event.occurredAt.timeIntervalSince1970)
+                sqlite3_bind_double(statement, 8, event.observedAt.timeIntervalSince1970)
+                bind(event.source.rawValue, at: 9, to: statement)
+                bind(event.confidence.rawValue, at: 10, to: statement)
+                _ = payload.withUnsafeBytes {
+                    sqlite3_bind_blob(statement, 11, $0.baseAddress, Int32(payload.count), SQLITE_TRANSIENT)
+                }
+                bind(digest, at: 12, to: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append agent event") }
+                sqlite3_reset(statement)
+                sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT")
+        } catch {
+            try? executeUnlocked("ROLLBACK")
+            throw error
+        }
+    }
+
+    func agentEvents(projectID: String, limit: Int = 2_000) throws -> [AgentEventEnvelope] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+          SELECT payload FROM agent_event_stream WHERE project_id=?
+          ORDER BY occurred_at ASC, session_id ASC, sequence ASC LIMIT ?
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare agent event read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(projectID, at: 1, to: statement)
+        sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 20_000))))
+        var events: [AgentEventEnvelope] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let event = try? decoder.decode(AgentEventEnvelope.self, from: payload) {
+                events.append(event)
+            }
+        }
+        return events
+    }
+
+    /// On-demand compatibility read used only when a project has no canonical
+    /// event stream yet. It reconstructs the selected project rather than
+    /// loading historical evidence during application startup.
+    func legacyProjectEvents(projectID: String, limit: Int = 5_000) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let root = URL(fileURLWithPath: projectID).standardizedFileURL.path
+        let prefix = root.hasSuffix("/") ? root + "%" : root + "/%"
+        let sql = """
+          SELECT payload FROM (
+            SELECT payload, observed_at, ingested_at FROM evidence_records
+            WHERE json_extract(CAST(payload AS TEXT), '$.sessionId') IS NOT NULL
+              AND (json_extract(CAST(payload AS TEXT), '$.path')=?
+                   OR json_extract(CAST(payload AS TEXT), '$.path') LIKE ?)
+            ORDER BY observed_at DESC, ingested_at DESC LIMIT ?
+          ) ORDER BY observed_at ASC, ingested_at ASC
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare legacy project event read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(root, at: 1, to: statement); bind(prefix, at: 2, to: statement)
+        sqlite3_bind_int(statement, 3, Int32(max(1, min(limit, 20_000))))
+        var result: [GuardEvent] = []; var ids = Set<UUID>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let event = try? decoder.decode(GuardEvent.self, from: data), ids.insert(event.id).inserted {
+                result.append(event)
+            }
+        }
+        return result
+    }
+
+    func agentEvents(sessionID: String) throws -> [AgentEventEnvelope] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = "SELECT payload FROM agent_event_stream WHERE session_id=? ORDER BY sequence ASC"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare session agent event read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionID, at: 1, to: statement)
+        var events: [AgentEventEnvelope] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let event = try? decoder.decode(AgentEventEnvelope.self, from: payload) {
+                events.append(event)
+            }
+        }
+        return events
+    }
+
+    func nextAgentEventSequence(sessionID: String) throws -> UInt64 {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "SELECT COALESCE(MAX(sequence),0)+1 FROM agent_event_stream WHERE session_id=?"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare next agent event sequence")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionID, at: 1, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW else { throw failure("read next agent event sequence") }
+        return UInt64(max(1, sqlite3_column_int64(statement, 0)))
+    }
+
+    func upsertCodeChanges(_ changes: [IndexedCodeChange]) throws {
+        guard !changes.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            let sql = """
+              INSERT INTO code_change_index(change_id,project_id,agent_id,session_id,turn_id,path,
+              operation,started_at,last_observed_at,attribution,payload,payload_sha256)
+              VALUES(?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT(change_id) DO UPDATE SET
+              last_observed_at=excluded.last_observed_at,attribution=excluded.attribution,
+              payload=excluded.payload,payload_sha256=excluded.payload_sha256
+              """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw failure("prepare code change upsert")
+            }
+            defer { sqlite3_finalize(statement) }
+            for change in changes {
+                let payload = try encoder.encode(change)
+                let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                bind(change.id, at: 1, to: statement); bind(change.projectID, at: 2, to: statement)
+                bind(change.agentID, at: 3, to: statement); bind(change.sessionID, at: 4, to: statement)
+                bindOptional(change.turnID, at: 5, to: statement); bind(change.path, at: 6, to: statement)
+                bind(change.operation.rawValue, at: 7, to: statement)
+                sqlite3_bind_double(statement, 8, change.startedAt.timeIntervalSince1970)
+                sqlite3_bind_double(statement, 9, change.lastObservedAt.timeIntervalSince1970)
+                bind(change.attribution.rawValue, at: 10, to: statement)
+                _ = payload.withUnsafeBytes { sqlite3_bind_blob(statement, 11, $0.baseAddress, Int32(payload.count), SQLITE_TRANSIENT) }
+                bind(digest, at: 12, to: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert code change") }
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func codeChanges(projectID: String, path: String? = nil, limit: Int = 2_000) throws -> [IndexedCodeChange] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = path == nil
+            ? "SELECT payload FROM code_change_index WHERE project_id=? ORDER BY last_observed_at DESC LIMIT ?"
+            : "SELECT payload FROM code_change_index WHERE project_id=? AND path=? ORDER BY last_observed_at DESC LIMIT ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare code change read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(projectID, at: 1, to: statement)
+        if let path { bind(path, at: 2, to: statement); sqlite3_bind_int(statement, 3, Int32(max(1, min(limit, 20_000)))) }
+        else { sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 20_000)))) }
+        var result: [IndexedCodeChange] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let value = try? decoder.decode(IndexedCodeChange.self, from: payload) { result.append(value) }
+        }
+        return result
+    }
+
+    func replaceChangeSets(projectID: String, values: [IndexedChangeSet]) throws {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var deletion: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "DELETE FROM change_set_index WHERE project_id=?", -1,
+                                     &deletion, nil) == SQLITE_OK else { throw failure("prepare change set replacement") }
+            bind(projectID, at: 1, to: deletion)
+            guard sqlite3_step(deletion) == SQLITE_DONE else { sqlite3_finalize(deletion); throw failure("delete change sets") }
+            sqlite3_finalize(deletion)
+            let sql = """
+              INSERT INTO change_set_index(change_set_id,project_id,title,started_at,last_activity_at,
+              state,confidence,payload,payload_sha256) VALUES(?,?,?,?,?,?,?,?,?)
+              """
+            var statement: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+                throw failure("prepare change set insert")
+            }
+            defer { sqlite3_finalize(statement) }
+            for value in values {
+                let payload = try encoder.encode(value)
+                let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                bind(value.id, at: 1, to: statement); bind(value.projectID, at: 2, to: statement)
+                bind(value.title, at: 3, to: statement)
+                sqlite3_bind_double(statement, 4, value.startedAt.timeIntervalSince1970)
+                sqlite3_bind_double(statement, 5, value.lastActivityAt.timeIntervalSince1970)
+                bind(value.state.rawValue, at: 6, to: statement)
+                bind(value.groupingConfidence.rawValue, at: 7, to: statement)
+                _ = payload.withUnsafeBytes { sqlite3_bind_blob(statement, 8, $0.baseAddress, Int32(payload.count), SQLITE_TRANSIENT) }
+                bind(digest, at: 9, to: statement)
+                guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("insert change set") }
+                sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func changeSets(projectID: String, limit: Int = 500) throws -> [IndexedChangeSet] {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "SELECT payload FROM change_set_index WHERE project_id=? ORDER BY last_activity_at DESC LIMIT ?"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare change set read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(projectID, at: 1, to: statement); sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 5_000))))
+        var result: [IndexedChangeSet] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let value = try? decoder.decode(IndexedChangeSet.self, from: payload) { result.append(value) }
+        }
+        return result
+    }
+
+    func upsertRequirementDocument(_ value: GeneratedRequirementDocument) throws {
+        lock.lock(); defer { lock.unlock() }
+        let payload = try encoder.encode(value)
+        let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+        let sql = """
+          INSERT INTO requirement_documents(document_id,change_set_id,version,generated_at,model,payload,payload_sha256)
+          VALUES(?,?,?,?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET
+          generated_at=excluded.generated_at,model=excluded.model,payload=excluded.payload,
+          payload_sha256=excluded.payload_sha256
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare requirement document upsert")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(value.id, at: 1, to: statement); bind(value.changeSetID, at: 2, to: statement)
+        sqlite3_bind_int(statement, 3, Int32(value.version))
+        sqlite3_bind_double(statement, 4, value.generatedAt.timeIntervalSince1970)
+        bind(value.model, at: 5, to: statement)
+        _ = payload.withUnsafeBytes { sqlite3_bind_blob(statement, 6, $0.baseAddress, Int32(payload.count), SQLITE_TRANSIENT) }
+        bind(digest, at: 7, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert requirement document") }
+    }
+
+    func requirementDocuments(changeSetID: String) throws -> [GeneratedRequirementDocument] {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "SELECT payload FROM requirement_documents WHERE change_set_id=? ORDER BY version DESC"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare requirement document read")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(changeSetID, at: 1, to: statement)
+        var result: [GeneratedRequirementDocument] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let value = try? decoder.decode(GeneratedRequirementDocument.self, from: data) { result.append(value) }
+        }
+        return result
     }
 
     func rawRecordCount() throws -> Int {
@@ -548,6 +887,67 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
         }
         return result
+    }
+
+    func historicalSecurityCandidates(limit: Int) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+        WITH candidates AS (
+          SELECT payload, observed_at, ingested_at,
+                 ROW_NUMBER() OVER (
+                   PARTITION BY COALESCE(json_extract(CAST(payload AS TEXT), '$.agent'), 'unknown')
+                   ORDER BY observed_at DESC, ingested_at DESC
+                 ) AS agent_rank
+          FROM evidence_records
+          WHERE source LIKE 'agentsight:%' OR source='tool-intent' OR source='policy-engine'
+             OR source='external-content-security' OR source='lsof-network'
+        )
+        SELECT payload FROM candidates WHERE agent_rank <= ?
+        ORDER BY observed_at DESC, ingested_at DESC
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare security history") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(max(1, limit / 5)))
+        var result: [GuardEvent] = []
+        var ids = Set<UUID>()
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let event = try? decoder.decode(GuardEvent.self, from: data), ids.insert(event.id).inserted {
+                result.append(event)
+            }
+        }
+        return result
+    }
+
+    /// Bounded project history used by the project supervisor. Reading is
+    /// explicit and incremental: each known session contributes at most the
+    /// requested number of newest records.
+    func projectEvidence(sessionIDs: [String], limitPerSession: Int = 500) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        guard !sessionIDs.isEmpty else { return [] }
+        let sql = "SELECT payload FROM evidence_records WHERE json_extract(CAST(payload AS TEXT), '$.sessionId')=? ORDER BY observed_at DESC, ingested_at DESC LIMIT ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare project history")
+        }
+        defer { sqlite3_finalize(statement) }
+        var result: [GuardEvent] = []
+        var ids = Set<UUID>()
+        for sessionID in Set(sessionIDs) {
+            sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            bind(sessionID, at: 1, to: statement)
+            sqlite3_bind_int(statement, 2, Int32(max(1, limitPerSession)))
+            while sqlite3_step(statement) == SQLITE_ROW {
+                guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+                let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+                if let event = try? decoder.decode(GuardEvent.self, from: data), ids.insert(event.id).inserted {
+                    result.append(event)
+                }
+            }
+        }
+        return result.sorted { $0.ts > $1.ts }
     }
 
     // MARK: - History review

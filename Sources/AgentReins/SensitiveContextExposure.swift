@@ -56,7 +56,7 @@ enum SensitiveContextExposure {
                 regex: #"(?:sk-[A-Za-z0-9_-]{16,}|(?:api[_ -]?key|access[_ -]?token|secret)[\s\"']*[:=][\s\"']*[A-Za-z0-9_./+\-=]{12,})"#,
                 severity: "critical", validate: { _ in true }),
         Pattern(category: .password,
-                regex: #"(?:password|passwd|pwd|密码)[\s\"']*[:=][\s\"']*[^\s\"']{6,}"#,
+                regex: #"(?:password|passwd|pwd|sshpass|密码)[\s\"']*[:=][\s\"']*[^\s\"']{6,}"#,
                 severity: "high", validate: { _ in true }),
         Pattern(category: .nationalID, regex: #"(?<!\d)\d{17}[0-9Xx](?!\d)"#,
                 severity: "high", validate: { _ in true }),

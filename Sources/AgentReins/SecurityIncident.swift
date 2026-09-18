@@ -179,3 +179,197 @@ struct SecurityIncident: Identifiable, Sendable {
         ["critical": 4, "high": 3, "medium": 2, "info": 1][severity, default: 0]
     }
 }
+
+/// First-layer copy for people who need a decision, not a rule-engine dump.
+/// Raw rule IDs and evidence stay available in the incident detail sheet.
+struct SecurityIncidentPresentation: Sendable {
+    let title: String
+    let whyItMatters: String
+    let recommendedAction: String
+    let status: String
+    let confidence: String
+
+    static func make(_ incident: SecurityIncident, chinese: Bool) -> Self {
+        let agent = (incident.agent?.isEmpty == false ? incident.agent! : (chinese ? "未识别的智能体" : "Unknown agent"))
+        let rules = incident.ruleIDs
+        let sensitiveRead = rules.contains("cross_project_sensitive_file_read")
+        let outsideRead = rules.contains("cross_project_file_read")
+        let credentialResult = rules.contains("credential_in_tool_result")
+        let credentialArguments = rules.contains("credential_in_tool_arguments")
+        let external = incident.primary.kind == "external-content" || rules.contains { $0.hasPrefix("external_content_") }
+        let network = incident.primary.kind == "network"
+
+        let title: String
+        let why: String
+        let action: String
+        if sensitiveRead {
+            title = chinese ? "\(agent) 读取了项目外的敏感文件" : "\(agent) read a sensitive file outside its project"
+            why = chinese ? "文件内容可能包含账号、密钥或服务器配置，并可能进入智能体上下文。" : "The file may contain credentials, keys, or server configuration that could enter the agent context."
+            action = chinese ? "确认这次读取是否必要；如果不必要，请撤销或轮换其中的凭据。" : "Confirm the read was necessary. If not, revoke or rotate any exposed credentials."
+        } else if credentialArguments {
+            title = chinese ? "\(agent) 把凭据放进了工具调用" : "\(agent) placed credentials in a tool call"
+            why = chinese ? "已确认：工具参数匹配了密码、Token 或私钥特征。尚未确认：它是否为真实凭据，以及是否已经发送到模型或中转。" : "Confirmed: a tool argument matched a password, token, or private-key pattern. Not yet confirmed: whether it was real or sent to a model or relay."
+            action = chinese ? "先查看匹配字段和调用链。只有确认是真实凭据并已暴露时才轮换；误报可标记为可信。" : "Inspect the matched field and call chain first. Rotate only if it is a real credential that was exposed; mark false positives as trusted."
+        } else if credentialResult {
+            let tool = incident.events.compactMap(\.toolName).first
+            let toolLabel = tool.map { chinese ? "工具「\($0)」" : "tool “\($0)”" }
+                ?? (chinese ? "工具结果" : "a tool result")
+            title = chinese ? "\(agent) 的\(toolLabel)中出现疑似凭据" : "Possible credentials found in \(agent)'s \(toolLabel)"
+            why = chinese ? "已确认：返回内容匹配了敏感凭据特征并进入本地会话。尚未确认：它是否为真实凭据，以及后续是否进入模型请求或外网连接。" : "Confirmed: returned content matched a credential pattern and entered the local session. Not yet confirmed: whether it was real or later entered a model request or network flow."
+            action = chinese ? "打开证据核对匹配内容和后续数据流。确认真实外泄后再轮换；仅有本地命中时先限制继续传播。" : "Inspect the matched content and downstream data flow. Rotate after confirming real exposure; if it stayed local, first prevent onward propagation."
+        } else if outsideRead {
+            title = chinese ? "\(agent) 读取了当前项目之外的文件" : "\(agent) read a file outside its project"
+            why = chinese ? "这可能是合理依赖，也可能表示智能体越过了当前任务边界。" : "This may be a valid dependency, or the agent may have crossed the current task boundary."
+            action = chinese ? "检查文件路径与当前任务是否相关；不相关时收紧允许范围。" : "Check whether the file belongs to this task. Tighten the allowed scope if it does not."
+        } else if external {
+            let source = incident.primary.command ?? incident.primary.remoteDomain ?? (chinese ? "外部内容" : "external content")
+            title = chinese ? "\(agent) 使用了不可信的外部内容" : "\(agent) used untrusted external content"
+            why = chinese ? "网页、仓库或工具结果可能包含诱导智能体执行危险操作的指令。来源：\(source)" : "A page, repository, or tool result may contain instructions that manipulate the agent. Source: \(source)"
+            action = chinese ? "在执行其中的命令或代码前，先查看内容与来源。" : "Review the content and its source before executing any command or code from it."
+        } else if network {
+            let destination = incident.primary.remoteDomain ?? incident.primary.remoteHost ?? (chinese ? "未知地址" : "an unknown destination")
+            title = chinese ? "\(agent) 连接到 \(destination)" : "\(agent) connected to \(destination)"
+            why = chinese ? "这是智能体与外部服务之间的数据通道，当前需要确认目的地是否符合任务预期。" : "This is a data path from the agent to an external service. The destination should match the task."
+            action = chinese ? "确认该域名或 IP 属于预期的模型、代码仓库或服务器。" : "Confirm the domain or IP belongs to the expected model, repository, or server."
+        } else {
+            title = incident.title
+            why = chinese ? "AgentReins 检测到需要人工确认的行为。" : "AgentReins found behavior that needs a human decision."
+            action = chinese ? "打开证据，确认该行为是否符合你的任务。" : "Open the evidence and confirm that the behavior matches your task."
+        }
+
+        let status: String
+        switch incident.severity {
+        case "critical": status = chinese ? "立即处理" : "Act now"
+        case "high": status = chinese ? "需要审查" : "Review"
+        default: status = chinese ? "请留意" : "Be aware"
+        }
+        let confidenceValue = incident.events.compactMap(\.attributionConfidence).first?.rawValue ?? "unknown"
+        let confidence: String
+        switch confidenceValue.lowercased() {
+        case "confirmed": confidence = chinese ? "归属已确认" : "Attribution confirmed"
+        case "inferred": confidence = chinese ? "归属为推断" : "Attribution inferred"
+        default: confidence = chinese ? "归属未知" : "Attribution unknown"
+        }
+        return Self(title: title, whyItMatters: why, recommendedAction: action,
+                    status: status, confidence: confidence)
+    }
+}
+
+/// Security-operations projection. Every field answers an investigation question;
+/// missing telemetry stays explicitly unknown instead of becoming product copy.
+struct SecurityIncidentAssessment: Sendable {
+    enum EvidenceLevel: String, Sendable {
+        case confirmed
+        case inferred
+        case unknown
+    }
+
+    struct Field: Identifiable, Sendable {
+        let id: String
+        let label: String
+        let value: String
+        let level: EvidenceLevel
+    }
+
+    let fields: [Field]
+    let disposition: String
+
+    static func make(_ incident: SecurityIncident, chinese: Bool) -> Self {
+        let rows = incident.events
+        let primary = incident.primary
+        let agent = incident.agent ?? (chinese ? "未识别 Agent" : "Unknown agent")
+        let pid = rows.compactMap(\.processId).first
+        let subject = pid.map { "\(agent) · PID \($0)" } ?? agent
+        let subjectLevel: EvidenceLevel = incident.agent == nil ? .unknown
+            : (rows.contains { $0.attributionConfidence == .confirmed } ? .confirmed : .inferred)
+
+        let behavior: String
+        if let tool = rows.compactMap(\.toolName).first {
+            behavior = chinese ? "调用工具 \(tool)" : "Called tool \(tool)"
+        } else if primary.kind == "file" {
+            behavior = chinese ? "\(fileOperation(primary.op))文件" : "\(primary.op.capitalized) file"
+        } else if primary.kind == "network" {
+            behavior = chinese ? "建立外部连接" : "Opened an external connection"
+        } else if primary.kind == "model" {
+            behavior = primary.op == "prompt"
+                ? (chinese ? "向模型发送上下文" : "Sent context to a model")
+                : (chinese ? "接收模型响应" : "Received a model response")
+        } else {
+            behavior = primary.command.map { ProcessArgumentRedactor.redact($0) }
+                ?? (chinese ? "执行了受监控操作" : "Performed a monitored operation")
+        }
+
+        let path = rows.map(\.path).first { !$0.isEmpty && $0 != "-" }
+        let endpoint = rows.compactMap { $0.remoteDomain ?? $0.remoteHost }.first
+        let asset = path ?? endpoint ?? rows.compactMap(\.model).first
+            ?? (chinese ? "未知资产" : "Unknown asset")
+
+        let rules = Set(incident.ruleIDs)
+        let dataType: String
+        if rules.contains("credential_in_tool_arguments") || rules.contains("credential_in_tool_result") {
+            dataType = chinese ? "疑似账号、密码、Token 或私钥" : "Possible credential, token, or private key"
+        } else if rules.contains("cross_project_sensitive_file_read") {
+            dataType = chinese ? "项目外敏感文件" : "Sensitive file outside the project"
+        } else if primary.kind == "memory" {
+            dataType = chinese ? "Agent 持久化记忆" : "Persistent agent memory"
+        } else if primary.kind == "model" {
+            dataType = chinese ? "模型上下文" : "Model context"
+        } else if primary.kind == "file" {
+            dataType = chinese ? "项目文件" : "Project file"
+        } else {
+            dataType = chinese ? "未分类" : "Unclassified"
+        }
+
+        let destination: String
+        let destinationLevel: EvidenceLevel
+        if let endpoint {
+            destination = "\(endpoint):\(rows.compactMap(\.remotePort).first.map(String.init) ?? "?")"
+            destinationLevel = .confirmed
+        } else if rows.contains(where: { $0.kind == "model" && $0.op == "prompt" }) {
+            destination = rows.compactMap(\.model).first
+                ?? (chinese ? "模型（名称未采集）" : "Model (name not captured)")
+            destinationLevel = rows.compactMap(\.model).first == nil ? .unknown : .confirmed
+        } else if rows.contains(where: { $0.kind == "tool" }) {
+            destination = chinese ? "仅确认进入本地工具会话；未发现外发证据" : "Confirmed in local tool session; no outbound evidence"
+            destinationLevel = .confirmed
+        } else {
+            destination = chinese ? "未知：没有可关联的模型或网络证据" : "Unknown: no linked model or network evidence"
+            destinationLevel = .unknown
+        }
+
+        let result: String
+        if incident.wasBlocked { result = chinese ? "执行前已阻止" : "Blocked before execution" }
+        else if incident.wasRestored { result = chinese ? "已执行，文件随后恢复" : "Executed; file subsequently restored" }
+        else if rows.contains(where: { ["completed", "success", "ok", "sent"].contains($0.action.lowercased()) }) {
+            result = chinese ? "执行成功" : "Execution succeeded"
+        } else if rows.contains(where: { ["failed", "error", "denied"].contains($0.action.lowercased()) }) {
+            result = chinese ? "执行失败" : "Execution failed"
+        } else { result = chinese ? "已观察到尝试；最终结果未知" : "Attempt observed; final outcome unknown" }
+
+        let disposition: String
+        if rules.contains("credential_in_tool_arguments") || rules.contains("credential_in_tool_result") {
+            disposition = chinese
+                ? "核对匹配字段与后续数据流；确认真实外泄后轮换凭据，误报则标记可信。"
+                : "Inspect the matched field and downstream flow. Rotate after confirmed exposure; mark false positives trusted."
+        } else if primary.kind == "external-content" {
+            disposition = chinese ? "暂停执行外部内容中的命令，核验来源与内容。" : "Pause commands from the external content and verify its source."
+        } else if primary.kind == "network" {
+            disposition = chinese ? "核对目标是否属于本次任务；不属于时阻断并检查发送内容。" : "Verify the destination belongs to the task; otherwise block it and inspect transmitted data."
+        } else {
+            disposition = chinese ? "查看原始证据，确认行为是否符合任务授权范围。" : "Inspect raw evidence and verify the behavior was authorized for this task."
+        }
+
+        return Self(fields: [
+            Field(id: "subject", label: chinese ? "主体" : "Actor", value: subject, level: subjectLevel),
+            Field(id: "behavior", label: chinese ? "行为" : "Action", value: behavior, level: .confirmed),
+            Field(id: "asset", label: chinese ? "资产" : "Asset", value: asset, level: asset.contains("未知") || asset.contains("Unknown") ? .unknown : .confirmed),
+            Field(id: "data", label: chinese ? "数据" : "Data", value: dataType, level: dataType.contains("疑似") || dataType.contains("Possible") ? .inferred : .confirmed),
+            Field(id: "destination", label: chinese ? "流向" : "Destination", value: destination, level: destinationLevel),
+            Field(id: "result", label: chinese ? "结果" : "Outcome", value: result, level: result.contains("未知") || result.contains("unknown") ? .unknown : .confirmed)
+        ], disposition: disposition)
+    }
+
+    private static func fileOperation(_ op: String) -> String {
+        ["read": "读取", "write": "写入", "modify": "修改", "delete": "删除", "move": "移动", "rename": "重命名"][op] ?? op
+    }
+}
