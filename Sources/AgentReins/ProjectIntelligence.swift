@@ -53,6 +53,10 @@ struct ProjectIntelligenceSnapshot {
     let memoryWrites: Int
     let drift: [ProjectDriftFinding]
     let observedFileCount: Int
+    let indexedSymbolCount: Int
+    let indexEngine: String?
+    let atlasEventCount: Int
+    let atlasLastFailure: String?
     let lastVerifiedAt: Date?
 }
 
@@ -71,7 +75,7 @@ enum ProjectIntelligence {
         let purposeText = index?.purpose ?? "Project purpose has not been established from project-owned evidence."
         let purpose = ProjectKnowledgeItem(id: "purpose", text: purposeText,
             source: index?.purpose != nil ? "README · local project index" : "README or project documentation not indexed",
-            confidence: index?.purpose != nil ? .observed : .inferred)
+            confidence: index?.purpose != nil ? .declared : .inferred)
 
         let changedFiles = Array(Set(changes.flatMap { $0.createdFiles + $0.modifiedFiles + $0.deletedFiles })).sorted()
         let readFiles = Array(Set(changes.flatMap(\.readFiles))).sorted()
@@ -98,7 +102,8 @@ enum ProjectIntelligence {
             purpose: purpose,
             currentGoal: latestIntent.map { ProjectKnowledgeItem(id: "goal", text: $0,
                 source: "Latest captured user request", confidence: .declared) },
-            capabilities: capabilities(files: files, declaredFeatures: index?.featureNames ?? []),
+            capabilities: capabilities(files: files, declaredFeatures: index?.featureNames ?? [],
+                                       documents: index?.documents ?? []),
             architecture: architecture(files: files, projectPath: projectPath, index: index),
             constraints: constraints,
             decisions: Array(decisions),
@@ -107,10 +112,17 @@ enum ProjectIntelligence {
             memoryWrites: changes.reduce(0) { $0 + $1.memoryWrites },
             drift: driftFindings(changes: changes, sessions: sessions, constraints: constraints),
             observedFileCount: files.count,
+            indexedSymbolCount: index?.documents.reduce(0) { $0 + $1.symbols.count } ?? 0,
+            indexEngine: index?.engine.rawValue,
+            atlasEventCount: index?.atlasEvents.count ?? 0,
+            atlasLastFailure: index?.atlasEvents.first(where: {
+                ($0.status?.lowercased() == "failure") || $0.summary.lowercased().contains("failed")
+            })?.summary,
             lastVerifiedAt: verifiedEvents.map(\.ts).max())
     }
 
-    private static func capabilities(files: [String], declaredFeatures: [String]) -> [ProjectCapability] {
+    private static func capabilities(files: [String], declaredFeatures: [String],
+                                     documents: [ProjectCodeDocument]) -> [ProjectCapability] {
         struct Rule { let name: String; let explanation: String; let tokens: [String] }
         let rules = [
             Rule(name: "User Experience", explanation: "Application views and interaction surfaces", tokens: ["view", "ui", "screen", "dashboard", "content"]),
@@ -122,7 +134,13 @@ enum ProjectIntelligence {
             Rule(name: "Web Agent Protection", explanation: "Browser Agent activity and untrusted external content", tokens: ["web", "browser", "externalcontent"])
         ]
         let inferred = rules.compactMap { rule -> ProjectCapability? in
-            let matched = files.filter { path in rule.tokens.contains { path.lowercased().contains($0) } }
+            let matched = files.filter { path in
+                guard !rule.tokens.contains(where: { path.lowercased().contains($0) }) else { return true }
+                guard let document = documents.first(where: { path.hasSuffix($0.rel) || path == $0.rel }) else { return false }
+                let structuralFacts = ([document.summary] + document.imports + document.symbols.map(\.name))
+                    .joined(separator: " ").lowercased()
+                return rule.tokens.contains(where: structuralFacts.contains)
+            }
             guard !matched.isEmpty else { return nil }
             return ProjectCapability(id: rule.name, name: rule.name, explanation: rule.explanation,
                 files: Array(matched.prefix(8)), confidence: .observed)
@@ -139,7 +157,8 @@ enum ProjectIntelligence {
         if let index, !index.areas.isEmpty {
             return index.areas.prefix(7).map { area in
                 ProjectArchitectureArea(id: area.name, name: area.name,
-                    responsibility: responsibility(for: area.name, files: area.files), files: area.files)
+                    responsibility: responsibility(for: area.name, files: area.files,
+                        documents: index.documents.filter { area.files.contains($0.rel) }), files: area.files)
             }
         }
         let relative = files.map { path -> String in
@@ -154,12 +173,15 @@ enum ProjectIntelligence {
         }
         return grouped.map { name, rows in
             ProjectArchitectureArea(id: name, name: name,
-                responsibility: responsibility(for: name, files: rows), files: Array(rows.sorted().prefix(12)))
+                responsibility: responsibility(for: name, files: rows, documents: []), files: Array(rows.sorted().prefix(12)))
         }.sorted { $0.files.count > $1.files.count }.prefix(7).map { $0 }
     }
 
-    private static func responsibility(for name: String, files: [String]) -> String {
-        let text = "\(name) \(files.joined(separator: " "))".lowercased()
+    private static func responsibility(for name: String, files: [String],
+                                       documents: [ProjectCodeDocument]) -> String {
+        let text = ("\(name) \(files.joined(separator: " ")) " + documents.flatMap {
+            [$0.summary] + $0.imports + $0.symbols.prefix(20).map(\.name)
+        }.joined(separator: " ")).lowercased()
         if text.contains("test") { return "Automated verification" }
         if text.contains("view") || text.contains("ui") { return "User-facing product experience" }
         if text.contains("collector") || text.contains("sight") { return "Runtime evidence collection" }

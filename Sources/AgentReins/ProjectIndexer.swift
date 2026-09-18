@@ -8,7 +8,43 @@ struct ProjectIndexSnapshot: Sendable {
     let files: [String]
     let areas: [ProjectIndexArea]
     let technologies: [String]
+    let documents: [ProjectCodeDocument]
+    let engine: ProjectIndexEngine
+    let atlasEvents: [AtlasProjectEvent]
     let complete: Bool
+}
+
+struct AtlasProjectEvent: Codable, Hashable, Sendable {
+    let source: String
+    let kind: String
+    let summary: String
+    let timestamp: String
+    let status: String?
+    let agent: String?
+}
+
+enum ProjectIndexEngine: String, Sendable {
+    case structural = "AgentReins Structural Index"
+    case atlasImport = "Atlas Code Index"
+}
+
+struct ProjectCodeSymbol: Codable, Hashable, Sendable {
+    let name: String
+    let kind: String
+    let line: Int
+}
+
+/// AgentReins' versioned form of Atlas' `CodebaseDoc`.  Keeping this boundary
+/// independent from the UI lets us consume a native atlas-codeindex sidecar or
+/// an existing `.atlas/codebase-index/docs.json` without changing the product.
+struct ProjectCodeDocument: Codable, Hashable, Sendable {
+    let rel: String
+    let language: String
+    let imports: [String]
+    let symbols: [ProjectCodeSymbol]
+    let hash: String
+    let summary: String
+    let importRank: Int
 }
 
 struct ProjectIndexArea: Sendable {
@@ -105,7 +141,14 @@ enum ProjectIndexer {
             ["readme.md", "readme", "readme.txt"].contains(URL(fileURLWithPath: file).lastPathComponent.lowercased())
         }.map { root.appendingPathComponent($0) }
         let readme = readmeURL.flatMap(readText)
-        return snapshot(root: root, files: files, readme: readme,
+        if let atlasDocuments = loadAtlasDocuments(root: root), !atlasDocuments.isEmpty {
+            return snapshot(root: root, files: files, readme: readme, documents: atlasDocuments,
+                            engine: .atlasImport, atlasEvents: atlasEvents(root: root),
+                            complete: allFiles.count <= maximumFiles)
+        }
+        let documents = ProjectStructuralIndexer.scan(root: root, files: files)
+        return snapshot(root: root, files: files, readme: readme, documents: documents,
+                        engine: .structural, atlasEvents: atlasEvents(root: root),
                         complete: allFiles.count <= maximumFiles)
     }
 
@@ -136,10 +179,64 @@ enum ProjectIndexer {
         return text.split(separator: "\0").map(String.init)
     }
 
-    private static func snapshot(root: URL, files: [String], readme: String?, complete: Bool) -> ProjectIndexSnapshot {
+    private static func snapshot(root: URL, files: [String], readme: String?,
+                                 documents: [ProjectCodeDocument], engine: ProjectIndexEngine,
+                                 atlasEvents: [AtlasProjectEvent],
+                                 complete: Bool) -> ProjectIndexSnapshot {
         ProjectIndexSnapshot(projectPath: root.path, indexedAt: Date(),
             purpose: readme.flatMap(readmePurpose), featureNames: readme.map(readmeFeatures) ?? [],
-            files: files, areas: architectureAreas(files), technologies: technologies(files), complete: complete)
+            files: files, areas: architectureAreas(files, documents: documents),
+            technologies: technologies(files), documents: documents, engine: engine,
+            atlasEvents: atlasEvents, complete: complete)
+    }
+
+    private static func atlasEvents(root: URL) -> [AtlasProjectEvent] {
+        let url = root.appendingPathComponent(".atlas/logs.jsonl")
+        guard let text = try? String(contentsOf: url, encoding: .utf8) else { return [] }
+        struct Raw: Decodable {
+            let source: String?
+            let kind: String?
+            let summary: String?
+            let timestamp: String?
+            let payload: Payload?
+            struct Payload: Decodable {
+                let status: String?
+                let agent: String?
+                let kind: String?
+            }
+        }
+        return text.split(separator: "\n").compactMap { line in
+            guard let data = line.data(using: .utf8), let raw = try? JSONDecoder().decode(Raw.self, from: data),
+                  let source = raw.source, let kind = raw.kind, let summary = raw.summary else { return nil }
+            return AtlasProjectEvent(source: source, kind: raw.payload?.kind ?? kind,
+                summary: summary, timestamp: raw.timestamp ?? "", status: raw.payload?.status,
+                agent: raw.payload?.agent)
+        }
+        .suffix(100)
+        .reversed()
+        .map { $0 }
+    }
+
+    private struct AtlasIndex: Decodable { let docs: [AtlasDocument] }
+    private struct AtlasDocument: Decodable {
+        let rel: String
+        let language: String
+        let imports: [String]
+        let symbols: [ProjectCodeSymbol]
+        let hash: String
+        let summary: String?
+        let importRank: Int?
+    }
+
+    private static func loadAtlasDocuments(root: URL) -> [ProjectCodeDocument]? {
+        let url = root.appendingPathComponent(".atlas/codebase-index/docs.json")
+        guard let data = try? Data(contentsOf: url),
+              let index = try? JSONDecoder().decode(AtlasIndex.self, from: data) else { return nil }
+        return index.docs.map {
+            ProjectCodeDocument(rel: $0.rel, language: $0.language, imports: $0.imports,
+                symbols: $0.symbols, hash: $0.hash, summary: $0.summary ?? "",
+                importRank: $0.importRank ?? 0)
+        }
     }
 
     private static func readText(_ url: URL) -> String? {
@@ -180,7 +277,7 @@ enum ProjectIndexer {
         }.prefix(8).map { $0 }
     }
 
-    private static func architectureAreas(_ files: [String]) -> [ProjectIndexArea] {
+    private static func architectureAreas(_ files: [String], documents: [ProjectCodeDocument]) -> [ProjectIndexArea] {
         let grouped = Dictionary(grouping: files) { file -> String in
             let parts = file.split(separator: "/")
             if let source = parts.firstIndex(where: { ["sources", "src", "app", "packages"].contains($0.lowercased()) }), parts.count > source + 1 {
@@ -188,8 +285,12 @@ enum ProjectIndexer {
             }
             return parts.count > 1 ? String(parts[0]) : "Project Root"
         }
-        return grouped.map { ProjectIndexArea(name: $0.key, files: Array($0.value.prefix(20))) }
-            .sorted { $0.files.count > $1.files.count }.prefix(10).map { $0 }
+        let importance = Dictionary(uniqueKeysWithValues: documents.map { ($0.rel, $0.importRank) })
+        return grouped.map { name, paths in
+            ProjectIndexArea(name: name, files: Array(paths.sorted {
+                importance[$0, default: 0] > importance[$1, default: 0]
+            }.prefix(20)))
+        }.sorted { $0.files.count > $1.files.count }.prefix(10).map { $0 }
     }
 
     private static func technologies(_ files: [String]) -> [String] {
