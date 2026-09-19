@@ -347,6 +347,27 @@ final class AgentEventProtocolTests: XCTestCase {
         XCTAssertEqual(committed.first?.id, file.id)
     }
 
+    func testCodeChangeIndexerAcceptsRepeatedToolLifecycleEvents() {
+        let requested = event(sequence: 1, payload: .toolCall(ToolCallLifecycleEvidence(
+            callID: "patch-1", toolName: "apply_patch", serverName: nil,
+            arguments: "Update App.swift", argumentsDigest: nil, state: .requested,
+            startedAt: Date(timeIntervalSince1970: 1), completedAt: nil,
+            exitCode: nil, evidenceIDs: [])))
+        let completed = event(sequence: 2, payload: .toolCall(ToolCallLifecycleEvidence(
+            callID: "patch-1", toolName: "apply_patch", serverName: nil,
+            arguments: "Update App.swift", argumentsDigest: nil, state: .completed,
+            startedAt: Date(timeIntervalSince1970: 1), completedAt: Date(timeIntervalSince1970: 2),
+            exitCode: 0, evidenceIDs: [])))
+        let file = event(sequence: 3, payload: .fileActivity(FileActivityEvidence(
+            operation: .modify, path: "Sources/App.swift", beforeDigest: "a", afterDigest: "b",
+            patch: "+ fixed", toolCallID: "patch-1", attribution: .confirmed)))
+
+        let changes = CodeChangeIndexer.build(events: [requested, completed, file])
+
+        XCTAssertEqual(changes.count, 1)
+        XCTAssertEqual(changes.first?.toolName, "apply_patch")
+    }
+
     func testCodeChangeIndexPersistsAndQueriesByProjectAndPath() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentreins-code-change-\(UUID().uuidString).sqlite3")

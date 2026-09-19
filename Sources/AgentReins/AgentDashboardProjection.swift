@@ -14,6 +14,15 @@ struct AgentDashboardProjectionInput: Sendable {
 }
 
 struct AgentDashboardProjection: Sendable {
+    struct LiveTaskSnapshot: Sendable {
+        let session: AgentSessionSnapshot?
+        let turn: AgentTurn?
+        let files: [GuardEvent]
+        let tools: [AgentToolCall]
+        let codeFindings: [CodeFinding]
+        let timeline: [GuardEvent]
+    }
+
     let key: AgentDashboardProjectionKey
     let sessions: [AgentSessionSnapshot]
     let activeSession: AgentSessionSnapshot?
@@ -26,6 +35,7 @@ struct AgentDashboardProjection: Sendable {
     let findingCount: Int
     let hostCount: Int
     let evidenceCoverage: String
+    let liveTask: LiveTaskSnapshot
 
     static func build(input: AgentDashboardProjectionInput) throws -> AgentDashboardProjection {
         let selectedAgent = input.key.selectedAgent
@@ -65,12 +75,23 @@ struct AgentDashboardProjection: Sendable {
             ? "—"
             : "\(Int(Double(confirmed) / Double(scopedEvents.count) * 100))%"
         let hosts = Set(scopedEvents.compactMap { $0.remoteDomain ?? $0.remoteHost })
+        let activeTurn = activeSession?.turns.last
+        let activeRows = activeSession.map { session in
+            scopedEvents.filter { event in
+                event.sessionId == session.id && (activeTurn?.id == nil || event.turnId == activeTurn?.id)
+            }
+        } ?? []
+        let liveTask = LiveTaskSnapshot(session: activeSession, turn: activeTurn,
+            files: activeRows.filter { $0.kind == "file" },
+            tools: activeTurn?.toolCalls ?? [],
+            codeFindings: activeRows.compactMap(\.codeFindings).flatMap { $0 },
+            timeline: activeRows.sorted { $0.ts < $1.ts })
         return AgentDashboardProjection(key: input.key, sessions: scopedSessions,
             activeSession: activeSession, events: scopedEvents, incidents: scopedIncidents,
             networkFlows: networkFlows, networkIPs: networkIPs,
             sshSessions: sshSessions, memoryCommits: memoryCommits,
             findingCount: scopedEvents.compactMap(\.codeFindings).flatMap { $0 }.count,
-            hostCount: hosts.count, evidenceCoverage: evidenceCoverage)
+            hostCount: hosts.count, evidenceCoverage: evidenceCoverage, liveTask: liveTask)
     }
 
     private static func matches(agent: String, selectedAgent: String) -> Bool {

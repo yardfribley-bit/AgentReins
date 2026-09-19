@@ -2745,6 +2745,44 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertNotNil(store.journals.first?.completedAt)
     }
 
+    func testForensicCaseExpandsIncidentToSameTurnWithoutClaimingExfiltration() throws {
+        let now = Date()
+        let read = GuardEvent(kind: "file", ruleId: "cross_project_sensitive_file_read",
+            path: "/run/credentials/xray.service/xray.json", command: nil, agent: "workbuddy",
+            op: "read", severity: "high", ts: now, action: "needs_review",
+            sessionId: "session", turnId: "turn", toolCallId: "call",
+            userIntent: "Configure the server", toolName: "Bash", source: "agentsight:workbuddy-local",
+            attributionConfidence: .confirmed)
+        let network = GuardEvent(kind: "network", ruleId: "tool_network_intent", path: "-",
+            command: nil, agent: "workbuddy", op: "connect", severity: "high",
+            ts: now.addingTimeInterval(2), action: "observed", sessionId: "session", turnId: "turn",
+            toolCallId: "call", toolName: "Bash", source: "agentsight:workbuddy-local",
+            attributionConfidence: .confirmed, remoteHost: "43.153.166.155", remotePort: 22)
+        let incident = try XCTUnwrap(SecurityIncident.correlate([read]).first)
+        let forensic = ForensicCase.build(incident: incident, allEvents: [read, network], health: [])
+
+        XCTAssertEqual(forensic.timeline.count, 2)
+        XCTAssertTrue(forensic.findings.contains { $0.id == "same-task" && $0.confidence == .correlated })
+        XCTAssertTrue(forensic.findings.contains { $0.id == "exfiltration" && $0.confidence == .unverified })
+        XCTAssertFalse(forensic.coverage.first { $0.id == "payload" }?.available ?? true)
+    }
+
+    func testForensicCaseDoesNotPullUnrelatedSessionEvidence() throws {
+        let now = Date()
+        let alert = GuardEvent(kind: "alert", ruleId: "credential_in_tool_result", path: "-",
+            command: "Credential-like result", agent: "workbuddy", op: "policy", severity: "high",
+            ts: now, action: "needs_review", sessionId: "session-a", turnId: "turn-a")
+        let unrelated = GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
+            command: nil, agent: "codex", op: "connect", severity: "medium",
+            ts: now.addingTimeInterval(1), action: "observed", sessionId: "session-b", turnId: "turn-b",
+            remoteHost: "example.com", remotePort: 443)
+        let incident = try XCTUnwrap(SecurityIncident.correlate([alert]).first)
+        let forensic = ForensicCase.build(incident: incident, allEvents: [alert, unrelated], health: [])
+
+        XCTAssertEqual(forensic.timeline.map(\.id), [alert.id])
+        XCTAssertFalse(forensic.findings.contains { $0.id == "network" })
+    }
+
     private func gitOutput(_ arguments: [String], at root: URL) throws -> String {
         let process = Process()
         let output = Pipe()

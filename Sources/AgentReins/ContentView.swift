@@ -39,7 +39,10 @@ struct ContentView: View {
         .onReceive(agentDiscovery.$agents) { liveDashboard.updateAgents($0) }
         .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true) }
         .sheet(item: $selectedSession) { SessionEvidenceSheet(session: $0) }
-        .sheet(item: $selectedIncident) { IncidentEvidenceSheet(incident: $0) }
+        .sheet(item: $selectedIncident) {
+            ForensicCaseWorkspaceView(incident: $0, events: liveDashboard.snapshot.events,
+                                      health: liveDashboard.snapshot.health)
+        }
     }
 
     private func refreshLiveDashboard() {
@@ -120,54 +123,5 @@ private struct SessionEvidenceSheet: View {
             Text(value ?? "Not captured").font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
                 .frame(maxWidth: .infinity, alignment: .leading)
         }.padding(.top, 8)
-    }
-}
-
-private struct IncidentEvidenceSheet: View {
-    let incident: SecurityIncident
-    @Environment(\.dismiss) private var dismiss
-    @EnvironmentObject private var language: AppLanguageStore
-
-    private var copy: SecurityIncidentPresentation {
-        SecurityIncidentPresentation.make(incident, chinese: language.language == .simplifiedChinese)
-    }
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            HStack { Text(copy.title).font(.title2.bold()); Spacer(); Button(language.text("Done")) { dismiss() } }
-            HStack(spacing: 8) {
-                Text(copy.status.uppercased()).font(.system(size: 11, weight: .bold)).foregroundStyle(.orange)
-                Text("·")
-                Text(copy.confidence).foregroundStyle(.secondary)
-            }
-            VStack(alignment: .leading, spacing: 10) {
-                explanation(language.language == .english ? "WHAT WE OBSERVED" : "已观察到 / 尚未确认", copy.whyItMatters)
-                explanation(language.language == .english ? "NEXT DECISION" : "下一步判断", copy.recommendedAction)
-            }.padding(14).background(Color.orange.opacity(0.08), in: RoundedRectangle(cornerRadius: 10))
-            ScrollView {
-                LazyVStack(alignment: .leading, spacing: 10) {
-                    Text(language.language == .english ? "TECHNICAL EVIDENCE" : "技术证据")
-                        .font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-                    ForEach(incident.events) { event in
-                        VStack(alignment: .leading, spacing: 5) {
-                            Text("\(event.kind.uppercased()) · \(event.op)").font(.system(size: 12, weight: .bold))
-                            Text(event.command ?? event.modelResponse ?? event.modelPrompt ?? event.path)
-                                .font(.system(size: 13, design: .monospaced)).textSelection(.enabled)
-                            Text(event.attributionMethod ?? "Attribution unavailable")
-                                .font(.system(size: 12)).foregroundStyle(.secondary)
-                            Text("Rule · \(event.ruleId)")
-                                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.tertiary)
-                        }.padding(11).background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
-                    }
-                }
-            }
-        }.padding(18).frame(minWidth: 760, minHeight: 520)
-    }
-
-    private func explanation(_ title: String, _ value: String) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(title).font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
-            Text(value).font(.system(size: 13)).fixedSize(horizontal: false, vertical: true)
-        }
     }
 }

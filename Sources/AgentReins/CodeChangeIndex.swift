@@ -34,10 +34,14 @@ enum CodeChangeIndexer {
             if $0.occurredAt == $1.occurredAt { return $0.sequence < $1.sequence }
             return $0.occurredAt < $1.occurredAt
         }
-        let tools = Dictionary(uniqueKeysWithValues: ordered.compactMap { event -> (String, ToolCallLifecycleEvidence)? in
-            guard case let .toolCall(value) = event.payload else { return nil }
-            return (value.callID, value)
-        })
+        // A tool call legitimately has multiple lifecycle envelopes (requested,
+        // running, completed/failed).  Keep the last observed state instead of
+        // using `uniqueKeysWithValues`, which traps when historical evidence
+        // contains more than one envelope for the same call ID.
+        let tools = ordered.reduce(into: [String: ToolCallLifecycleEvidence]()) { result, event in
+            guard case let .toolCall(value) = event.payload else { return }
+            result[value.callID] = value
+        }
         let checkpoints = ordered.compactMap { event -> AgentCheckpointEvidence? in
             guard case let .checkpoint(value) = event.payload else { return nil }
             return value

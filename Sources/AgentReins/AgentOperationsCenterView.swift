@@ -94,8 +94,11 @@ struct AgentOperationsCenterView: View {
     }
     private var scopedSessions: [AgentSessionSnapshot] { currentProjection?.sessions ?? [] }
     private var activeSession: AgentSessionSnapshot? { currentProjection?.activeSession }
-    private var activeTurn: AgentTurn? { activeSession?.turns.last }
+    private var activeTurn: AgentTurn? { currentProjection?.liveTask.turn ?? activeSession?.turns.last }
     private var scopedEvents: [GuardEvent] { currentProjection?.events ?? [] }
+    private var liveTaskFiles: [GuardEvent] { currentProjection?.liveTask.files ?? [] }
+    private var liveTaskTools: [AgentToolCall] { currentProjection?.liveTask.tools ?? [] }
+    private var liveTaskCodeFindings: [CodeFinding] { currentProjection?.liveTask.codeFindings ?? [] }
     private var processes: [ProcessSnapshotRecord] {
         let agents = selectedAgent == "All agents"
             ? discoveredAgents.filter { $0.presence == .running }.map(\.product)
@@ -535,21 +538,15 @@ struct AgentOperationsCenterView: View {
 
     private var globalMissionControl: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack(alignment: .top, spacing: 16) {
-                VStack(alignment: .leading, spacing: 5) {
-                    Text(L("LIVE MISSION CONTROL")).micro(cyan)
-                    Text(globalHeadline).font(.system(size: 24, weight: .bold))
-                    Text(L("Track every project, task and safety decision across your AI agents."))
-                        .font(.system(size: 13)).foregroundStyle(.secondary)
-                }
-                Spacer()
-                globalMetric(L("PROJECTS"), projectMissions.count, cyan)
-                globalMetric(L("ACTIVE TASKS"), activeTaskCount, .blue)
-                globalMetric(L("REVIEW"), scopedIncidents.filter { $0.severity != "info" }.count, amber)
-                globalMetric(L("EVIDENCE"), evidenceCoverage, green)
-            }
-            .padding(16).background(panel, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(border))
+            GlobalSituationHeaderView(
+                eyebrow: L("LIVE MISSION CONTROL"), headline: globalHeadline,
+                subtitle: L("Track every project, task and safety decision across your AI agents."),
+                projects: projectMissions.count, activeTasks: activeTaskCount,
+                reviews: scopedIncidents.filter { $0.severity != "info" }.count,
+                evidenceCoverage: evidenceCoverage,
+                projectLabel: L("PROJECTS"), activeTaskLabel: L("ACTIVE TASKS"),
+                reviewLabel: L("REVIEW"), evidenceLabel: L("EVIDENCE")
+            )
 
             HStack(spacing: 4) {
                 ForEach(GlobalTab.allCases) { tab in
@@ -578,20 +575,6 @@ struct AgentOperationsCenterView: View {
         if critical { return language.language == .english ? "Review required across active AI work" : "当前 AI 工作存在需要审查的风险" }
         if activeTaskCount > 0 { return language.language == .english ? "\(activeTaskCount) AI task\(activeTaskCount == 1 ? "" : "s") running now" : "\(activeTaskCount) 个 AI 任务正在运行" }
         return L(observing ? "Monitoring for new Agent activity" : "Monitoring is paused")
-    }
-
-    private func globalMetric(_ label: String, _ value: Int, _ color: Color) -> some View {
-        globalMetric(label, String(value), color)
-    }
-
-    private func globalMetric(_ label: String, _ value: String, _ color: Color) -> some View {
-        VStack(alignment: .leading, spacing: 3) {
-            Text(label).micro(.secondary)
-            Text(value).font(.system(size: 20, weight: .bold, design: .rounded)).foregroundStyle(color)
-        }
-        .padding(.horizontal, 13).padding(.vertical, 9)
-        .background(raised, in: RoundedRectangle(cornerRadius: 8))
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(border.opacity(0.8)))
     }
 
     private var globalProjectsView: some View {
@@ -809,29 +792,9 @@ struct AgentOperationsCenterView: View {
                 empty(L("No project security finding is supported by current evidence"))
             } else {
                 ForEach(incidents.prefix(30)) { incident in
-                    let copy = SecurityIncidentPresentation.make(incident,
-                        chinese: language.language == .simplifiedChinese)
-                    let assessment = SecurityIncidentAssessment.make(incident,
-                        chinese: language.language == .simplifiedChinese)
-                    Button { onIncident(incident) } label: {
-                        VStack(alignment: .leading, spacing: 8) {
-                            HStack {
-                                Circle().fill(incidentColor(incident.severity)).frame(width: 8, height: 8)
-                                Text(copy.title).font(.system(size: 13, weight: .bold)).lineLimit(2)
-                                Spacer()
-                                Text(clock(incident.ts)).font(.system(size: 10, design: .monospaced))
-                                    .foregroundStyle(.tertiary)
-                            }
-                            securityAssessmentGrid(assessment)
-                            HStack {
-                                Text(L("RESPONSE")).micro(.secondary)
-                                Text(assessment.disposition).font(.system(size: 11)).foregroundStyle(.secondary)
-                                Spacer()
-                                Text(L("View evidence")).font(.system(size: 10, weight: .semibold)).foregroundStyle(cyan)
-                            }
-                        }.padding(11).background(panel, in: RoundedRectangle(cornerRadius: 9))
-                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(incidentColor(incident.severity).opacity(0.45)))
-                    }.buttonStyle(.plain)
+                    SecurityIncidentCardView(incident: incident,
+                        chinese: language.language == .simplifiedChinese,
+                        density: .compact) { onIncident(incident) }
                 }
             }
         }
@@ -1188,70 +1151,10 @@ struct AgentOperationsCenterView: View {
                 }.padding(.bottom, 2)
             }
             ForEach(visible) { incident in
-                let copy = SecurityIncidentPresentation.make(incident, chinese: language.language == .simplifiedChinese)
-                let assessment = SecurityIncidentAssessment.make(incident, chinese: language.language == .simplifiedChinese)
-                Button { onIncident(incident) } label: {
-                    HStack(alignment: .top, spacing: 12) {
-                        Image(systemName: "exclamationmark.shield.fill")
-                            .foregroundStyle(incidentColor(incident.severity)).font(.system(size: 20))
-                            .frame(width: 26)
-                        VStack(alignment: .leading, spacing: 9) {
-                            HStack(spacing: 8) {
-                                Text(copy.title).font(.system(size: 15, weight: .bold)).lineLimit(2)
-                                Spacer(minLength: 8)
-                                labelChip(copy.status.uppercased(), color: incidentColor(incident.severity))
-                            }
-                            securityAssessmentGrid(assessment)
-                            securityExplanationRow(language.language == .english ? "RESPONSE" : "处置建议",
-                                                   assessment.disposition, icon: "checklist")
-                            HStack(spacing: 7) {
-                                Text("\(formattedAgentName(incident.agent ?? (language.language == .english ? "Unknown Agent" : "未识别智能体"))) · \(clock(incident.ts))")
-                                Text("·")
-                                Text(copy.confidence)
-                                Spacer()
-                                Text(language.language == .english ? "View evidence" : "查看证据")
-                                    .fontWeight(.semibold).foregroundStyle(cyan)
-                                Image(systemName: "chevron.right").foregroundStyle(cyan)
-                            }.font(.system(size: 11)).foregroundStyle(.tertiary)
-                        }
-                    }.padding(15).background(panel, in: RoundedRectangle(cornerRadius: 10))
-                        .overlay(RoundedRectangle(cornerRadius: 10).stroke(incidentColor(incident.severity).opacity(0.55)))
-                }.buttonStyle(HoverCardButtonStyle())
+                SecurityIncidentCardView(incident: incident,
+                    chinese: language.language == .simplifiedChinese,
+                    density: .standard) { onIncident(incident) }
             }
-        }
-    }
-
-    private func securityAssessmentGrid(_ assessment: SecurityIncidentAssessment) -> some View {
-        LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading),
-                            GridItem(.flexible(), alignment: .topLeading)], spacing: 8) {
-            ForEach(assessment.fields) { field in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Circle().fill(assessmentColor(field.level)).frame(width: 6, height: 6)
-                        Text(field.label.uppercased())
-                            .font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-                        Text(assessmentLevel(field.level))
-                            .font(.system(size: 8, weight: .semibold))
-                            .foregroundStyle(assessmentColor(field.level))
-                    }
-                    Text(field.value).font(.system(size: 11, weight: .medium))
-                        .foregroundStyle(.secondary).lineLimit(3)
-                }
-                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(raised, in: RoundedRectangle(cornerRadius: 7))
-            }
-        }
-    }
-
-    private func assessmentColor(_ level: SecurityIncidentAssessment.EvidenceLevel) -> Color {
-        switch level { case .confirmed: return green; case .inferred: return amber; case .unknown: return .gray }
-    }
-
-    private func assessmentLevel(_ level: SecurityIncidentAssessment.EvidenceLevel) -> String {
-        switch level {
-        case .confirmed: return language.language == .english ? "CONFIRMED" : "已确认"
-        case .inferred: return language.language == .english ? "INFERRED" : "关联推断"
-        case .unknown: return language.language == .english ? "UNKNOWN" : "未知"
         }
     }
 
@@ -1357,16 +1260,6 @@ struct AgentOperationsCenterView: View {
         }
     }
 
-    private func securityExplanationRow(_ label: String, _ value: String, icon: String) -> some View {
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: icon).font(.system(size: 11)).foregroundStyle(.secondary).frame(width: 14)
-            VStack(alignment: .leading, spacing: 2) {
-                Text(label).font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-                Text(value).font(.system(size: 12)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
-            }
-        }
-    }
-
     private func liveStage(for session: AgentSessionSnapshot) -> (label: String, color: Color) {
         guard let turn = session.turns.last else { return ("Monitoring", .gray) }
         if session.events.contains(where: { $0.kind == "verification" && ["passed", "verified", "success"].contains($0.action.lowercased()) }) {
@@ -1390,33 +1283,13 @@ struct AgentOperationsCenterView: View {
     }
 
     private var taskHeader: some View {
-        HStack(alignment: .top, spacing: 14) {
-            VStack(alignment: .leading, spacing: 7) {
-                HStack(spacing: 10) {
-                    Circle().fill(activeSession == nil ? Color.gray : green).frame(width: 9, height: 9)
-                    Text(activeSession?.agentDisplayName ?? "Waiting for agent activity")
-                        .font(.system(size: 20, weight: .bold))
-                    if activeSession != nil {
-                        Text("Running").font(.system(size: 13, weight: .bold)).foregroundStyle(green)
-                            .padding(.horizontal, 8).padding(.vertical, 3)
-                            .background(green.opacity(0.12), in: Capsule())
-                    }
-                    if let pid = rootPID {
-                        Text("PID \(pid)").font(.system(size: 13, design: .monospaced)).foregroundStyle(.secondary)
-                    }
-                    if let model = activeSession?.model {
-                        Text(model).badge(.blue)
-                    }
-                }
-                Text(liveHeadline)
-                    .font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(2)
-            }
-            Spacer()
-            if let session = activeSession {
-                Button("Open session…") { onSession(session) }
-                    .buttonStyle(.bordered)
-            }
-        }
+        AgentLiveTaskHeaderView(
+            agentName: activeSession?.agentDisplayName ?? L("Waiting for agent activity"),
+            headline: liveHeadline, active: activeSession != nil,
+            pid: rootPID, model: activeSession?.model,
+            openTitle: L("Open session…"),
+            onOpen: activeSession.map { session in { onSession(session) } }
+        )
     }
 
     private var tabBar: some View {
@@ -1450,7 +1323,7 @@ struct AgentOperationsCenterView: View {
             networkPanel
         case .files:
             listPanel("FILE ACTIVITY", "What the Agent read or changed in this task") {
-                let files = scopedEvents.filter { $0.kind == "file" }
+                let files = liveTaskFiles
                 if files.isEmpty { empty("No file activity observed in this task") }
                 if !files.isEmpty {
                     HStack(spacing: 6) {
@@ -1486,7 +1359,7 @@ struct AgentOperationsCenterView: View {
             memoryCommitPanel
         case .code:
             listPanel("GENERATED CODE", "Code findings from the active window") {
-                let findings = scopedEvents.compactMap(\.codeFindings).flatMap { $0 }
+                let findings = liveTaskCodeFindings
                 if findings.isEmpty { empty("No generated-code findings") }
                 ForEach(Array(findings)) { finding in
                     HStack(alignment: .top, spacing: 8) {
@@ -1504,7 +1377,7 @@ struct AgentOperationsCenterView: View {
             }
         case .tools:
             listPanel("TOOL CALLS", "Tools and MCP activity for the live turn") {
-                let calls = activeTurn?.toolCalls ?? []
+                let calls = liveTaskTools
                 if calls.isEmpty { empty("No tool calls yet") }
                 ForEach(calls) { call in
                     let related = activeSession?.events.last {
@@ -3080,22 +2953,11 @@ struct AgentOperationsCenterView: View {
     // MARK: - Helpers
 
     private func listPanel<C: View>(_ title: String, _ subtitle: String, @ViewBuilder content: () -> C) -> some View {
-        posturePanel(title, subtitle) {
-            VStack(spacing: 8) { content() }
-        }
+        EvidencePanelView(title, subtitle: subtitle, stacked: true, content: content)
     }
 
     private func posturePanel<C: View>(_ title: String, _ subtitle: String, @ViewBuilder content: () -> C) -> some View {
-        VStack(alignment: .leading, spacing: 12) {
-            VStack(alignment: .leading, spacing: 3) {
-                Text(title).micro(cyan)
-                Text(subtitle).font(.system(size: 13)).foregroundStyle(.secondary)
-            }
-            content()
-        }
-        .padding(13)
-        .background(panel, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(border))
+        EvidencePanelView(title, subtitle: subtitle, content: content)
     }
 
     private var contextDetail: String? {
