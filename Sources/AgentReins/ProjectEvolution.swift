@@ -61,7 +61,8 @@ struct ProjectEvolutionSnapshot: Identifiable {
 enum ProjectEvolution {
     static func build(sessions: [AgentSessionSnapshot], incidents: [SecurityIncident]) -> [ProjectEvolutionSnapshot] {
         let attributable = sessions.compactMap { session -> (String, AgentSessionSnapshot)? in
-            guard let path = projectRoot(session.workspace) else { return nil }
+            let workspace = SupervisedWorkspaceResolver.resolve(session.workspace)
+            guard let path = workspace.path else { return nil }
             return (path, session)
         }
         return Dictionary(grouping: attributable, by: \.0).map { path, rows in
@@ -80,9 +81,7 @@ enum ProjectEvolution {
     }
 
     static func projectRoot(_ workspace: String?) -> String? {
-        guard let workspace, workspace != "-", !workspace.isEmpty else { return nil }
-        let url = URL(fileURLWithPath: workspace).standardized
-        return url.pathExtension.isEmpty ? url.path : url.deletingLastPathComponent().path
+        SupervisedWorkspaceResolver.resolve(workspace).path
     }
 
     private static func changeSets(session: AgentSessionSnapshot, projectPath: String,

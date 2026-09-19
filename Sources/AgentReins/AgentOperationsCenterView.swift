@@ -52,7 +52,7 @@ struct AgentOperationsCenterView: View {
     @State private var projectQuestionResults: [FeatureProvenanceRecord] = []
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
-        case projects = "Projects"
+        case projects = "Workspaces"
         case agents = "Agents"
         case security = "Security"
         var id: String { rawValue }
@@ -179,21 +179,28 @@ struct AgentOperationsCenterView: View {
         let id: String
         let name: String
         let path: String
+        let kind: SupervisedWorkspaceKind
         let sessions: [AgentSessionSnapshot]
         var lastActivity: Date { sessions.map(\.lastActivityAt).max() ?? .distantPast }
     }
     private var projectMissions: [ProjectMission] {
         let grouped = Dictionary(grouping: sessions) { session -> String in
-            guard let workspace = session.workspace, workspace != "-", !workspace.isEmpty else { return "Unassigned" }
-            let url = URL(fileURLWithPath: workspace)
-            return url.pathExtension.isEmpty ? url.standardized.path : url.deletingLastPathComponent().standardized.path
+            SupervisedWorkspaceResolver.resolve(session.workspace).id
         }
         return grouped.map { path, rows in
-            let name = path == "Unassigned" ? "Unassigned activity" : URL(fileURLWithPath: path).lastPathComponent
-            return ProjectMission(id: path, name: name.isEmpty ? path : name, path: path,
+            let identity = SupervisedWorkspaceResolver.resolve(path == "Unassigned" ? nil : path)
+            let kind = identity.kind
+            let directoryName = path == "Unassigned" ? "Unassigned activity" : URL(fileURLWithPath: path).lastPathComponent
+            let recentIntent = rows.sorted { $0.lastActivityAt > $1.lastActivityAt }
+                .compactMap { $0.turns.reversed().compactMap(\.userInput).first ?? $0.latestIntent }.first
+            let name = kind == .task
+                ? String((recentIntent ?? (language.language == .english ? "Temporary Agent task" : "临时 Agent 任务")).prefix(72))
+                : directoryName
+            return ProjectMission(id: path, name: name.isEmpty ? path : name, path: path, kind: kind,
                                   sessions: rows.sorted { $0.lastActivityAt > $1.lastActivityAt })
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
+
     private var projectEvolution: [ProjectEvolutionSnapshot] {
         ProjectEvolution.build(sessions: sessions, incidents: incidents)
     }
@@ -476,7 +483,7 @@ struct AgentOperationsCenterView: View {
                 Text("\(discoveredAgents.count)").badge(cyan)
             }.padding(16)
             fleetRow(name: "All agents",
-                     title: L("Project mission control"),
+                     title: language.language == .english ? "Workspace mission control" : "工作空间监工",
                      detail: "\(activeTaskCount) active tasks · \(scopedIncidents.count) findings",
                      live: observing)
             ForEach(discoveredAgents) { item in
@@ -544,11 +551,12 @@ struct AgentOperationsCenterView: View {
         VStack(alignment: .leading, spacing: 14) {
             GlobalSituationHeaderView(
                 eyebrow: L("LIVE MISSION CONTROL"), headline: globalHeadline,
-                subtitle: L("Track every project, task and safety decision across your AI agents."),
+                subtitle: L("Track every repository, temporary task and safety decision across your AI agents."),
                 projects: projectMissions.count, activeTasks: activeTaskCount,
                 reviews: scopedIncidents.filter { $0.severity != "info" }.count,
                 evidenceCoverage: evidenceCoverage,
-                projectLabel: L("PROJECTS"), activeTaskLabel: L("ACTIVE TASKS"),
+                projectLabel: language.language == .english ? "WORKSPACES" : "工作空间",
+                activeTaskLabel: L("ACTIVE TASKS"),
                 reviewLabel: L("REVIEW"), evidenceLabel: L("EVIDENCE")
             )
 
@@ -599,6 +607,7 @@ struct AgentOperationsCenterView: View {
         let projectIncidents = mergeIncidents(liveProjectIncidents,
             projectHistoricalIncidents[project.path] ?? [])
         let changedFiles = evolution?.changedFileCount ?? 0
+        let observedFiles = Set(evolution?.changeSets.flatMap { $0.createdFiles + $0.modifiedFiles + $0.deletedFiles + $0.readFiles } ?? []).count
         let isSelected = selectedProjectPath == project.id
         let latestSession = project.sessions.max { $0.lastActivityAt < $1.lastActivityAt }
         let latestGoal = latestSession?.turns.reversed().compactMap(\.userInput).first
@@ -608,22 +617,31 @@ struct AgentOperationsCenterView: View {
             Button {
                 selectedProjectPath = isSelected ? nil : project.id
                 if !isSelected {
-                    projectIndex.request(path: project.path)
+                    if project.kind == .repository { projectIndex.request(path: project.path) }
                     loadProjectHistory(project)
                 }
             } label: {
                 HStack(alignment: .top, spacing: 12) {
-                    Image(systemName: "square.3.layers.3d.top.filled").font(.system(size: 21)).foregroundStyle(cyan)
+                    Image(systemName: project.kind == .repository ? "shippingbox.fill" : "checklist")
+                        .font(.system(size: 21)).foregroundStyle(cyan)
                     VStack(alignment: .leading, spacing: 3) {
                         Text(project.name).font(.system(size: 18, weight: .bold))
                         Text(project.path).font(.system(size: 12, design: .monospaced))
                             .foregroundStyle(.secondary).lineLimit(1)
-                        Text(String((index?.purpose ?? "Open the project to index tracked files").prefix(150)))
+                        Text(String((project.kind == .repository
+                            ? (index?.purpose ?? (language.language == .english
+                                ? "Open this repository to index tracked source"
+                                : "展开代码项目以索引已跟踪源码"))
+                            : (language.language == .english
+                                ? "Temporary task evidence — Git is not required"
+                                : "临时任务证据——无需 Git")).prefix(150)))
                             .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                     }
                     Spacer()
+                    labelChip(workspaceKindLabel(project.kind), color: project.kind == .repository ? .blue : cyan)
                     labelChip("\(project.sessions.count) AGENT\(project.sessions.count == 1 ? "" : "S")", color: cyan)
-                    labelChip("\(changedFiles) CHANGED", color: changedFiles > 0 ? .blue : .gray)
+                    labelChip(project.kind == .repository ? "\(changedFiles) CHANGED" : "\(observedFiles) FILE EVIDENCE",
+                              color: (project.kind == .repository ? changedFiles : observedFiles) > 0 ? .blue : .gray)
                     labelChip(L(projectIncidents.isEmpty ? "MONITORING" : "REVIEW REQUIRED"),
                               color: projectIncidents.isEmpty ? green : amber)
                     Image(systemName: isSelected ? "chevron.up" : "chevron.down")
@@ -632,14 +650,22 @@ struct AgentOperationsCenterView: View {
             }.buttonStyle(.plain)
                 if isSelected {
                 HStack {
-                    projectIndexControl(project.path, snapshot: index)
-                    if let error = projectIndex.error(for: project.path) {
-                        Text(error).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2)
+                    if project.kind == .repository {
+                        projectIndexControl(project.path, snapshot: index)
+                        if let error = projectIndex.error(for: project.path) {
+                            Text(error).font(.system(size: 10)).foregroundStyle(.red).lineLimit(2)
+                        } else {
+                            Text(language.language == .english
+                                 ? "Git-tracked source is indexed into structural evidence; Atlas indexes are imported when present"
+                                 : "Git 已跟踪源码会转为结构证据；如存在 Atlas 索引则直接导入")
+                                .font(.system(size: 10)).foregroundStyle(.tertiary)
+                        }
                     } else {
-                        Text(language.language == .english
-                             ? "Git-tracked source is indexed into structural evidence; Atlas indexes are imported when present"
-                             : "Git 已跟踪源码会转为结构证据；如存在 Atlas 索引则直接导入")
-                            .font(.system(size: 10)).foregroundStyle(.tertiary)
+                        Label(language.language == .english
+                              ? "Temporary task workspace — Git is not required"
+                              : "临时任务空间——无需 Git",
+                              systemImage: "checkmark.circle")
+                            .font(.system(size: 10, weight: .semibold)).foregroundStyle(green)
                     }
                     if projectHistoryLoading.contains(project.path) {
                         ProgressView().controlSize(.mini).tint(cyan)
@@ -651,8 +677,10 @@ struct AgentOperationsCenterView: View {
                     Spacer()
                 }
                 Divider().overlay(border)
-                let intelligence = ProjectIntelligence.build(projectPath: project.path,
-                    sessions: project.sessions, evolution: evolution, index: index)
+                let intelligence = project.kind == .repository
+                    ? ProjectIntelligence.build(projectPath: project.path,
+                        sessions: project.sessions, evolution: evolution, index: index)
+                    : nil
                 projectCockpit(project, evolution: evolution, intelligence: intelligence,
                                projectIncidents: projectIncidents)
             } else {
@@ -707,24 +735,36 @@ struct AgentOperationsCenterView: View {
             : "已索引 \(snapshot.files.count)\(suffix)"
     }
 
+    private func workspaceKindLabel(_ kind: SupervisedWorkspaceKind) -> String {
+        switch kind {
+        case .repository: return language.language == .english ? "REPOSITORY" : "代码项目"
+        case .task: return language.language == .english ? "TASK WORKSPACE" : "任务空间"
+        case .unassigned: return language.language == .english ? "UNASSIGNED" : "未归属"
+        }
+    }
+
     private func projectCockpit(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
-                                intelligence: ProjectIntelligenceSnapshot,
+                                intelligence: ProjectIntelligenceSnapshot?,
                                 projectIncidents: [SecurityIncident]) -> some View {
         let liveSessions = project.sessions.filter(sessionIsLive)
         return VStack(alignment: .leading, spacing: 12) {
-            projectBrief(project, evolution: evolution, intelligence: intelligence,
-                         projectIncidents: projectIncidents)
+            if project.kind == .repository, let intelligence {
+                projectBrief(project, evolution: evolution, intelligence: intelligence,
+                             projectIncidents: projectIncidents)
+            } else {
+                taskWorkspaceBrief(project, evolution: evolution, projectIncidents: projectIncidents)
+            }
 
             HStack(spacing: 4) {
                 ForEach(ProjectView.allCases) { tab in
                     Button { projectView = tab } label: {
-                        Text(L(tab.rawValue).uppercased()).font(.system(size: 11, weight: .bold))
+                        Text(projectTabLabel(tab, kind: project.kind).uppercased()).font(.system(size: 11, weight: .bold))
                             .foregroundStyle(projectView == tab ? cyan : .secondary)
                             .padding(.horizontal, 12).padding(.vertical, 7)
                     }.buttonStyle(TabButtonStyle(selected: projectView == tab))
                 }
                 Spacer()
-                evidenceTag(intelligence.purpose.confidence)
+                if let intelligence { evidenceTag(intelligence.purpose.confidence) }
             }.overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
 
             switch projectView {
@@ -750,13 +790,22 @@ struct AgentOperationsCenterView: View {
         }
     }
 
+    private func projectTabLabel(_ tab: ProjectView, kind: SupervisedWorkspaceKind) -> String {
+        if tab == .ask && kind != .repository {
+            return language.language == .english ? "Ask Task" : "询问任务"
+        }
+        return L(tab.rawValue)
+    }
+
     private func projectQuestionView(_ project: ProjectMission,
                                      evolution: ProjectEvolutionSnapshot?) -> some View {
         let relevantChanges = matchingChanges(question: projectQuestion,
                                               changes: evolution?.changeSets ?? [])
         return VStack(alignment: .leading, spacing: 12) {
             VStack(alignment: .leading, spacing: 5) {
-                Text(language.language == .english ? "ASK THIS PROJECT" : "向项目提问").micro(cyan)
+                Text(project.kind == .repository
+                     ? (language.language == .english ? "ASK THIS PROJECT" : "向项目提问")
+                     : (language.language == .english ? "ASK THIS TASK" : "向任务提问")).micro(cyan)
                 Text(language.language == .english
                      ? "Ask how a requirement was implemented, which Agent or model worked on it, what changed, whether memory was touched, and how the result was verified."
                      : "可以询问某项需求如何实现、由哪个 Agent 或模型执行、改了什么、是否动过记忆，以及最终如何验证。")
@@ -1224,6 +1273,36 @@ struct AgentOperationsCenterView: View {
             }.padding(9).background(panel, in: RoundedRectangle(cornerRadius: 8))
         }
         }
+    }
+
+    private func taskWorkspaceBrief(_ project: ProjectMission, evolution: ProjectEvolutionSnapshot?,
+                                    projectIncidents: [SecurityIncident]) -> some View {
+        let changes = evolution?.changeSets ?? []
+        let latest = changes.first
+        let observedFiles = Set(changes.flatMap { $0.createdFiles + $0.modifiedFiles + $0.deletedFiles + $0.readFiles }).count
+        let memoryReads = changes.reduce(0) { $0 + $1.memoryReads }
+        let memoryWrites = changes.reduce(0) { $0 + $1.memoryWrites }
+        return VStack(alignment: .leading, spacing: 9) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(language.language == .english ? "TASK BRIEF" : "任务摘要").micro(cyan)
+                    Text(latest?.requirement ?? (language.language == .english
+                         ? "Requirement evidence has not been captured"
+                         : "尚未捕获需求证据"))
+                        .font(.system(size: 15, weight: .semibold)).lineLimit(4)
+                    Text(language.language == .english
+                         ? "This is a temporary Agent task workspace. Requirement and security evidence are supervised without requiring a Git repository."
+                         : "这是临时 Agent 任务空间；无需建立 Git 仓库，仍会监督需求与安全证据。")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }.frame(maxWidth: .infinity, alignment: .leading)
+                projectBriefMetric(language.language == .english ? "REQUIREMENTS" : "需求", "\(changes.count)", cyan)
+                projectBriefMetric(language.language == .english ? "SESSIONS" : "会话", "\(project.sessions.count)", .blue)
+                projectBriefMetric(language.language == .english ? "FILES OBSERVED" : "文件证据", "\(observedFiles)", .purple)
+                projectBriefMetric(language.language == .english ? "MEMORY" : "记忆", "\(memoryReads)R · \(memoryWrites)W", cyan)
+                projectBriefMetric(language.language == .english ? "FINDINGS" : "风险", "\(projectIncidents.count)",
+                                   projectIncidents.isEmpty ? green : amber)
+            }
+        }.padding(13).background(raised.opacity(0.55), in: RoundedRectangle(cornerRadius: 10))
     }
 
     private func projectBriefMetric(_ title: String, _ value: String, _ color: Color) -> some View {

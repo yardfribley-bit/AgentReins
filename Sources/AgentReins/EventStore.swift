@@ -367,9 +367,8 @@ final class EventStore: ObservableObject {
 
     nonisolated private static func canonicalProjectID(session: AgentSessionSnapshot?,
                                                        sessionID: String) -> String {
-        guard let raw = session?.workspace?.trimmingCharacters(in: .whitespacesAndNewlines),
-              !raw.isEmpty, raw != "-" else { return "unattributed:\(sessionID)" }
-        return URL(fileURLWithPath: raw).standardizedFileURL.path
+        let workspace = SupervisedWorkspaceResolver.resolve(session?.workspace)
+        return workspace.kind == .unassigned ? "unattributed:\(sessionID)" : workspace.id
     }
 
     func refreshCollectorHealth(publish: Bool) {

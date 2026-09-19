@@ -2988,6 +2988,36 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertFalse(forensic.findings.contains { $0.id == "network" })
     }
 
+    func testWorkspaceResolverSeparatesRepositoryTaskAndUnassignedEvidence() throws {
+        let repository = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-workspace-repository-\(UUID().uuidString)")
+        let nested = repository.appendingPathComponent("Sources/Feature")
+        let task = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-task-workspace-\(UUID().uuidString)")
+        defer {
+            try? FileManager.default.removeItem(at: repository)
+            try? FileManager.default.removeItem(at: task)
+        }
+        try FileManager.default.createDirectory(at: nested, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: repository.appendingPathComponent(".git"),
+                                                withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: task, withIntermediateDirectories: true)
+
+        let repositoryIdentity = SupervisedWorkspaceResolver.resolve(nested.path)
+        XCTAssertEqual(repositoryIdentity.kind, .repository)
+        XCTAssertEqual(repositoryIdentity.id, repository.path)
+        XCTAssertEqual(repositoryIdentity.repositoryRoot, repository.path)
+
+        let taskIdentity = SupervisedWorkspaceResolver.resolve(task.path)
+        XCTAssertEqual(taskIdentity.kind, .task)
+        XCTAssertEqual(taskIdentity.id, task.path)
+        XCTAssertNil(taskIdentity.repositoryRoot)
+
+        let unassigned = SupervisedWorkspaceResolver.resolve(nil)
+        XCTAssertEqual(unassigned.kind, .unassigned)
+        XCTAssertNil(unassigned.path)
+    }
+
     private func gitOutput(_ arguments: [String], at root: URL) throws -> String {
         let process = Process()
         let output = Pipe()
