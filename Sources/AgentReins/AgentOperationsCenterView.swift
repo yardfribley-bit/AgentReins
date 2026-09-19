@@ -1133,6 +1133,12 @@ struct AgentOperationsCenterView: View {
     private var globalSecurityView: some View {
         let visible = scopedIncidents.filter { $0.severity != "info" }
         return LazyVStack(alignment: .leading, spacing: 12) {
+            SecurityPostureSummaryView(incidents: visible, sessions: sessions, health: health,
+                                       evidenceCoverage: evidenceCoverage,
+                                       analysisConfigured: semanticAnalyzer.configured,
+                                       analysisModel: semanticAnalyzer.model,
+                                       latestAIReview: semanticAnalyzer.historicalAnalysis,
+                                       chinese: language.language == .simplifiedChinese)
             if let analysis = semanticAnalyzer.historicalAnalysis {
                 aiHistoricalFindings(analysis)
             }
@@ -1142,15 +1148,15 @@ struct AgentOperationsCenterView: View {
                     : "当前实时范围内没有需要处理的风险")
             } else {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(language.language == .english ? "WHAT NEEDS YOUR ATTENTION" : "需要你关注的事情")
+                    Text(language.language == .english ? "PRIORITIZED SECURITY CASES" : "按优先级排列的安全案件")
                         .font(.system(size: 12, weight: .bold)).foregroundStyle(cyan)
                     Text(language.language == .english
-                         ? "Start with the decision. Open an item only when you need its technical evidence."
-                         : "先看结论和建议；需要核实时，再打开技术证据。")
+                         ? "Each case states what happened, why it matters, what remains unknown, and what to do next."
+                         : "每个案件先说明发生了什么、为什么重要、哪些尚未确认，以及下一步怎么做。")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }.padding(.bottom, 2)
             }
-            ForEach(visible) { incident in
+            ForEach(visible.sorted { severityRank($0.severity) > severityRank($1.severity) }) { incident in
                 SecurityIncidentCardView(incident: incident,
                     chinese: language.language == .simplifiedChinese,
                     density: .standard) { onIncident(incident) }
@@ -1175,7 +1181,12 @@ struct AgentOperationsCenterView: View {
                     eventStore.loadHistoricalSecurityEvidence { result in
                         switch result {
                         case .success(let rows):
-                            Task { await semanticAnalyzer.analyzeHistory(rows, policies: alertPolicyStore.policies) }
+                            Task {
+                                await semanticAnalyzer.analyzeHistory(rows, policies: alertPolicyStore.policies)
+                                if let analysis = semanticAnalyzer.historicalAnalysis {
+                                    alertPolicyStore.ingestAIProposals(analysis, events: rows)
+                                }
+                            }
                         case .failure(let error): semanticAnalyzer.lastError = error.localizedDescription
                         }
                     }

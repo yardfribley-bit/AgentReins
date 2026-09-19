@@ -446,4 +446,72 @@ final class AgentEventProtocolTests: XCTestCase {
                       prompt("weather-prompt", "weather", "建立全新的天气缓存和预报刷新功能", 200)]
         XCTAssertEqual(ChangeSetIndexer.build(projectID: "project", events: events, changes: values).count, 2)
     }
+
+    func testChangeSetKeepsCorrectionsAndAcknowledgementsInOneSessionRequirement() {
+        func prompt(_ id: String, _ turn: String, _ text: String, _ time: TimeInterval) -> AgentEventEnvelope {
+            AgentEventEnvelope(id: id, projectID: "project", agentID: "codex", sessionID: "article-session",
+                turnID: turn, sequence: UInt64(time), occurredAt: Date(timeIntervalSince1970: time),
+                observedAt: Date(timeIntervalSince1970: time), source: .agentTranscript,
+                confidence: .confirmed, payload: .userPrompt(UserPromptEvidence(
+                    rawText: text, digest: nil, requirementIDs: [])))
+        }
+        let events = [prompt("p1", "t1", "写一篇公众号文章", 10),
+                      prompt("p2", "t2", "不应该这样，重新调整文章结构", 20),
+                      prompt("p3", "t3", "好", 30),
+                      prompt("p4", "t4", "行", 40)]
+
+        let sets = ChangeSetIndexer.build(projectID: "project", events: events, changes: [])
+
+        XCTAssertEqual(sets.count, 1)
+        XCTAssertEqual(sets.first?.contextCount, 4)
+        XCTAssertEqual(sets.first?.dialogue.map(\.role), [.start, .correct, .continueWork, .continueWork])
+    }
+
+    func testChangeSetNeverFallsBackAcrossSessionBoundary() {
+        func prompt(_ id: String, _ session: String, _ turn: String, _ text: String, _ time: TimeInterval) -> AgentEventEnvelope {
+            AgentEventEnvelope(id: id, projectID: "project", agentID: "codex", sessionID: session,
+                turnID: turn, sequence: UInt64(time), occurredAt: Date(timeIntervalSince1970: time),
+                observedAt: Date(timeIntervalSince1970: time), source: .agentTranscript,
+                confidence: .confirmed, payload: .userPrompt(UserPromptEvidence(
+                    rawText: text, digest: nil, requirementIDs: [])))
+        }
+        let change = IndexedCodeChange(id: "orphan", projectID: "project", agentID: "workbuddy",
+            sessionID: "session-b", turnID: nil, path: "Secret.swift", operation: .modify,
+            beforeDigest: nil, afterDigest: "new", patch: nil, toolCallID: nil, toolName: nil,
+            userPrompt: nil, requirementIDs: [], model: nil,
+            startedAt: Date(timeIntervalSince1970: 30), lastObservedAt: Date(timeIntervalSince1970: 31),
+            attribution: .inferred, commitHashes: [], verification: [], evidenceIDs: ["orphan"])
+
+        let sets = ChangeSetIndexer.build(projectID: "project",
+            events: [prompt("p1", "session-a", "t1", "修改登录功能", 10)], changes: [change])
+
+        XCTAssertEqual(sets.count, 2)
+        XCTAssertFalse(sets.first(where: { $0.sessionIDs.contains("session-a") })?.codeChangeIDs.contains("orphan") ?? true)
+    }
+
+    func testChangeSetIgnoresCompactedTranscriptBundleAndDeduplicatesOneTurnPrompt() {
+        func prompt(_ id: String, _ turn: String, _ text: String, _ time: TimeInterval) -> AgentEventEnvelope {
+            AgentEventEnvelope(id: id, projectID: "project", agentID: "codex", sessionID: "session",
+                turnID: turn, sequence: UInt64(time), occurredAt: Date(timeIntervalSince1970: time),
+                observedAt: Date(timeIntervalSince1970: time), source: .agentTranscript,
+                confidence: .inferred, payload: .userPrompt(UserPromptEvidence(
+                    rawText: text, digest: nil, requirementIDs: [])))
+        }
+        let replay = """
+        [126] user: 我现在下载了 ZCode，需要新增 ZCode 采集器
+        [127] assistant: 我开始处理
+        [128] tool: apply_patch
+        """
+        let events = [prompt("replay", "t0", replay, 1),
+                      prompt("p1", "t1", "新增 ZCode 采集器", 2),
+                      prompt("p1-duplicate", "t1", "新增 ZCode 采集器", 3),
+                      prompt("p2", "t2", "好", 4)]
+
+        let sets = ChangeSetIndexer.build(projectID: "project", events: events, changes: [])
+
+        XCTAssertEqual(sets.count, 1)
+        XCTAssertEqual(sets.first?.title, "新增 ZCode 采集器")
+        XCTAssertEqual(sets.first?.contextCount, 2)
+        XCTAssertEqual(sets.first?.dialogue.map(\.role), [.start, .continueWork])
+    }
 }

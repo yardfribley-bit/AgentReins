@@ -36,6 +36,7 @@ struct AgentReinsApp: App {
     @StateObject private var workBuddySight = WorkBuddySight()
     @StateObject private var codexSight = CodexSight()
     @StateObject private var qoderSight = QoderSight()
+    @StateObject private var zcodeSight = ZCodeSight()
     @StateObject private var claudeSight = ClaudeSight()
     @StateObject private var cursorSight = CursorSight()
     @StateObject private var webAgentSight = WebAgentSight()
@@ -60,6 +61,7 @@ struct AgentReinsApp: App {
                 .environmentObject(workBuddySight)
                 .environmentObject(codexSight)
                 .environmentObject(qoderSight)
+                .environmentObject(zcodeSight)
                 .environmentObject(claudeSight)
                 .environmentObject(cursorSight)
                 .environmentObject(webAgentSight)
@@ -80,6 +82,7 @@ struct AgentReinsApp: App {
                 .onReceive(workBuddySight.$connected) { agentDiscovery.setAdapterConnected("workbuddy", connected: $0) }
                 .onReceive(codexSight.$connected) { agentDiscovery.setAdapterConnected("codex", connected: $0) }
                 .onReceive(qoderSight.$connected) { agentDiscovery.setAdapterConnected("qoder", connected: $0) }
+                .onReceive(zcodeSight.$connected) { agentDiscovery.setAdapterConnected("zcode", connected: $0) }
                 .onReceive(claudeSight.$connected) { agentDiscovery.setAdapterConnected("claude-code", connected: $0) }
                 .onReceive(cursorSight.$connected) { agentDiscovery.setAdapterConnected("cursor", connected: $0) }
                 .onReceive(webAgentSight.$connected) { agentDiscovery.setAdapterConnected("web-ai", connected: $0) }
@@ -126,6 +129,15 @@ struct AgentReinsApp: App {
                         eventStore.record(fresh + projected)
                     }
                     qoderSight.start()
+                    zcodeSight.onEvents = { events in
+                        let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
+                        let projected = activityProjector.project(fresh)
+                        attributionResolver.observe(fresh + projected)
+                        refineRecentNetworkEvents()
+                        turnJournalStore.ingest(journalEvents(from: fresh))
+                        eventStore.record(fresh + projected)
+                    }
+                    zcodeSight.start()
                     claudeSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)

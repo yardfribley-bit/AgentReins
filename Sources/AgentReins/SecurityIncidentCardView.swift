@@ -34,9 +34,8 @@ struct SecurityIncidentCardView: View {
                         else { Text(incident.ts.formatted(date: .omitted, time: .shortened))
                             .font(.system(size: 10, design: .monospaced)).foregroundStyle(.tertiary) }
                     }
-                    assessmentGrid
                     if density == .standard {
-                        explanationRow
+                        securityStory
                         HStack(spacing: 7) {
                             Text("\(displayAgent) · \(incident.ts.formatted(date: .omitted, time: .shortened))")
                             Text("·")
@@ -62,31 +61,53 @@ struct SecurityIncidentCardView: View {
         .buttonStyle(.plain)
     }
 
-    private var assessmentGrid: some View {
-        LazyVGrid(columns: [GridItem(.flexible(), alignment: .topLeading),
-                            GridItem(.flexible(), alignment: .topLeading)], spacing: 8) {
-            ForEach(assessment.fields) { field in
-                VStack(alignment: .leading, spacing: 3) {
-                    HStack(spacing: 5) {
-                        Circle().fill(color(field.level)).frame(width: 6, height: 6)
-                        Text(field.label.uppercased()).font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-                        Text(level(field.level)).font(.system(size: 8, weight: .semibold)).foregroundStyle(color(field.level))
-                    }
-                    Text(field.value).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).lineLimit(3)
-                }
-                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
-                .background(raised, in: RoundedRectangle(cornerRadius: 7))
+    private var securityStory: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            storyRow(icon: "exclamationmark.circle", label: chinese ? "为什么重要" : "WHY IT MATTERS",
+                     value: copy.whyItMatters, color: severityColor)
+            evidenceBoundary
+            storyRow(icon: "arrow.right.circle.fill", label: chinese ? "建议怎么做" : "WHAT TO DO NEXT",
+                     value: copy.recommendedAction, color: .cyan)
+        }
+        .padding(11)
+        .background(raised.opacity(0.72), in: RoundedRectangle(cornerRadius: 8))
+    }
+
+    private var evidenceBoundary: some View {
+        let confirmed = assessment.fields.filter { $0.level == .confirmed }
+        let inferred = assessment.fields.filter { $0.level == .inferred }
+        let unknown = assessment.fields.filter { $0.level == .unknown }
+        return VStack(alignment: .leading, spacing: 6) {
+            if !confirmed.isEmpty {
+                boundaryLine(color: .green, title: chinese ? "已确认" : "CONFIRMED",
+                             value: confirmed.prefix(3).map { "\($0.label)：\($0.value)" }.joined(separator: " · "))
+            }
+            if !inferred.isEmpty {
+                boundaryLine(color: .orange, title: chinese ? "关联推断" : "INFERRED",
+                             value: inferred.prefix(2).map { "\($0.label)：\($0.value)" }.joined(separator: " · "))
+            }
+            if !unknown.isEmpty {
+                boundaryLine(color: .gray, title: chinese ? "尚未确认" : "NOT PROVEN",
+                             value: unknown.prefix(2).map { "\($0.label)：\($0.value)" }.joined(separator: " · "))
             }
         }
     }
 
-    private var explanationRow: some View {
-        HStack(alignment: .top, spacing: 7) {
-            Image(systemName: "checklist").foregroundStyle(.cyan).frame(width: 16)
+    private func storyRow(icon: String, label: String, value: String, color: Color) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon).foregroundStyle(color).frame(width: 16)
             VStack(alignment: .leading, spacing: 2) {
-                Text(chinese ? "处置建议" : "RESPONSE").font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
-                Text(assessment.disposition).font(.system(size: 11)).foregroundStyle(.secondary)
+                Text(label).font(.system(size: 9, weight: .bold)).foregroundStyle(.tertiary)
+                Text(value).font(.system(size: 12, weight: .medium)).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true)
             }
+        }
+    }
+
+    private func boundaryLine(color: Color, title: String, value: String) -> some View {
+        HStack(alignment: .top, spacing: 7) {
+            Circle().fill(color).frame(width: 7, height: 7).padding(.top, 4)
+            Text(title).font(.system(size: 9, weight: .bold)).foregroundStyle(color).frame(width: 70, alignment: .leading)
+            Text(value).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(3)
         }
     }
 
@@ -106,16 +127,6 @@ struct SecurityIncidentCardView: View {
     }
     private var severityColor: Color {
         switch incident.severity { case "critical": return .red; case "high": return .orange; case "medium": return .yellow; default: return .blue }
-    }
-    private func color(_ level: SecurityIncidentAssessment.EvidenceLevel) -> Color {
-        switch level { case .confirmed: return .green; case .inferred: return .orange; case .unknown: return .gray }
-    }
-    private func level(_ value: SecurityIncidentAssessment.EvidenceLevel) -> String {
-        switch value {
-        case .confirmed: return chinese ? "已确认" : "CONFIRMED"
-        case .inferred: return chinese ? "关联推断" : "INFERRED"
-        case .unknown: return chinese ? "未知" : "UNKNOWN"
-        }
     }
     private var panel: Color { Color(red: 8/255, green: 27/255, blue: 45/255) }
     private var raised: Color { Color(red: 13/255, green: 36/255, blue: 59/255) }

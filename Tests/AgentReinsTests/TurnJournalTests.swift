@@ -148,6 +148,69 @@ final class TurnJournalTests: XCTestCase {
                                                     webEvidenceActive: false).isEmpty)
     }
 
+    func testZCodeDiscoveryUsesNativeDatabaseAndProcessMarkers() throws {
+        let processes = [
+            ProcessSnapshotRecord(pid: "40", ppid: "1",
+                command: "/Applications/ZCode.app/Contents/MacOS/ZCode"),
+            ProcessSnapshotRecord(pid: "41", ppid: "40", command: "zcode-host-local-1")
+        ]
+        let paths: Set<String> = ["/Applications/ZCode.app", AgentDiscoveryEngine.home + "/.zcode/cli/db/db.sqlite"]
+        let agents = AgentDiscoveryEngine.discover(processes: processes, existingPaths: paths,
+                                                    webEvidenceActive: false)
+        let zcode = try XCTUnwrap(agents.first { $0.id == "zcode" })
+        XCTAssertEqual(zcode.product, "ZCode")
+        XCTAssertEqual(zcode.processIds, [40, 41])
+        XCTAssertEqual(zcode.adapter, "zcode-native-v1")
+        XCTAssertTrue(zcode.coverage.isSuperset(of: [.process, .session, .prompt, .response, .tools]))
+    }
+
+    func testZCodeProjectionCapturesPromptContextResponseModelToolsAndUsage() throws {
+        let user = #"{"role":"user","modelSelection":{"providerId":"account:zai-start-plan","modelId":"GLM-5.3"},"contextSnapshot":{"envInfo":{"cwd":"/tmp/project"}},"tools":{"Bash":true,"Read":true},"metadata":{"inputIntent":{"text":"Fix login"}},"anchor":{"turnId":"turn-1"}}"#
+        let assistant = #"{"role":"assistant","providerId":"account:zai-start-plan","modelId":"GLM-5.3","tokens":{"input":120,"output":30,"reasoning":10,"cache":{"read":40}},"anchor":{"turnId":"turn-1"}}"#
+        let textPart = #"{"type":"text","text":"Implemented login"}"#
+        let reasoningPart = #"{"type":"reasoning","text":"Inspect authentication before editing."}"#
+        let toolPart = #"{"type":"tool","callID":"call-1","tool":"Bash","state":{"status":"completed","input":{"command":"swift test"},"output":"ok"}}"#
+        let events = ZCodeSight.project(sessionID: "zs", workspace: "/tmp/project",
+            messages: [
+                ["user-message", "1000", user], ["assistant-message", "2000", assistant]
+            ], parts: [
+                ["part-1", "assistant-message", "2001", textPart],
+                ["part-r", "assistant-message", "2001", reasoningPart],
+                ["part-2", "assistant-message", "2002", toolPart]
+            ], toolRows: [["call-1", "Bash", "completed", "2002", "2100", "0", "120", "0", nil, "turn-1"]],
+            usageRows: [["turn-1", "completed", "1000", "2100", "1", "0", "1", "0", "120", "30", "10", "40"]])
+
+        XCTAssertEqual(events.first { $0.op == "prompt" }?.userIntent, "Fix login")
+        XCTAssertNotNil(events.first { $0.op == "context_prepared" }?.modelPrompt)
+        XCTAssertEqual(events.first { $0.op == "response" }?.modelResponse, "Implemented login")
+        XCTAssertEqual(events.first { $0.op == "response" }?.model, "account:zai-start-plan/GLM-5.3")
+        XCTAssertEqual(events.first { $0.op == "reasoning_summary" }?.modelReasoning,
+                       "Inspect authentication before editing.")
+        XCTAssertEqual(events.first { $0.op == "reasoning_summary" }?.reasoningTokens, 10)
+        XCTAssertEqual(events.first { $0.op == "call" }?.toolName, "Bash")
+        XCTAssertTrue(events.first { $0.op == "call" }?.command?.contains("swift test") == true)
+        XCTAssertEqual(events.first { $0.op == "usage" }?.cachedTokens, 40)
+        XCTAssertEqual(events.first { $0.op == "usage" }?.reasoningTokens, 10)
+        XCTAssertTrue(events.allSatisfy {
+            $0.agent == "zcode" && $0.source == "agentsight:zcode-self-reported-v1"
+                && $0.attributionConfidence == .unknown
+        })
+    }
+
+    func testZCodeStructuredLogCapturesRuntimeAndMCPWithoutCredentialFiles() throws {
+        let fixture = """
+        {"timestamp":"2026-09-19T11:36:57Z","event":"bootstrap.app.startup.runtime_config.completed","sessionId":"zs","context":{"workingDirectory":"/tmp/project","model":"GLM-5.3","memoryEnabled":true,"apiKey":"must-not-survive"}}
+        {"timestamp":"2026-09-19T11:37:01Z","event":"mcp.server.connected","sessionId":"zs","context":{"workspacePath":"/tmp/project","mcpConnectionId":"mcp-1","mcpServerName":"node_repl","transport":"stdio"}}
+        """
+        let parsed = ZCodeSight.parseLog(Data(fixture.utf8), sourcePath: "/tmp/zcode.jsonl")
+        XCTAssertEqual(parsed.malformed, 0)
+        XCTAssertEqual(parsed.events.count, 2)
+        XCTAssertEqual(parsed.events.first?.model, "GLM-5.3")
+        XCTAssertFalse(parsed.events.first?.command?.contains("must-not-survive") == true)
+        XCTAssertEqual(parsed.events.last?.toolName, "mcp:node_repl")
+        XCTAssertEqual(parsed.events.last?.action, "completed")
+    }
+
     func testClaudeDesktopDoesNotClaimClaudeCodeNativeCoverage() throws {
         let processes = [ProcessSnapshotRecord(pid: "40", ppid: "1",
             command: "/Applications/Claude.app/Contents/MacOS/Claude")]
@@ -832,6 +895,126 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(AgentPolicyAlertEngine.findings(events: [call, read], policies: policies).isEmpty)
     }
 
+    func testCustomAlertPolicyPersistsAndExecutesInObserveMode() throws {
+        let defaults = UserDefaults.standard
+        let previous = defaults.data(forKey: AlertPolicyPersistence.key)
+        defer {
+            if let previous { defaults.set(previous, forKey: AlertPolicyPersistence.key) }
+            else { defaults.removeObject(forKey: AlertPolicyPersistence.key) }
+        }
+        let custom = AlertPolicy(id: "user_sensitive_read", name: "Project credential boundary",
+            explanation: "Watch selected projects for sensitive reads.", enabled: true,
+            severity: "critical", notify: true, agentNames: ["codex"],
+            projectPaths: ["/projects/app"], excludedPaths: [],
+            detector: .crossProjectSensitiveFileRead, origin: "user", mode: "observe")
+        AlertPolicyPersistence.save(AlertPolicy.defaults + [custom])
+
+        let restored = try XCTUnwrap(AlertPolicyPersistence.load().first { $0.id == custom.id })
+        XCTAssertEqual(restored.effectiveDetector, .crossProjectSensitiveFileRead)
+        XCTAssertEqual(restored.effectiveOrigin, "user")
+
+        let call = GuardEvent(kind: "tool", ruleId: "call", path: "/projects/app", command: "cat /tmp/.env",
+            agent: "codex", op: "call", severity: "info", ts: Date(), action: "requested",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "Shell")
+        let read = GuardEvent(kind: "file", ruleId: "read", path: "/tmp/.env", command: nil,
+            agent: "codex", op: "read", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", toolCallId: "c", toolName: "Shell")
+        let finding = try XCTUnwrap(AgentPolicyAlertEngine.findings(events: [call, read], policies: [restored]).first)
+        XCTAssertEqual(finding.ruleId, custom.id)
+        XCTAssertEqual(finding.action, "recorded")
+    }
+
+    @MainActor
+    func testAIRuleCandidateBacktestsAndRequiresApprovalBeforeObserveMode() throws {
+        let defaults = UserDefaults.standard
+        let previousPolicies = defaults.data(forKey: AlertPolicyPersistence.key)
+        let previousCandidates = defaults.data(forKey: AlertPolicyStore.candidateKey)
+        defer {
+            if let previousPolicies { defaults.set(previousPolicies, forKey: AlertPolicyPersistence.key) }
+            else { defaults.removeObject(forKey: AlertPolicyPersistence.key) }
+            if let previousCandidates { defaults.set(previousCandidates, forKey: AlertPolicyStore.candidateKey) }
+            else { defaults.removeObject(forKey: AlertPolicyStore.candidateKey) }
+        }
+        defaults.removeObject(forKey: AlertPolicyStore.candidateKey)
+        AlertPolicyPersistence.save(AlertPolicy.defaults)
+        let store = AlertPolicyStore()
+        let examination = LLMSelfExamination(verdict: "confirmed", confidence: 0.91,
+            evidenceSufficient: true, falsePositiveRisk: "low", counterEvidence: "none",
+            rationale: "Repeated credential-shaped values were present in tool arguments.")
+        let rule = AIRuleExamination(id: "credential_arguments_repeat", name: "Credential in command",
+            origin: "ai_proposed", severity: "critical",
+            condition: "Alert when a credential appears in tool arguments or command text.",
+            llmSelfExamine: examination)
+        let analysis = HistoricalSecurityAnalysis(findings: [], rules: [rule],
+            generatedAt: "2026-09-19T00:00:00Z", model: "test-model", examinationPasses: 2)
+        let event = GuardEvent(kind: "tool", ruleId: "call", path: "/projects/app",
+            command: "password='example-secret-123' deploy", agent: "codex", op: "call",
+            severity: "info", ts: Date(), action: "requested", sessionId: "s", turnId: "t",
+            toolCallId: "c", toolName: "Shell")
+
+        store.ingestAIProposals(analysis, events: [event])
+
+        let candidate = try XCTUnwrap(store.aiCandidates.first)
+        XCTAssertEqual(candidate.detector, .credentialInToolArguments)
+        XCTAssertEqual(candidate.historicalMatches, 1)
+        XCTAssertNil(store.policies.first { $0.id == "ai_\(candidate.id)" })
+
+        store.approve(candidate)
+
+        let approved = try XCTUnwrap(store.policies.first { $0.id == "ai_\(candidate.id)" })
+        XCTAssertEqual(approved.effectiveOrigin, "ai_proposed")
+        XCTAssertEqual(approved.effectiveMode, "observe")
+        XCTAssertFalse(approved.notify)
+        XCTAssertTrue(store.aiCandidates.isEmpty)
+    }
+
+    func testSensitiveModelRequestRuleRequiresCapturedBodyAndDoesNotInferFromNetwork() throws {
+        let request = GuardEvent(kind: "model", ruleId: "prompt", path: "/projects/app",
+            command: nil, agent: "workbuddy", op: "prompt", severity: "info", ts: Date(),
+            action: "sent", sessionId: "s", turnId: "t",
+            modelPrompt: "Deploy with password=correct-horse and keep it private.",
+            model: "relay/model", source: "agentsight:workbuddy-local",
+            attributionConfidence: .confirmed, attributionMethod: "native agent request record",
+            remoteDomain: "relay.example")
+        let finding = try XCTUnwrap(AgentPolicyAlertEngine.findings(events: [request]).first {
+            $0.ruleId == "sensitive_data_in_model_request"
+        })
+        XCTAssertEqual(finding.severity, "critical")
+        XCTAssertEqual(finding.action, "needs_review")
+        XCTAssertEqual(finding.turnId, "t")
+
+        let socketOnly = GuardEvent(kind: "network", ruleId: "connect", path: "-", command: nil,
+            agent: "workbuddy", op: "connect", severity: "info", ts: Date(), action: "observed",
+            sessionId: "s", turnId: "t", remoteHost: "203.0.113.10", remotePort: 443)
+        XCTAssertFalse(AgentPolicyAlertEngine.findings(events: [socketOnly]).contains {
+            $0.ruleId == "sensitive_data_in_model_request"
+        })
+    }
+
+    func testCrossApplicationSensitiveReadDoesNotRequirePerfectToolCallJoin() throws {
+        let read = GuardEvent(kind: "file", ruleId: "read", path:
+            "/Users/test/Library/Application Support/ServerManager/servers.yaml",
+            command: nil, agent: "workbuddy", op: "read", severity: "info", ts: Date(),
+            action: "observed", sessionId: "s", turnId: "t",
+            source: "agent-adapter", attributionConfidence: .confirmed,
+            attributionMethod: "native file tool evidence")
+
+        let finding = try XCTUnwrap(AgentPolicyAlertEngine.findings(events: [read]).first {
+            $0.ruleId == "cross_application_sensitive_read"
+        })
+        XCTAssertEqual(finding.severity, "critical")
+        XCTAssertEqual(finding.agent, "workbuddy")
+        XCTAssertEqual(finding.attributionConfidence, .confirmed)
+
+        let ownRead = GuardEvent(kind: "file", ruleId: "read", path:
+            "/Users/test/Library/Application Support/WorkBuddy/servers.yaml",
+            command: nil, agent: "workbuddy", op: "read", severity: "info", ts: Date(),
+            action: "observed", attributionConfidence: .confirmed)
+        XCTAssertFalse(AgentPolicyAlertEngine.findings(events: [ownRead]).contains {
+            $0.ruleId == "cross_application_sensitive_read"
+        })
+    }
+
     func testLibprocSnapshotCapturesCurrentProcessWithoutEnvironmentLeakage() throws {
         setenv("AGENTREINS_TEST_SECRET", "must-not-enter-process-evidence", 1)
         defer { unsetenv("AGENTREINS_TEST_SECRET") }
@@ -1410,6 +1593,28 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(assessment.items.first { $0.category == .developerInstructions }?.present == true)
         XCTAssertTrue(assessment.items.first { $0.category == .permissions }?.present == true)
         XCTAssertTrue(assessment.items.first { $0.category == .attachments }?.present == true)
+    }
+
+    func testCodexCompactedTranscriptBundleIsContextNotANewUserRequirement() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("codex-bundle-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let bundle = "[126] user: 新增 ZCode 采集器\n[127] assistant: 开始处理\n[128] tool: apply_patch"
+        let escaped = bundle.replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+        let rows = [
+            #"{"timestamp":"2026-09-09T00:00:00Z","type":"session_meta","payload":{"id":"bundle-session","cwd":"/tmp/project"}}"#,
+            "{\"timestamp\":\"2026-09-09T00:00:01Z\",\"type\":\"event_msg\",\"payload\":{\"type\":\"item_completed\",\"turn_id\":\"turn-1\",\"item\":{\"type\":\"UserMessage\",\"id\":\"bundle\",\"content\":[{\"type\":\"text\",\"text\":\"\(escaped)\"}]}}}"
+        ]
+        try rows.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+
+        let events = CodexSight.parseSession(url, fullHistory: true)
+
+        XCTAssertFalse(events.contains { $0.op == "prompt" })
+        let context = try XCTUnwrap(events.first { $0.op == "recovered_transcript" })
+        XCTAssertNil(context.modelPrompt)
+        XCTAssertNil(context.userIntent)
+        XCTAssertTrue(context.command?.contains("roleCounts") == true)
     }
 
     func testCodexHistoryIsOnlyReconstructedOnDemand() throws {

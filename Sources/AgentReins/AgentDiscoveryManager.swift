@@ -41,7 +41,7 @@ final class AgentDiscoveryManager: ObservableObject {
     init(provider: (any ProcessSnapshotting)? = nil) {
         self.provider = provider ?? ResilientProcessSnapshotProvider(agentMarkers:
             ["codex", "chatgpt", "workbuddy", "qoder", "claude-code", "claude-desktop",
-             "cursor", "kiro", "windsurf", "trae"])
+             "cursor", "zcode", "kiro", "windsurf", "trae"])
     }
 
     func start() {
@@ -162,6 +162,10 @@ enum AgentDiscoveryEngine {
         Signature(id: "qoder", product: "Qoder",
             appPaths: ["/Applications/Qoder.app"], markers: ["/qoder.app/", "/.qoder/"],
             dataPath: "\(home)/.qoder/projects", adapter: "qoder-native"),
+        Signature(id: "zcode", product: "ZCode",
+            appPaths: ["/Applications/ZCode.app"],
+            markers: ["/zcode.app/", "/.zcode/", "zcode-host-local"],
+            dataPath: "\(home)/.zcode/cli/db/db.sqlite", adapter: "zcode-native-v1"),
         Signature(id: "claude-code", product: "Claude Code",
             appPaths: ["\(home)/Applications/Claude Code URL Handler.app"],
             markers: ["/claude-code", "/usr/local/bin/claude", "/opt/homebrew/bin/claude",

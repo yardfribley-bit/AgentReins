@@ -200,6 +200,14 @@ final class EventStore: ObservableObject {
         persistenceQueue.async {
             let result = Result {
                 try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                // Change sets are a replaceable projection. Rebuild only when
+                // the user opens this project's history so parser/indexer fixes
+                // take effect without a costly all-project startup migration.
+                let events = try database.agentEvents(projectID: projectID)
+                let changes = try database.codeChanges(projectID: projectID)
+                try database.replaceChangeSets(projectID: projectID,
+                    values: ChangeSetIndexer.build(projectID: projectID,
+                        events: events, changes: changes))
                 return try database.changeSets(projectID: projectID, limit: limit)
             }
             DispatchQueue.main.async { completion(result) }

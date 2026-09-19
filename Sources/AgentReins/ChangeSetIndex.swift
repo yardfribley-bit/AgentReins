@@ -51,22 +51,37 @@ enum ChangeSetIndexer {
 
     static func build(projectID: String, events: [AgentEventEnvelope],
                       changes: [IndexedCodeChange]) -> [IndexedChangeSet] {
-        let prompts = events.compactMap { event -> (AgentEventEnvelope, UserPromptEvidence)? in
+        let candidates = events.compactMap { event -> (AgentEventEnvelope, UserPromptEvidence)? in
             guard event.projectID == projectID, case let .userPrompt(value) = event.payload else { return nil }
+            // Codex compaction may replay a transcript bundle as one compatibility
+            // message. It is useful context evidence, but it is not a new user ask.
+            guard !isTranscriptBundle(value.rawText) else { return nil }
             return (event, value)
         }.sorted { $0.0.occurredAt < $1.0.occurredAt }
+        // Re-reading a compatibility stream can produce more than one projection
+        // of the same logical prompt. A turn has one user prompt boundary.
+        var seenPromptTurns = Set<String>()
+        let prompts = candidates.filter { event, _ in
+            guard let turnID = event.turnID else { return true }
+            return seenPromptTurns.insert(key(event.sessionID, turnID)).inserted
+        }
         var drafts: [Draft] = []
-        var activeIndex: Int?
+        // A session is a hard attribution boundary. Different agent sessions may
+        // work on the same project at the same time and must never share an
+        // implicit "current requirement".
+        var activeIndexBySession: [String: Int] = [:]
         var turnToDraft: [String: Int] = [:]
 
         for (event, prompt) in prompts {
+            let sessionID = event.sessionID
+            let activeIndex = activeIndexBySession[sessionID]
             let role = classify(prompt.rawText, hasActive: activeIndex != nil)
             if activeIndex == nil || role == .newRequirement || role == .start {
                 drafts.append(Draft(idSeed: event.id, dialogue: [],
                                     requirementIDs: Set(prompt.requirementIDs), changes: []))
-                activeIndex = drafts.count - 1
+                activeIndexBySession[sessionID] = drafts.count - 1
             }
-            guard let index = activeIndex else { continue }
+            guard let index = activeIndexBySession[sessionID] else { continue }
             let storedRole: RequirementDialogueRole = drafts[index].dialogue.isEmpty ? .start : role
             drafts[index].dialogue.append(RequirementDialogueEntry(
                 id: event.id, role: storedRole, text: prompt.rawText,
@@ -75,13 +90,17 @@ enum ChangeSetIndexer {
                 confidence: role == .unknown ? .inferred : .observed))
             drafts[index].requirementIDs.formUnion(prompt.requirementIDs)
             turnToDraft[key(event.sessionID, event.turnID)] = index
-            if role == .accept || role == .cancel { activeIndex = nil }
+            // Acknowledgements such as "好" and "行" are part of the same
+            // requirement dialogue. Only an explicit cancellation closes it.
+            if role == .cancel { activeIndexBySession[sessionID] = nil }
         }
 
         for change in changes.sorted(by: { $0.startedAt < $1.startedAt }) {
             let exact = turnToDraft[key(change.sessionID, change.turnID)]
             let preceding = drafts.indices.reversed().first { index in
-                (drafts[index].dialogue.first?.occurredAt ?? .distantFuture) <= change.startedAt
+                drafts[index].dialogue.contains { entry in
+                    entry.sessionID == change.sessionID && entry.occurredAt <= change.startedAt
+                }
             }
             if let index = exact ?? preceding {
                 drafts[index].changes.append(change)
@@ -122,24 +141,34 @@ enum ChangeSetIndexer {
                 startedAt: times.min() ?? first.occurredAt,
                 lastActivityAt: times.max() ?? first.occurredAt, state: state,
                 groupingConfidence: draft.dialogue.contains { $0.confidence == .inferred } ? .inferred : .observed,
-                groupingReasons: ["shared_user_request_dialogue"], evidenceIDs: evidence.sorted())
+                groupingReasons: ["same_session_requirement_dialogue"], evidenceIDs: evidence.sorted())
         }.sorted { $0.lastActivityAt > $1.lastActivityAt }
     }
 
-    private static func classify(_ raw: String, hasActive: Bool) -> RequirementDialogueRole {
+    static func classify(_ raw: String, hasActive: Bool) -> RequirementDialogueRole {
         let value = raw.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
         if !hasActive { return .start }
         if matches(value, ["取消", "不用做", "别做", "cancel", "stop this"]) { return .cancel }
         if matches(value, ["可以了", "这样可以", "完成了", "通过", "looks good", "approved", "done"]) { return .accept }
         if matches(value, ["继续", "接着", "往下", "干", "做", "行", "好", "go on", "continue"]) && value.count <= 40 { return .continueWork }
-        if matches(value, ["我认为", "再加", "还要", "同时", "另外", "改成", "调整", "补充", "also", "add", "change", "refine"]) { return .refine }
-        if matches(value, ["不对", "错了", "修复", "修一下", "重新", "应该", "bug", "fix", "wrong"]) { return .correct }
-        if value.count > 12 { return .newRequirement }
+        if matches(value, ["不应该", "不对", "错了", "修复", "修一下", "重新", "刚才", "bug", "fix", "wrong"]) { return .correct }
+        if matches(value, ["我认为", "应该", "再加", "还要", "同时", "改成", "调整", "补充", "优化", "also", "add", "change", "refine"]) { return .refine }
+        // Length is not evidence of a new requirement. Require an explicit goal
+        // switch so detailed corrections remain attached to their original ask.
+        if matches(value, ["新需求", "新的需求", "另一个需求", "另外一个需求", "全新的", "下一个任务",
+                           "下面做", "接下来做", "换一个", "做另一个", "new task", "another task",
+                           "next task", "new requirement", "switch to"]) { return .newRequirement }
         return .unknown
     }
 
     private static func matches(_ value: String, _ markers: [String]) -> Bool {
         markers.contains { value.contains($0) }
+    }
+    static func isTranscriptBundle(_ value: String) -> Bool {
+        let pattern = #"(?m)^\s*\[\d+\]\s+(user|assistant|tool|developer):"#
+        guard let expression = try? NSRegularExpression(pattern: pattern) else { return false }
+        let range = NSRange(value.startIndex..<value.endIndex, in: value)
+        return expression.numberOfMatches(in: value, range: range) >= 2
     }
     private static func key(_ session: String, _ turn: String?) -> String { "\(session)\u{0}\(turn ?? "unattributed")" }
     private static func digest(_ value: String) -> String {

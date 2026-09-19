@@ -231,6 +231,16 @@ final class CodexSight: ObservableObject {
                let content = textContent(item["content"]) {
                 let turn = payload["turn_id"] as? String ?? currentTurn ?? item["id"] as? String
                 currentTurn = turn
+                if ChangeSetIndexer.isTranscriptBundle(content) {
+                    let metadata = transcriptBundleMetadata(content)
+                    result.append(event(identity: "\(session):\(turn ?? "none"):\(item["id"] as? String ?? timestampKey):transcript-bundle",
+                        kind: "context", rule: "codex_recovered_transcript_bundle", workspace: workspace,
+                        op: "recovered_transcript", timestamp: timestamp, action: "captured",
+                        session: session, trace: nil, turn: turn, intent: nil, prompt: nil,
+                        response: nil, toolCallId: nil, toolName: "codex.compacted_history",
+                        command: jsonString(metadata), model: model))
+                    continue
+                }
                 lastIntent = cleanUserIntent(content)
                 result.append(event(identity: "\(session):\(turn ?? "none"):\(item["id"] as? String ?? timestampKey):prompt", kind: "model",
                     rule: "codex_model_prompt", workspace: workspace, op: "prompt", timestamp: timestamp,
@@ -416,6 +426,18 @@ final class CodexSight: ObservableObject {
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         return value.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private nonisolated static func transcriptBundleMetadata(_ value: String) -> [String: Any] {
+        let roles = ["user", "assistant", "tool", "developer"]
+        let counts = Dictionary(uniqueKeysWithValues: roles.map { role -> (String, Int) in
+            let pattern = "(?m)^\\s*\\[\\d+\\]\\s+\(role):"
+            let expression = try? NSRegularExpression(pattern: pattern)
+            let range = NSRange(value.startIndex..<value.endIndex, in: value)
+            return (role, expression?.numberOfMatches(in: value, range: range) ?? 0)
+        })
+        return ["byteCount": value.utf8.count, "roleCounts": counts,
+                "sha256": SHA256.hash(data: Data(value.utf8)).map { String(format: "%02x", $0) }.joined()]
     }
 
     private nonisolated static func date(_ value: Any?) -> Date {

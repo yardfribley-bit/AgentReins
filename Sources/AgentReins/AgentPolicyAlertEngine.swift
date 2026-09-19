@@ -6,45 +6,77 @@ import Foundation
 enum AgentPolicyAlertEngine {
     static func findings(events: [GuardEvent], policies: [AlertPolicy] = AlertPolicyPersistence.load()) -> [GuardEvent] {
         let ordered = events.sorted { $0.ts < $1.ts }
-        let configured = Dictionary(uniqueKeysWithValues: policies.map { ($0.id, $0) })
+        let configured = Dictionary(grouping: policies.filter(\.enabled), by: \.effectiveDetector)
         let calls = Dictionary(uniqueKeysWithValues: ordered.compactMap { event -> (String, GuardEvent)? in
             guard event.kind == "tool", event.op == "call", let key = key(event) else { return nil }
             return (key, event)
         })
         var output: [GuardEvent] = []
 
+        for request in ordered where request.kind == "model" && request.op == "prompt" {
+            guard let body = request.modelPrompt, !body.isEmpty,
+                  !SensitiveContextExposure.scan(text: body, source: "model request").isEmpty,
+                  let candidates = configured[.some(.sensitiveDataInModelRequest)] else { continue }
+            for policy in candidates where policy.applies(to: request, workspace: request.path) {
+                output.append(alert(rule: policy.id, severity: policy.severity,
+                                    notify: policy.effectiveMode == "active" && policy.notify,
+                                    event: request, workspace: request.path,
+                                    detail: "Sensitive data appeared in a captured model request body"))
+            }
+        }
+
         for call in ordered where call.kind == "tool" && call.op == "call" {
             guard let arguments = call.command, !arguments.isEmpty,
                   !SensitiveContextExposure.scan(text: arguments, source: "tool arguments").isEmpty,
-                  let policy = configured["credential_in_tool_arguments"],
-                  policy.applies(to: call, workspace: call.path) else { continue }
-            output.append(alert(rule: policy.id, severity: policy.severity, notify: policy.notify,
-                                event: call, workspace: call.path,
-                                detail: "Credential-like material appeared in Agent tool arguments"))
+                  let candidates = configured[.some(.credentialInToolArguments)] else { continue }
+            for policy in candidates where policy.applies(to: call, workspace: call.path) {
+                output.append(alert(rule: policy.id, severity: policy.severity,
+                                    notify: policy.effectiveMode == "active" && policy.notify,
+                                    event: call, workspace: call.path,
+                                    detail: "Credential-like material appeared in Agent tool arguments"))
+            }
         }
 
         for event in ordered where event.kind == "file" && event.op == "read" {
             guard let callKey = key(event), let call = calls[callKey],
                   isOutside(path: event.path, workspace: call.path) else { continue }
             let sensitive = sensitivePath(event.path)
-            let ruleID = sensitive ? "cross_project_sensitive_file_read" : "cross_project_file_read"
-            guard let policy = configured[ruleID], policy.applies(to: event, workspace: call.path) else { continue }
-            output.append(alert(rule: ruleID,
-                severity: policy.severity, notify: policy.notify, event: event, workspace: call.path,
-                detail: sensitive
-                    ? "Agent read a sensitive file outside the active project"
-                    : "Agent read a file outside the active project"))
+            let detector: AlertDetector = sensitive ? .crossProjectSensitiveFileRead : .crossProjectFileRead
+            guard let candidates = configured[.some(detector)] else { continue }
+            for policy in candidates where policy.applies(to: event, workspace: call.path) {
+                output.append(alert(rule: policy.id, severity: policy.severity,
+                    notify: policy.effectiveMode == "active" && policy.notify, event: event, workspace: call.path,
+                    detail: sensitive
+                        ? "Agent read a sensitive file outside the active project"
+                        : "Agent read a file outside the active project"))
+            }
+        }
+
+        for event in ordered where event.kind == "file" && event.op == "read" {
+            guard let agent = event.agent, !agent.isEmpty,
+                  belongsToAnotherApplication(path: event.path, agent: agent),
+                  isSensitiveRead(event),
+                  let candidates = configured[.some(.crossApplicationSensitiveRead)] else { continue }
+            let workspace = event.relatedPath ?? calls[key(event) ?? ""]?.path
+            for policy in candidates where policy.applies(to: event, workspace: workspace) {
+                output.append(alert(rule: policy.id, severity: policy.severity,
+                    notify: policy.effectiveMode == "active" && policy.notify,
+                    event: event, workspace: workspace,
+                    detail: "Agent read sensitive data owned by another application"))
+            }
         }
 
         for result in ordered where result.kind == "tool" && result.op == "result" {
             guard let content = result.modelResponse, !content.isEmpty,
                   !SensitiveContextExposure.scan(text: content, source: "tool result").isEmpty else { continue }
             let workspace = calls[key(result) ?? ""]?.path
-            guard let policy = configured["credential_in_tool_result"],
-                  policy.applies(to: result, workspace: workspace) else { continue }
-            output.append(alert(rule: policy.id, severity: policy.severity, notify: policy.notify, event: result,
-                                workspace: workspace,
-                                detail: "Sensitive credential material appeared in an Agent tool result"))
+            guard let candidates = configured[.some(.credentialInToolResult)] else { continue }
+            for policy in candidates where policy.applies(to: result, workspace: workspace) {
+                output.append(alert(rule: policy.id, severity: policy.severity,
+                                    notify: policy.effectiveMode == "active" && policy.notify, event: result,
+                                    workspace: workspace,
+                                    detail: "Sensitive credential material appeared in an Agent tool result"))
+            }
         }
         return deduplicate(output)
     }
@@ -67,6 +99,26 @@ enum AgentPolicyAlertEngine {
         return [".env", ".pem", ".key", "id_rsa", "id_ed25519", "credentials", "servers.yaml",
                 "servers.yml", "secrets.yaml", "secrets.yml", "config.toml", ".zshrc"]
             .contains(where: { name == $0 || lower.contains("/.ssh/") || lower.contains("token") || lower.contains("password") })
+    }
+
+    private static func isSensitiveRead(_ event: GuardEvent) -> Bool {
+        if sensitivePath(event.path) { return true }
+        let captured = [event.beforeContent, event.afterContent, event.modelResponse]
+            .compactMap { $0 }.joined(separator: "\n")
+        return !captured.isEmpty && !SensitiveContextExposure.scan(text: captured, source: "file read").isEmpty
+    }
+
+    private static func belongsToAnotherApplication(path: String, agent: String) -> Bool {
+        let lower = path.lowercased()
+        let ownerBoundary = lower.contains("/library/containers/")
+            || lower.contains("/library/application support/")
+            || lower.contains("/.config/")
+        guard ownerBoundary else { return false }
+        let normalizedAgent = agent.lowercased().replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        let normalizedPath = lower.replacingOccurrences(of: "-", with: "")
+            .replacingOccurrences(of: " ", with: "")
+        return normalizedAgent.isEmpty || !normalizedPath.contains(normalizedAgent)
     }
 
     private static func alert(rule: String, severity: String, notify: Bool, event: GuardEvent,
