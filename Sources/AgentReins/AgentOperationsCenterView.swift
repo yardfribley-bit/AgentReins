@@ -45,6 +45,11 @@ struct AgentOperationsCenterView: View {
     @State private var projectHistoricalIncidents: [String: [SecurityIncident]] = [:]
     @State private var projectHistoryLoading = Set<String>()
     @State private var projectHistoryErrors: [String: String] = [:]
+    @State private var projectQuestion = ""
+    @State private var projectQuestionPath: String?
+    @State private var projectQuestionLoading = false
+    @State private var projectQuestionError: String?
+    @State private var projectQuestionResults: [FeatureProvenanceRecord] = []
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
         case projects = "Projects"
@@ -55,10 +60,7 @@ struct AgentOperationsCenterView: View {
 
     private enum ProjectView: String, CaseIterable, Identifiable {
         case requirements = "Requirements"
-        case capabilities = "Capabilities"
-        case architecture = "Architecture"
-        case evolution = "Evolution"
-        case memory = "Understanding"
+        case ask = "Ask Project"
         case security = "Security"
         var id: String { rawValue }
     }
@@ -598,7 +600,10 @@ struct AgentOperationsCenterView: View {
             projectHistoricalIncidents[project.path] ?? [])
         let changedFiles = evolution?.changedFileCount ?? 0
         let isSelected = selectedProjectPath == project.id
-        let latestGoal = project.sessions.max { $0.lastActivityAt < $1.lastActivityAt }?.latestIntent
+        let latestSession = project.sessions.max { $0.lastActivityAt < $1.lastActivityAt }
+        let latestGoal = latestSession?.turns.reversed().compactMap(\.userInput).first
+            ?? latestSession?.latestIntent
+            ?? evolution?.changeSets.first?.requirement
         return VStack(alignment: .leading, spacing: 13) {
             Button {
                 selectedProjectPath = isSelected ? nil : project.id
@@ -652,7 +657,9 @@ struct AgentOperationsCenterView: View {
                                projectIncidents: projectIncidents)
             } else {
                 HStack(spacing: 8) {
-                    Text(latestGoal ?? "No active goal captured")
+                    Text(latestGoal ?? (language.language == .english
+                         ? "Requirement evidence has not been captured for this project"
+                         : "该项目尚未捕获需求证据"))
                         .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(1)
                     Spacer()
                     if let index {
@@ -724,14 +731,8 @@ struct AgentOperationsCenterView: View {
             case .requirements:
                 projectRequirementSupervisor(project, evolution: evolution,
                                              projectIncidents: projectIncidents)
-            case .capabilities:
-                projectCapabilityMap(intelligence)
-            case .architecture:
-                projectArchitectureMap(intelligence)
-            case .evolution:
-                projectEvolutionView(evolution)
-            case .memory:
-                projectUnderstandingView(intelligence)
+            case .ask:
+                projectQuestionView(project, evolution: evolution)
             case .security:
                 projectSecurityView(projectIncidents)
             }
@@ -747,6 +748,143 @@ struct AgentOperationsCenterView: View {
                 }
             }
         }
+    }
+
+    private func projectQuestionView(_ project: ProjectMission,
+                                     evolution: ProjectEvolutionSnapshot?) -> some View {
+        let relevantChanges = matchingChanges(question: projectQuestion,
+                                              changes: evolution?.changeSets ?? [])
+        return VStack(alignment: .leading, spacing: 12) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(language.language == .english ? "ASK THIS PROJECT" : "向项目提问").micro(cyan)
+                Text(language.language == .english
+                     ? "Ask how a requirement was implemented, which Agent or model worked on it, what changed, whether memory was touched, and how the result was verified."
+                     : "可以询问某项需求如何实现、由哪个 Agent 或模型执行、改了什么、是否动过记忆，以及最终如何验证。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+
+            HStack(spacing: 9) {
+                Image(systemName: "sparkle.magnifyingglass").foregroundStyle(cyan)
+                TextField(language.language == .english
+                          ? "What happened when we added ZCode collection?"
+                          : "例如：接入 ZCode 时是否修改了记忆体？",
+                          text: $projectQuestion)
+                    .textFieldStyle(.plain).font(.system(size: 13))
+                    .onSubmit { askProject(project) }
+                if projectQuestionLoading { ProgressView().controlSize(.small).tint(cyan) }
+                Button(language.language == .english ? "Ask" : "查询") { askProject(project) }
+                    .buttonStyle(.borderedProminent).tint(cyan).disabled(projectQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }.padding(11).background(raised, in: RoundedRectangle(cornerRadius: 9))
+                .overlay(RoundedRectangle(cornerRadius: 9).stroke(cyan.opacity(0.38)))
+
+            HStack(spacing: 7) {
+                projectQuestionSuggestion(language.language == .english ? "Who implemented this feature?" : "这个功能是谁实现的？", project: project)
+                projectQuestionSuggestion(language.language == .english ? "Did it change Agent memory?" : "是否修改了 Agent 记忆？", project: project)
+                projectQuestionSuggestion(language.language == .english ? "Which tools and files were involved?" : "调用了哪些工具、修改了哪些文件？", project: project)
+                projectQuestionSuggestion(language.language == .english ? "Was the result independently verified?" : "结果是否经过独立验证？", project: project)
+            }
+
+            if let error = projectQuestionError {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.system(size: 11)).foregroundStyle(amber)
+            } else if projectQuestionPath == project.path && !projectQuestion.isEmpty && !projectQuestionLoading {
+                projectGroundedAnswer(project: project, changes: relevantChanges,
+                                      records: projectQuestionResults)
+            }
+        }
+    }
+
+    private func projectQuestionSuggestion(_ text: String, project: ProjectMission) -> some View {
+        Button(text) {
+            projectQuestion = text
+            askProject(project)
+        }.buttonStyle(.bordered).controlSize(.small)
+    }
+
+    private func askProject(_ project: ProjectMission) {
+        let question = projectQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        projectQuestionPath = project.path
+        projectQuestionLoading = true
+        projectQuestionError = nil
+        projectQuestionResults = []
+        eventStore.findFeatureProvenance(projectID: project.path, query: question, limit: 12) { result in
+            guard projectQuestionPath == project.path else { return }
+            projectQuestionLoading = false
+            switch result {
+            case .success(let records): projectQuestionResults = records
+            case .failure(let error): projectQuestionError = error.localizedDescription
+            }
+        }
+    }
+
+    private func matchingChanges(question: String, changes: [ProjectChangeSet]) -> [ProjectChangeSet] {
+        let terms = question.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
+            .filter { $0.count > 1 }
+        guard !terms.isEmpty else { return Array(changes.prefix(5)) }
+        let matched = changes.filter { change in
+            let corpus = ([change.requirement, change.agent] + change.tools + change.createdFiles
+                          + change.modifiedFiles + change.deletedFiles + change.securityFindings)
+                .joined(separator: " ").lowercased()
+            return terms.contains { corpus.contains($0) }
+        }
+        return Array((matched.isEmpty ? changes : matched).prefix(8))
+    }
+
+    private func projectGroundedAnswer(project: ProjectMission, changes: [ProjectChangeSet],
+                                       records: [FeatureProvenanceRecord]) -> some View {
+        let memoryReads = changes.reduce(0) { $0 + $1.memoryReads }
+        let memoryWrites = changes.reduce(0) { $0 + $1.memoryWrites }
+        let files = Array(Set(changes.flatMap { $0.createdFiles + $0.modifiedFiles + $0.deletedFiles }
+            + records.flatMap(\.files))).sorted()
+        let agents = Array(Set(changes.map { formattedAgentName($0.agent) } + records.map { formattedAgentName($0.agentID) })).sorted()
+        let tools = Array(Set(changes.flatMap(\.tools) + records.flatMap { $0.tools.map(\.name) })).sorted()
+        let verified = changes.contains { $0.verification == .verified }
+            || records.flatMap(\.verification).contains { $0.outcome == .passed }
+        let evidenceCount = records.reduce(0) { $0 + $1.matchedEvidenceIDs.count }
+
+        return VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Label(language.language == .english ? "Evidence-grounded answer" : "基于证据的回答",
+                      systemImage: "checkmark.seal.fill")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(cyan)
+                Spacer()
+                labelChip("\(evidenceCount) \(language.language == .english ? "EVIDENCE" : "条证据")",
+                          color: evidenceCount > 0 ? green : amber)
+            }
+            if changes.isEmpty && records.isEmpty {
+                Text(language.language == .english
+                     ? "AgentReins cannot answer this from captured project evidence. This is an evidence gap, not proof that the activity did not happen."
+                     : "AgentReins 无法从已采集的项目证据回答该问题。这是证据缺口，不代表该行为没有发生。")
+                    .font(.system(size: 13, weight: .semibold)).foregroundStyle(amber)
+            } else {
+                if !agents.isEmpty { requirementEvidenceLine("Agents", value: agents.joined(separator: ", "), icon: "person.2") }
+                requirementEvidenceLine(language.language == .english ? "Memory" : "记忆",
+                                        value: "\(memoryReads) read(s), \(memoryWrites) write(s) " + (memoryWrites == 0
+                                            ? (language.language == .english ? "— no write observed" : "— 未观察到写入")
+                                            : (language.language == .english ? "— persistent write observed" : "— 观察到持久化写入")), icon: "brain")
+                if !tools.isEmpty { requirementEvidenceLine(language.language == .english ? "Tools" : "工具", value: tools.prefix(10).joined(separator: ", "), icon: "wrench.and.screwdriver") }
+                if !files.isEmpty { requirementEvidenceLine(language.language == .english ? "Files changed" : "变更文件", value: files.prefix(12).joined(separator: " · "), icon: "doc.badge.gearshape") }
+                requirementEvidenceLine(language.language == .english ? "Verification" : "验证",
+                                        value: verified
+                                            ? (language.language == .english ? "Independent verification passed" : "独立验证已通过")
+                                            : (language.language == .english ? "No passing independent verification was found" : "未发现通过的独立验证"),
+                                        icon: verified ? "checkmark.shield.fill" : "exclamationmark.shield")
+                ForEach(records.prefix(5)) { record in
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text(record.userPrompt ?? (language.language == .english ? "Prompt was not captured" : "未捕获提示词"))
+                            .font(.system(size: 12, weight: .semibold)).lineLimit(3)
+                        Text("\(formattedAgentName(record.agentID)) · \(record.model ?? "model unknown") · session \(record.sessionID)")
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
+                    }.padding(8).background(panel, in: RoundedRectangle(cornerRadius: 7))
+                }
+            }
+            Text(language.language == .english
+                 ? "Answers are assembled from local evidence. The analysis model may improve query terms, but it cannot add unsupported facts."
+                 : "回答由本地证据组合生成；分析模型可以改善检索词，但不能补充没有证据支持的事实。")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+        }.padding(12).background(panel, in: RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).stroke(border))
     }
 
     private func projectRequirementSupervisor(_ project: ProjectMission,
