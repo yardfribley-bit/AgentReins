@@ -40,7 +40,8 @@ struct AgentOperationsCenterView: View {
     @State private var projectionError: String?
     @State private var globalTab: GlobalTab = .projects
     @State private var selectedProjectPath: String?
-    @State private var projectView: ProjectView = .capabilities
+    @State private var projectView: ProjectView = .requirements
+    @State private var selectedRequirementID: String?
     @State private var projectHistoricalIncidents: [String: [SecurityIncident]] = [:]
     @State private var projectHistoryLoading = Set<String>()
     @State private var projectHistoryErrors: [String: String] = [:]
@@ -53,6 +54,7 @@ struct AgentOperationsCenterView: View {
     }
 
     private enum ProjectView: String, CaseIterable, Identifiable {
+        case requirements = "Requirements"
         case capabilities = "Capabilities"
         case architecture = "Architecture"
         case evolution = "Evolution"
@@ -719,6 +721,9 @@ struct AgentOperationsCenterView: View {
             }.overlay(Rectangle().fill(border).frame(height: 1), alignment: .bottom)
 
             switch projectView {
+            case .requirements:
+                projectRequirementSupervisor(project, evolution: evolution,
+                                             projectIncidents: projectIncidents)
             case .capabilities:
                 projectCapabilityMap(intelligence)
             case .architecture:
@@ -742,6 +747,195 @@ struct AgentOperationsCenterView: View {
                 }
             }
         }
+    }
+
+    private func projectRequirementSupervisor(_ project: ProjectMission,
+                                              evolution: ProjectEvolutionSnapshot?,
+                                              projectIncidents: [SecurityIncident]) -> some View {
+        let changes = evolution?.changeSets ?? []
+        let liveSessionIDs = Set(project.sessions.filter(sessionIsLive).map(\.id))
+        let current = changes.first { liveSessionIDs.contains($0.sessionId) } ?? changes.first
+
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(language.language == .english ? "REQUIREMENT SUPERVISOR" : "需求监工")
+                        .micro(cyan)
+                    Text(language.language == .english
+                         ? "Follow what the user asked for, what the Agent changed, and whether the result is safe and verified."
+                         : "围绕用户需求，监督 Agent 做了什么、影响了什么，以及结果是否安全并通过验证。")
+                        .font(.system(size: 12)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                labelChip("\(changes.count) \(language.language == .english ? "REQUIREMENTS" : "项需求")", color: cyan)
+                labelChip("\(changes.filter { $0.verification == .verified }.count) \(language.language == .english ? "VERIFIED" : "已验证")", color: green)
+                labelChip("\(projectIncidents.count) \(language.language == .english ? "FINDINGS" : "项风险")",
+                          color: projectIncidents.isEmpty ? green : amber)
+            }
+
+            if let current {
+                requirementHero(current, isLive: liveSessionIDs.contains(current.sessionId))
+            } else {
+                empty(language.language == .english
+                      ? "No requirement has been attributed to this project yet"
+                      : "尚未发现可归属到该项目的需求")
+            }
+
+            if changes.count > 1 {
+                Text(language.language == .english ? "REQUIREMENT HISTORY" : "历史需求回顾").micro(cyan)
+                ForEach(changes.dropFirst().prefix(12)) { change in
+                    requirementHistoryRow(change)
+                }
+            }
+        }
+    }
+
+    private func requirementHero(_ change: ProjectChangeSet, isLive: Bool) -> some View {
+        let expanded = selectedRequirementID == change.id
+        return VStack(alignment: .leading, spacing: 12) {
+            HStack(alignment: .top, spacing: 12) {
+                ZStack {
+                    Circle().fill((isLive ? cyan : verificationColor(change.verification)).opacity(0.14))
+                    Image(systemName: isLive ? "waveform.path.ecg" : "checklist")
+                        .foregroundStyle(isLive ? cyan : verificationColor(change.verification))
+                }.frame(width: 42, height: 42)
+                VStack(alignment: .leading, spacing: 5) {
+                    HStack(spacing: 7) {
+                        Text(isLive
+                             ? (language.language == .english ? "CURRENT REQUIREMENT" : "当前需求")
+                             : (language.language == .english ? "LATEST REQUIREMENT" : "最近需求"))
+                            .micro(isLive ? cyan : .secondary)
+                        labelChip(formattedAgentName(change.agent).uppercased(), color: .blue)
+                    }
+                    Text(change.requirement).font(.system(size: 16, weight: .bold)).lineLimit(expanded ? nil : 3)
+                    Text("\(relativeAge(change.startedAt)) · \(change.summary)")
+                        .font(.system(size: 11)).foregroundStyle(.secondary)
+                }
+                Spacer()
+                VStack(alignment: .trailing, spacing: 5) {
+                    Text(L(change.verification.rawValue).uppercased())
+                        .font(.system(size: 10, weight: .bold, design: .monospaced))
+                        .foregroundStyle(verificationColor(change.verification))
+                    if change.verification == .agentReported {
+                        Text(language.language == .english ? "Independent verification pending" : "等待独立验证")
+                            .font(.system(size: 10)).foregroundStyle(amber)
+                    }
+                }
+            }
+
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 8)], spacing: 8) {
+                requirementImpact("Files changed", zh: "代码变更", value: "\(change.changedFileCount)",
+                                  detail: "+\(change.createdFiles.count)  ~\(change.modifiedFiles.count)  −\(change.deletedFiles.count)",
+                                  icon: "doc.badge.gearshape", color: .blue)
+                requirementImpact("Memory activity", zh: "记忆活动",
+                                  value: "\(change.memoryReads)R · \(change.memoryWrites)W",
+                                  detail: change.memoryWrites == 0
+                                    ? (language.language == .english ? "No write observed" : "未观察到写入")
+                                    : (language.language == .english ? "Persistent writes observed" : "观察到持久化写入"),
+                                  icon: "brain.head.profile", color: change.memoryWrites > 0 ? amber : cyan)
+                requirementImpact("Tool calls", zh: "工具调用", value: "\(change.tools.count)",
+                                  detail: change.tools.isEmpty
+                                    ? (language.language == .english ? "No named tool captured" : "未捕获具名工具")
+                                    : change.tools.prefix(2).joined(separator: ", "),
+                                  icon: "wrench.and.screwdriver", color: .purple)
+                requirementImpact("External access", zh: "外部访问", value: "\(change.externalDestinations.count)",
+                                  detail: change.externalDestinations.isEmpty
+                                    ? (language.language == .english ? "No destination observed" : "未观察到外部目的地")
+                                    : change.externalDestinations.prefix(2).joined(separator: ", "),
+                                  icon: "network", color: change.externalDestinations.isEmpty ? green : amber)
+                requirementImpact("Security", zh: "安全发现", value: "\(change.securityFindings.count)",
+                                  detail: change.securityFindings.first
+                                    ?? (language.language == .english ? "No finding in captured evidence" : "已采集证据中无发现"),
+                                  icon: "shield.lefthalf.filled", color: change.securityFindings.isEmpty ? green : .red)
+            }
+
+            if expanded {
+                requirementEvidenceDetails(change)
+            }
+            Button {
+                selectedRequirementID = expanded ? nil : change.id
+            } label: {
+                Label(expanded
+                      ? (language.language == .english ? "Hide evidence" : "收起证据")
+                      : (language.language == .english ? "Inspect requirement evidence" : "查看需求证据"),
+                      systemImage: expanded ? "chevron.up" : "chevron.down")
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(cyan)
+            }.buttonStyle(.plain)
+        }
+        .padding(14).background(raised.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(isLive ? cyan.opacity(0.55) : border))
+    }
+
+    private func requirementImpact(_ en: String, zh: String, value: String, detail: String,
+                                   icon: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            HStack {
+                Image(systemName: icon).foregroundStyle(color)
+                Text(language.language == .english ? en.uppercased() : zh)
+                    .font(.system(size: 9, weight: .bold, design: .monospaced)).foregroundStyle(.secondary)
+                Spacer()
+                Text(value).font(.system(size: 14, weight: .bold, design: .rounded)).foregroundStyle(color)
+            }
+            Text(detail).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+        }.padding(9).background(panel, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(color.opacity(0.22)))
+    }
+
+    private func requirementEvidenceDetails(_ change: ProjectChangeSet) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Divider().overlay(border)
+            Text(language.language == .english ? "ATTRIBUTED EVIDENCE" : "归属证据").micro(.secondary)
+            requirementEvidenceLine("Session", value: change.sessionId, icon: "rectangle.stack")
+            requirementEvidenceLine(language.language == .english ? "Changed files" : "变更文件",
+                                    value: change.changedFileCount == 0
+                                        ? (language.language == .english ? "No file mutation observed" : "未观察到文件变更")
+                                        : (change.createdFiles + change.modifiedFiles + change.deletedFiles).prefix(6).joined(separator: " · "), icon: "doc.text")
+            requirementEvidenceLine(language.language == .english ? "Read files" : "读取文件",
+                                    value: change.readFiles.isEmpty
+                                        ? (language.language == .english ? "No read evidence attributed" : "未归属到文件读取证据")
+                                        : change.readFiles.prefix(6).joined(separator: " · "), icon: "eye")
+            Text(language.language == .english
+                 ? "‘Not observed’ describes current evidence coverage; it does not prove the action never happened."
+                 : "“未观察到”仅描述当前证据覆盖范围，并不等于证明该行为从未发生。")
+                .font(.system(size: 10)).foregroundStyle(.tertiary)
+        }
+    }
+
+    private func requirementEvidenceLine(_ label: String, value: String, icon: String) -> some View {
+        HStack(alignment: .top, spacing: 8) {
+            Image(systemName: icon).foregroundStyle(cyan).frame(width: 16)
+            Text(label).font(.system(size: 10, weight: .bold)).frame(width: 90, alignment: .leading)
+            Text(value).font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                .textSelection(.enabled).lineLimit(3)
+        }
+    }
+
+    private func requirementHistoryRow(_ change: ProjectChangeSet) -> some View {
+        Button {
+            selectedRequirementID = selectedRequirementID == change.id ? nil : change.id
+        } label: {
+            VStack(alignment: .leading, spacing: 7) {
+                HStack(spacing: 9) {
+                    Circle().fill(verificationColor(change.verification)).frame(width: 7, height: 7)
+                    Text(change.requirement).font(.system(size: 12, weight: .semibold)).lineLimit(2)
+                    Spacer()
+                    Text(formattedAgentName(change.agent)).font(.system(size: 10, weight: .bold)).foregroundStyle(.blue)
+                    Text(relativeAge(change.lastActivityAt)).font(.system(size: 10)).foregroundStyle(.tertiary)
+                    Image(systemName: selectedRequirementID == change.id ? "chevron.up" : "chevron.down")
+                        .font(.system(size: 9)).foregroundStyle(.secondary)
+                }
+                HStack(spacing: 7) {
+                    changeChip("\(change.changedFileCount)", language.language == .english ? "files" : "文件", .blue)
+                    changeChip("\(change.memoryReads)R/\(change.memoryWrites)W", language.language == .english ? "memory" : "记忆", cyan)
+                    changeChip("\(change.externalDestinations.count)", language.language == .english ? "external" : "外联", amber)
+                    changeChip("\(change.securityFindings.count)", language.language == .english ? "findings" : "风险", change.securityFindings.isEmpty ? green : .red)
+                    Spacer()
+                    Text(L(change.verification.rawValue)).font(.system(size: 10, weight: .bold))
+                        .foregroundStyle(verificationColor(change.verification))
+                }
+                if selectedRequirementID == change.id { requirementEvidenceDetails(change) }
+            }.padding(10).background(panel, in: RoundedRectangle(cornerRadius: 8))
+        }.buttonStyle(.plain)
     }
 
     private func loadProjectHistory(_ project: ProjectMission) {
