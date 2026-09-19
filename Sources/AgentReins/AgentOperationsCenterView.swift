@@ -822,26 +822,27 @@ struct AgentOperationsCenterView: View {
         let terms = question.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
             .filter { $0.count > 1 }
         guard !terms.isEmpty else { return Array(changes.prefix(5)) }
-        let matched = changes.filter { change in
+        return Array(changes.filter { change in
             let corpus = ([change.requirement, change.agent] + change.tools + change.createdFiles
                           + change.modifiedFiles + change.deletedFiles + change.securityFindings)
                 .joined(separator: " ").lowercased()
             return terms.contains { corpus.contains($0) }
-        }
-        return Array((matched.isEmpty ? changes : matched).prefix(8))
+        }.prefix(8))
     }
 
     private func projectGroundedAnswer(project: ProjectMission, changes: [ProjectChangeSet],
                                        records: [FeatureProvenanceRecord]) -> some View {
-        let memoryReads = changes.reduce(0) { $0 + $1.memoryReads }
-        let memoryWrites = changes.reduce(0) { $0 + $1.memoryWrites }
-        let files = Array(Set(changes.flatMap { $0.createdFiles + $0.modifiedFiles + $0.deletedFiles }
-            + records.flatMap(\.files))).sorted()
-        let agents = Array(Set(changes.map { formattedAgentName($0.agent) } + records.map { formattedAgentName($0.agentID) })).sorted()
-        let tools = Array(Set(changes.flatMap(\.tools) + records.flatMap { $0.tools.map(\.name) })).sorted()
-        let verified = changes.contains { $0.verification == .verified }
-            || records.flatMap(\.verification).contains { $0.outcome == .passed }
-        let evidenceCount = records.reduce(0) { $0 + $1.matchedEvidenceIDs.count }
+        // Ask Project answers use turn-scoped provenance. ProjectChangeSet is
+        // useful navigation context, but must not broaden memory/file claims to
+        // every turn in the same long-running session.
+        let memoryReads = records.reduce(0) { $0 + $1.memoryReads }
+        let memoryWrites = records.reduce(0) { $0 + $1.memoryWrites }
+        let files = Array(Set(records.flatMap(\.files))).sorted()
+        let agents = Array(Set(records.map { formattedAgentName($0.agentID) })).sorted()
+        let tools = Array(Set(records.flatMap { $0.tools.map(\.name) }
+            .filter { !["unknown", "unknown_tool", "tool"].contains($0.lowercased()) })).sorted()
+        let verified = records.flatMap(\.verification).contains { $0.outcome == .passed }
+        let evidenceCount = Set(records.flatMap(\.matchedEvidenceIDs)).count
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -852,7 +853,7 @@ struct AgentOperationsCenterView: View {
                 labelChip("\(evidenceCount) \(language.language == .english ? "EVIDENCE" : "条证据")",
                           color: evidenceCount > 0 ? green : amber)
             }
-            if changes.isEmpty && records.isEmpty {
+            if records.isEmpty {
                 Text(language.language == .english
                      ? "AgentReins cannot answer this from captured project evidence. This is an evidence gap, not proof that the activity did not happen."
                      : "AgentReins 无法从已采集的项目证据回答该问题。这是证据缺口，不代表该行为没有发生。")
@@ -863,8 +864,8 @@ struct AgentOperationsCenterView: View {
                                         value: "\(memoryReads) read(s), \(memoryWrites) write(s) " + (memoryWrites == 0
                                             ? (language.language == .english ? "— no write observed" : "— 未观察到写入")
                                             : (language.language == .english ? "— persistent write observed" : "— 观察到持久化写入")), icon: "brain")
-                if !tools.isEmpty { requirementEvidenceLine(language.language == .english ? "Tools" : "工具", value: tools.prefix(10).joined(separator: ", "), icon: "wrench.and.screwdriver") }
-                if !files.isEmpty { requirementEvidenceLine(language.language == .english ? "Files changed" : "变更文件", value: files.prefix(12).joined(separator: " · "), icon: "doc.badge.gearshape") }
+                if !tools.isEmpty { projectToolEvidence(tools) }
+                if !files.isEmpty { projectFileEvidence(files, projectPath: project.path) }
                 requirementEvidenceLine(language.language == .english ? "Verification" : "验证",
                                         value: verified
                                             ? (language.language == .english ? "Independent verification passed" : "独立验证已通过")
@@ -885,6 +886,51 @@ struct AgentOperationsCenterView: View {
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }.padding(12).background(panel, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(border))
+    }
+
+    private func projectToolEvidence(_ tools: [String]) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            Label(language.language == .english ? "Tools used" : "实际调用工具",
+                  systemImage: "wrench.and.screwdriver")
+                .font(.system(size: 10, weight: .bold)).foregroundStyle(cyan)
+            HStack(spacing: 6) {
+                ForEach(Array(tools.prefix(8)), id: \.self) { tool in
+                    Text(tool).font(.system(size: 10, weight: .semibold, design: .monospaced))
+                        .padding(.horizontal, 7).padding(.vertical, 4)
+                        .background(Color.purple.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+                        .foregroundStyle(.purple)
+                }
+            }
+        }
+    }
+
+    private func projectFileEvidence(_ files: [String], projectPath: String) -> some View {
+        VStack(alignment: .leading, spacing: 6) {
+            HStack {
+                Label(language.language == .english ? "Files evidenced in matched turns" : "匹配对话中的文件证据",
+                      systemImage: "doc.badge.gearshape")
+                    .font(.system(size: 10, weight: .bold)).foregroundStyle(cyan)
+                Spacer()
+                Text("\(files.count)").badge(.blue)
+            }
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: 230), spacing: 7)], spacing: 7) {
+                ForEach(Array(files.prefix(12)), id: \.self) { path in
+                    let relative = path.hasPrefix(projectPath + "/")
+                        ? String(path.dropFirst(projectPath.count + 1)) : path
+                    HStack(spacing: 8) {
+                        Image(systemName: "doc.text.fill").foregroundStyle(.blue)
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text(URL(fileURLWithPath: path).lastPathComponent)
+                                .font(.system(size: 11, weight: .bold)).lineLimit(1)
+                            Text(relative).font(.system(size: 9, design: .monospaced))
+                                .foregroundStyle(.secondary).lineLimit(2)
+                        }
+                        Spacer()
+                    }.padding(8).background(raised, in: RoundedRectangle(cornerRadius: 7))
+                        .overlay(RoundedRectangle(cornerRadius: 7).stroke(border.opacity(0.8)))
+                }
+            }
+        }
     }
 
     private func projectRequirementSupervisor(_ project: ProjectMission,

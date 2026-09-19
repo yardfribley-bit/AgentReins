@@ -273,6 +273,56 @@ final class AgentEventProtocolTests: XCTestCase {
         XCTAssertTrue(result.first?.commits.isEmpty == true)
     }
 
+    func testFeatureProvenanceKeepsZCodeQueryTurnScopedAndRejectsMalformedPaths() {
+        let base = Date(timeIntervalSince1970: 500)
+        func envelope(_ id: String, turn: String, sequence: UInt64,
+                      payload: AgentEventPayload) -> AgentEventEnvelope {
+            AgentEventEnvelope(id: id, projectID: "/projects/agentreins", agentID: "codex",
+                sessionID: "long-session", turnID: turn, sequence: sequence,
+                occurredAt: base.addingTimeInterval(Double(sequence)),
+                observedAt: base.addingTimeInterval(Double(sequence)), source: .agentProtocol,
+                confidence: .confirmed, payload: payload)
+        }
+        let events = [
+            envelope("z-prompt", turn: "zcode", sequence: 1,
+                payload: .userPrompt(UserPromptEvidence(rawText: "新增 ZCode 采集器",
+                    digest: nil, requirementIDs: []))),
+            envelope("z-call", turn: "zcode", sequence: 2,
+                payload: .toolCall(ToolCallLifecycleEvidence(callID: "call-1", toolName: "apply_patch",
+                    serverName: nil, arguments: "update ZCodeSight.swift", argumentsDigest: nil,
+                    state: .requested, startedAt: base, completedAt: nil, exitCode: nil,
+                    evidenceIDs: ["z-call"]))),
+            envelope("z-output", turn: "zcode", sequence: 3,
+                payload: .toolCall(ToolCallLifecycleEvidence(callID: "call-1", toolName: "unknown_tool",
+                    serverName: nil, arguments: nil, argumentsDigest: nil, state: .completed,
+                    startedAt: nil, completedAt: base.addingTimeInterval(3), exitCode: 0,
+                    evidenceIDs: ["z-output"]))),
+            envelope("z-file", turn: "zcode", sequence: 4,
+                payload: .fileActivity(FileActivityEvidence(operation: .create,
+                    path: "Sources/AgentReins/ZCodeSight.swift", beforeDigest: nil,
+                    afterDigest: "digest", patch: nil, toolCallID: "call-1", attribution: .confirmed))),
+            envelope("z-bad-file", turn: "zcode", sequence: 5,
+                payload: .fileActivity(FileActivityEvidence(operation: .modify,
+                    path: "/Users/example/1000\",\"workdir\":\"/project\",\"max_output_tokens\":1000}",
+                    beforeDigest: nil, afterDigest: nil, patch: nil,
+                    toolCallID: "call-1", attribution: .inferred))),
+            envelope("other", turn: "article", sequence: 6,
+                payload: .userPrompt(UserPromptEvidence(rawText: "将这些发现写进公众号文章，修改文件",
+                    digest: nil, requirementIDs: [])))
+        ]
+
+        let result = FeatureProvenanceIndex.search(
+            query: "ZCode 那个需求修改了哪些文件", projectID: "/projects/agentreins", events: events)
+
+        XCTAssertEqual(result.count, 1)
+        XCTAssertEqual(result.first?.turnID, "zcode")
+        XCTAssertEqual(result.first?.tools.first?.name, "apply_patch")
+        XCTAssertEqual(result.first?.tools.first?.state, .completed)
+        XCTAssertEqual(result.first?.files, ["Sources/AgentReins/ZCodeSight.swift"])
+        XCTAssertEqual(result.first?.memoryReads, 0)
+        XCTAssertEqual(result.first?.memoryWrites, 0)
+    }
+
     func testLegacyProjectEventsRestoreOnlySelectedProject() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("agentreins-feature-history-\(UUID().uuidString).sqlite3")

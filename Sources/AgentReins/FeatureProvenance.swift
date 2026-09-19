@@ -19,6 +19,9 @@ struct FeatureProvenanceRecord: Codable, Identifiable, Sendable {
     let provider: String?
     let tools: [FeatureProvenanceTool]
     let files: [String]
+    let memoryReads: Int
+    let memoryWrites: Int
+    let memoryLocators: [String]
     let commits: [String]
     let verification: [VerificationEvidence]
     let startedAt: Date
@@ -37,6 +40,7 @@ enum FeatureProvenanceIndex {
                        events: [AgentEventEnvelope], additionalTerms: [String] = [],
                        limit: Int = 20) -> [FeatureProvenanceRecord] {
         let terms = Array(Set(queryTerms(query) + additionalTerms.flatMap(queryTerms))).sorted()
+        let anchorTerms = terms.filter { $0.unicodeScalars.contains { $0.isASCII && ($0.properties.isAlphabetic || CharacterSet.decimalDigits.contains($0)) } }
         guard !terms.isEmpty else { return [] }
         let scoped = events.filter { $0.projectID == projectID }
         let groups = Dictionary(grouping: scoped) { event in
@@ -55,6 +59,9 @@ enum FeatureProvenanceIndex {
             var calls: [String: ToolCallLifecycleEvidence] = [:]
             var outputs: [String: ToolOutputEvidence] = [:]
             var files = Set<String>()
+            var memoryReads = 0
+            var memoryWrites = 0
+            var memoryLocators = Set<String>()
             var commits = Set<String>()
             var verification: [VerificationEvidence] = []
 
@@ -72,15 +79,34 @@ enum FeatureProvenanceIndex {
                 case .plan(let value):
                     weightedTexts.append((([value.title].compactMap { $0 } + value.steps).joined(separator: " "), 3, event.id))
                 case .toolCall(let value):
-                    calls[value.callID] = value
+                    if let existing = calls[value.callID], isUnknownTool(value.toolName), !isUnknownTool(existing.toolName) {
+                        // Incremental transcript reads may see an output without
+                        // replaying the original call. Never let that placeholder
+                        // erase a tool name already captured for the same call ID.
+                        calls[value.callID] = ToolCallLifecycleEvidence(
+                            callID: value.callID, toolName: existing.toolName,
+                            serverName: existing.serverName ?? value.serverName,
+                            arguments: existing.arguments ?? value.arguments,
+                            argumentsDigest: existing.argumentsDigest ?? value.argumentsDigest,
+                            state: value.state, startedAt: existing.startedAt ?? value.startedAt,
+                            completedAt: value.completedAt ?? existing.completedAt,
+                            exitCode: value.exitCode ?? existing.exitCode,
+                            evidenceIDs: Array(Set(existing.evidenceIDs + value.evidenceIDs)).sorted())
+                    } else {
+                        calls[value.callID] = value
+                    }
                     weightedTexts.append(("\(value.toolName) \(value.arguments ?? "")", 3, event.id))
                 case .toolOutput(let value):
                     outputs[value.callID] = value
                     if let output = value.output { weightedTexts.append((output, 1, event.id)) }
                 case .fileActivity(let value):
-                    files.insert(value.path)
+                    if plausibleProjectPath(value.path) { files.insert(value.path) }
                     weightedTexts.append(("\(value.path) \(value.patch ?? "")", 4, event.id))
                 case .memoryActivity(let value):
+                    if value.operation == .retrieve { memoryReads += 1 } else { memoryWrites += 1 }
+                    if let locator = value.storageLocator, plausibleProjectPath(locator) {
+                        memoryLocators.insert(locator)
+                    }
                     weightedTexts.append(("\(value.key ?? "") \(value.storageLocator ?? "") \(value.summary)", 2, event.id))
                 case .checkpoint(let value):
                     commits.insert(value.commitHash)
@@ -97,6 +123,7 @@ enum FeatureProvenanceIndex {
 
             var score = 0.0
             var matched = Set<String>()
+            var matchedAnchors = Set<String>()
             for (text, weight, evidenceID) in weightedTexts {
                 let normalized = normalize(text)
                 let hits = terms.filter { normalized.contains($0) }.count
@@ -104,8 +131,9 @@ enum FeatureProvenanceIndex {
                     score += weight * Double(hits) / Double(terms.count)
                     matched.insert(evidenceID)
                 }
+                matchedAnchors.formUnion(anchorTerms.filter { normalized.contains($0) })
             }
-            guard score > 0 else { return nil }
+            guard score > 0, anchorTerms.isEmpty || !matchedAnchors.isEmpty else { return nil }
             let tools = calls.values.sorted { ($0.startedAt ?? first.occurredAt) < ($1.startedAt ?? first.occurredAt) }
                 .map { call in
                     FeatureProvenanceTool(name: call.toolName, server: call.serverName,
@@ -116,7 +144,8 @@ enum FeatureProvenanceIndex {
                 id: key, projectID: projectID, sessionID: first.sessionID,
                 turnID: first.turnID, agentID: first.agentID, userPrompt: prompt,
                 model: model, provider: provider, tools: tools,
-                files: files.sorted(), commits: commits.sorted(), verification: verification,
+                files: files.sorted(), memoryReads: memoryReads, memoryWrites: memoryWrites,
+                memoryLocators: memoryLocators.sorted(), commits: commits.sorted(), verification: verification,
                 startedAt: first.occurredAt, lastEventAt: last.occurredAt,
                 relevance: score, matchedEvidenceIDs: matched.sorted())
         }
@@ -143,5 +172,18 @@ enum FeatureProvenanceIndex {
     private static func normalize(_ value: String) -> String {
         value.folding(options: [.caseInsensitive, .diacriticInsensitive], locale: .current)
             .lowercased()
+    }
+
+    private static func isUnknownTool(_ value: String) -> Bool {
+        let normalized = value.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        return normalized.isEmpty || normalized == "unknown" || normalized == "unknown_tool" || normalized == "tool"
+    }
+
+    private static func plausibleProjectPath(_ value: String) -> Bool {
+        let path = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !path.isEmpty, path.count <= 512 else { return false }
+        guard !path.contains("\"") && !path.contains("{") && !path.contains("}")
+                && !path.contains("yield_time") && !path.contains("max_output") else { return false }
+        return path.hasPrefix("/") || path.hasPrefix("./") || path.contains(".")
     }
 }
