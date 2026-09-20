@@ -53,6 +53,10 @@ enum FeatureProvenanceIndex {
             }
             guard let first = ordered.first, let last = ordered.last else { return nil }
             var weightedTexts: [(String, Double, String)] = []
+            // Required query anchors must come from evidence owned by this
+            // turn. Injected conversation history and tool output may quote
+            // unrelated work from an older turn.
+            var anchorTexts: [String] = []
             var prompt: String?
             var model: String?
             var provider: String?
@@ -70,6 +74,7 @@ enum FeatureProvenanceIndex {
                 case .userPrompt(let value):
                     if prompt == nil { prompt = value.rawText }
                     weightedTexts.append((value.rawText, 6, event.id))
+                    anchorTexts.append(value.rawText)
                 case .contextPrepared(let value):
                     model = value.model ?? model; provider = value.provider ?? provider
                     for layer in value.layers { weightedTexts.append((layer.summary, 1, event.id)) }
@@ -77,7 +82,9 @@ enum FeatureProvenanceIndex {
                     model = value.model ?? model; provider = value.provider ?? provider
                     weightedTexts.append((value.text, 2, event.id))
                 case .plan(let value):
-                    weightedTexts.append((([value.title].compactMap { $0 } + value.steps).joined(separator: " "), 3, event.id))
+                    let planText = ([value.title].compactMap { $0 } + value.steps).joined(separator: " ")
+                    weightedTexts.append((planText, 3, event.id))
+                    anchorTexts.append(planText)
                 case .toolCall(let value):
                     if let existing = calls[value.callID], isUnknownTool(value.toolName), !isUnknownTool(existing.toolName) {
                         // Incremental transcript reads may see an output without
@@ -96,12 +103,14 @@ enum FeatureProvenanceIndex {
                         calls[value.callID] = value
                     }
                     weightedTexts.append(("\(value.toolName) \(value.arguments ?? "")", 3, event.id))
+                    anchorTexts.append("\(value.toolName) \(value.arguments ?? "")")
                 case .toolOutput(let value):
                     outputs[value.callID] = value
                     if let output = value.output { weightedTexts.append((output, 1, event.id)) }
                 case .fileActivity(let value):
                     if plausibleProjectPath(value.path) { files.insert(value.path) }
                     weightedTexts.append(("\(value.path) \(value.patch ?? "")", 4, event.id))
+                    if plausibleProjectPath(value.path) { anchorTexts.append(value.path) }
                 case .memoryActivity(let value):
                     if value.operation == .retrieve { memoryReads += 1 } else { memoryWrites += 1 }
                     if let locator = value.storageLocator, plausibleProjectPath(locator) {
@@ -110,8 +119,10 @@ enum FeatureProvenanceIndex {
                     weightedTexts.append(("\(value.key ?? "") \(value.storageLocator ?? "") \(value.summary)", 2, event.id))
                 case .checkpoint(let value):
                     commits.insert(value.commitHash)
-                    files.formUnion(value.touchedPaths)
+                    let validPaths = value.touchedPaths.filter(plausibleProjectPath)
+                    files.formUnion(validPaths)
                     weightedTexts.append((value.touchedPaths.joined(separator: " "), 4, event.id))
+                    anchorTexts.append(contentsOf: validPaths)
                 case .verification(let value):
                     verification.append(value)
                     weightedTexts.append((value.summary, 2, event.id))
@@ -123,7 +134,6 @@ enum FeatureProvenanceIndex {
 
             var score = 0.0
             var matched = Set<String>()
-            var matchedAnchors = Set<String>()
             for (text, weight, evidenceID) in weightedTexts {
                 let normalized = normalize(text)
                 let hits = terms.filter { normalized.contains($0) }.count
@@ -131,8 +141,9 @@ enum FeatureProvenanceIndex {
                     score += weight * Double(hits) / Double(terms.count)
                     matched.insert(evidenceID)
                 }
-                matchedAnchors.formUnion(anchorTerms.filter { normalized.contains($0) })
             }
+            let normalizedAnchors = normalize(anchorTexts.joined(separator: " "))
+            let matchedAnchors = Set(anchorTerms.filter { normalizedAnchors.contains($0) })
             guard score > 0, anchorTerms.isEmpty || !matchedAnchors.isEmpty else { return nil }
             let tools = calls.values.sorted { ($0.startedAt ?? first.occurredAt) < ($1.startedAt ?? first.occurredAt) }
                 .map { call in
@@ -184,6 +195,10 @@ enum FeatureProvenanceIndex {
         guard !path.isEmpty, path.count <= 512 else { return false }
         guard !path.contains("\"") && !path.contains("{") && !path.contains("}")
                 && !path.contains("yield_time") && !path.contains("max_output") else { return false }
-        return path.hasPrefix("/") || path.hasPrefix("./") || path.contains(".")
+        guard !path.contains(";") && !path.contains(",") && !path.contains("\n") else { return false }
+        guard !path.contains(" ") else { return false }
+        let leaf = URL(fileURLWithPath: path).lastPathComponent
+        guard !leaf.isEmpty, leaf != ".", leaf != ".." else { return false }
+        return path.hasPrefix("/") || path.hasPrefix("./") || path.contains("/") || leaf.contains(".")
     }
 }

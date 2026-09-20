@@ -50,10 +50,12 @@ struct AgentOperationsCenterView: View {
     @State private var projectQuestionLoading = false
     @State private var projectQuestionError: String?
     @State private var projectQuestionResults: [FeatureProvenanceRecord] = []
+    @State private var selectedQuestionBatchID: String?
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
         case projects = "Workspaces"
         case agents = "Agents"
+        case egress = "Outbound"
         case security = "Security"
         var id: String { rawValue }
     }
@@ -63,6 +65,10 @@ struct AgentOperationsCenterView: View {
         case ask = "Ask Project"
         case security = "Security"
         var id: String { rawValue }
+    }
+
+    private enum ProjectQuestionIntent {
+        case context, tools, files, network, memory, verification, overview
     }
 
     private enum CenterTab: String, CaseIterable, Identifiable {
@@ -577,6 +583,7 @@ struct AgentOperationsCenterView: View {
             switch globalTab {
             case .projects: globalProjectsView
             case .agents: globalAgentsView
+            case .egress: globalEgressView
             case .security: globalSecurityView
             }
         }
@@ -857,6 +864,7 @@ struct AgentOperationsCenterView: View {
         projectQuestionLoading = true
         projectQuestionError = nil
         projectQuestionResults = []
+        selectedQuestionBatchID = nil
         eventStore.findFeatureProvenance(projectID: project.path, query: question, limit: 12) { result in
             guard projectQuestionPath == project.path else { return }
             projectQuestionLoading = false
@@ -869,29 +877,44 @@ struct AgentOperationsCenterView: View {
 
     private func matchingChanges(question: String, changes: [ProjectChangeSet]) -> [ProjectChangeSet] {
         let terms = question.lowercased().split { !$0.isLetter && !$0.isNumber }.map(String.init)
-            .filter { $0.count > 1 }
+            .filter { $0.count > 1 && !["需求", "上下文", "工具", "文件", "网络", "记忆", "验证",
+                                      "哪些", "哪个", "什么", "调用", "修改", "context", "tool", "file"].contains($0) }
         guard !terms.isEmpty else { return Array(changes.prefix(5)) }
-        return Array(changes.filter { change in
+        return Array(changes.compactMap { change -> (ProjectChangeSet, Int)? in
             let corpus = ([change.requirement, change.agent] + change.tools + change.createdFiles
-                          + change.modifiedFiles + change.deletedFiles + change.securityFindings)
+                          + change.modifiedFiles + change.deletedFiles + change.securityFindings
+                          + change.contexts.compactMap(\.userInput))
                 .joined(separator: " ").lowercased()
-            return terms.contains { corpus.contains($0) }
-        }.prefix(8))
+            let score = terms.reduce(0) { $0 + (corpus.contains($1) ? 1 : 0) }
+            return score > 0 ? (change, score) : nil
+        }.sorted {
+            if $0.1 == $1.1 { return $0.0.lastActivityAt > $1.0.lastActivityAt }
+            return $0.1 > $1.1
+        }.prefix(8).map(\.0))
     }
 
     private func projectGroundedAnswer(project: ProjectMission, changes: [ProjectChangeSet],
                                        records: [FeatureProvenanceRecord]) -> some View {
-        // Ask Project answers use turn-scoped provenance. ProjectChangeSet is
-        // useful navigation context, but must not broaden memory/file claims to
-        // every turn in the same long-running session.
-        let memoryReads = records.reduce(0) { $0 + $1.memoryReads }
-        let memoryWrites = records.reduce(0) { $0 + $1.memoryWrites }
-        let files = Array(Set(records.flatMap(\.files))).sorted()
-        let agents = Array(Set(records.map { formattedAgentName($0.agentID) })).sorted()
-        let tools = Array(Set(records.flatMap { $0.tools.map(\.name) }
-            .filter { !["unknown", "unknown_tool", "tool"].contains($0.lowercased()) })).sorted()
-        let verified = records.flatMap(\.verification).contains { $0.outcome == .passed }
-        let evidenceCount = Set(records.flatMap(\.matchedEvidenceIDs)).count
+        // Resolve the entity first, then select evidence fields. Search results
+        // can nominate a batch, but can never broaden its evidence boundary.
+        let selectedBatch = changes.first { $0.id == selectedQuestionBatchID }
+            ?? (changes.count == 1 ? changes.first : nil)
+        let allowedTurnKeys = Set(selectedBatch?.contexts.map { "\($0.sessionId)\u{0}\($0.turnId)" } ?? [])
+        let scopedRecords = selectedBatch.map { batch in
+            records.filter { record in
+                if let turn = record.turnID, !allowedTurnKeys.isEmpty {
+                    return allowedTurnKeys.contains("\(record.sessionID)\u{0}\(turn)")
+                }
+                return batch.sessionIDs.contains(record.sessionID)
+            }
+        } ?? []
+        let memoryReads = scopedRecords.reduce(0) { $0 + $1.memoryReads }
+        let memoryWrites = scopedRecords.reduce(0) { $0 + $1.memoryWrites }
+        let files = Array(Set(scopedRecords.flatMap(\.files))).sorted()
+        let agents = Array(Set(scopedRecords.map { formattedAgentName($0.agentID) })).sorted()
+        let verified = scopedRecords.flatMap(\.verification).contains { $0.outcome == .passed }
+        let evidenceCount = Set(scopedRecords.flatMap(\.matchedEvidenceIDs)).count
+        let intent = projectQuestionIntent(projectQuestion)
 
         return VStack(alignment: .leading, spacing: 10) {
             HStack {
@@ -902,31 +925,88 @@ struct AgentOperationsCenterView: View {
                 labelChip("\(evidenceCount) \(language.language == .english ? "EVIDENCE" : "条证据")",
                           color: evidenceCount > 0 ? green : amber)
             }
-            if records.isEmpty {
+            if changes.isEmpty {
                 Text(language.language == .english
-                     ? "AgentReins cannot answer this from captured project evidence. This is an evidence gap, not proof that the activity did not happen."
-                     : "AgentReins 无法从已采集的项目证据回答该问题。这是证据缺口，不代表该行为没有发生。")
+                     ? "No change batch matches this question. AgentReins will not answer by mixing nearby session evidence."
+                     : "没有找到与问题匹配的变更批次。AgentReins 不会混入同一 Session 中临近但无关的证据。")
                     .font(.system(size: 13, weight: .semibold)).foregroundStyle(amber)
+            } else if selectedBatch == nil {
+                Text(language.language == .english
+                     ? "Multiple change batches match. Select one before inspecting evidence."
+                     : "找到多个候选变更批次，请先选择一个，再查看其内部证据。")
+                    .font(.system(size: 12, weight: .semibold)).foregroundStyle(amber)
+                ForEach(changes) { batch in
+                    Button {
+                        selectedQuestionBatchID = batch.id
+                    } label: {
+                        HStack {
+                            VStack(alignment: .leading, spacing: 3) {
+                                Text(batch.requirement).font(.system(size: 11, weight: .bold)).lineLimit(2)
+                                Text("\(batch.contextCount) context · \(batch.changedFileCount) files · \(formattedAgentName(batch.agent))")
+                                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(.secondary)
+                            }
+                            Spacer()
+                            Image(systemName: "chevron.right").foregroundStyle(cyan)
+                        }.padding(8).background(panel, in: RoundedRectangle(cornerRadius: 7))
+                    }.buttonStyle(.plain)
+                }
             } else {
+                if let selectedBatch {
+                    requirementEvidenceLine(language.language == .english ? "Change batch" : "变更批次",
+                                            value: selectedBatch.requirement, icon: "square.stack.3d.up")
+                }
                 if !agents.isEmpty { requirementEvidenceLine("Agents", value: agents.joined(separator: ", "), icon: "person.2") }
-                requirementEvidenceLine(language.language == .english ? "Memory" : "记忆",
+                if intent == .memory || intent == .overview {
+                    requirementEvidenceLine(language.language == .english ? "Memory" : "记忆",
                                         value: "\(memoryReads) read(s), \(memoryWrites) write(s) " + (memoryWrites == 0
                                             ? (language.language == .english ? "— no write observed" : "— 未观察到写入")
                                             : (language.language == .english ? "— persistent write observed" : "— 观察到持久化写入")), icon: "brain")
-                if !tools.isEmpty { projectToolEvidence(tools) }
-                if !files.isEmpty { projectFileEvidence(files, projectPath: project.path) }
-                requirementEvidenceLine(language.language == .english ? "Verification" : "验证",
+                }
+                if intent == .tools || intent == .overview {
+                    projectToolCallEvidence(scopedRecords)
+                }
+                if (intent == .files || intent == .overview), !files.isEmpty {
+                    projectFileEvidence(files, projectPath: project.path)
+                }
+                if intent == .network {
+                    Text(language.language == .english
+                         ? "Network evidence is not yet part of this turn-scoped query record. Open the batch network evidence instead of inferring destinations."
+                         : "当前按 Turn 检索的记录尚未携带网络明细；请查看批次网络证据，系统不会在这里推测目的地。")
+                        .font(.system(size: 11, weight: .semibold)).foregroundStyle(amber)
+                }
+                if intent == .verification || intent == .overview {
+                    requirementEvidenceLine(language.language == .english ? "Verification" : "验证",
                                         value: verified
                                             ? (language.language == .english ? "Independent verification passed" : "独立验证已通过")
                                             : (language.language == .english ? "No passing independent verification was found" : "未发现通过的独立验证"),
                                         icon: verified ? "checkmark.shield.fill" : "exclamationmark.shield")
-                ForEach(records.prefix(5)) { record in
+                }
+                if intent == .context || intent == .overview {
+                    if let selectedBatch {
+                        ForEach(selectedBatch.contexts.prefix(12)) { context in
+                            VStack(alignment: .leading, spacing: 3) {
+                                if let input = context.userInput {
+                                    Text((language.language == .english ? "User: " : "用户：") + input)
+                                        .font(.system(size: 12, weight: .semibold)).lineLimit(5)
+                                }
+                                if let response = context.modelResponse {
+                                    Text((language.language == .english ? "Agent: " : "Agent：") + response)
+                                        .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(5)
+                                }
+                                Text("session \(context.sessionId) · turn \(context.turnId)")
+                                    .font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                            }.padding(8).background(panel, in: RoundedRectangle(cornerRadius: 7))
+                        }
+                    } else {
+                    ForEach(scopedRecords.prefix(8)) { record in
                     VStack(alignment: .leading, spacing: 3) {
                         Text(record.userPrompt ?? (language.language == .english ? "Prompt was not captured" : "未捕获提示词"))
                             .font(.system(size: 12, weight: .semibold)).lineLimit(3)
                         Text("\(formattedAgentName(record.agentID)) · \(record.model ?? "model unknown") · session \(record.sessionID)")
                             .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(2)
                     }.padding(8).background(panel, in: RoundedRectangle(cornerRadius: 7))
+                    }
+                    }
                 }
             }
             Text(language.language == .english
@@ -935,6 +1015,52 @@ struct AgentOperationsCenterView: View {
                 .font(.system(size: 10)).foregroundStyle(.tertiary)
         }.padding(12).background(panel, in: RoundedRectangle(cornerRadius: 9))
             .overlay(RoundedRectangle(cornerRadius: 9).stroke(border))
+    }
+
+    private func projectQuestionIntent(_ question: String) -> ProjectQuestionIntent {
+        let value = question.lowercased()
+        if ["上下文", "提示词", "对话", "context", "prompt", "conversation"].contains(where: value.contains) { return .context }
+        if ["工具", "mcp", "skill", "function", "tool", "调用"].contains(where: value.contains) { return .tools }
+        if ["文件", "代码", "diff", "file", "code", "修改"].contains(where: value.contains) { return .files }
+        if ["网络", "网站", "ip", "域名", "ssh", "network", "domain"].contains(where: value.contains) { return .network }
+        if ["记忆", "memory", "remember"].contains(where: value.contains) { return .memory }
+        if ["验证", "测试", "完成", "verify", "test", "pass"].contains(where: value.contains) { return .verification }
+        return .overview
+    }
+
+    private func projectToolCallEvidence(_ records: [FeatureProvenanceRecord]) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            Label(language.language == .english ? "Tool calls in matched turns" : "匹配上下文中的工具调用",
+                  systemImage: "wrench.and.screwdriver")
+                .font(.system(size: 10, weight: .bold)).foregroundStyle(cyan)
+            if records.allSatisfy({ $0.tools.isEmpty }) {
+                Text(language.language == .english ? "No named tool call was captured" : "未捕获具名工具调用")
+                    .font(.system(size: 11, weight: .semibold)).foregroundStyle(amber)
+            }
+            ForEach(records) { record in
+                ForEach(Array(record.tools.enumerated()), id: \.offset) { _, tool in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack {
+                            Text(tool.name).font(.system(size: 11, weight: .bold, design: .monospaced))
+                                .foregroundStyle(.purple)
+                            if let server = tool.server { labelChip(server, color: .purple) }
+                            Spacer()
+                            Text(tool.state.rawValue.uppercased()).micro(tool.state == .failed ? .red : green)
+                        }
+                        if let arguments = tool.arguments, !arguments.isEmpty {
+                            Text((language.language == .english ? "Arguments: " : "参数：") + arguments)
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(5)
+                        }
+                        if let result = tool.resultPreview, !result.isEmpty {
+                            Text((language.language == .english ? "Result: " : "结果：") + result)
+                                .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary).lineLimit(5)
+                        }
+                        Text("\(formattedAgentName(record.agentID)) · session \(record.sessionID)\(record.turnID.map { " · turn \($0)" } ?? "")")
+                            .font(.system(size: 9, design: .monospaced)).foregroundStyle(.tertiary)
+                    }.padding(8).background(panel, in: RoundedRectangle(cornerRadius: 7))
+                }
+            }
+        }
     }
 
     private func projectToolEvidence(_ tools: [String]) -> some View {
@@ -992,15 +1118,15 @@ struct AgentOperationsCenterView: View {
         return VStack(alignment: .leading, spacing: 12) {
             HStack(alignment: .top, spacing: 12) {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text(language.language == .english ? "REQUIREMENT SUPERVISOR" : "需求监工")
+                    Text(language.language == .english ? "OBSERVED CHANGE ACTIVITY" : "已观测变更活动")
                         .micro(cyan)
                     Text(language.language == .english
-                         ? "Follow what the user asked for, what the Agent changed, and whether the result is safe and verified."
-                         : "围绕用户需求，监督 Agent 做了什么、影响了什么，以及结果是否安全并通过验证。")
+                         ? "Review each coherent project change with its surrounding conversations, tools, network, memory, and verification evidence."
+                         : "以一次连续项目变更为索引，关联前后多轮上下文、工具、网络、记忆与验证证据。")
                         .font(.system(size: 12)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                labelChip("\(changes.count) \(language.language == .english ? "REQUIREMENTS" : "项需求")", color: cyan)
+                labelChip("\(changes.count) \(language.language == .english ? "OBSERVED" : "个已观测批次")", color: cyan)
                 labelChip("\(changes.filter { $0.verification == .verified }.count) \(language.language == .english ? "VERIFIED" : "已验证")", color: green)
                 labelChip("\(projectIncidents.count) \(language.language == .english ? "FINDINGS" : "项风险")",
                           color: projectIncidents.isEmpty ? green : amber)
@@ -1010,12 +1136,12 @@ struct AgentOperationsCenterView: View {
                 requirementHero(current, isLive: liveSessionIDs.contains(current.sessionId))
             } else {
                 empty(language.language == .english
-                      ? "No requirement has been attributed to this project yet"
-                      : "尚未发现可归属到该项目的需求")
+                      ? "No captured Agent activity has been attributed yet. This does not mean the project has no history."
+                      : "尚未发现可归属的 Agent 活动；这不代表项目没有历史变更。")
             }
 
             if changes.count > 1 {
-                Text(language.language == .english ? "REQUIREMENT HISTORY" : "历史需求回顾").micro(cyan)
+                Text(language.language == .english ? "CAPTURED ACTIVITY HISTORY" : "已采集活动历史").micro(cyan)
                 ForEach(changes.dropFirst().prefix(12)) { change in
                     requirementHistoryRow(change)
                 }
@@ -1035,8 +1161,8 @@ struct AgentOperationsCenterView: View {
                 VStack(alignment: .leading, spacing: 5) {
                     HStack(spacing: 7) {
                         Text(isLive
-                             ? (language.language == .english ? "CURRENT REQUIREMENT" : "当前需求")
-                             : (language.language == .english ? "LATEST REQUIREMENT" : "最近需求"))
+                             ? (language.language == .english ? "LIVE CHANGE BATCH" : "实时变更批次")
+                             : (language.language == .english ? "LATEST CHANGE BATCH" : "最近变更批次"))
                             .micro(isLive ? cyan : .secondary)
                         labelChip(formattedAgentName(change.agent).uppercased(), color: .blue)
                     }
@@ -1057,6 +1183,9 @@ struct AgentOperationsCenterView: View {
             }
 
             LazyVGrid(columns: [GridItem(.adaptive(minimum: 145), spacing: 8)], spacing: 8) {
+                requirementImpact("Linked context", zh: "关联上下文", value: "\(change.contextCount)",
+                                  detail: "\(change.sessionIDs.count) session(s) · \(change.turnCount) turn(s)",
+                                  icon: "text.bubble", color: cyan)
                 requirementImpact("Files changed", zh: "代码变更", value: "\(change.changedFileCount)",
                                   detail: "+\(change.createdFiles.count)  ~\(change.modifiedFiles.count)  −\(change.deletedFiles.count)",
                                   icon: "doc.badge.gearshape", color: .blue)
@@ -1090,7 +1219,7 @@ struct AgentOperationsCenterView: View {
             } label: {
                 Label(expanded
                       ? (language.language == .english ? "Hide evidence" : "收起证据")
-                      : (language.language == .english ? "Inspect requirement evidence" : "查看需求证据"),
+                      : (language.language == .english ? "Inspect batch evidence" : "查看批次证据"),
                       systemImage: expanded ? "chevron.up" : "chevron.down")
                     .font(.system(size: 11, weight: .semibold)).foregroundStyle(cyan)
             }.buttonStyle(.plain)
@@ -1117,8 +1246,13 @@ struct AgentOperationsCenterView: View {
     private func requirementEvidenceDetails(_ change: ProjectChangeSet) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             Divider().overlay(border)
-            Text(language.language == .english ? "ATTRIBUTED EVIDENCE" : "归属证据").micro(.secondary)
-            requirementEvidenceLine("Session", value: change.sessionId, icon: "rectangle.stack")
+            Text(language.language == .english ? "ATTRIBUTED BATCH EVIDENCE" : "批次关联证据").micro(.secondary)
+            requirementEvidenceLine(language.language == .english ? "Sessions" : "关联会话",
+                                    value: change.sessionIDs.joined(separator: " · "), icon: "rectangle.stack")
+            requirementEvidenceLine(language.language == .english ? "Models" : "模型",
+                                    value: change.modelNames.isEmpty
+                                        ? (language.language == .english ? "Not captured" : "未捕获")
+                                        : change.modelNames.joined(separator: " · "), icon: "brain")
             requirementEvidenceLine(language.language == .english ? "Changed files" : "变更文件",
                                     value: change.changedFileCount == 0
                                         ? (language.language == .english ? "No file mutation observed" : "未观察到文件变更")
@@ -1127,6 +1261,31 @@ struct AgentOperationsCenterView: View {
                                     value: change.readFiles.isEmpty
                                         ? (language.language == .english ? "No read evidence attributed" : "未归属到文件读取证据")
                                         : change.readFiles.prefix(6).joined(separator: " · "), icon: "eye")
+            if !change.contexts.isEmpty {
+                Text(language.language == .english ? "LINKED CONTEXT" : "关联上下文").micro(cyan)
+                    .padding(.top, 4)
+                ForEach(change.contexts.prefix(8)) { context in
+                    VStack(alignment: .leading, spacing: 4) {
+                        HStack(spacing: 6) {
+                            Text(context.turnId).font(.system(size: 9, weight: .bold, design: .monospaced))
+                                .foregroundStyle(cyan)
+                            Text(relativeAge(context.occurredAt)).font(.system(size: 9)).foregroundStyle(.tertiary)
+                            if let model = context.model {
+                                Text(model).font(.system(size: 9, design: .monospaced)).foregroundStyle(.blue)
+                            }
+                        }
+                        if let input = context.userInput, !input.isEmpty {
+                            Text((language.language == .english ? "User: " : "用户：") + input)
+                                .font(.system(size: 10, weight: .semibold)).lineLimit(4)
+                        }
+                        if let response = context.modelResponse, !response.isEmpty {
+                            Text((language.language == .english ? "Agent: " : "Agent：") + response)
+                                .font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(4)
+                        }
+                    }.padding(8).frame(maxWidth: .infinity, alignment: .leading)
+                        .background(panel, in: RoundedRectangle(cornerRadius: 7))
+                }
+            }
             Text(language.language == .english
                  ? "‘Not observed’ describes current evidence coverage; it does not prove the action never happened."
                  : "“未观察到”仅描述当前证据覆盖范围，并不等于证明该行为从未发生。")
@@ -1295,7 +1454,7 @@ struct AgentOperationsCenterView: View {
                          : "这是临时 Agent 任务空间；无需建立 Git 仓库，仍会监督需求与安全证据。")
                         .font(.system(size: 11)).foregroundStyle(.secondary)
                 }.frame(maxWidth: .infinity, alignment: .leading)
-                projectBriefMetric(language.language == .english ? "REQUIREMENTS" : "需求", "\(changes.count)", cyan)
+                projectBriefMetric(language.language == .english ? "OBSERVED BATCHES" : "已观测批次", "\(changes.count)", cyan)
                 projectBriefMetric(language.language == .english ? "SESSIONS" : "会话", "\(project.sessions.count)", .blue)
                 projectBriefMetric(language.language == .english ? "FILES OBSERVED" : "文件证据", "\(observedFiles)", .purple)
                 projectBriefMetric(language.language == .english ? "MEMORY" : "记忆", "\(memoryReads)R · \(memoryWrites)W", cyan)
@@ -1585,6 +1744,100 @@ struct AgentOperationsCenterView: View {
                          detail: latest?.workspace ?? "No project attributed", live: item.presence == .running)
             }
         }
+    }
+
+    private var globalEgressView: some View {
+        let reports = AgentEgressAudit.build(sessions: sessions)
+        let critical = reports.filter { $0.risk == .critical || $0.risk == .high }.count
+        let incomplete = reports.filter { $0.coverage != .complete }.count
+        let sensitive = reports.reduce(0) { $0 + $1.sensitiveFindings.count }
+        return LazyVStack(alignment: .leading, spacing: 12) {
+            HStack(spacing: 10) {
+                egressMetric(language.language == .english ? "OUTBOUND TURNS" : "出站轮次",
+                             value: reports.count.formatted(), color: cyan)
+                egressMetric(language.language == .english ? "HIGH RISK" : "高风险",
+                             value: critical.formatted(), color: critical > 0 ? .red : green)
+                egressMetric(language.language == .english ? "SENSITIVE ITEMS" : "敏感项",
+                             value: sensitive.formatted(), color: sensitive > 0 ? amber : green)
+                egressMetric(language.language == .english ? "EVIDENCE GAPS" : "证据缺口",
+                             value: incomplete.formatted(), color: incomplete > 0 ? amber : green)
+            }
+            VStack(alignment: .leading, spacing: 4) {
+                Text(language.language == .english ? "AGENT EGRESS AUDIT" : "智能体出站审计")
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(cyan)
+                Text(language.language == .english
+                     ? "One turn, one accountable record: who sent what, to which provider or relay, with which sensitive context and evidence gaps."
+                     : "一轮一次可追责记录：谁向哪个模型、网站或中转发送了什么，包含哪些敏感上下文，以及证据是否完整。")
+                    .font(.system(size: 12)).foregroundStyle(.secondary)
+            }
+            if reports.isEmpty {
+                empty(language.language == .english
+                    ? "No outbound request has been correlated to an Agent turn"
+                    : "尚未发现能够关联到智能体轮次的出站请求")
+            } else {
+                ForEach(reports.prefix(80)) { report in egressCard(report) }
+            }
+        }
+    }
+
+    private func egressMetric(_ title: String, value: String, color: Color) -> some View {
+        VStack(alignment: .leading, spacing: 5) {
+            Text(title).font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+            Text(value).font(.system(size: 22, weight: .bold, design: .monospaced)).foregroundStyle(color)
+        }
+        .padding(12).frame(maxWidth: .infinity, alignment: .leading)
+        .background(panel, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(border))
+    }
+
+    private func egressCard(_ report: AgentEgressAudit) -> some View {
+        let riskColor: Color = report.risk == .critical ? .red
+            : report.risk == .high ? amber
+            : report.risk == .medium || report.risk == .unknown ? .yellow : green
+        return Button {
+            if let session = sessions.first(where: { $0.id == report.sessionId }) { onSession(session) }
+        } label: {
+            VStack(alignment: .leading, spacing: 11) {
+                HStack(alignment: .top, spacing: 10) {
+                    Image(systemName: "arrow.up.right.circle.fill").font(.system(size: 21)).foregroundStyle(riskColor)
+                    VStack(alignment: .leading, spacing: 3) {
+                        Text("\(report.agent) → \(report.primaryDestination)")
+                            .font(.system(size: 16, weight: .bold)).foregroundStyle(.primary)
+                        Text(report.userIntent ?? (language.language == .english ? "User intent not captured" : "未捕获用户意图"))
+                            .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                    }
+                    Spacer()
+                    labelChip(report.risk.rawValue.uppercased(), color: riskColor)
+                    labelChip(L(report.coverage.rawValue).uppercased(),
+                              color: report.coverage == .complete ? green : amber)
+                    Text(relativeAge(report.occurredAt)).micro(.secondary)
+                }
+                HStack(spacing: 8) {
+                    labelChip("MODEL · \(report.claimedModels.joined(separator: ", ").isEmpty ? "UNKNOWN" : report.claimedModels.joined(separator: ", "))", color: .blue)
+                    if let tokens = report.inputTokens { labelChip("INPUT · \(tokens.formatted()) TOKENS", color: cyan) }
+                    labelChip("CAPTURED · \(formatBytes(report.capturedPromptBytes))", color: report.capturedPromptBytes > 0 ? green : amber)
+                    labelChip("IDENTITY · \(report.routeIdentity.uppercased())", color: report.routeIdentity == "consistent" ? green : amber)
+                }
+                if !report.exposedCategories.isEmpty {
+                    VStack(alignment: .leading, spacing: 4) {
+                        Text(language.language == .english ? "DATA SENT UPSTREAM" : "发送到上游的数据")
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                        Text(report.exposedCategories.map(\.rawValue).joined(separator: " · "))
+                            .font(.system(size: 12)).foregroundStyle(.primary).lineLimit(3)
+                    }
+                }
+                if !report.sensitiveFindings.isEmpty {
+                    Text((language.language == .english ? "Sensitive: " : "敏感数据：")
+                         + report.sensitiveFindings.map { $0.category.rawValue }.joined(separator: " · "))
+                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(.red)
+                }
+                if let finding = report.findings.first {
+                    Text(finding).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }
+            .padding(15).background(panel, in: RoundedRectangle(cornerRadius: 12))
+            .overlay(RoundedRectangle(cornerRadius: 12).stroke(riskColor.opacity(0.55)))
+        }.buttonStyle(.plain)
     }
 
     private var globalSecurityView: some View {

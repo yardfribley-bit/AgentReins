@@ -216,7 +216,7 @@ struct AgentSessionSnapshot: Identifiable, Sendable {
                 id: sessionId,
                 agent: normalizedAgent(ordered.compactMap(\.agent).last),
                 model: ordered.compactMap(\.model).last,
-                workspace: ordered.map(\.path).last(where: { $0 != "-" }),
+                workspace: SupervisedWorkspaceResolver.resolve(events: ordered).path,
                 startedAt: ordered.first?.ts ?? Date(),
                 lastActivityAt: ordered.last?.ts ?? Date(),
                 exchanges: exchanges,

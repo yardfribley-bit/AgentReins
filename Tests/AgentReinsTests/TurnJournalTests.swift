@@ -3013,6 +3013,21 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(taskIdentity.id, task.path)
         XCTAssertNil(taskIdentity.repositoryRoot)
 
+        let sessionEvents = [
+            GuardEvent(kind: "context", ruleId: "workspace", path: repository.path,
+                command: nil, agent: "codex", op: "context", severity: "info",
+                ts: Date(), action: "observed", sessionId: "s", turnId: "t"),
+            GuardEvent(kind: "tool", ruleId: "shell", path: repository.path + "/60;",
+                command: "sed -n 1,60p", agent: "codex", op: "exec", severity: "info",
+                ts: Date(), action: "completed", sessionId: "s", turnId: "t"),
+            GuardEvent(kind: "file", ruleId: "write", path: nested.appendingPathComponent("View.swift").path,
+                command: nil, agent: "codex", op: "modify", severity: "info",
+                ts: Date(), action: "observed", sessionId: "s", turnId: "t")
+        ]
+        let sessionIdentity = SupervisedWorkspaceResolver.resolve(events: sessionEvents)
+        XCTAssertEqual(sessionIdentity.id, repository.path)
+        XCTAssertEqual(sessionIdentity.kind, .repository)
+
         let unassigned = SupervisedWorkspaceResolver.resolve(nil)
         XCTAssertEqual(unassigned.kind, .unassigned)
         XCTAssertNil(unassigned.path)

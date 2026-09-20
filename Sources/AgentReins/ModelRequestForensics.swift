@@ -256,6 +256,7 @@ enum ForensicAssessmentKind: String, Codable, Sendable {
     case contextExposure = "context_exposure"
     case trafficSeparation = "traffic_separation"
     case relaySecurity = "relay_security"
+    case egressAudit = "egress_audit"
 }
 
 struct ForensicAssessmentRecord: Equatable, Sendable {
@@ -304,6 +305,11 @@ struct ForensicAssessmentRecord: Equatable, Sendable {
                let item = record(.relaySecurity, version: 1,
                                  confidence: relay.configuredGateways.isEmpty ? .inferred : .confirmed,
                                  value: relay) { result.append(item) }
+            if let snapshot = AgentSessionSnapshot.build(from: rows).first,
+               let audit = AgentEgressAudit.build(session: snapshot).first(where: { $0.turnId == turn }),
+               let item = record(.egressAudit, version: 1,
+                                 confidence: audit.coverage == .complete ? .confirmed : .inferred,
+                                 value: audit) { result.append(item) }
             return result
         }
     }

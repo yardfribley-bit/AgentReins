@@ -39,14 +39,16 @@ struct IndexedChangeSet: Codable, Identifiable, Sendable {
     let evidenceIDs: [String]
 }
 
-/// A Change Set is one user request and the dialogue that evolves it. Files,
-/// turns, sessions, agents, and commits are contributions—not boundaries.
+/// A Change Set is a continuous project activity batch. Dialogue, files,
+/// tools, turns, sessions, agents, and commits are evidence attached to the
+/// batch—not interchangeable counts and not requirement boundaries.
 enum ChangeSetIndexer {
     private struct Draft {
         var idSeed: String
         var dialogue: [RequirementDialogueEntry]
         var requirementIDs: Set<String>
         var changes: [IndexedCodeChange]
+        var reasons: Set<String>
     }
 
     static func build(projectID: String, events: [AgentEventEnvelope],
@@ -65,58 +67,53 @@ enum ChangeSetIndexer {
             guard let turnID = event.turnID else { return true }
             return seenPromptTurns.insert(key(event.sessionID, turnID)).inserted
         }
+        // A batch starts with an observed state mutation. Prompts are explanatory
+        // evidence, never batch creators. This prevents a long conversation (or
+        // an entire session) from being misreported as project change history.
         var drafts: [Draft] = []
-        // A session is a hard attribution boundary. Different agent sessions may
-        // work on the same project at the same time and must never share an
-        // implicit "current requirement".
-        var activeIndexBySession: [String: Int] = [:]
-        var turnToDraft: [String: Int] = [:]
-
-        for (event, prompt) in prompts {
-            let sessionID = event.sessionID
-            let activeIndex = activeIndexBySession[sessionID]
-            let role = classify(prompt.rawText, hasActive: activeIndex != nil)
-            if activeIndex == nil || role == .newRequirement || role == .start {
-                drafts.append(Draft(idSeed: event.id, dialogue: [],
-                                    requirementIDs: Set(prompt.requirementIDs), changes: []))
-                activeIndexBySession[sessionID] = drafts.count - 1
+        for change in changes.sorted(by: { $0.startedAt < $1.startedAt }) {
+            if let index = drafts.indices.last,
+               let reason = continuationReason(previous: drafts[index], next: change) {
+                drafts[index].changes.append(change)
+                drafts[index].requirementIDs.formUnion(change.requirementIDs)
+                drafts[index].reasons.insert(reason)
+            } else {
+                drafts.append(Draft(idSeed: change.id, dialogue: [],
+                                    requirementIDs: Set(change.requirementIDs), changes: [change],
+                                    reasons: ["observed_state_mutation"]))
             }
-            guard let index = activeIndexBySession[sessionID] else { continue }
-            let storedRole: RequirementDialogueRole = drafts[index].dialogue.isEmpty ? .start : role
+        }
+
+        // Attach only prompts that have a causal key shared by a mutation. A
+        // nearby timestamp alone is not sufficient attribution.
+        for (event, prompt) in prompts {
+            let exact = drafts.indices.first { index in
+                drafts[index].changes.contains {
+                    $0.sessionID == event.sessionID && $0.turnID == event.turnID
+                }
+            }
+            let bridge = drafts.indices.first { index in
+                let rows = drafts[index].changes
+                guard rows.contains(where: { $0.sessionID == event.sessionID }),
+                      let start = rows.map(\.startedAt).min(),
+                      let end = rows.map(\.lastObservedAt).max(),
+                      event.occurredAt >= start, event.occurredAt <= end else { return false }
+                return classify(prompt.rawText, hasActive: true) != .newRequirement
+            }
+            guard let index = exact ?? bridge else { continue }
+            let role = classify(prompt.rawText, hasActive: !drafts[index].dialogue.isEmpty)
             drafts[index].dialogue.append(RequirementDialogueEntry(
-                id: event.id, role: storedRole, text: prompt.rawText,
-                sessionID: event.sessionID, turnID: event.turnID,
+                id: event.id,
+                role: drafts[index].dialogue.isEmpty ? .start : role,
+                text: prompt.rawText, sessionID: event.sessionID, turnID: event.turnID,
                 occurredAt: event.occurredAt, evidenceID: event.id,
                 confidence: role == .unknown ? .inferred : .observed))
             drafts[index].requirementIDs.formUnion(prompt.requirementIDs)
-            turnToDraft[key(event.sessionID, event.turnID)] = index
-            // Acknowledgements such as "好" and "行" are part of the same
-            // requirement dialogue. Only an explicit cancellation closes it.
-            if role == .cancel { activeIndexBySession[sessionID] = nil }
-        }
-
-        for change in changes.sorted(by: { $0.startedAt < $1.startedAt }) {
-            let exact = turnToDraft[key(change.sessionID, change.turnID)]
-            let preceding = drafts.indices.reversed().first { index in
-                drafts[index].dialogue.contains { entry in
-                    entry.sessionID == change.sessionID && entry.occurredAt <= change.startedAt
-                }
-            }
-            if let index = exact ?? preceding {
-                drafts[index].changes.append(change)
-            } else {
-                let synthetic = RequirementDialogueEntry(
-                    id: "unattributed:\(change.id)", role: .unknown,
-                    text: change.userPrompt ?? "Code changes without a captured user request",
-                    sessionID: change.sessionID, turnID: change.turnID,
-                    occurredAt: change.startedAt, evidenceID: change.id, confidence: .unknown)
-                drafts.append(Draft(idSeed: synthetic.id, dialogue: [synthetic],
-                                    requirementIDs: Set(change.requirementIDs), changes: [change]))
-            }
+            drafts[index].reasons.insert("same_session_turn")
         }
 
         return drafts.compactMap { draft in
-            guard let first = draft.dialogue.first else { return nil }
+            guard let firstChange = draft.changes.first else { return nil }
             let dialogueTurns = Set(draft.dialogue.map { key($0.sessionID, $0.turnID) })
             let contextualEvidence = events.filter { dialogueTurns.contains(key($0.sessionID, $0.turnID)) }.map(\.id)
             let evidence = Set(draft.dialogue.map(\.evidenceID) + contextualEvidence + draft.changes.flatMap(\.evidenceIDs))
@@ -132,17 +129,55 @@ enum ChangeSetIndexer {
             let times = draft.dialogue.map(\.occurredAt) + draft.changes.map(\.lastObservedAt)
             return IndexedChangeSet(
                 id: digest("\(projectID)\u{0}\(draft.idSeed)"), projectID: projectID,
-                title: String(first.text.prefix(240)), requirementIDs: draft.requirementIDs.sorted(),
+                title: String((draft.dialogue.first?.text ?? firstChange.userPrompt
+                    ?? "Unattributed workspace change").prefix(240)), requirementIDs: draft.requirementIDs.sorted(),
                 dialogue: draft.dialogue, agentIDs: agents.sorted(), sessionIDs: sessions.sorted(),
                 turnIDs: turns.sorted(), contextCount: draft.dialogue.count, attemptCount: turns.count,
                 codeChangeIDs: draft.changes.map(\.id).sorted(),
                 paths: Array(Set(draft.changes.map(\.path))).sorted(),
                 commitHashes: Array(Set(draft.changes.flatMap(\.commitHashes))).sorted(),
-                startedAt: times.min() ?? first.occurredAt,
-                lastActivityAt: times.max() ?? first.occurredAt, state: state,
+                startedAt: times.min() ?? firstChange.startedAt,
+                lastActivityAt: times.max() ?? firstChange.lastObservedAt, state: state,
                 groupingConfidence: draft.dialogue.contains { $0.confidence == .inferred } ? .inferred : .observed,
-                groupingReasons: ["same_session_requirement_dialogue"], evidenceIDs: evidence.sorted())
+                groupingReasons: draft.reasons.sorted(), evidenceIDs: evidence.sorted())
         }.sorted { $0.lastActivityAt > $1.lastActivityAt }
+    }
+
+    /// Returns a positive causal reason when two mutations belong to one
+    /// continuous state transition. Commit identity and prompt similarity are
+    /// deliberately absent: both are optional metadata, not batch boundaries.
+    private static func continuationReason(previous: Draft, next: IndexedCodeChange) -> String? {
+        guard let last = previous.changes.last else { return nil }
+        let gap = next.startedAt.timeIntervalSince(last.lastObservedAt)
+        guard gap >= 0 else { return nil }
+        let priorVerified = last.verification.contains { [.passed, .failed].contains($0.outcome) }
+        guard !priorVerified else { return nil }
+        if gap <= 10 * 60, let call = next.toolCallID,
+           previous.changes.contains(where: { $0.toolCallID == call }) {
+            return "same_tool_call"
+        }
+        if gap <= 10 * 60, last.sessionID == next.sessionID,
+           last.turnID != nil, last.turnID == next.turnID {
+            return "same_session_turn"
+        }
+        let sameSession = last.sessionID == next.sessionID
+        let sharedRequirement = !Set(previous.requirementIDs).isDisjoint(with: next.requirementIDs)
+        let contradictsKnownRequirement = !previous.requirementIDs.isEmpty && !next.requirementIDs.isEmpty
+            && !sharedRequirement
+        let relatedPath = previous.changes.contains { pathsRelated($0.path, next.path) }
+        if sharedRequirement && relatedPath && gap <= 30 * 60 {
+            return "shared_requirement_related_workspace_mutation"
+        }
+        if sameSession && relatedPath && !contradictsKnownRequirement && gap <= 120 {
+            return "continuous_related_workspace_mutation"
+        }
+        return nil
+    }
+
+    private static func pathsRelated(_ lhs: String, _ rhs: String) -> Bool {
+        let a = URL(fileURLWithPath: lhs).deletingLastPathComponent().standardized.path
+        let b = URL(fileURLWithPath: rhs).deletingLastPathComponent().standardized.path
+        return lhs == rhs || a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/")
     }
 
     static func classify(_ raw: String, hasActive: Bool) -> RequirementDialogueRole {

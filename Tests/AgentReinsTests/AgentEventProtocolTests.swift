@@ -306,7 +306,11 @@ final class AgentEventProtocolTests: XCTestCase {
                     path: "/Users/example/1000\",\"workdir\":\"/project\",\"max_output_tokens\":1000}",
                     beforeDigest: nil, afterDigest: nil, patch: nil,
                     toolCallID: "call-1", attribution: .inferred))),
-            envelope("other", turn: "article", sequence: 6,
+            envelope("z-checkpoint", turn: "zcode", sequence: 6,
+                payload: .checkpoint(AgentCheckpointEvidence(commitHash: "abc", branch: "main",
+                    touchedPaths: ["120;", "30;", "90,170p", "Sources/AgentReins/ZCodeSight.swift"],
+                    survivingPaths: [], attribution: .inferred, evidenceIDs: []))),
+            envelope("other", turn: "article", sequence: 7,
                 payload: .userPrompt(UserPromptEvidence(rawText: "将这些发现写进公众号文章，修改文件",
                     digest: nil, requirementIDs: [])))
         ]
@@ -512,9 +516,9 @@ final class AgentEventProtocolTests: XCTestCase {
 
         let sets = ChangeSetIndexer.build(projectID: "project", events: events, changes: [])
 
-        XCTAssertEqual(sets.count, 1)
-        XCTAssertEqual(sets.first?.contextCount, 4)
-        XCTAssertEqual(sets.first?.dialogue.map(\.role), [.start, .correct, .continueWork, .continueWork])
+        // Dialogue without an observed state mutation is activity, not a
+        // change batch.
+        XCTAssertTrue(sets.isEmpty)
     }
 
     func testChangeSetNeverFallsBackAcrossSessionBoundary() {
@@ -535,8 +539,26 @@ final class AgentEventProtocolTests: XCTestCase {
         let sets = ChangeSetIndexer.build(projectID: "project",
             events: [prompt("p1", "session-a", "t1", "修改登录功能", 10)], changes: [change])
 
+        XCTAssertEqual(sets.count, 1)
+        XCTAssertEqual(sets.first?.codeChangeIDs, ["orphan"])
+        XCTAssertTrue(sets.first?.dialogue.isEmpty == true)
+    }
+
+    func testChangeSetSplitsOneLongLivedTurnAfterStableGap() {
+        func change(_ id: String, _ time: TimeInterval) -> IndexedCodeChange {
+            IndexedCodeChange(id: id, projectID: "project", agentID: "codex",
+                sessionID: "long-session", turnID: "long-turn", path: "Sources/App.swift",
+                operation: .modify, beforeDigest: nil, afterDigest: id, patch: nil,
+                toolCallID: nil, toolName: nil, userPrompt: "Improve the app",
+                requirementIDs: [], model: nil, startedAt: Date(timeIntervalSince1970: time),
+                lastObservedAt: Date(timeIntervalSince1970: time + 1), attribution: .observed,
+                commitHashes: [], verification: [], evidenceIDs: [id])
+        }
+
+        let sets = ChangeSetIndexer.build(projectID: "project", events: [],
+            changes: [change("morning", 100), change("next-day", 86_500)])
+
         XCTAssertEqual(sets.count, 2)
-        XCTAssertFalse(sets.first(where: { $0.sessionIDs.contains("session-a") })?.codeChangeIDs.contains("orphan") ?? true)
     }
 
     func testChangeSetIgnoresCompactedTranscriptBundleAndDeduplicatesOneTurnPrompt() {
@@ -559,9 +581,8 @@ final class AgentEventProtocolTests: XCTestCase {
 
         let sets = ChangeSetIndexer.build(projectID: "project", events: events, changes: [])
 
-        XCTAssertEqual(sets.count, 1)
-        XCTAssertEqual(sets.first?.title, "新增 ZCode 采集器")
-        XCTAssertEqual(sets.first?.contextCount, 2)
-        XCTAssertEqual(sets.first?.dialogue.map(\.role), [.start, .continueWork])
+        // Replayed or genuine prompts cannot create a change batch without a
+        // captured state transition.
+        XCTAssertTrue(sets.isEmpty)
     }
 }

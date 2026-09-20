@@ -32,7 +32,15 @@ struct ProjectChangeSet: Identifiable {
     let securityFindings: [String]
     let verification: ProjectVerificationState
 
+    /// Dialogue is evidence attached to the batch, not the identity of the
+    /// batch. One batch can legitimately span several turns.
+    var contexts: [ProjectChangeContext] = []
+
     var changedFileCount: Int { Set(createdFiles + modifiedFiles + deletedFiles).count }
+    var contextCount: Int { contexts.count }
+    var sessionIDs: [String] { Array(Set(contexts.map(\.sessionId) + [sessionId])).sorted() }
+    var turnCount: Int { Set(contexts.map(\.turnId)).count }
+    var modelNames: [String] { Array(Set(contexts.compactMap(\.model))).sorted() }
     var summary: String {
         var parts: [String] = []
         if !createdFiles.isEmpty { parts.append("created \(createdFiles.count) file(s)") }
@@ -42,6 +50,16 @@ struct ProjectChangeSet: Identifiable {
         if parts.isEmpty { parts.append("no file mutation observed") }
         return formattedAgentName(agent) + " " + parts.joined(separator: ", ")
     }
+}
+
+struct ProjectChangeContext: Identifiable {
+    let id: String
+    let sessionId: String
+    let turnId: String
+    let occurredAt: Date
+    let userInput: String?
+    let modelResponse: String?
+    let model: String?
 }
 
 struct ProjectEvolutionSnapshot: Identifiable {
@@ -86,59 +104,66 @@ enum ProjectEvolution {
 
     private static func changeSets(session: AgentSessionSnapshot, projectPath: String,
                                    incidents: [SecurityIncident]) -> [ProjectChangeSet] {
-        struct RequirementGroup {
-            var turns: [AgentTurn]
+        struct BatchDraft {
+            var mutations: [GuardEvent]
         }
 
         let orderedTurns = session.turns.sorted { $0.startedAt < $1.startedAt }
-        var groups: [RequirementGroup] = []
-        var hasActiveRequirement = false
-        for turn in orderedTurns {
-            let text = turn.userInput ?? ""
-            let role = ChangeSetIndexer.classify(text, hasActive: hasActiveRequirement)
-            if !hasActiveRequirement || role == .newRequirement || role == .start {
-                groups.append(RequirementGroup(turns: [turn]))
-                hasActiveRequirement = true
+        let mutations = session.events.filter { event in
+            event.kind == "file" && ["create", "modify", "update", "write", "delete", "move", "rename"]
+                .contains(event.op.lowercased())
+        }.sorted { $0.ts < $1.ts }
+        var groups: [BatchDraft] = []
+        for mutation in mutations {
+            guard let index = groups.indices.last, let last = groups[index].mutations.last else {
+                groups.append(BatchDraft(mutations: [mutation])); continue
+            }
+            let sameTurn = mutation.turnId != nil && mutation.turnId == last.turnId
+            let sameTool = mutation.toolCallId != nil && mutation.toolCallId == last.toolCallId
+            let gap = mutation.ts.timeIntervalSince(last.ts)
+            let verifiedBetween = session.events.contains { event in
+                event.kind == "verification" && event.ts >= last.ts && event.ts <= mutation.ts
+                    && ["passed", "verified", "success", "failed", "failure", "error"]
+                        .contains(event.action.lowercased())
+            }
+            let related = groups[index].mutations.contains { pathsRelated($0.path, mutation.path) }
+            // A turn can remain open for hours or days. Identity alone cannot
+            // bridge two stable work periods; all causal continuations are
+            // bounded by observed time and verification state.
+            if !verifiedBetween && gap >= 0
+                && ((sameTurn && gap <= 10 * 60) || (sameTool && gap <= 10 * 60)
+                    || (gap <= 120 && related)) {
+                groups[index].mutations.append(mutation)
             } else {
-                groups[groups.count - 1].turns.append(turn)
+                groups.append(BatchDraft(mutations: [mutation]))
             }
-            if role == .cancel { hasActiveRequirement = false }
-        }
-
-        if groups.isEmpty {
-            let rows = session.events
-            let relatedIncidents = incidents.filter { incident in
-                incident.events.contains { $0.sessionId == session.id }
-            }
-            return [ProjectChangeSet(id: "\(session.id):session", projectPath: projectPath,
-                sessionId: session.id, turnId: "session", agent: session.agent,
-                requirement: session.latestIntent ?? "Requirement not captured",
-                startedAt: session.startedAt, lastActivityAt: rows.map(\.ts).max() ?? session.lastActivityAt,
-                createdFiles: uniqueFiles(rows, operations: ["create"]),
-                modifiedFiles: uniqueFiles(rows, operations: ["modify", "update", "write"]),
-                deletedFiles: uniqueFiles(rows, operations: ["delete"]), readFiles: uniqueFiles(rows, operations: ["read"]),
-                tools: [], externalDestinations: Array(Set(rows.compactMap { $0.remoteDomain ?? $0.remoteHost })).sorted(),
-                memoryReads: 0, memoryWrites: 0,
-                securityFindings: Array(Set(relatedIncidents.filter { $0.severity != "info" }.map(\.title))).sorted(),
-                verification: verificationState(turns: [], events: rows))]
         }
 
         return groups.map { group in
-            let turnIDs = Set(group.turns.map(\.id))
-            let firstTurn = group.turns[0]
+            let mutationTurnIDs = Set(group.mutations.compactMap(\.turnId))
+            let exactTurns = orderedTurns.filter { mutationTurnIDs.contains($0.id) }
+            let firstMutation = group.mutations[0]
+            let lastMutation = group.mutations.last ?? firstMutation
+            let firstTurnTime = exactTurns.map(\.startedAt).min() ?? firstMutation.ts
+            let turns = orderedTurns.filter { turn in
+                mutationTurnIDs.contains(turn.id)
+                    || (turn.startedAt >= firstTurnTime && turn.startedAt <= lastMutation.ts)
+            }
+            let turnIDs = Set(turns.map(\.id))
+            let firstTurn = turns.first
             let rows = session.events.filter { event in
                 event.turnId.map(turnIDs.contains) ?? false
             }
-            let calls = group.turns.flatMap(\.toolCalls)
+            let calls = turns.flatMap(\.toolCalls)
             let relatedIncidents = incidents.filter { incident in
                 incident.events.contains { event in
                     event.sessionId == session.id && (event.turnId.map(turnIDs.contains) ?? false)
                 }
             }
-            return ProjectChangeSet(id: "\(session.id):\(firstTurn.id)", projectPath: projectPath,
-                sessionId: session.id, turnId: firstTurn.id, agent: session.agent,
-                requirement: firstTurn.userInput ?? session.latestIntent ?? "Requirement not captured",
-                startedAt: firstTurn.startedAt, lastActivityAt: rows.map(\.ts).max() ?? group.turns.map(\.startedAt).max() ?? session.lastActivityAt,
+            return ProjectChangeSet(id: "\(session.id):\(firstMutation.id.uuidString)", projectPath: projectPath,
+                sessionId: session.id, turnId: firstTurn?.id ?? firstMutation.turnId ?? "unattributed", agent: session.agent,
+                requirement: firstTurn?.userInput ?? firstMutation.userIntent ?? "Requirement not captured",
+                startedAt: firstMutation.ts, lastActivityAt: rows.map(\.ts).max() ?? lastMutation.ts,
                 createdFiles: uniqueFiles(rows, operations: ["create"]),
                 modifiedFiles: uniqueFiles(rows, operations: ["modify", "update", "write"]),
                 deletedFiles: uniqueFiles(rows, operations: ["delete"]),
@@ -148,8 +173,21 @@ enum ProjectEvolution {
                 memoryReads: calls.filter(\.isMemoryRead).count,
                 memoryWrites: calls.filter(\.isMemoryWrite).count,
                 securityFindings: Array(Set(relatedIncidents.filter { $0.severity != "info" }.map(\.title))).sorted(),
-                verification: verificationState(turns: group.turns, events: rows))
+                verification: verificationState(turns: turns, events: rows),
+                contexts: turns.map {
+                    ProjectChangeContext(id: "\(session.id):\($0.id)", sessionId: session.id,
+                        turnId: $0.id, occurredAt: $0.startedAt, userInput: $0.userInput,
+                        modelResponse: $0.finalResponse, model: $0.modelNames == "Not captured" ? nil : $0.modelNames)
+                })
         }
+    }
+
+    private static func pathsRelated(_ lhs: String, _ rhs: String) -> Bool {
+        guard lhs != "-", rhs != "-" else { return false }
+        if lhs == rhs { return true }
+        let a = URL(fileURLWithPath: lhs).deletingLastPathComponent().standardized.path
+        let b = URL(fileURLWithPath: rhs).deletingLastPathComponent().standardized.path
+        return a == b || a.hasPrefix(b + "/") || b.hasPrefix(a + "/")
     }
 
     private static func uniqueFiles(_ events: [GuardEvent], operations: Set<String>) -> [String] {
