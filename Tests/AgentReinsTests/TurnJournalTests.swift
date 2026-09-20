@@ -1327,12 +1327,12 @@ final class TurnJournalTests: XCTestCase {
         try database.upsertAssessments(records)
         let stored = try database.assessments(sessionId: "session", turnId: "turn")
 
-        XCTAssertEqual(stored.count, 1)
-        XCTAssertEqual(stored.first?.kind, .contextExposure)
-        XCTAssertEqual(stored.first?.ruleVersion, 1)
-        XCTAssertEqual(stored.first?.confidence, .confirmed)
-        XCTAssertEqual(stored.first?.evidenceEventIds, [event.id.uuidString])
-        XCTAssertFalse(stored.first?.payload.isEmpty == true)
+        XCTAssertEqual(Set(stored.map(\.kind)), [.contextExposure, .egressAudit])
+        let contextExposure = try XCTUnwrap(stored.first { $0.kind == .contextExposure })
+        XCTAssertEqual(contextExposure.ruleVersion, 1)
+        XCTAssertEqual(contextExposure.confidence, .confirmed)
+        XCTAssertEqual(contextExposure.evidenceEventIds, [event.id.uuidString])
+        XCTAssertFalse(contextExposure.payload.isEmpty)
     }
 
     @MainActor

@@ -26,6 +26,9 @@ final class AgentEgressAuditTests: XCTestCase {
         XCTAssertTrue(audit.exposedCategories.contains(.skills))
         XCTAssertTrue(audit.sensitiveFindings.contains { $0.category == .password })
         XCTAssertEqual(audit.routeIdentity, "unverified")
+        XCTAssertFalse(audit.dataClassifications.contains { $0.category == .notCaptured })
+        XCTAssertTrue(audit.dataClassifications.flatMap(\.evidence)
+            .contains { $0.content.contains("password: secret123") })
         let assessments = ForensicAssessmentRecord.build(events: [prompt, configured], generatedAt: now)
         XCTAssertTrue(assessments.contains { $0.kind == .egressAudit && $0.turnId == "turn" })
     }
@@ -65,5 +68,39 @@ final class AgentEgressAuditTests: XCTestCase {
         XCTAssertEqual(audit.coverage, .missingRoute)
         XCTAssertNotEqual(audit.risk, .low)
         XCTAssertTrue(audit.findings.contains { $0.contains("no request-level network route") })
+    }
+
+    func testClassifiedContextPreservesActualContentAndSendOrder() throws {
+        let now = Date()
+        let events = [
+            GuardEvent(kind: "context", ruleId: "base", path: "/tmp/project", command: nil,
+                agent: "codex", op: "base_instructions", severity: "info", ts: now,
+                action: "captured", sessionId: "session", turnId: "turn",
+                modelPrompt: "SYSTEM: protect user data", source: "codex-jsonl"),
+            GuardEvent(kind: "context", ruleId: "developer", path: "/tmp/project", command: nil,
+                agent: "codex", op: "developer_instructions", severity: "info",
+                ts: now.addingTimeInterval(1), action: "captured", sessionId: "session", turnId: "turn",
+                modelPrompt: "DEVELOPER: inspect before editing", source: "codex-jsonl"),
+            GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project", command: nil,
+                agent: "codex", op: "prompt", severity: "info", ts: now.addingTimeInterval(2),
+                action: "sent", sessionId: "session", turnId: "turn", userIntent: "Explain the parser",
+                modelPrompt: "USER: explain Parser.swift", model: "gpt-5", source: "codex-jsonl"),
+            GuardEvent(kind: "tool", ruleId: "read", path: "/tmp/project/Parser.swift", command: nil,
+                agent: "codex", op: "result", severity: "info", ts: now.addingTimeInterval(3),
+                action: "completed", sessionId: "session", turnId: "turn", modelResponse: "struct Parser {}",
+                toolName: "Read", source: "codex-jsonl", relatedPath: "/tmp/project/Parser.swift"),
+            GuardEvent(kind: "model", ruleId: "usage", path: "/tmp/project", command: nil,
+                agent: "codex", op: "usage", severity: "info", ts: now.addingTimeInterval(4),
+                action: "recorded", sessionId: "session", turnId: "turn", model: "gpt-5",
+                inputTokens: 120, source: "codex-jsonl")
+        ]
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: events).first)
+        let audit = try XCTUnwrap(AgentEgressAudit.build(session: session).first)
+        let evidence = audit.dataClassifications.flatMap(\.evidence).sorted { $0.sequence < $1.sequence }
+
+        XCTAssertEqual(evidence.map(\.category), [.systemInstructions, .developerInstructions, .userInput, .sourceCode])
+        XCTAssertEqual(evidence.map(\.content), ["SYSTEM: protect user data", "DEVELOPER: inspect before editing",
+                                                 "USER: explain Parser.swift", "struct Parser {}"])
+        XCTAssertEqual(evidence.last?.source, "Read")
     }
 }

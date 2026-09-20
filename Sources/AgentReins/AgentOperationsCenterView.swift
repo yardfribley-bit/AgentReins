@@ -51,6 +51,9 @@ struct AgentOperationsCenterView: View {
     @State private var projectQuestionError: String?
     @State private var projectQuestionResults: [FeatureProvenanceRecord] = []
     @State private var selectedQuestionBatchID: String?
+    @State private var selectedEgressAudit: AgentEgressAudit?
+    @State private var selectedEgressCategory: EgressDataCategory?
+    @State private var showingRawEgressContext = false
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
         case projects = "Workspaces"
@@ -350,6 +353,9 @@ struct AgentOperationsCenterView: View {
         }
         .sheet(isPresented: $showingAlertPolicies) {
             AlertPolicySettingsView().environmentObject(alertPolicyStore)
+        }
+        .sheet(item: $selectedEgressAudit) { report in
+            egressReader(report)
         }
     }
 
@@ -1775,7 +1781,7 @@ struct AgentOperationsCenterView: View {
                     ? "No outbound request has been correlated to an Agent turn"
                     : "尚未发现能够关联到智能体轮次的出站请求")
             } else {
-                ForEach(reports.prefix(80)) { report in egressCard(report) }
+                ForEach(reports.prefix(80)) { report in egressSummaryCard(report) }
             }
         }
     }
@@ -1790,16 +1796,21 @@ struct AgentOperationsCenterView: View {
         .overlay(RoundedRectangle(cornerRadius: 10).stroke(border))
     }
 
-    private func egressCard(_ report: AgentEgressAudit) -> some View {
+    private func egressSummaryCard(_ report: AgentEgressAudit) -> some View {
         let riskColor: Color = report.risk == .critical ? .red
             : report.risk == .high ? amber
             : report.risk == .medium || report.risk == .unknown ? .yellow : green
+        let evidence = report.dataClassifications.flatMap(\.evidence).sorted { $0.sequence < $1.sequence }
+        let categoryNames = Array(Set(evidence.map { egressCategoryName($0.category) })).prefix(4)
         return Button {
-            if let session = sessions.first(where: { $0.id == report.sessionId }) { onSession(session) }
+            selectedEgressCategory = nil
+            showingRawEgressContext = false
+            selectedEgressAudit = report
         } label: {
-            VStack(alignment: .leading, spacing: 11) {
+            VStack(alignment: .leading, spacing: 10) {
                 HStack(alignment: .top, spacing: 10) {
-                    Image(systemName: "arrow.up.right.circle.fill").font(.system(size: 21)).foregroundStyle(riskColor)
+                    Image(systemName: "arrow.up.right.circle.fill")
+                        .font(.system(size: 21)).foregroundStyle(riskColor)
                     VStack(alignment: .leading, spacing: 3) {
                         Text("\(report.agent) → \(report.primaryDestination)")
                             .font(.system(size: 16, weight: .bold)).foregroundStyle(.primary)
@@ -1808,36 +1819,263 @@ struct AgentOperationsCenterView: View {
                     }
                     Spacer()
                     labelChip(report.risk.rawValue.uppercased(), color: riskColor)
-                    labelChip(L(report.coverage.rawValue).uppercased(),
-                              color: report.coverage == .complete ? green : amber)
                     Text(relativeAge(report.occurredAt)).micro(.secondary)
                 }
-                HStack(spacing: 8) {
-                    labelChip("MODEL · \(report.claimedModels.joined(separator: ", ").isEmpty ? "UNKNOWN" : report.claimedModels.joined(separator: ", "))", color: .blue)
-                    if let tokens = report.inputTokens { labelChip("INPUT · \(tokens.formatted()) TOKENS", color: cyan) }
-                    labelChip("CAPTURED · \(formatBytes(report.capturedPromptBytes))", color: report.capturedPromptBytes > 0 ? green : amber)
-                    labelChip("IDENTITY · \(report.routeIdentity.uppercased())", color: report.routeIdentity == "consistent" ? green : amber)
-                }
-                if !report.exposedCategories.isEmpty {
-                    VStack(alignment: .leading, spacing: 4) {
-                        Text(language.language == .english ? "DATA SENT UPSTREAM" : "发送到上游的数据")
-                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
-                        Text(report.exposedCategories.map(\.rawValue).joined(separator: " · "))
-                            .font(.system(size: 12)).foregroundStyle(.primary).lineLimit(3)
+                if let first = evidence.first {
+                    HStack(alignment: .top, spacing: 8) {
+                        Text(language.language == .english ? "Starts with" : "上下文开头")
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(cyan)
+                        Text(first.content.replacingOccurrences(of: "\n", with: " "))
+                            .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
                     }
                 }
-                if !report.sensitiveFindings.isEmpty {
-                    Text((language.language == .english ? "Sensitive: " : "敏感数据：")
-                         + report.sensitiveFindings.map { $0.category.rawValue }.joined(separator: " · "))
-                        .font(.system(size: 12, weight: .semibold)).foregroundStyle(.red)
-                }
-                if let finding = report.findings.first {
-                    Text(finding).font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(2)
+                HStack(spacing: 8) {
+                    Text(categoryNames.joined(separator: " · "))
+                        .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                    Spacer()
+                    Label(language.language == .english ? "Read uploaded context" : "阅读上传上下文",
+                          systemImage: "doc.text.magnifyingglass")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
                 }
             }
-            .padding(15).background(panel, in: RoundedRectangle(cornerRadius: 12))
-            .overlay(RoundedRectangle(cornerRadius: 12).stroke(riskColor.opacity(0.55)))
+            .padding(15).background(panel, in: RoundedRectangle(cornerRadius: 8))
+            .overlay(RoundedRectangle(cornerRadius: 8).stroke(riskColor.opacity(0.55)))
         }.buttonStyle(.plain)
+    }
+
+    private func egressReader(_ report: AgentEgressAudit) -> some View {
+        let allEvidence = report.dataClassifications.flatMap(\.evidence).sorted { $0.sequence < $1.sequence }
+        let visibleEvidence = selectedEgressCategory.map { selected in
+            allEvidence.filter { $0.category == selected }
+        } ?? allEvidence
+        let categories = EgressDataCategory.allCases.filter { category in
+            category != .notCaptured && allEvidence.contains { $0.category == category }
+        }
+        let riskColor: Color = report.risk == .critical ? .red
+            : report.risk == .high ? amber
+            : report.risk == .medium || report.risk == .unknown ? .yellow : green
+        return VStack(spacing: 0) {
+            HStack(spacing: 12) {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(language.language == .english ? "UPLOADED CONTEXT" : "发送给大模型的上下文")
+                        .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+                    Text("\(report.agent) → \(report.primaryDestination)")
+                        .font(.system(size: 18, weight: .bold))
+                    Text(report.userIntent ?? (language.language == .english ? "User intent not captured" : "未捕获用户意图"))
+                        .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
+                }
+                Spacer()
+                Picker("", selection: $showingRawEgressContext) {
+                    Text(language.language == .english ? "Reading view" : "整理阅读").tag(false)
+                    Text(language.language == .english ? "Captured text" : "捕获原文").tag(true)
+                }.pickerStyle(.segmented).frame(width: 210)
+                Button { selectedEgressAudit = nil } label: {
+                    Image(systemName: "xmark").frame(width: 28, height: 28)
+                }.buttonStyle(.plain)
+            }.padding(18).background(panel)
+
+            Divider().overlay(border)
+            HStack(spacing: 0) {
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        egressReaderCategoryButton(nil,
+                            title: language.language == .english ? "Complete context" : "完整上下文",
+                            preview: report.userIntent ?? "")
+                        ForEach(categories, id: \.rawValue) { category in
+                            let first = allEvidence.first { $0.category == category }
+                            egressReaderCategoryButton(category, title: egressCategoryName(category),
+                                preview: first?.content.replacingOccurrences(of: "\n", with: " ") ?? "")
+                        }
+                    }.padding(12)
+                }.frame(width: 250).background(panel.opacity(0.72))
+
+                Divider().overlay(border)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        if showingRawEgressContext {
+                            Text(visibleEvidence.map(\.content).joined(separator: "\n\n"))
+                                .font(.system(size: 11, design: .monospaced))
+                                .textSelection(.enabled)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                        } else {
+                            ForEach(visibleEvidence) { evidence in egressContextSegment(evidence) }
+                        }
+                        if visibleEvidence.isEmpty {
+                            empty(language.language == .english ? "No captured text in this category" : "该分类没有已捕获原文")
+                        }
+                    }.padding(20)
+                }.frame(maxWidth: .infinity)
+
+                Divider().overlay(border)
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 12) {
+                        Text(language.language == .english ? "SECURITY ASSESSMENT" : "安全判断")
+                            .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+                        Text(egressRiskSummary(report)).font(.system(size: 13, weight: .bold)).foregroundStyle(riskColor)
+                        ForEach(report.findings, id: \.self) { finding in
+                            Text("• \(finding)").font(.system(size: 11)).foregroundStyle(.secondary)
+                        }
+                        if !report.sensitiveFindings.isEmpty {
+                            Divider().overlay(border)
+                            Text(language.language == .english ? "Sensitive content found" : "发现的敏感内容")
+                                .font(.system(size: 11, weight: .bold)).foregroundStyle(.red)
+                            ForEach(Array(report.sensitiveFindings.enumerated()), id: \.offset) { _, finding in
+                                Text("\(sensitiveCategoryName(finding.category)) · \(finding.source)")
+                                    .font(.system(size: 11)).foregroundStyle(.red)
+                            }
+                        }
+                        Divider().overlay(border)
+                        Text(language.language == .english ? "TECHNICAL EVIDENCE" : "技术证据")
+                            .font(.system(size: 10, weight: .bold)).foregroundStyle(.secondary)
+                        Text(report.inputTokens.map { "\($0.formatted()) input tokens" }
+                             ?? (language.language == .english ? "Tokens not reported" : "Token 未报告"))
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        Text(formatBytes(report.capturedPromptBytes))
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                    }.padding(16)
+                }.frame(width: 280).background(panel.opacity(0.72))
+            }
+        }
+        .frame(minWidth: 1080, minHeight: 720)
+        .background(canvas).environment(\.colorScheme, .dark)
+    }
+
+    private func egressReaderCategoryButton(_ category: EgressDataCategory?, title: String,
+                                            preview: String) -> some View {
+        let selected = selectedEgressCategory == category
+        return Button {
+            selectedEgressCategory = category
+        } label: {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title).font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(selected ? cyan : .primary)
+                if !preview.isEmpty {
+                    Text(preview).font(.system(size: 10)).foregroundStyle(.secondary).lineLimit(2)
+                }
+            }.padding(9).frame(maxWidth: .infinity, alignment: .leading)
+                .background(selected ? cyan.opacity(0.10) : Color.clear,
+                            in: RoundedRectangle(cornerRadius: 6))
+        }.buttonStyle(.plain)
+    }
+
+    private func egressContextSegment(_ evidence: EgressDataEvidence) -> some View {
+        VStack(alignment: .leading, spacing: 7) {
+            HStack(spacing: 8) {
+                Image(systemName: egressCategoryIcon(evidence.category))
+                    .frame(width: 18).foregroundStyle(egressCategoryColor(evidence.category))
+                Text(egressCategoryName(evidence.category))
+                    .font(.system(size: 12, weight: .bold)).foregroundStyle(egressCategoryColor(evidence.category))
+                Text(evidence.source).font(.system(size: 10)).foregroundStyle(.secondary)
+                Spacer()
+            }
+            Text(evidence.content)
+                .font(.system(size: 11, design: .monospaced))
+                .foregroundStyle(.primary)
+                .textSelection(.enabled)
+                .frame(maxWidth: .infinity, alignment: .leading)
+                .padding(.leading, 26)
+        }
+    }
+
+    private func egressCategoryName(_ category: EgressDataCategory) -> String {
+        if language.language == .english {
+            switch category {
+            case .userInput: return "User instructions"
+            case .systemInstructions: return "System instructions"
+            case .developerInstructions: return "Developer instructions"
+            case .identityAndPreferences: return "Identity and preferences"
+            case .memory: return "Memory"
+            case .agentRules: return "Agent rules and skills"
+            case .projectContent: return "Project context"
+            case .sourceCode: return "Source code"
+            case .toolCalls: return "Tool calls and arguments"
+            case .toolResults: return "Tool results"
+            case .deviceEnvironment: return "Device and environment"
+            case .connectors: return "Connectors and services"
+            case .permissions: return "Permissions and sandbox"
+            case .conversationHistory: return "Conversation history"
+            case .attachments: return "Attachments"
+            case .otherCaptured: return "Other captured content"
+            case .notCaptured: return "Not captured / unclassified"
+            }
+        }
+        switch category {
+        case .userInput: return "用户指令"
+        case .systemInstructions: return "系统指令"
+        case .developerInstructions: return "开发者指令"
+        case .identityAndPreferences: return "身份与个人偏好"
+        case .memory: return "长期记忆"
+        case .agentRules: return "智能体规则与技能"
+        case .projectContent: return "项目上下文"
+        case .sourceCode: return "源代码"
+        case .toolCalls: return "工具调用与参数"
+        case .connectors: return "连接器与外部服务状态"
+        case .permissions: return "权限与沙箱配置"
+        case .conversationHistory: return "历史对话与摘要"
+        case .attachments: return "附件与图片"
+        case .toolResults: return "工具执行结果"
+        case .deviceEnvironment: return "设备与运行环境"
+        case .otherCaptured: return "其他已捕获内容"
+        case .notCaptured: return "未捕获 / 无法分类"
+        }
+    }
+
+    private func egressCategoryColor(_ category: EgressDataCategory) -> Color {
+        switch category {
+        case .notCaptured: return amber
+        case .identityAndPreferences, .memory, .sourceCode, .toolResults, .attachments: return .red
+        case .userInput: return green
+        default: return cyan
+        }
+    }
+
+    private func egressCategoryIcon(_ category: EgressDataCategory) -> String {
+        switch category {
+        case .identityAndPreferences: return "person.text.rectangle"
+        case .memory, .conversationHistory: return "brain.head.profile"
+        case .projectContent: return "folder.fill"
+        case .sourceCode: return "chevron.left.forwardslash.chevron.right"
+        case .toolCalls: return "hammer.fill"
+        case .toolResults: return "terminal.fill"
+        case .attachments: return "paperclip"
+        case .deviceEnvironment, .permissions: return "desktopcomputer"
+        case .connectors: return "network"
+        case .agentRules, .systemInstructions, .developerInstructions: return "doc.text.fill"
+        case .userInput: return "text.bubble.fill"
+        case .otherCaptured: return "doc.plaintext"
+        case .notCaptured: return "eye.slash.fill"
+        }
+    }
+
+    private func sensitiveCategoryName(_ category: SensitiveExposureCategory) -> String {
+        if language.language == .english { return category.rawValue }
+        switch category {
+        case .apiCredential: return "API 凭据"
+        case .password: return "密码"
+        case .privateKey: return "私钥"
+        case .bankCard: return "银行卡号"
+        case .nationalID: return "身份证号"
+        case .email: return "电子邮箱"
+        }
+    }
+
+    private func egressRiskSummary(_ report: AgentEgressAudit) -> String {
+        if language.language == .english {
+            switch report.risk {
+            case .critical: return "Critical: sensitive data and an unverified or relayed destination were both found"
+            case .high: return "High risk: sensitive data or a model relay was found"
+            case .medium: return "Needs review: evidence is incomplete or destination identity is unverified"
+            case .low: return "Low risk: no sensitive data found and the route is consistent"
+            case .unknown: return "Unknown: there is not enough evidence for a safety verdict"
+            }
+        }
+        switch report.risk {
+        case .critical: return "严重风险：同时发现敏感数据和未经验证或经中转的接收方"
+        case .high: return "高风险：发现敏感数据或模型中转服务"
+        case .medium: return "需要审查：证据不完整或无法确认接收方身份"
+        case .low: return "低风险：未发现敏感数据，且传输路径与声明一致"
+        case .unknown: return "无法判断：现有证据不足以得出安全结论"
+        }
     }
 
     private var globalSecurityView: some View {

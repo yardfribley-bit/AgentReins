@@ -106,6 +106,17 @@ AgentReins is an early alpha. The repository is public so that the implementatio
 - Tool and MCP security classification based on capability: command execution, filesystem mutation, network access, credential exposure, and external content.
 - A least-privilege Chrome/Edge adapter for confirmed Grok Imagine prompt, upload, and result evidence.
 
+### Outbound context inventory
+
+The **Outbound** workspace answers a narrower question than a conventional network log: **what content did the Agent assemble and send to the model for this request?**
+
+- Each model request opens in a dedicated context reader instead of expanding thousands of characters inside the request list.
+- Captured content remains in send order and keeps its original text. Labels explain the content without replacing it with counts or summaries.
+- The reader classifies user instructions, system and developer instructions, conversation history, identity and memory, Agent rules and skills, project context, source code, tool calls and arguments, tool results, device context, permissions, connectors, and attachments.
+- Every section names its local evidence source. A category directory filters the same underlying text, while a captured-text mode provides a minimally processed view for forensic review.
+- Sensitive-content findings and the safety verdict are shown beside the context they assess. Token totals, model claims, routes, and byte counts remain supporting technical evidence rather than the primary presentation.
+- AgentReins displays only content recorded by the local Agent or another supported evidence source. Missing request bodies remain unknown; provider-reported Token totals are never used to invent or reconstruct unseen text.
+
 ### Network activity
 
 AgentReins now combines two complementary sources instead of treating a periodic socket snapshot as complete truth:
@@ -208,6 +219,7 @@ The extension requests access only to `gemini.google.com`, `chatgpt.com`, `claud
 │   ├── AgentGuardApp.swift       App lifecycle and menu bar entry
 │   ├── ContentView.swift         Main product interface
 │   ├── AgentOperationsCenterView.swift  Live operations console
+│   ├── AgentEgressAudit.swift    Outbound context classification and verdicts
 │   ├── DevelopmentTrace.swift    Task-stage reconstruction
 │   ├── AgentRuntimeProfile.swift Agent-specific process responsibilities
 │   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
