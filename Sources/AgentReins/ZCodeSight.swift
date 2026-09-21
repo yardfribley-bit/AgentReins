@@ -186,15 +186,14 @@ final class ZCodeSight: ObservableObject {
                 let tokens = object["tokens"] as? [String: Any]
                 let cache = tokens?["cache"] as? [String: Any]
                 if !reasoning.isEmpty {
-                    let captured = bounded(reasoning, maximum: 64_000)
                     events.append(event("\(messageID):reasoning", kind: "model", op: "reasoning_summary",
                         action: "captured", timestamp: timestamp, session: sessionID, turn: turn,
                         workspace: workspace,
-                        command: json(["capturedCharacters": captured.count,
+                        command: json(["capturedCharacters": reasoning.count,
                                        "recordedCharacters": reasoning.count,
-                                       "truncated": captured.count < reasoning.count,
+                                       "truncated": false,
                                        "sha256": digest(Data(reasoning.utf8))]),
-                        modelReasoning: captured, model: model, provider: provider,
+                        modelReasoning: reasoning, model: model, provider: provider,
                         reasoningTokens: int(tokens?["reasoning"])))
                 }
                 events.append(event("\(messageID):response", kind: "model", op: "response", action: "received",
@@ -368,9 +367,6 @@ final class ZCodeSight: ObservableObject {
     }
     private nonisolated static func digest(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-    }
-    private nonisolated static func bounded(_ value: String, maximum: Int) -> String {
-        String(value.prefix(maximum))
     }
     private nonisolated static func uuid(_ value: String) -> UUID {
         let bytes = Array(SHA256.hash(data: Data(value.utf8)).prefix(16))

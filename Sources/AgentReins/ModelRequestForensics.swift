@@ -93,6 +93,10 @@ struct ContextExposureReport: Codable, Equatable, Sendable {
     }
 
     private static func identityPaths(in text: String) -> [String] {
+        let upper = text.uppercased()
+        guard upper.contains("SOUL.MD") || upper.contains("IDENTITY.MD") || upper.contains("USER.MD") else {
+            return []
+        }
         let regex = try! NSRegularExpression(pattern: #"Path:\s+([^\r\n]+(?:SOUL|IDENTITY|USER)\.md)"#,
                                              options: .caseInsensitive)
         let range = NSRange(text.startIndex..., in: text)

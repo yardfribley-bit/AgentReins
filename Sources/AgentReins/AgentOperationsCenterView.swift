@@ -53,7 +53,14 @@ struct AgentOperationsCenterView: View {
     @State private var selectedQuestionBatchID: String?
     @State private var selectedEgressAudit: AgentEgressAudit?
     @State private var selectedEgressCategory: EgressDataCategory?
-    @State private var showingRawEgressContext = false
+    @State private var egressReaderMode: EgressReaderMode = .organized
+    @State private var egressReaderPage = 0
+
+    private enum EgressReaderMode: String, CaseIterable {
+        case organized
+        case raw
+        case reasoning
+    }
 
     private enum GlobalTab: String, CaseIterable, Identifiable {
         case projects = "Workspaces"
@@ -1811,7 +1818,8 @@ struct AgentOperationsCenterView: View {
         let categoryNames = Array(Set(evidence.map { egressCategoryName($0.category) })).prefix(4)
         return Button {
             selectedEgressCategory = nil
-            showingRawEgressContext = false
+            egressReaderMode = .organized
+            egressReaderPage = 0
             selectedEgressAudit = report
         } label: {
             VStack(alignment: .leading, spacing: 10) {
@@ -1855,6 +1863,12 @@ struct AgentOperationsCenterView: View {
         let visibleEvidence = selectedEgressCategory.map { selected in
             allEvidence.filter { $0.category == selected }
         } ?? allEvidence
+        let evidencePages = pagedEgressEvidence(visibleEvidence)
+        let rawPages = pagedText(visibleEvidence.map(\.content).joined(separator: "\n\n"))
+        let reasoningPages = pagedReasoning(report.capturedModelReasoning)
+        let pageCount = egressReaderMode == .organized ? evidencePages.count
+            : egressReaderMode == .raw ? rawPages.count : reasoningPages.count
+        let page = min(egressReaderPage, max(0, pageCount - 1))
         let categories = EgressDataCategory.allCases.filter { category in
             category != .notCaptured && allEvidence.contains { $0.category == category }
         }
@@ -1872,10 +1886,12 @@ struct AgentOperationsCenterView: View {
                         .font(.system(size: 12)).foregroundStyle(.secondary).lineLimit(2)
                 }
                 Spacer()
-                Picker("", selection: $showingRawEgressContext) {
-                    Text(language.language == .english ? "Reading view" : "整理阅读").tag(false)
-                    Text(language.language == .english ? "Captured text" : "捕获原文").tag(true)
-                }.pickerStyle(.segmented).frame(width: 210)
+                Picker("", selection: $egressReaderMode) {
+                    Text(language.language == .english ? "Sent context" : "发送内容").tag(EgressReaderMode.organized)
+                    Text(language.language == .english ? "Raw input" : "输入原文").tag(EgressReaderMode.raw)
+                    Text(language.language == .english ? "Model reasoning" : "模型思考").tag(EgressReaderMode.reasoning)
+                }.pickerStyle(.segmented).frame(width: 330)
+                    .onChange(of: egressReaderMode) { _ in egressReaderPage = 0 }
                 Button { selectedEgressAudit = nil } label: {
                     Image(systemName: "xmark").frame(width: 28, height: 28)
                 }.buttonStyle(.plain)
@@ -1899,17 +1915,23 @@ struct AgentOperationsCenterView: View {
                 Divider().overlay(border)
                 ScrollView {
                     VStack(alignment: .leading, spacing: 18) {
-                        if showingRawEgressContext {
-                            Text(visibleEvidence.map(\.content).joined(separator: "\n\n"))
+                        if egressReaderMode == .reasoning {
+                            modelReasoningEvidence(reasoningPages.isEmpty ? nil : reasoningPages[page])
+                        } else if egressReaderMode == .raw {
+                            Text(rawPages.isEmpty ? "" : rawPages[page])
                                 .font(.system(size: 11, design: .monospaced))
                                 .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                         } else {
-                            ForEach(visibleEvidence) { evidence in egressContextSegment(evidence) }
+                            if !evidencePages.isEmpty {
+                                egressContextSegment(evidencePages[page].evidence,
+                                                     content: evidencePages[page].content)
+                            }
                         }
-                        if visibleEvidence.isEmpty {
+                        if egressReaderMode != .reasoning && visibleEvidence.isEmpty {
                             empty(language.language == .english ? "No captured text in this category" : "该分类没有已捕获原文")
                         }
+                        if pageCount > 1 { egressPagination(page: page, count: pageCount) }
                     }.padding(20)
                 }.frame(maxWidth: .infinity)
 
@@ -1947,11 +1969,101 @@ struct AgentOperationsCenterView: View {
         .background(canvas).environment(\.colorScheme, .dark)
     }
 
+    private struct PagedEgressEvidence {
+        let evidence: EgressDataEvidence
+        let content: String
+    }
+
+    private struct PagedReasoning {
+        let evidence: CapturedModelReasoning
+        let content: String
+    }
+
+    private func pagedText(_ text: String, pageSize: Int = 20_000) -> [String] {
+        guard !text.isEmpty else { return [] }
+        var pages: [String] = []
+        var start = text.startIndex
+        while start < text.endIndex {
+            let end = text.index(start, offsetBy: pageSize, limitedBy: text.endIndex) ?? text.endIndex
+            pages.append(String(text[start..<end]))
+            start = end
+        }
+        return pages
+    }
+
+    private func pagedEgressEvidence(_ rows: [EgressDataEvidence]) -> [PagedEgressEvidence] {
+        rows.flatMap { row in
+            pagedText(row.content).map { PagedEgressEvidence(evidence: row, content: $0) }
+        }
+    }
+
+    private func pagedReasoning(_ rows: [CapturedModelReasoning]) -> [PagedReasoning] {
+        rows.flatMap { row in
+            pagedText(row.content).map { PagedReasoning(evidence: row, content: $0) }
+        }
+    }
+
+    private func egressPagination(page: Int, count: Int) -> some View {
+        HStack(spacing: 10) {
+            Button { egressReaderPage = max(0, page - 1) } label: {
+                Image(systemName: "chevron.left").frame(width: 28, height: 28)
+            }.buttonStyle(.plain).disabled(page == 0)
+            Text("\(page + 1) / \(count)")
+                .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+            Button { egressReaderPage = min(count - 1, page + 1) } label: {
+                Image(systemName: "chevron.right").frame(width: 28, height: 28)
+            }.buttonStyle(.plain).disabled(page + 1 >= count)
+            Spacer()
+            Text(language.language == .english ? "20,000 characters per page" : "每页最多 20,000 字符")
+                .font(.system(size: 10)).foregroundStyle(.secondary)
+        }.padding(.top, 8)
+    }
+
+    private func modelReasoningEvidence(_ page: PagedReasoning?) -> some View {
+        VStack(alignment: .leading, spacing: 16) {
+            VStack(alignment: .leading, spacing: 5) {
+                Text(language.language == .english ? "MODEL → AGENT" : "大模型 → Agent")
+                    .font(.system(size: 11, weight: .bold)).foregroundStyle(cyan)
+                Text(language.language == .english
+                     ? "Reasoning recorded locally by the Agent"
+                     : "Agent 本地记录中实际捕获的思考内容")
+                    .font(.system(size: 15, weight: .bold))
+                Text(language.language == .english
+                     ? "This is returned model content, not data uploaded in the current request. It becomes outbound data only if a later request includes it."
+                     : "这是模型返回内容，不计入本次上传；只有后续请求再次携带它时，才属于新的出境数据。")
+                    .font(.system(size: 11)).foregroundStyle(.secondary)
+            }
+            if let page {
+                VStack(alignment: .leading, spacing: 7) {
+                    HStack {
+                        Image(systemName: "brain.head.profile").foregroundStyle(cyan)
+                        Text(page.evidence.source).font(.system(size: 11, weight: .bold))
+                        Spacer()
+                        Text(page.evidence.occurredAt.formatted(date: .omitted, time: .standard))
+                            .font(.system(size: 10, design: .monospaced)).foregroundStyle(.secondary)
+                    }
+                    Text(page.content).font(.system(size: 11, design: .monospaced))
+                        .textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    if let detail = page.evidence.captureDetail, !detail.isEmpty {
+                        Text(detail).font(.system(size: 10, design: .monospaced))
+                            .foregroundStyle(.secondary).textSelection(.enabled)
+                    }
+                }.padding(12).background(panel, in: RoundedRectangle(cornerRadius: 7))
+                    .overlay(RoundedRectangle(cornerRadius: 7).stroke(border))
+            } else {
+                empty(language.language == .english
+                      ? "No locally recorded model reasoning for this turn"
+                      : "本轮没有本地记录的模型思考内容")
+            }
+        }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+
     private func egressReaderCategoryButton(_ category: EgressDataCategory?, title: String,
                                             preview: String) -> some View {
         let selected = selectedEgressCategory == category
         return Button {
             selectedEgressCategory = category
+            egressReaderPage = 0
         } label: {
             VStack(alignment: .leading, spacing: 4) {
                 Text(title).font(.system(size: 12, weight: .semibold))
@@ -1965,7 +2077,7 @@ struct AgentOperationsCenterView: View {
         }.buttonStyle(.plain)
     }
 
-    private func egressContextSegment(_ evidence: EgressDataEvidence) -> some View {
+    private func egressContextSegment(_ evidence: EgressDataEvidence, content: String? = nil) -> some View {
         VStack(alignment: .leading, spacing: 7) {
             HStack(spacing: 8) {
                 Image(systemName: egressCategoryIcon(evidence.category))
@@ -1975,7 +2087,7 @@ struct AgentOperationsCenterView: View {
                 Text(evidence.source).font(.system(size: 10)).foregroundStyle(.secondary)
                 Spacer()
             }
-            Text(evidence.content)
+            Text(content ?? evidence.content)
                 .font(.system(size: 11, design: .monospaced))
                 .foregroundStyle(.primary)
                 .textSelection(.enabled)

@@ -197,6 +197,22 @@ final class TurnJournalTests: XCTestCase {
         })
     }
 
+    func testZCodePreservesReasoningBeyondPreviousDisplayLimit() throws {
+        let reasoning = String(repeating: "推理证据", count: 18_000)
+        let user = #"{"role":"user","metadata":{"inputIntent":{"text":"audit"}},"anchor":{"turnId":"turn-long"}}"#
+        let assistant = #"{"role":"assistant","anchor":{"turnId":"turn-long"}}"#
+        let reasoningData = try JSONSerialization.data(withJSONObject: ["type": "reasoning", "text": reasoning])
+        let reasoningPart = String(decoding: reasoningData, as: UTF8.self)
+
+        let events = ZCodeSight.project(sessionID: "zs-long", workspace: "/tmp/project",
+            messages: [["user", "1000", user], ["assistant", "2000", assistant]],
+            parts: [["reasoning", "assistant", "2001", reasoningPart]], toolRows: [], usageRows: [])
+
+        let captured = try XCTUnwrap(events.first { $0.op == "reasoning_summary" })
+        XCTAssertEqual(captured.modelReasoning, reasoning)
+        XCTAssertTrue(captured.command?.contains("\"truncated\":false") == true)
+    }
+
     func testZCodeStructuredLogCapturesRuntimeAndMCPWithoutCredentialFiles() throws {
         let fixture = """
         {"timestamp":"2026-09-19T11:36:57Z","event":"bootstrap.app.startup.runtime_config.completed","sessionId":"zs","context":{"workingDirectory":"/tmp/project","model":"GLM-5.3","memoryEnabled":true,"apiKey":"must-not-survive"}}
@@ -1678,6 +1694,35 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(chain.nextActionName, "Bash")
         XCTAssertEqual(chain.evidence, .partial)
         XCTAssertLessThan(elapsed, 1.0)
+    }
+
+    func testWorkBuddyPreservesLongLocalEvidenceAndIndependentReasoning() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("workbuddy-long-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let prompt = String(repeating: "P", count: 70_000)
+        let reasoning = String(repeating: "R", count: 12_000)
+        let arguments = String(repeating: "A", count: 6_000)
+        let output = String(repeating: "O", count: 20_000)
+        let rows: [[String: Any]] = [
+            ["id": "turn", "type": "message", "role": "user", "sessionId": "long-session",
+             "timestamp": 1, "content": [["text": prompt]]],
+            ["id": "reason", "type": "reasoning", "sessionId": "long-session", "timestamp": 2,
+             "content": [["text": reasoning]]],
+            ["id": "call", "type": "function_call", "callId": "call-1", "name": "Bash",
+             "sessionId": "long-session", "timestamp": 3, "arguments": arguments],
+            ["id": "result", "type": "function_call_result", "callId": "call-1", "name": "Bash",
+             "sessionId": "long-session", "timestamp": 4, "output": output]
+        ]
+        let data = try rows.map { try JSONSerialization.data(withJSONObject: $0) }
+        try data.map { String(decoding: $0, as: UTF8.self) }.joined(separator: "\n")
+            .write(to: url, atomically: true, encoding: .utf8)
+
+        let events = WorkBuddySight.parseSession(url, fullHistory: true)
+
+        XCTAssertEqual(events.first { $0.op == "prompt" }?.modelPrompt, prompt)
+        XCTAssertEqual(events.first { $0.op == "reasoning_summary" }?.modelReasoning, reasoning)
+        XCTAssertEqual(events.first { $0.op == "call" }?.command, "Bash(\(arguments))")
+        XCTAssertEqual(events.first { $0.op == "result" }?.modelResponse, output)
     }
 
     func testWorkBuddyCustomModelUsesConfiguredOpenRouterEndpoint() throws {

@@ -61,6 +61,14 @@ struct EgressDataClassification: Identifiable, Codable, Equatable, Sendable {
     let evidence: [EgressDataEvidence]
 }
 
+struct CapturedModelReasoning: Identifiable, Codable, Equatable, Sendable {
+    let id: String
+    let source: String
+    let content: String
+    let occurredAt: Date
+    let captureDetail: String?
+}
+
 /// A user-facing, turn-scoped answer to: what did this Agent send, where did it
 /// go, and can AgentReins prove that the route and payload were safe?
 struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
@@ -80,6 +88,7 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
     let capturedPromptBytes: Int
     let exposedCategories: [ContextExposureCategory]
     let dataClassifications: [EgressDataClassification]
+    let capturedModelReasoning: [CapturedModelReasoning]
     let sensitiveFindings: [SensitiveExposureFinding]
     let coverage: EgressCoverage
     let risk: EgressRiskLevel
@@ -128,8 +137,13 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
         let reasoningTokens = events.compactMap(\.reasoningTokens).max()
         let capturedBytes = exposure?.capturedPromptBytes ?? 0
         let classifications = classify(events: events, inputTokens: inputTokens)
+        let capturedReasoning = reasoningEvidence(events: events)
         let modelRoutes = destinations.filter {
             $0.classification == .modelRelay || $0.classification == .modelProvider
+        }
+        let verifiedNetworkBody = events.contains {
+            $0.source == "agentsight:workbuddy-network-body" &&
+                $0.op == "network_prompt" && $0.action == "captured_complete"
         }
 
         let coverage: EgressCoverage
@@ -137,6 +151,8 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
             coverage = .missingRoute
         } else if capturedBytes == 0 {
             coverage = .metadataOnly
+        } else if verifiedNetworkBody {
+            coverage = .complete
         } else if let inputTokens, inputTokens > 0,
                   capturedBytes < inputTokens * 2 {
             // This is intentionally conservative. Tokens do not have a fixed byte
@@ -194,9 +210,24 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
             capturedPromptBytes: capturedBytes,
             exposedCategories: exposure?.items.filter(\.present).map(\.category) ?? [],
             dataClassifications: classifications,
+            capturedModelReasoning: capturedReasoning,
             sensitiveFindings: sensitive, coverage: coverage, risk: risk,
             findings: findings, recommendedActions: actions,
             evidenceEventIds: rows.map { $0.id.uuidString }.sorted())
+    }
+
+    private static func reasoningEvidence(events: [GuardEvent]) -> [CapturedModelReasoning] {
+        var seen: Set<String> = []
+        return events.sorted { $0.ts < $1.ts }.compactMap { event in
+            guard let content = event.modelReasoning?.trimmingCharacters(in: .whitespacesAndNewlines),
+                  !content.isEmpty, seen.insert(content).inserted else { return nil }
+            return CapturedModelReasoning(
+                id: event.id.uuidString,
+                source: event.source ?? event.agent ?? "local Agent record",
+                content: content,
+                occurredAt: event.ts,
+                captureDetail: event.command)
+        }
     }
 
     private struct ClassifiedFragment {
@@ -209,8 +240,12 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
 
     private static func classify(events: [GuardEvent], inputTokens: Int?) -> [EgressDataClassification] {
         var fragments: [ClassifiedFragment] = []
+        let hasNetworkBody = events.contains {
+            $0.source == "agentsight:workbuddy-network-body" && $0.op == "network_prompt"
+        }
         for event in events {
-            if let prompt = event.modelPrompt, !prompt.isEmpty {
+            if let prompt = event.modelPrompt, !prompt.isEmpty,
+               !hasNetworkBody || event.source == "agentsight:workbuddy-network-body" {
                 fragments.append(contentsOf: classifyPrompt(prompt, event: event))
             }
             if event.op == "turn_context", let command = event.command, !command.isEmpty {
@@ -254,6 +289,11 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
     }
 
     private static func classifyPrompt(_ text: String, event: GuardEvent) -> [ClassifiedFragment] {
+        if event.source == "agentsight:workbuddy-network-body",
+           let data = text.data(using: .utf8),
+           let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            return classifyNetworkRequest(request, event: event)
+        }
         switch event.op {
         case "base_instructions": return [fragment(.systemInstructions, text, event)]
         case "developer_instructions": return [fragment(.developerInstructions, text, event)]
@@ -262,6 +302,57 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
         case "project_context": return [fragment(.projectContent, text, event)]
         default: break
         }
+
+        return classifyTaggedText(text, defaultCategory: event.op == "prompt" || event.userIntent != nil
+                                  ? .userInput : .otherCaptured, event: event)
+    }
+
+    private static func classifyNetworkRequest(_ request: [String: Any], event: GuardEvent) -> [ClassifiedFragment] {
+        let messages = request["messages"] as? [[String: Any]] ?? []
+        let lastUser = messages.lastIndex { $0["role"] as? String == "user" }
+        var output: [ClassifiedFragment] = []
+        for (index, message) in messages.enumerated() {
+            let role = (message["role"] as? String)?.lowercased() ?? "unknown"
+            guard let content = readableJSONContent(message["content"]), !content.isEmpty else { continue }
+            let category: EgressDataCategory
+            switch role {
+            case "system": category = .systemInstructions
+            case "developer": category = .developerInstructions
+            case "tool", "function": category = .toolResults
+            case "user" where index == lastUser: category = .userInput
+            default: category = .conversationHistory
+            }
+            output.append(contentsOf: classifyTaggedText(content, defaultCategory: category, event: event))
+        }
+        if let tools = request["tools"], let content = prettyJSON(tools) {
+            output.append(fragment(.toolCalls, content, event))
+        }
+        let metadata = request.filter { !["messages", "tools"].contains($0.key) }
+        if !metadata.isEmpty, let content = prettyJSON(metadata) {
+            output.append(fragment(.otherCaptured, content, event))
+        }
+        return output
+    }
+
+    private static func readableJSONContent(_ value: Any?) -> String? {
+        if let text = value as? String { return text }
+        guard let parts = value as? [[String: Any]] else { return value.flatMap(prettyJSON) }
+        return parts.compactMap { part in
+            if let text = part["text"] as? String { return text }
+            return prettyJSON(part)
+        }.joined(separator: "\n").trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func prettyJSON(_ value: Any) -> String? {
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value, options: [.prettyPrinted, .sortedKeys]) else {
+            return nil
+        }
+        return String(data: data, encoding: .utf8)
+    }
+
+    private static func classifyTaggedText(_ text: String, defaultCategory: EgressDataCategory,
+                                           event: GuardEvent) -> [ClassifiedFragment] {
 
         let tagged: [(EgressDataCategory, [String])] = [
             (.identityAndPreferences, ["identity_context", "user_profile", "user_preferences"]),
@@ -279,8 +370,10 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
         var claimed = IndexSet()
         var output: [ClassifiedFragment] = []
         let nsText = text as NSString
+        let lowercased = text.lowercased()
         for (category, tags) in tagged {
             for tag in tags {
+                guard lowercased.contains("<\(tag.lowercased())") else { continue }
                 let pattern = "<\\Q\(tag)\\E(?:\\s[^>]*)?>[\\s\\S]*?</\\Q\(tag)\\E>"
                 guard let regex = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { continue }
                 let full = NSRange(text.startIndex..., in: text)
@@ -308,9 +401,7 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
         let remainingContent = remainingParts.joined(separator: "\n")
             .trimmingCharacters(in: .whitespacesAndNewlines)
         if !remainingContent.isEmpty {
-            let category: EgressDataCategory = event.op == "prompt" || event.userIntent != nil
-                ? .userInput : .otherCaptured
-            output.append(ClassifiedFragment(category: category, bytes: remainingContent.utf8.count,
+            output.append(ClassifiedFragment(category: defaultCategory, bytes: remainingContent.utf8.count,
                 source: sourceLabel(event), content: remainingContent, eventID: event.id.uuidString))
         }
         return output

@@ -34,6 +34,7 @@ struct AgentReinsApp: App {
     @StateObject private var processGuard = ProcessGuard()
     @StateObject private var turnJournalStore = TurnJournalStore()
     @StateObject private var workBuddySight = WorkBuddySight()
+    @StateObject private var workBuddyNetworkCapture = WorkBuddyNetworkCapture()
     @StateObject private var codexSight = CodexSight()
     @StateObject private var qoderSight = QoderSight()
     @StateObject private var zcodeSight = ZCodeSight()
@@ -59,6 +60,7 @@ struct AgentReinsApp: App {
                 .environmentObject(eventStore)
                 .environmentObject(turnJournalStore)
                 .environmentObject(workBuddySight)
+                .environmentObject(workBuddyNetworkCapture)
                 .environmentObject(codexSight)
                 .environmentObject(qoderSight)
                 .environmentObject(zcodeSight)
@@ -111,6 +113,13 @@ struct AgentReinsApp: App {
                         eventStore.record(fresh + projected)
                     }
                     workBuddySight.start()
+                    workBuddyNetworkCapture.onEvents = { events in
+                        let correlated = events.map { attributionResolver.resolveWorkBuddyNetworkBody($0) }
+                        let fresh = eventStore.unrecorded(correlated)
+                        attributionResolver.observe(fresh)
+                        eventStore.record(fresh)
+                    }
+                    workBuddyNetworkCapture.start()
                     codexSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)

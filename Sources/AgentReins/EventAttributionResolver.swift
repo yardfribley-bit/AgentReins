@@ -12,6 +12,7 @@ final class EventAttributionResolver: ObservableObject {
         let kind: String
         let op: String
         let command: String?
+        let userIntent: String?
         let agent: String?
         let workspace: String?
         let timestamp: Date
@@ -48,11 +49,34 @@ final class EventAttributionResolver: ObservableObject {
             contexts.append(Context(sessionId: sessionId, turnId: turnId,
                                     toolCallId: event.toolCallId, toolName: event.toolName,
                                     kind: event.kind, op: event.op, command: event.command,
+                                    userIntent: event.userIntent,
                                     agent: event.agent?.lowercased(),
                                     workspace: normalizedWorkspace(event.path), timestamp: event.ts))
         }
         contexts.removeAll { now.timeIntervalSince($0.timestamp) > max(window * 4, 180) }
         if contexts.count > 500 { contexts.removeFirst(contexts.count - 500) }
+    }
+
+    /// Joins a captured WorkBuddy HTTPS body only when its user text identifies
+    /// exactly one recent native prompt. Parallel or missing matches stay in a
+    /// separate network evidence session instead of being guessed into a turn.
+    func resolveWorkBuddyNetworkBody(_ event: GuardEvent) -> GuardEvent {
+        guard event.source == "agentsight:workbuddy-network-body",
+              let intent = normalizedIntent(event.userIntent), !intent.isEmpty else { return event }
+        let matching = contexts.filter { context in
+            guard context.agent == "workbuddy", context.kind == "model", context.op == "prompt",
+                  abs(event.ts.timeIntervalSince(context.timestamp)) <= window,
+                  let candidate = normalizedIntent(context.userIntent) else { return false }
+            return candidate == intent ||
+                (candidate.count == 1_000 && intent.hasPrefix(candidate))
+        }
+        let turns = Dictionary(grouping: matching) { "\($0.sessionId):\($0.turnId)" }
+        guard turns.count == 1, let match = turns.values.first?.max(by: { $0.timestamp < $1.timestamp }) else {
+            return event
+        }
+        return event.attributed(sessionId: match.sessionId, turnId: match.turnId,
+                                toolCallId: event.toolCallId, confidence: .confirmed,
+                                method: "unique WorkBuddy user text + bounded \(Int(window))s time window")
     }
 
     func resolve(_ event: GuardEvent) -> GuardEvent {
@@ -155,5 +179,10 @@ final class EventAttributionResolver: ObservableObject {
     private func normalizedWorkspace(_ path: String) -> String? {
         guard path != "-", path.hasPrefix("/") else { return nil }
         return URL(fileURLWithPath: path).standardizedFileURL.path
+    }
+
+    private func normalizedIntent(_ value: String?) -> String? {
+        value?.trimmingCharacters(in: .whitespacesAndNewlines)
+            .replacingOccurrences(of: #"\s+"#, with: " ", options: .regularExpression)
     }
 }

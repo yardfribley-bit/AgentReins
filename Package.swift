@@ -12,6 +12,7 @@ let package = Package(
         .executableTarget(
             name: "AgentReins",
             path: "Sources/AgentReins",
+            resources: [.copy("Resources")],
             swiftSettings: [ .swiftLanguageMode(.v5) ],
             linkerSettings: [.linkedLibrary("sqlite3")]
         ),

@@ -18,12 +18,29 @@ struct SensitiveExposureFinding: Codable, Equatable, Sendable {
 
 enum SensitiveContextExposure {
     static func scan(text: String, source: String) -> [SensitiveExposureFinding] {
-        patterns.flatMap { pattern in
-            matches(pattern.regex, in: text).compactMap { match in
+        let lowercase = text.lowercased()
+        return patterns.flatMap { pattern in
+            guard shouldScan(pattern.category, text: text, lowercase: lowercase) else {
+                return [SensitiveExposureFinding]()
+            }
+            return matches(pattern.regex, in: text).compactMap { match -> SensitiveExposureFinding? in
                 guard pattern.validate(match) else { return nil }
                 return SensitiveExposureFinding(category: pattern.category, source: source,
                     evidence: boundedEvidence(match), severity: pattern.severity)
             }
+        }
+    }
+
+    private static func shouldScan(_ category: SensitiveExposureCategory, text: String,
+                                   lowercase: String) -> Bool {
+        switch category {
+        case .privateKey: return text.contains("PRIVATE KEY")
+        case .apiCredential:
+            return ["sk-", "api", "token", "secret"].contains(where: lowercase.contains)
+        case .password:
+            return ["password", "passwd", "pwd", "sshpass", "密码"].contains(where: lowercase.contains)
+        case .nationalID, .bankCard: return text.contains { $0.isNumber }
+        case .email: return text.contains("@")
         }
     }
 

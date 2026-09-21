@@ -144,7 +144,7 @@ final class WorkBuddySight: ObservableObject {
                     path: row["cwd"] as? String ?? "-", command: nil, agent: "workbuddy", op: "prompt",
                     severity: "info", ts: date(row["timestamp"]), action: "sent", sessionId: session,
                     traceId: provider["traceId"] as? String, turnId: rawId, userIntent: String(readableIntent.prefix(1_000)),
-                    modelPrompt: String(intent.prefix(64_000)), model: provider["model"] as? String,
+                    modelPrompt: intent, model: provider["model"] as? String,
                     source: "agentsight:workbuddy-local"))
                 continue
             }
@@ -160,7 +160,7 @@ final class WorkBuddySight: ObservableObject {
                     severity: "info", ts: date(row["timestamp"]), action: row["status"] as? String ?? "received",
                     sessionId: session, traceId: provider["traceId"] as? String,
                     turnId: currentTurn[session],
-                    userIntent: lastIntent[session], modelResponse: String(response.prefix(64_000)),
+                    userIntent: lastIntent[session], modelResponse: response,
                     model: provider["requestModelName"] as? String ?? provider["model"] as? String,
                     inputTokens: intValue(usage["prompt_tokens"] ?? usage["inputTokens"]),
                     outputTokens: intValue(usage["completion_tokens"] ?? usage["outputTokens"]),
@@ -174,7 +174,16 @@ final class WorkBuddySight: ObservableObject {
             }
             if type == "reasoning" {
                 if let reasoning = recursiveText(row["content"] ?? row["rawContent"]) {
-                    lastReasoning[session] = String(reasoning.prefix(8_000))
+                    lastReasoning[session] = reasoning
+                    let provider = row["providerData"] as? [String: Any] ?? [:]
+                    result.append(GuardEvent(id: id, kind: "model", ruleId: "agentsight_model_reasoning",
+                        path: row["cwd"] as? String ?? "-", command: nil,
+                        agent: "workbuddy", op: "reasoning_summary", severity: "info",
+                        ts: date(row["timestamp"]), action: "captured", sessionId: session,
+                        traceId: provider["traceId"] as? String, turnId: currentTurn[session],
+                        userIntent: lastIntent[session], modelReasoning: reasoning,
+                        model: provider["requestModelName"] as? String ?? provider["model"] as? String,
+                        source: "agentsight:workbuddy-local"))
                 }
                 continue
             }
@@ -194,7 +203,7 @@ final class WorkBuddySight: ObservableObject {
             let agent = (rawAgent == nil || rawAgent == "cli") ? "workbuddy" : rawAgent!
             let model = provider["requestModelName"] as? String ?? provider["model"] as? String
             let toolOutput = type == "function_call_result" ? recursiveText(row["output"] ?? provider["toolResult"]) : nil
-            let command = type == "function_call" ? "\(name)(\(String((args ?? "").prefix(4_000))))" : nil
+            let command = type == "function_call" ? "\(name)(\(args ?? ""))" : nil
             let generatedCodeFindings = type == "function_call"
                 ? CodeSecurityScanner.scanGenerated(toolName: name, arguments: args) : []
             result.append(GuardEvent(id: id, kind: "tool", ruleId: "agentsight_\(type)", path: row["cwd"] as? String ?? "-",
@@ -204,7 +213,7 @@ final class WorkBuddySight: ObservableObject {
                 userIntent: type == "function_call" ? lastIntent[session] : nil,
                 modelDecision: type == "function_call" ? "The model selected \(name)" : nil,
                 modelReasoning: type == "function_call" ? (provider["reasoning"] as? String ?? lastReasoning[session]) : nil,
-                modelResponse: toolOutput.map { String($0.prefix(16_000)) },
+                modelResponse: toolOutput,
                 toolName: name, model: model,
                 inputTokens: intValue(usage["prompt_tokens"] ?? usage["input_tokens"]),
                 outputTokens: intValue(usage["completion_tokens"] ?? usage["output_tokens"]),

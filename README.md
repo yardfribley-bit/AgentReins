@@ -116,6 +116,8 @@ The **Outbound** workspace answers a narrower question than a conventional netwo
 - Every section names its local evidence source. A category directory filters the same underlying text, while a captured-text mode provides a minimally processed view for forensic review.
 - Sensitive-content findings and the safety verdict are shown beside the context they assess. Token totals, model claims, routes, and byte counts remain supporting technical evidence rather than the primary presentation.
 - AgentReins displays only content recorded by the local Agent or another supported evidence source. Missing request bodies remain unknown; provider-reported Token totals are never used to invent or reconstruct unseen text.
+- WorkBuddy's first network-body integration is an explicit audited-proxy mode for a separately launched WorkBuddy CLI process. The bundled `workbuddy_network_capture.py` addon records only supported Tencent Copilot request and response bodies, verifies request SHA-256 and byte completeness, and feeds them into the same context reader. It does not alter the system proxy or trust store and does not claim coverage for unrelated WorkBuddy desktop traffic.
+- Launch mitmproxy with the bundled addon and point only the audited WorkBuddy process at that local proxy. Captures are appended with mode `0600` to `~/Library/Application Support/AgentReins/workbuddy-network.jsonl`; AgentReins tails complete JSONL records and leaves incomplete trailing records unread until the next poll.
 
 ### Network activity
 
@@ -257,7 +259,7 @@ See [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) for the
 - Common API keys, tokens, passwords, and private-key blocks are redacted locally before optional OpenRouter analysis.
 - Captured evidence and inferred correlation must be labeled separately.
 - Missing evidence is reported as unknown instead of being guessed.
-- AgentReins does not claim access to hidden model reasoning that an agent or provider did not record.
+- AgentReins displays model reasoning actually recorded locally by agents such as ZCode and WorkBuddy, with its model-to-agent direction kept separate from outbound context. It does not claim access to server-side reasoning that was never returned or saved locally.
 - A client can identify where data was sent, but cannot prove that a remote server did not retain it.
 
 ## Documentation
