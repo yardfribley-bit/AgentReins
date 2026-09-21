@@ -213,6 +213,45 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertTrue(captured.command?.contains("\"truncated\":false") == true)
     }
 
+    func testZCodeModelIOProjectsCompletePreEncryptionRequestAndResponse() throws {
+        let object: [String: Any] = [
+            "type": "model_io", "requestId": "req-1", "sessionId": "session-1",
+            "turnId": "turn-1", "traceId": "trace-1",
+            "startedAt": "2026-09-21T10:00:00Z", "completedAt": "2026-09-21T10:00:02Z",
+            "model": ["providerId": "account:zai-start-plan", "modelId": "GLM-5.3"],
+            "request": [
+                "headers": ["authorization": "Bearer must-not-enter-projected-context"],
+                "messageCount": 2, "toolNames": ["Read", "Bash"],
+                "messages": [
+                    ["role": "system", "content": "System policy"],
+                    ["role": "user", "content": "Inspect this project"]
+                ],
+                "body": ["messages": [
+                    ["role": "system", "content": "System policy"],
+                    ["role": "user", "content": "Inspect this project"]
+                ], "tools": [["name": "Read"], ["name": "Bash"]]]
+            ],
+            "response": [
+                "reasoningText": "Inspect files before editing.", "text": "Done.",
+                "usage": ["inputTokens": 400, "outputTokens": 20, "cacheReadTokens": 300]
+            ]
+        ]
+
+        let events = ZCodeSight.modelIOEvents(object, sourcePath: "/tmp/model-io.jsonl")
+        let request = try XCTUnwrap(events.first { $0.op == "network_prompt" })
+        let response = try XCTUnwrap(events.first { $0.op == "network_response" })
+        XCTAssertEqual(request.userIntent, "Inspect this project")
+        XCTAssertTrue(request.modelPrompt?.contains("System policy") == true)
+        XCTAssertTrue(request.modelPrompt?.contains("Inspect this project") == true)
+        XCTAssertFalse(request.modelPrompt?.contains("must-not-enter-projected-context") == true)
+        XCTAssertEqual(request.action, "captured_pre_encryption")
+        XCTAssertEqual(request.attributionConfidence, .confirmed)
+        XCTAssertEqual(response.modelReasoning, "Inspect files before editing.")
+        XCTAssertEqual(response.modelResponse, "Done.")
+        XCTAssertEqual(response.inputTokens, 400)
+        XCTAssertEqual(response.cachedTokens, 300)
+    }
+
     func testZCodeStructuredLogCapturesRuntimeAndMCPWithoutCredentialFiles() throws {
         let fixture = """
         {"timestamp":"2026-09-19T11:36:57Z","event":"bootstrap.app.startup.runtime_config.completed","sessionId":"zs","context":{"workingDirectory":"/tmp/project","model":"GLM-5.3","memoryEnabled":true,"apiKey":"must-not-survive"}}

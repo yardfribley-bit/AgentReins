@@ -102,6 +102,7 @@ AgentReins is an early alpha. The repository is public so that the implementatio
 
 - Per-turn user intent, model context, model response, model name, token usage, tool calls, tool arguments, and tool results when the local Agent records them.
 - Native WorkBuddy evidence plus local compatibility adapters for Codex, Qoder, and Cursor.
+- Native ZCode pre-encryption Model I/O collection from ZCode's own local rollout records. It preserves the ordered request body, conversation messages, tools, response text, recorded reasoning, usage, and request/trace/turn identifiers without installing a CA, changing the trust store, or routing traffic through a proxy.
 - Cursor Composer correlation across prompts, context-token composition, model responses, tool calls/results, and generated-file security scanning.
 - Tool and MCP security classification based on capability: command execution, filesystem mutation, network access, credential exposure, and external content.
 - A least-privilege Chrome/Edge adapter for confirmed Grok Imagine prompt, upload, and result evidence.
@@ -116,6 +117,7 @@ The **Outbound** workspace answers a narrower question than a conventional netwo
 - Every section names its local evidence source. A category directory filters the same underlying text, while a captured-text mode provides a minimally processed view for forensic review.
 - Sensitive-content findings and the safety verdict are shown beside the context they assess. Token totals, model claims, routes, and byte counts remain supporting technical evidence rather than the primary presentation.
 - AgentReins displays only content recorded by the local Agent or another supported evidence source. Missing request bodies remain unknown; provider-reported Token totals are never used to invent or reconstruct unseen text.
+- When ZCode's native `model-io-*.jsonl` records are present, AgentReins reads them incrementally and marks the request as confirmed pre-encryption evidence. If ZCode has disabled or removed those records, the UI reports that Model I/O evidence is unavailable instead of claiming complete capture.
 - WorkBuddy's first network-body integration is an explicit audited-proxy mode for a separately launched WorkBuddy CLI process. The bundled `workbuddy_network_capture.py` addon records only supported Tencent Copilot request and response bodies, verifies request SHA-256 and byte completeness, and feeds them into the same context reader. It does not alter the system proxy or trust store and does not claim coverage for unrelated WorkBuddy desktop traffic.
 - Launch mitmproxy with the bundled addon and point only the audited WorkBuddy process at that local proxy. Captures are appended with mode `0600` to `~/Library/Application Support/AgentReins/workbuddy-network.jsonl`; AgentReins tails complete JSONL records and leaves incomplete trailing records unread until the next poll.
 

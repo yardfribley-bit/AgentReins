@@ -3,9 +3,9 @@ import Foundation
 import SQLite3
 import SwiftUI
 
-/// Read-only native adapter for ZCode's local session database and structured
-/// runtime log. Credentials, cookies, and ZCode's local CA private key are
-/// deliberately outside the collector boundary.
+/// Read-only native adapter for ZCode's local session database, structured
+/// runtime log, and pre-encryption Model I/O records. Credentials, cookies,
+/// and private keys are deliberately outside the projected event boundary.
 @MainActor
 final class ZCodeSight: ObservableObject {
     @Published private(set) var connected = false
@@ -26,6 +26,7 @@ final class ZCodeSight: ObservableObject {
     }
     nonisolated static var sessionDatabaseURL: URL { root.appendingPathComponent("cli/db/db.sqlite") }
     nonisolated static var logRootURL: URL { root.appendingPathComponent("cli/log") }
+    nonisolated static var modelIORootURL: URL { root.appendingPathComponent("cli/rollout") }
 
     func start() {
         guard timer == nil else { return }
@@ -46,17 +47,19 @@ final class ZCodeSight: ObservableObject {
             let fingerprint = Self.sqliteFingerprint(Self.sessionDatabaseURL)
             let snapshot = fingerprint == previousFingerprint ? nil : Self.readLatestDatabase()
             let logs = Self.readLogs(previousOffsets: previousOffsets)
-            let raw = (snapshot.map { [$0.rawEvidence] } ?? []) + logs.raw
+            let modelIO = Self.readModelIO(previousOffsets: previousOffsets)
+            let raw = (snapshot.map { [$0.rawEvidence] } ?? []) + logs.raw + modelIO.raw
             var rawWriteFailed = false
             do { try evidenceDatabase?.appendRaw(raw) } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.databaseFingerprint = fingerprint
-                let available = FileManager.default.fileExists(atPath: Self.sessionDatabaseURL.path)
+                let databaseAvailable = FileManager.default.fileExists(atPath: Self.sessionDatabaseURL.path)
+                let available = databaseAvailable || modelIO.available
                 if self.connected != available { self.connected = available }
                 if rawWriteFailed { self.malformed += 1 }
-                self.malformed += logs.malformed
-                let projected = (snapshot?.events ?? []) + logs.events
+                self.malformed += logs.malformed + modelIO.malformed
+                let projected = (snapshot?.events ?? []) + logs.events + modelIO.events
                 let fresh = projected.filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
@@ -66,13 +69,21 @@ final class ZCodeSight: ObservableObject {
                         source: "zcode", stream: stream, offset: Int64(offset),
                         fingerprint: nil, updatedAt: Date()))
                 }
+                for (stream, offset) in modelIO.offsets {
+                    self.logOffsets[stream] = offset
+                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
+                        source: "zcode", stream: stream, offset: Int64(offset),
+                        fingerprint: nil, updatedAt: Date()))
+                }
                 try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                     source: "zcode", state: !available ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: available ? Date() : nil, lagSeconds: nil,
                     accepted: self.accepted, malformed: self.malformed, dropped: 0,
-                    detail: available
-                        ? "ZCode session SQLite and structured runtime log connected"
-                        : "ZCode local session database is unavailable"))
+                    detail: modelIO.available
+                        ? "ZCode pre-encryption Model I/O, session SQLite, and runtime log connected"
+                        : databaseAvailable
+                            ? "ZCode session SQLite and runtime log connected; no native Model I/O record found"
+                            : "ZCode local evidence is unavailable"))
             }
         }
     }
@@ -281,6 +292,88 @@ final class ZCodeSight: ObservableObject {
         return (events, raw, offsets, malformed)
     }
 
+    private nonisolated static func readModelIO(previousOffsets: [String: UInt64])
+        -> (events: [GuardEvent], raw: [RawEvidenceRecord], offsets: [String: UInt64], malformed: Int,
+            available: Bool) {
+        let files = (try? FileManager.default.contentsOfDirectory(at: modelIORootURL,
+            includingPropertiesForKeys: [.contentModificationDateKey], options: [.skipsHiddenFiles])) ?? []
+        let modelIOFiles = files.filter { $0.lastPathComponent.hasPrefix("model-io-") && $0.pathExtension == "jsonl" }
+        var events: [GuardEvent] = [], raw: [RawEvidenceRecord] = [], offsets: [String: UInt64] = [:], malformed = 0
+        for url in modelIOFiles {
+            guard let record = RawLogCapture.capture(url: url, source: "zcode-model-io",
+                previousOffset: previousOffsets[url.path], maximumInitialBytes: 64 * 1_024 * 1_024) else { continue }
+            raw.append(record); offsets[url.path] = RawLogCapture.safeCheckpoint(for: record)
+            for line in record.payload.split(separator: 0x0A) {
+                guard let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                      object["type"] as? String == "model_io" else { malformed += 1; continue }
+                let projected = modelIOEvents(object, sourcePath: url.path)
+                if projected.isEmpty { malformed += 1 } else { events += projected }
+            }
+        }
+        return (events, raw, offsets, malformed, !modelIOFiles.isEmpty)
+    }
+
+    nonisolated static func modelIOEvents(_ object: [String: Any], sourcePath: String) -> [GuardEvent] {
+        guard let requestID = object["requestId"] as? String,
+              let request = object["request"] as? [String: Any] else { return [] }
+        let session = object["sessionId"] as? String ?? "zcode-model-io"
+        let turn = object["turnId"] as? String
+        let trace = object["traceId"] as? String
+        let started = ISO8601DateFormatter().date(from: object["startedAt"] as? String ?? "") ?? Date()
+        let completed = ISO8601DateFormatter().date(from: object["completedAt"] as? String ?? "") ?? started
+        let modelInfo = object["model"] as? [String: Any] ?? [:]
+        let model = modelInfo["modelId"] as? String
+        let provider = modelInfo["providerId"] as? String
+        let body = request["body"] ?? request["messages"] ?? [:]
+        let prompt = json(body)
+        let messages = request["messages"] as? [[String: Any]]
+        let intent = messages?.last(where: { $0["role"] as? String == "user" })
+            .flatMap { messageText($0["content"]) }
+        let requestMeta = json([
+            "capture": "ZCode pre-encryption Model I/O",
+            "requestId": requestID,
+            "traceId": trace ?? "",
+            "messageCount": request["messageCount"] ?? -1,
+            "toolNames": request["toolNames"] ?? [],
+            "bodyBytes": prompt?.utf8.count ?? 0
+        ])
+        var result = [GuardEvent(id: uuid("model-io:\(requestID):request"), kind: "model",
+            ruleId: "zcode_model_io_request", path: sourcePath, command: requestMeta,
+            agent: "zcode", op: "network_prompt", severity: "info", ts: started,
+            action: "captured_pre_encryption", sessionId: session, traceId: trace, turnId: turn,
+            userIntent: intent, modelPrompt: prompt, model: [provider, model].compactMap { $0 }.joined(separator: "/"),
+            source: "agentsight:zcode-model-io", attributionConfidence: .confirmed,
+            attributionMethod: "ZCode native Model I/O record captured before TLS encryption",
+            remotePort: 443, remoteDomain: "zcode.z.ai")]
+        if let response = object["response"] as? [String: Any] {
+            let usage = response["usage"] as? [String: Any] ?? [:]
+            result.append(GuardEvent(id: uuid("model-io:\(requestID):response"), kind: "model",
+                ruleId: "zcode_model_io_response", path: sourcePath, command: requestMeta,
+                agent: "zcode", op: "network_response", severity: "info", ts: completed,
+                action: object["error"] == nil ? "received" : "failed", sessionId: session,
+                traceId: trace, turnId: turn, userIntent: intent,
+                modelReasoning: response["reasoningText"] as? String,
+                modelResponse: response["text"] as? String,
+                model: [provider, model].compactMap { $0 }.joined(separator: "/"),
+                inputTokens: int(usage["inputTokens"] ?? usage["input_tokens"]),
+                outputTokens: int(usage["outputTokens"] ?? usage["output_tokens"]),
+                cachedTokens: int(usage["cacheReadTokens"] ?? usage["cacheReadInputTokens"] ?? usage["cached_tokens"]),
+                reasoningTokens: int(usage["reasoningTokens"] ?? usage["reasoning_tokens"]),
+                source: "agentsight:zcode-model-io", attributionConfidence: .confirmed,
+                attributionMethod: "ZCode native Model I/O response record",
+                remotePort: 443, remoteDomain: "zcode.z.ai"))
+        }
+        return result
+    }
+
+    private nonisolated static func messageText(_ value: Any?) -> String? {
+        if let text = value as? String { return text }
+        if let parts = value as? [[String: Any]] {
+            return parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+        }
+        return nil
+    }
+
     private nonisolated static func toolPartEvents(_ parts: [[String: Any]], messageID: String,
         timestamp: Date, session: String, turn: String?, workspace: String,
         model: String?, provider: String?) -> [GuardEvent] {
@@ -361,7 +454,11 @@ final class ZCodeSight: ObservableObject {
             .compactMap { $0["text"] as? String }.joined(separator: "\n")
         return value.isEmpty ? nil : value
     }
-    private nonisolated static func int(_ value: Any?) -> Int? { (value as? NSNumber)?.intValue }
+    private nonisolated static func int(_ value: Any?) -> Int? {
+        if let number = value as? NSNumber { return number.intValue }
+        if let string = value as? String { return Int(string) }
+        return nil
+    }
     private nonisolated static func date(milliseconds: Int64?) -> Date? {
         milliseconds.map { Date(timeIntervalSince1970: Double($0) / 1_000) }
     }
