@@ -886,17 +886,24 @@ struct AgentOperationsCenterView: View {
             .filter { $0.count > 1 && !["需求", "上下文", "工具", "文件", "网络", "记忆", "验证",
                                       "哪些", "哪个", "什么", "调用", "修改", "context", "tool", "file"].contains($0) }
         guard !terms.isEmpty else { return Array(changes.prefix(5)) }
-        return Array(changes.compactMap { change -> (ProjectChangeSet, Int)? in
-            let corpus = ([change.requirement, change.agent] + change.tools + change.createdFiles
-                          + change.modifiedFiles + change.deletedFiles + change.securityFindings
-                          + change.contexts.compactMap(\.userInput))
-                .joined(separator: " ").lowercased()
-            let score = terms.reduce(0) { $0 + (corpus.contains($1) ? 1 : 0) }
-            return score > 0 ? (change, score) : nil
-        }.sorted {
+        var scored: [(change: ProjectChangeSet, score: Int)] = []
+        for change in changes {
+            var fields = [change.requirement, change.agent]
+            fields.append(contentsOf: change.tools)
+            fields.append(contentsOf: change.createdFiles)
+            fields.append(contentsOf: change.modifiedFiles)
+            fields.append(contentsOf: change.deletedFiles)
+            fields.append(contentsOf: change.securityFindings)
+            fields.append(contentsOf: change.contexts.compactMap(\.userInput))
+            let corpus = fields.joined(separator: " ").lowercased()
+            let score = terms.filter(corpus.contains).count
+            if score > 0 { scored.append((change, score)) }
+        }
+        scored.sort {
             if $0.1 == $1.1 { return $0.0.lastActivityAt > $1.0.lastActivityAt }
             return $0.1 > $1.1
-        }.prefix(8).map(\.0))
+        }
+        return scored.prefix(8).map(\.change)
     }
 
     private func projectGroundedAnswer(project: ProjectMission, changes: [ProjectChangeSet],
