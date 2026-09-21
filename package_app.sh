@@ -51,6 +51,8 @@ fi
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
+cp "$INTEL_BIN_DIR/AgentReins_AgentReins.bundle/Resources/workbuddy_network_capture.py" \
+  "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
 cp -R "$PROJECT_DIR/BrowserExtension" "$APP_BUNDLE/Contents/Resources/BrowserExtension"
 
