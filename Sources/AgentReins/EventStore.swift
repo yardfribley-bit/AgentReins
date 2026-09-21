@@ -105,6 +105,7 @@ final class EventStore: ObservableObject {
             if saved.costUSD == nil, candidate.costUSD != nil { return true }
             if saved.action != candidate.action { return true }
             if saved.modelResponse == nil, candidate.modelResponse != nil { return true }
+            if saved.modelPrompt != candidate.modelPrompt, candidate.modelPrompt?.isEmpty == false { return true }
             if saved.modelResponse != candidate.modelResponse, candidate.kind == "verification" { return true }
             if saved.afterContent == nil, candidate.afterContent != nil { return true }
             return false

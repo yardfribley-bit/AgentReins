@@ -289,7 +289,7 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
     }
 
     private static func classifyPrompt(_ text: String, event: GuardEvent) -> [ClassifiedFragment] {
-        if event.source == "agentsight:workbuddy-network-body",
+        if ["agentsight:workbuddy-network-body", "agentsight:zcode-model-io"].contains(event.source),
            let data = text.data(using: .utf8),
            let request = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
             return classifyNetworkRequest(request, event: event)
@@ -316,6 +316,7 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
             guard let content = readableJSONContent(message["content"]), !content.isEmpty else { continue }
             let category: EgressDataCategory
             switch role {
+            case "system" where looksLikeAgentRules(content): category = .agentRules
             case "system": category = .systemInstructions
             case "developer": category = .developerInstructions
             case "tool", "function": category = .toolResults
@@ -332,6 +333,12 @@ struct AgentEgressAudit: Identifiable, Codable, Equatable, Sendable {
             output.append(fragment(.otherCaptured, content, event))
         }
         return output
+    }
+
+    private static func looksLikeAgentRules(_ content: String) -> Bool {
+        let lower = content.lowercased()
+        return lower.contains("skills are available") || lower.contains("skills_instructions")
+            || (lower.contains("skill.md") && lower.contains("skill"))
     }
 
     private static func readableJSONContent(_ value: Any?) -> String? {

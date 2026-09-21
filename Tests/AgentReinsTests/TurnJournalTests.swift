@@ -222,14 +222,16 @@ final class TurnJournalTests: XCTestCase {
             "request": [
                 "headers": ["authorization": "Bearer must-not-enter-projected-context"],
                 "messageCount": 2, "toolNames": ["Read", "Bash"],
+                "messagesKind": "full",
                 "messages": [
                     ["role": "system", "content": "System policy"],
-                    ["role": "user", "content": "Inspect this project"]
+                    ["role": "user", "content": "Earlier request"],
+                    ["role": "user", "content": "Inspect this project"],
+                    ["role": "system", "content": "The following skills are available: /tmp/example/SKILL.md"]
                 ],
-                "body": ["messages": [
-                    ["role": "system", "content": "System policy"],
-                    ["role": "user", "content": "Inspect this project"]
-                ], "tools": [["name": "Read"], ["name": "Bash"]]]
+                "body": ["system": [["type": "text", "text": "System policy"]],
+                         "model": "GLM-5.3", "thinking": ["type": "enabled"],
+                         "tools": [["name": "Read"], ["name": "Bash"]]]
             ],
             "response": [
                 "reasoningText": "Inspect files before editing.", "text": "Done.",
@@ -242,8 +244,12 @@ final class TurnJournalTests: XCTestCase {
         let response = try XCTUnwrap(events.first { $0.op == "network_response" })
         XCTAssertEqual(request.userIntent, "Inspect this project")
         XCTAssertTrue(request.modelPrompt?.contains("System policy") == true)
+        XCTAssertTrue(request.modelPrompt?.contains("Earlier request") == true)
         XCTAssertTrue(request.modelPrompt?.contains("Inspect this project") == true)
+        XCTAssertTrue(request.modelPrompt?.contains("The following skills are available") == true)
+        XCTAssertTrue(request.modelPrompt?.contains("\"requestMetadata\"") == true)
         XCTAssertFalse(request.modelPrompt?.contains("must-not-enter-projected-context") == true)
+        XCTAssertEqual(request.modelPrompt?.components(separatedBy: "System policy").count, 2)
         XCTAssertEqual(request.action, "captured_pre_encryption")
         XCTAssertEqual(request.attributionConfidence, .confirmed)
         XCTAssertEqual(response.modelReasoning, "Inspect files before editing.")

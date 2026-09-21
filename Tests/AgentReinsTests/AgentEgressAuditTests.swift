@@ -103,4 +103,42 @@ final class AgentEgressAuditTests: XCTestCase {
                                                  "USER: explain Parser.swift", "struct Parser {}"])
         XCTAssertEqual(evidence.last?.source, "Read")
     }
+
+    func testZCodeModelIOSeparatesMessagesSkillsToolsAndRequestMetadata() throws {
+        let context: [String: Any] = [
+            "messages": [
+                ["role": "system", "content": "System policy"],
+                ["role": "user", "content": "Earlier request"],
+                ["role": "user", "content": "。"],
+                ["role": "system", "content": "The following skills are available: /tmp/example/SKILL.md"]
+            ],
+            "tools": [["name": "Read", "description": "Read a file"]],
+            "requestMetadata": ["model": "GLM-5.3", "thinking": ["type": "enabled"]]
+        ]
+        let data = try JSONSerialization.data(withJSONObject: context)
+        let prompt = try XCTUnwrap(String(data: data, encoding: .utf8))
+        let request = GuardEvent(kind: "model", ruleId: "zcode_model_io_request", path: "/tmp/model-io.jsonl",
+            command: nil, agent: "zcode", op: "network_prompt", severity: "info", ts: Date(),
+            action: "captured_pre_encryption", sessionId: "session", turnId: "turn",
+            userIntent: "。", modelPrompt: prompt, model: "GLM-5.3",
+            source: "agentsight:zcode-model-io", attributionConfidence: .confirmed)
+        let usage = GuardEvent(kind: "model", ruleId: "zcode_model_io_response", path: "/tmp/model-io.jsonl",
+            command: nil, agent: "zcode", op: "network_response", severity: "info", ts: Date(),
+            action: "received", sessionId: "session", turnId: "turn", model: "GLM-5.3",
+            inputTokens: 100, source: "agentsight:zcode-model-io")
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: [request, usage]).first)
+        let audit = try XCTUnwrap(AgentEgressAudit.build(session: session).first)
+
+        XCTAssertEqual(audit.dataClassifications.first { $0.category == .systemInstructions }?.evidence.first?.content,
+                       "System policy")
+        XCTAssertEqual(audit.dataClassifications.first { $0.category == .conversationHistory }?.evidence.first?.content,
+                       "Earlier request")
+        XCTAssertEqual(audit.dataClassifications.first { $0.category == .userInput }?.evidence.first?.content, "。")
+        XCTAssertTrue(audit.dataClassifications.first { $0.category == .agentRules }?.evidence.first?.content
+            .contains("SKILL.md") == true)
+        XCTAssertTrue(audit.dataClassifications.first { $0.category == .toolCalls }?.evidence.first?.content
+            .contains("Read a file") == true)
+        XCTAssertTrue(audit.dataClassifications.first { $0.category == .otherCaptured }?.evidence.first?.content
+            .contains("GLM-5.3") == true)
+    }
 }

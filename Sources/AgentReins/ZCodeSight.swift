@@ -8,6 +8,7 @@ import SwiftUI
 /// and private keys are deliberately outside the projected event boundary.
 @MainActor
 final class ZCodeSight: ObservableObject {
+    private static let modelIOCheckpointSource = "zcode-model-io-v2"
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
     var onEvents: (([GuardEvent]) -> Void)?
@@ -30,7 +31,12 @@ final class ZCodeSight: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
-        if let saved = try? evidenceDatabase?.checkpoints(source: "zcode") { logOffsets = saved }
+        if let saved = try? evidenceDatabase?.checkpoints(source: "zcode") {
+            logOffsets = saved.filter { !$0.key.contains("/cli/rollout/model-io-") }
+        }
+        if let modelIO = try? evidenceDatabase?.checkpoints(source: Self.modelIOCheckpointSource) {
+            logOffsets.merge(modelIO) { _, current in current }
+        }
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 3, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -72,7 +78,7 @@ final class ZCodeSight: ObservableObject {
                 for (stream, offset) in modelIO.offsets {
                     self.logOffsets[stream] = offset
                     try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
-                        source: "zcode", stream: stream, offset: Int64(offset),
+                        source: Self.modelIOCheckpointSource, stream: stream, offset: Int64(offset),
                         fingerprint: nil, updatedAt: Date()))
                 }
                 try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
@@ -324,9 +330,8 @@ final class ZCodeSight: ObservableObject {
         let modelInfo = object["model"] as? [String: Any] ?? [:]
         let model = modelInfo["modelId"] as? String
         let provider = modelInfo["providerId"] as? String
-        let body = request["body"] ?? request["messages"] ?? [:]
-        let prompt = json(body)
         let messages = request["messages"] as? [[String: Any]]
+        let prompt = json(outboundContext(request))
         let intent = messages?.last(where: { $0["role"] as? String == "user" })
             .flatMap { messageText($0["content"]) }
         let requestMeta = json([
@@ -364,6 +369,26 @@ final class ZCodeSight: ObservableObject {
                 remotePort: 443, remoteDomain: "zcode.z.ai"))
         }
         return result
+    }
+
+    /// ZCode stores the provider body and its canonical message list separately.
+    /// Prefer the canonical messages, retain the tool schemas and request options,
+    /// and avoid presenting the duplicated provider `system` field twice.
+    nonisolated static func outboundContext(_ request: [String: Any]) -> [String: Any] {
+        let body = request["body"] as? [String: Any] ?? [:]
+        let messages = request["messages"] as? [[String: Any]]
+            ?? body["messages"] as? [[String: Any]] ?? []
+        var metadata = body
+        metadata.removeValue(forKey: "messages")
+        metadata.removeValue(forKey: "tools")
+        if !messages.isEmpty { metadata.removeValue(forKey: "system") }
+        for key in ["messageCount", "messageOffset", "messagesKind", "querySource"] {
+            if let value = request[key] { metadata[key] = value }
+        }
+        var context: [String: Any] = ["messages": messages]
+        if let tools = body["tools"] ?? request["tools"] { context["tools"] = tools }
+        if !metadata.isEmpty { context["requestMetadata"] = metadata }
+        return context
     }
 
     private nonisolated static func messageText(_ value: Any?) -> String? {
