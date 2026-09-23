@@ -51,6 +51,8 @@ struct AgentLiveTaskHeaderView: View {
     let model: String?
     let openTitle: String
     let onOpen: (() -> Void)?
+    let jsonTitle: String
+    let onJSON: (() -> Void)?
 
     var body: some View {
         HStack(alignment: .top, spacing: 14) {
@@ -72,6 +74,7 @@ struct AgentLiveTaskHeaderView: View {
                 Text(headline).font(.system(size: 14)).foregroundStyle(.secondary).lineLimit(2)
             }
             Spacer()
+            if let onJSON { Button(jsonTitle, action: onJSON).buttonStyle(.bordered) }
             if let onOpen { Button(openTitle, action: onOpen).buttonStyle(.bordered) }
         }
     }

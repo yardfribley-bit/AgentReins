@@ -18,6 +18,91 @@ struct AgentEventEnvelope: Codable, Identifiable, Sendable {
     let source: AgentEventSource
     let confidence: AlignmentConfidence
     let payload: AgentEventPayload
+    let correlation: AgentEventCorrelation?
+
+    init(id: String, projectID: String, agentID: String, sessionID: String,
+         turnID: String?, sequence: UInt64, occurredAt: Date, observedAt: Date,
+         source: AgentEventSource, confidence: AlignmentConfidence,
+         payload: AgentEventPayload, correlation: AgentEventCorrelation? = nil) {
+        self.id = id
+        self.projectID = projectID
+        self.agentID = agentID
+        self.sessionID = sessionID
+        self.turnID = turnID
+        self.sequence = sequence
+        self.occurredAt = occurredAt
+        self.observedAt = observedAt
+        self.source = source
+        self.confidence = confidence
+        self.payload = payload
+        self.correlation = correlation
+    }
+}
+
+/// Stable cross-event links. Time orders evidence; these identifiers carry
+/// identity and causality. Missing source identifiers remain nil.
+struct AgentEventCorrelation: Codable, Equatable, Sendable {
+    let taskID: String?
+    let traceID: String?
+    let spanID: String?
+    let parentSpanID: String?
+    let requestID: String?
+    let actionID: String?
+    let sourceEventID: String?
+
+    init(taskID: String? = nil, traceID: String? = nil, spanID: String? = nil,
+         parentSpanID: String? = nil, requestID: String? = nil,
+         actionID: String? = nil, sourceEventID: String? = nil) {
+        self.taskID = taskID
+        self.traceID = traceID
+        self.spanID = spanID
+        self.parentSpanID = parentSpanID
+        self.requestID = requestID
+        self.actionID = actionID
+        self.sourceEventID = sourceEventID
+    }
+}
+
+enum AgentCanonicalEventKind: String, Codable, CaseIterable, Sendable {
+    case turnState = "turn.state"
+    case agentInput = "agent.input"
+    case llmRequest = "llm.request"
+    case llmResponse = "llm.response"
+    case plan
+    case toolCall = "tool.call"
+    case toolResult = "tool.result"
+    case fileActivity = "file.activity"
+    case memoryActivity = "memory.activity"
+    case networkActivity = "network.activity"
+    case contextUsage = "context.usage"
+    case verification
+    case checkpoint
+    case finding = "security.finding"
+}
+
+extension AgentEventEnvelope {
+    var canonicalKind: AgentCanonicalEventKind {
+        switch payload {
+        case .turnState: return .turnState
+        case .userPrompt: return .agentInput
+        case .contextPrepared: return .llmRequest
+        case .modelMessage: return .llmResponse
+        case .plan: return .plan
+        case .toolCall: return .toolCall
+        case .toolOutput: return .toolResult
+        case .fileActivity: return .fileActivity
+        case .memoryActivity: return .memoryActivity
+        case .networkActivity: return .networkActivity
+        case .contextUsage: return .contextUsage
+        case .verification: return .verification
+        case .checkpoint: return .checkpoint
+        case .prediction: return .finding
+        }
+    }
+
+    var effectiveTaskID: String {
+        correlation?.taskID ?? "\(sessionID):\(turnID ?? "session")"
+    }
 }
 
 enum AgentEventSource: String, Codable, Sendable {
@@ -342,11 +427,29 @@ enum LegacyGuardEventAdapter {
             let session = event.sessionId ?? "unattributed:\(event.agent ?? "unknown")"
             let sequence = (sequenceBySession[session] ?? startingSequence) + 1
             sequenceBySession[session] = sequence
+            let actionID: String?
+            switch payload {
+            case .toolCall, .toolOutput, .fileActivity, .memoryActivity, .networkActivity:
+                actionID = event.toolCallId
+            default:
+                actionID = nil
+            }
+            let requestID: String?
+            switch payload {
+            case .contextPrepared, .modelMessage, .contextUsage:
+                requestID = event.traceId
+            default:
+                requestID = nil
+            }
             result.append(AgentEventEnvelope(
                 id: "\(event.id.uuidString):\(sequence)", projectID: projectID,
                 agentID: event.agent ?? "unknown", sessionID: session, turnID: event.turnId,
                 sequence: sequence, occurredAt: event.ts, observedAt: event.ts,
-                source: source(for: event), confidence: confidence(for: event), payload: payload))
+                source: source(for: event), confidence: confidence(for: event), payload: payload,
+                correlation: AgentEventCorrelation(
+                    taskID: "\(session):\(event.turnId ?? "session")",
+                    traceID: event.traceId, requestID: requestID, actionID: actionID,
+                    sourceEventID: event.id.uuidString)))
         }
 
         for event in ordered {

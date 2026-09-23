@@ -11,6 +11,132 @@ final class AgentEventProtocolTests: XCTestCase {
                            source: source, confidence: .observed, payload: payload)
     }
 
+    func testCorrelationRoundTripsAndCanonicalKindsRemainStable() throws {
+        let value = AgentEventEnvelope(
+            id: "event-1", projectID: "project", agentID: "codex",
+            sessionID: "session", turnID: "turn", sequence: 1,
+            occurredAt: Date(timeIntervalSince1970: 1),
+            observedAt: Date(timeIntervalSince1970: 2), source: .agentProtocol,
+            confidence: .confirmed,
+            payload: .contextPrepared(ContextAssemblySnapshot(
+                capturedAt: Date(timeIntervalSince1970: 1), userPromptDigest: nil,
+                finalPromptDigest: nil, layers: [], totalBytes: 10,
+                estimatedTokens: nil, model: "gpt", provider: "openai", route: nil)),
+            correlation: AgentEventCorrelation(
+                taskID: "task-1", traceID: "trace-1", spanID: "span-1",
+                parentSpanID: "span-0", requestID: "request-1",
+                actionID: nil, sourceEventID: "native-1"))
+
+        let data = try JSONEncoder().encode(value)
+        let restored = try JSONDecoder().decode(AgentEventEnvelope.self, from: data)
+
+        XCTAssertEqual(restored.correlation?.traceID, "trace-1")
+        XCTAssertEqual(restored.correlation?.requestID, "request-1")
+        XCTAssertEqual(restored.canonicalKind, .llmRequest)
+        XCTAssertEqual(restored.effectiveTaskID, "task-1")
+    }
+
+    func testLegacyEnvelopeWithoutCorrelationStillDecodes() throws {
+        let legacy = event(sequence: 1, payload: .turnState(.queued))
+        var object = try XCTUnwrap(
+            JSONSerialization.jsonObject(with: JSONEncoder().encode(legacy)) as? [String: Any])
+        object.removeValue(forKey: "correlation")
+        let restored = try JSONDecoder().decode(
+            AgentEventEnvelope.self, from: JSONSerialization.data(withJSONObject: object))
+
+        XCTAssertNil(restored.correlation)
+        XCTAssertEqual(restored.effectiveTaskID, "session:turn")
+    }
+
+    func testUniformMetricsDeduplicateToolLifecycleAndCountCanonicalEvents() {
+        let usage = event(sequence: 1, payload: .contextUsage(ContextUsageEvidence(
+            usedTokens: 15, windowTokens: nil, inputTokens: 10,
+            outputTokens: 5, cost: 0.25, compacting: false)))
+        let request = event(sequence: 2, payload: .contextPrepared(ContextAssemblySnapshot(
+            capturedAt: Date(), userPromptDigest: nil, finalPromptDigest: nil,
+            layers: [], totalBytes: 100, estimatedTokens: nil,
+            model: "gpt", provider: "openai", route: nil)))
+        let running = event(sequence: 3, payload: .toolCall(ToolCallLifecycleEvidence(
+            callID: "call-1", toolName: "exec_command", serverName: nil,
+            arguments: "swift test", argumentsDigest: nil, state: .running,
+            startedAt: nil, completedAt: nil, exitCode: nil, evidenceIDs: [])))
+        let completed = event(sequence: 4, payload: .toolCall(ToolCallLifecycleEvidence(
+            callID: "call-1", toolName: "exec_command", serverName: nil,
+            arguments: "swift test", argumentsDigest: nil, state: .completed,
+            startedAt: nil, completedAt: nil, exitCode: 0, evidenceIDs: [])))
+        let result = event(sequence: 5, payload: .toolOutput(ToolOutputEvidence(
+            callID: "call-1", output: "ok", outputDigest: nil,
+            byteCount: 2, truncated: false)))
+
+        let metrics = AgentEventMetrics.build(events: [usage, request, running, completed, result])
+
+        XCTAssertEqual(metrics.eventCount, 5)
+        XCTAssertEqual(metrics.llmRequestCount, 1)
+        XCTAssertEqual(metrics.toolCallCount, 1)
+        XCTAssertEqual(metrics.toolResultCount, 1)
+        XCTAssertEqual(metrics.commandExecutionCount, 1)
+        XCTAssertEqual(metrics.inputTokens, 10)
+        XCTAssertEqual(metrics.outputTokens, 5)
+        XCTAssertEqual(metrics.totalCost, 0.25)
+    }
+
+    func testTaskJSONExportContainsSourceAndNormalizedWorkBuddyEvidence() throws {
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project",
+            command: nil, agent: "workbuddy", op: "prompt", severity: "info",
+            ts: Date(timeIntervalSince1970: 1), action: "sent", sessionId: "session-1",
+            traceId: "trace-1", turnId: "turn-1", userIntent: "Fix login",
+            modelPrompt: "system + user", model: "model-a",
+            source: "agentsight:workbuddy-local")
+        let response = GuardEvent(kind: "model", ruleId: "response", path: "/tmp/project",
+            command: nil, agent: "workbuddy", op: "response", severity: "info",
+            ts: Date(timeIntervalSince1970: 2), action: "received", sessionId: "session-1",
+            traceId: "trace-1", turnId: "turn-1", modelResponse: "Done",
+            model: "model-a", inputTokens: 10, outputTokens: 2,
+            source: "agentsight:workbuddy-local")
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: [prompt, response]).first)
+
+        let export = AgentTaskJSONExport.build(session: session, turnID: "turn-1")
+        let json = try export.prettyJSON()
+
+        XCTAssertEqual(export.task.agentID, "workbuddy")
+        XCTAssertEqual(export.sourceEvents.count, 2)
+        XCTAssertFalse(export.revision.isEmpty)
+        XCTAssertEqual(export.capture.eventCount, export.events.count)
+        XCTAssertEqual(export.conversation.userInputs, ["Fix login"])
+        XCTAssertEqual(export.conversation.modelResponses, ["Done"])
+        XCTAssertNotNil(export.analysis.modelEconomics)
+        XCTAssertFalse(export.evidenceReferences.isEmpty)
+        XCTAssertEqual(export.outboundRequests.count, 1)
+        XCTAssertEqual(export.outboundRequests.first?.captureMode, .agentRecordedContext)
+        XCTAssertEqual(export.outboundRequests.first?.completeness, .unknown)
+        XCTAssertEqual(export.outboundRequests.first?.body, "system + user")
+        XCTAssertTrue(export.events.contains { $0.canonicalKind == .agentInput })
+        XCTAssertTrue(export.events.contains { $0.canonicalKind == .llmResponse })
+        XCTAssertTrue(json.contains("Fix login"))
+        XCTAssertTrue(json.contains("trace-1"))
+        XCTAssertTrue(json.contains("sourceEvents"))
+    }
+
+    func testTaskJSONMarksVerifiedWorkBuddyNetworkBodyAsComplete() throws {
+        let request = GuardEvent(kind: "model", ruleId: "workbuddy_network_request_body",
+            path: "/tmp", command: nil, agent: "workbuddy", op: "network_prompt",
+            severity: "info", ts: Date(timeIntervalSince1970: 1),
+            action: "captured_complete", sessionId: "network-session",
+            traceId: "trace-network", turnId: "turn-network",
+            userIntent: "Review code", modelPrompt: #"{"model":"m","messages":[]}"#,
+            model: "m", source: "agentsight:workbuddy-network-body",
+            attributionConfidence: .confirmed,
+            attributionMethod: "complete HTTPS request body")
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: [request]).first)
+
+        let export = AgentTaskJSONExport.build(session: session, turnID: "turn-network")
+
+        XCTAssertEqual(export.outboundRequests.first?.captureMode, .completeHTTPSRequestBody)
+        XCTAssertEqual(export.outboundRequests.first?.completeness, .complete)
+        XCTAssertEqual(export.outboundRequests.first?.destination, nil)
+        XCTAssertFalse(export.outboundRequests.first?.bodySHA256.isEmpty ?? true)
+    }
+
     func testCaptureHealthDetectsSequenceGap() {
         let events = [
             event(sequence: 1, payload: .turnState(.preparingContext)),

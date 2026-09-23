@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 /// Live agent posture first; complete evidence appears only after node selection.
@@ -55,6 +56,13 @@ struct AgentOperationsCenterView: View {
     @State private var selectedEgressCategory: EgressDataCategory?
     @State private var egressReaderMode: EgressReaderMode = .organized
     @State private var egressReaderPage = 0
+    @State private var selectedTaskJSON: TaskJSONDocument?
+
+    private struct TaskJSONDocument: Identifiable {
+        let id = UUID()
+        let title: String
+        let json: String
+    }
 
     private enum EgressReaderMode: String, CaseIterable {
         case organized
@@ -363,6 +371,9 @@ struct AgentOperationsCenterView: View {
         }
         .sheet(item: $selectedEgressAudit) { report in
             egressReader(report)
+        }
+        .sheet(item: $selectedTaskJSON) { document in
+            taskJSONReader(document)
         }
     }
 
@@ -2366,8 +2377,48 @@ struct AgentOperationsCenterView: View {
             headline: liveHeadline, active: activeSession != nil,
             pid: rootPID, model: activeSession?.model,
             openTitle: L("Open session…"),
-            onOpen: activeSession.map { session in { onSession(session) } }
+            onOpen: activeSession.map { session in { onSession(session) } },
+            jsonTitle: language.language == .english ? "View task JSON" : "查看任务 JSON",
+            onJSON: activeSession.map { session in
+                { showTaskJSON(session: session, turnID: activeTurn?.id) }
+            }
         )
+    }
+
+    private func showTaskJSON(session: AgentSessionSnapshot, turnID: String?) {
+        do {
+            let export = AgentTaskJSONExport.build(session: session, turnID: turnID)
+            selectedTaskJSON = TaskJSONDocument(
+                title: "\(session.agentDisplayName) · \(turnID ?? session.id)",
+                json: try export.prettyJSON())
+        } catch {
+            projectionError = "任务 JSON 生成失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func taskJSONReader(_ document: TaskJSONDocument) -> some View {
+        VStack(alignment: .leading, spacing: 12) {
+            HStack {
+                VStack(alignment: .leading, spacing: 3) {
+                    Text(language.language == .english ? "COMPLETE TASK JSON" : "完整任务 JSON")
+                        .font(.system(size: 11, weight: .bold, design: .monospaced))
+                        .foregroundStyle(cyan)
+                    Text(document.title).font(.system(size: 17, weight: .bold))
+                }
+                Spacer()
+                Button(language.language == .english ? "Copy JSON" : "复制 JSON") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(document.json, forType: .string)
+                }.buttonStyle(.borderedProminent).tint(cyan)
+            }
+            TextEditor(text: .constant(document.json))
+                .font(.system(size: 11, design: .monospaced))
+                .scrollContentBackground(.hidden)
+                .padding(8).background(canvas, in: RoundedRectangle(cornerRadius: 8))
+                .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
+        }
+        .padding(18).frame(minWidth: 900, minHeight: 680)
+        .background(panel).environment(\.colorScheme, .dark)
     }
 
     private var tabBar: some View {
