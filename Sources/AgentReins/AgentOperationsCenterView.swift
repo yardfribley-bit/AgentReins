@@ -592,6 +592,8 @@ struct AgentOperationsCenterView: View {
                 reviewLabel: L("REVIEW"), evidenceLabel: L("EVIDENCE")
             )
 
+            globalTaskOverview
+
             HStack(spacing: 4) {
                 ForEach(GlobalTab.allCases) { tab in
                     Button { globalTab = tab } label: {
@@ -620,6 +622,49 @@ struct AgentOperationsCenterView: View {
         if critical { return language.language == .english ? "Review required across active AI work" : "当前 AI 工作存在需要审查的风险" }
         if activeTaskCount > 0 { return language.language == .english ? "\(activeTaskCount) AI task\(activeTaskCount == 1 ? "" : "s") running now" : "\(activeTaskCount) 个 AI 任务正在运行" }
         return L(observing ? "Monitoring for new Agent activity" : "Monitoring is paused")
+    }
+
+    private var globalTaskOverview: some View {
+        VStack(alignment: .leading, spacing: 9) {
+            HStack {
+                Text(language.language == .english ? "RECENT TASKS" : "最近任务")
+                    .font(.system(size: 11, weight: .bold, design: .monospaced))
+                    .foregroundStyle(cyan)
+                Spacer()
+                Text(language.language == .english ? "Open a task to inspect its full evidence chain" : "点击任务查看完整证据链")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+            ForEach(Array(sessions.sorted { $0.lastActivityAt > $1.lastActivityAt }.prefix(3))) { session in
+                let turn = session.turns.last
+                let progress = turn.flatMap { eventStore.taskProgress["\(session.id)\u{0}\($0.id)"] }
+                Button {
+                    showTaskJSON(session: session, turnID: turn?.id)
+                } label: {
+                    HStack(spacing: 14) {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text("\(session.agentDisplayName) · \(turn?.userInput ?? session.latestIntent ?? "未采集任务描述")")
+                                .font(.system(size: 13, weight: .semibold)).lineLimit(1)
+                            Text(progress.map { "\($0.phase.rawValue) · 模型 \($0.modelRequests.count) 请求 / \($0.modelResponses.count) 响应 · 工具 \($0.toolResults.count) / \($0.toolCalls.count)" }
+                                 ?? "点击从 SQLite 读取完整任务证据")
+                                .font(.system(size: 11)).foregroundStyle(.secondary).lineLimit(1)
+                        }
+                        Spacer(minLength: 8)
+                        Text(session.lastActivityAt, style: .time)
+                            .font(.system(size: 11, design: .monospaced)).foregroundStyle(.secondary)
+                        Image(systemName: "chevron.right").font(.system(size: 11)).foregroundStyle(cyan)
+                    }
+                    .padding(11)
+                    .background(raised, in: RoundedRectangle(cornerRadius: 8))
+                }
+                .buttonStyle(.plain)
+            }
+            if sessions.isEmpty {
+                Text("尚未采集到任务。启动 Agent 后，这里会随证据到达更新。")
+                    .font(.caption).foregroundStyle(.secondary)
+            }
+        }
+        .padding(14).background(panel, in: RoundedRectangle(cornerRadius: 12))
+        .overlay(RoundedRectangle(cornerRadius: 12).stroke(border))
     }
 
     private var globalProjectsView: some View {
@@ -2374,28 +2419,53 @@ struct AgentOperationsCenterView: View {
     }
 
     private var taskHeader: some View {
-        AgentLiveTaskHeaderView(
-            agentName: activeSession?.agentDisplayName ?? L("Waiting for agent activity"),
-            headline: liveHeadline, active: activeSession != nil,
-            pid: rootPID, model: activeSession?.model,
-            openTitle: L("Open session…"),
-            onOpen: activeSession.map { session in { onSession(session) } },
-            jsonTitle: language.language == .english ? "View task JSON" : "查看任务 JSON",
-            onJSON: activeSession.map { session in
-                { showTaskJSON(session: session, turnID: activeTurn?.id) }
+        VStack(alignment: .leading, spacing: 12) {
+            AgentLiveTaskHeaderView(
+                agentName: activeSession?.agentDisplayName ?? L("Waiting for agent activity"),
+                headline: liveHeadline, active: activeSession != nil,
+                pid: rootPID, model: activeSession?.model,
+                openTitle: L("Open session…"),
+                onOpen: activeSession.map { session in { onSession(session) } },
+                jsonTitle: language.language == .english ? "View task JSON" : "查看任务 JSON",
+                onJSON: activeSession.map { session in
+                    { showTaskJSON(session: session, turnID: activeTurn?.id) }
+                }
+            )
+            if let sessionID = activeSession?.id, let turnID = activeTurn?.id,
+               let progress = eventStore.taskProgress["\(sessionID)\u{0}\(turnID)"] {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    let fresh = context.date.timeIntervalSince(progress.lastActivityAt) < 30
+                    let end = fresh ? context.date : progress.lastActivityAt
+                    let elapsed = max(0, Int(end.timeIntervalSince(progress.startedAt)))
+                    HStack(spacing: 14) {
+                        Text(fresh ? progress.phase.rawValue : "最后观测：\(progress.phase.rawValue)")
+                        Text("观测耗时 \(elapsed / 60)m \(elapsed % 60)s")
+                        Text("模型 \(progress.modelRequests.count) 请求 · \(progress.modelResponses.count) 响应")
+                        Text("工具 \(progress.toolResults.count)/\(progress.toolCalls.count) 完成")
+                        Text("Token \(progress.inputTokens + progress.outputTokens) 已确认")
+                        if !progress.riskEvents.isEmpty { Text("风险 \(progress.riskEvents.count)").foregroundStyle(.orange) }
+                    }
+                    .font(.system(size: 11, weight: .medium, design: .monospaced))
+                    .foregroundStyle(.secondary)
+                }
             }
-        )
+        }
     }
 
     private func showTaskJSON(session: AgentSessionSnapshot, turnID: String?) {
-        do {
-            let export = AgentTaskJSONExport.build(session: session, turnID: turnID)
-            selectedTaskJSON = TaskJSONDocument(
-                title: "\(session.agentDisplayName) · \(turnID ?? session.id)",
-                json: try export.prettyJSON(), snapshot: export)
-            taskReaderShowsJSON = false
-        } catch {
-            projectionError = "任务 JSON 生成失败：\(error.localizedDescription)"
+        // The live dashboard keeps only 500 recent events. Always rebuild the
+        // requested task from SQLite so a long task's early steps are present.
+        eventStore.loadSession(session.id) { result in
+            do {
+                let fullSession = try result.get()
+                let export = AgentTaskJSONExport.build(session: fullSession, turnID: turnID)
+                selectedTaskJSON = TaskJSONDocument(
+                    title: "\(fullSession.agentDisplayName) · \(turnID ?? fullSession.id)",
+                    json: try export.prettyJSON(), snapshot: export)
+                taskReaderShowsJSON = false
+            } catch {
+                projectionError = "任务 JSON 生成失败：\(error.localizedDescription)"
+            }
         }
     }
 

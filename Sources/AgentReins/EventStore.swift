@@ -29,6 +29,7 @@ final class EventStore: ObservableObject {
     private(set) var externalResources: [ExternalResource] = []
     private(set) var persistenceError: String?
     private(set) var collectorHealth: [CollectorHealthRecord] = []
+    private(set) var taskProgress: [String: TaskLiveProgress] = [:]
 
     private let fileURL: URL
     private let encoder: JSONEncoder
@@ -279,6 +280,22 @@ final class EventStore: ObservableObject {
     /// array once per event made SwiftUI rebuild the entire dashboard hundreds
     /// of times while a live session was being tailed.
     private func commitEvents(_ incoming: [GuardEvent], evidence: [GuardEvent]) {
+        for event in evidence {
+            guard let sessionID = event.sessionId, let turnID = event.turnId else { continue }
+            let key = "\(sessionID)\u{0}\(turnID)"
+            var progress = taskProgress[key] ?? TaskLiveProgress(
+                sessionID: sessionID, turnID: turnID,
+                startedAt: event.startedAt ?? event.ts, lastActivityAt: event.ts,
+                phase: .preparing)
+            progress.ingest(event)
+            taskProgress[key] = progress
+        }
+        if taskProgress.count > 64 {
+            let retained = taskProgress.values.sorted { $0.lastActivityAt > $1.lastActivityAt }.prefix(64)
+            taskProgress = Dictionary(uniqueKeysWithValues: retained.map {
+                ("\($0.sessionID)\u{0}\($0.turnID)", $0)
+            })
+        }
         var snapshot = incoming.sorted { $0.ts > $1.ts }
         if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
         events = snapshot
