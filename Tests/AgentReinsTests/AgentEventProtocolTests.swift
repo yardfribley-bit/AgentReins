@@ -80,6 +80,27 @@ final class AgentEventProtocolTests: XCTestCase {
         XCTAssertEqual(metrics.totalCost, 0.25)
     }
 
+    func testUsageAddsDistinctModelStepsEvenWhenTraceIsReused() {
+        func usage(_ id: String, sourceID: String, input: Int, output: Int) -> AgentEventEnvelope {
+            AgentEventEnvelope(id: id, projectID: "project", agentID: "workbuddy",
+                sessionID: "session", turnID: "turn", sequence: UInt64(id.count),
+                occurredAt: Date(), observedAt: Date(), source: .agentTranscript,
+                confidence: .observed,
+                payload: .contextUsage(ContextUsageEvidence(
+                    usedTokens: nil, windowTokens: nil, inputTokens: input,
+                    outputTokens: output, cost: nil, compacting: false)),
+                correlation: AgentEventCorrelation(traceID: "reused-trace",
+                    requestID: "reused-trace", sourceEventID: sourceID))
+        }
+        let metrics = AgentEventMetrics.build(events: [
+            usage("first", sourceID: "tool-decision", input: 74_727, output: 108),
+            usage("second", sourceID: "final-answer", input: 74_878, output: 119),
+            usage("replay", sourceID: "tool-decision", input: 74_727, output: 108)
+        ])
+        XCTAssertEqual(metrics.inputTokens, 149_605)
+        XCTAssertEqual(metrics.outputTokens, 227)
+    }
+
     func testTaskJSONExportContainsSourceAndNormalizedWorkBuddyEvidence() throws {
         let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project",
             command: nil, agent: "workbuddy", op: "prompt", severity: "info",
@@ -135,6 +156,225 @@ final class AgentEventProtocolTests: XCTestCase {
         XCTAssertEqual(export.outboundRequests.first?.completeness, .complete)
         XCTAssertEqual(export.outboundRequests.first?.destination, nil)
         XCTAssertFalse(export.outboundRequests.first?.bodySHA256.isEmpty ?? true)
+        XCTAssertEqual(export.capture.state, .healthy)
+    }
+
+    func testZCodeModelIOProjectionDoesNotClaimWireCompleteBody() throws {
+        let event = GuardEvent(kind: "model", ruleId: "zcode_model_io_request",
+            path: "/tmp/model-io.jsonl", command: nil, agent: "zcode",
+            op: "network_prompt", severity: "info", ts: Date(timeIntervalSince1970: 1),
+            action: "captured_pre_encryption", sessionId: "s", turnId: "t",
+            modelPrompt: #"{"messages":[],"requestMetadata":{"messageCount":2}}"#,
+            source: "agentsight:zcode-model-io",
+            attributionMethod: "ZCode native Model I/O record captured before TLS encryption")
+        let request = try XCTUnwrap(AgentOutboundRequestEvidence.build(events: [event]).first)
+        XCTAssertEqual(request.captureMode, .preEncryptionRequestProjection)
+        XCTAssertEqual(request.completeness, .partial)
+    }
+
+    func testTaskJourneyKeepsMultipleModelRoundsAndToolCode() throws {
+        func request(_ second: TimeInterval, body: String) -> AgentOutboundRequestEvidence {
+            let event = GuardEvent(kind: "model", ruleId: "request", path: "-",
+                command: nil, agent: "workbuddy", op: "network_prompt", severity: "info",
+                ts: Date(timeIntervalSince1970: second), action: "captured_complete",
+                sessionId: "s", turnId: "t", modelPrompt: body,
+                source: "agentsight:workbuddy-network-body")
+            return AgentOutboundRequestEvidence.build(events: [event])[0]
+        }
+        let first = request(10, body: #"{"messages":[{"role":"user","content":"Write C++"}]}"#)
+        let second = request(30, body: #"{"messages":[{"role":"tool","content":"file written"}]}"#)
+        let responses = [
+            AgentModelResponseEvidence(eventID: "r1", receivedAt: Date(timeIntervalSince1970: 12),
+                traceID: nil, model: "m", content: "Use Write", recordedReasoning: "Plan summary",
+                evidenceSource: "test"),
+            AgentModelResponseEvidence(eventID: "r2", receivedAt: Date(timeIntervalSince1970: 35),
+                traceID: nil, model: "m", content: "Done", recordedReasoning: nil,
+                evidenceSource: "test")]
+        let tool = ToolCallLifecycleEvidence(callID: "write-1", toolName: "Write",
+            serverName: nil, arguments: "Write hello.cpp: int main() { return 0; }",
+            argumentsDigest: nil, state: .completed,
+            startedAt: Date(timeIntervalSince1970: 13),
+            completedAt: Date(timeIntervalSince1970: 18), exitCode: 0, evidenceIDs: [])
+        let journey = AgentTaskJourney.build(requests: [first, second], responses: responses,
+            tools: [tool], toolResults: [ToolOutputEvidence(callID: "write-1", output: "created",
+                outputDigest: nil, byteCount: 7, truncated: false)], files: [])
+
+        XCTAssertEqual(journey.rounds.count, 2)
+        XCTAssertEqual(journey.rounds[0].response?.content, "Use Write")
+        XCTAssertEqual(journey.rounds[0].requestSections.first?.category, "message.user")
+        XCTAssertEqual(journey.rounds[0].toolSteps.first?.durationMS, 5_000)
+        XCTAssertTrue(journey.rounds[0].toolSteps.first?.call.arguments?.contains("int main()") == true)
+        XCTAssertEqual(journey.rounds[1].response?.content, "Done")
+        XCTAssertTrue(journey.unassignedResponses.isEmpty)
+    }
+
+    func testTaskJSONSeparatesOneToolLifecycleFromRelatedFileNetworkAndUsageSnapshots() throws {
+        let base = Date(timeIntervalSince1970: 1_000)
+        func row(_ kind: String, _ op: String, _ seconds: TimeInterval,
+                 toolName: String? = nil, command: String? = nil,
+                 response: String? = nil, input: Int? = nil, output: Int? = nil,
+                 remoteHost: String? = nil) -> GuardEvent {
+            GuardEvent(kind: kind, ruleId: "test", path: kind == "file" ? "/tmp/hello.cpp" : "/tmp",
+                command: command, agent: "workbuddy", op: op, severity: "info",
+                ts: base.addingTimeInterval(seconds), action: op == "result" ? "completed" : "observed",
+                sessionId: "session", traceId: "same-trace", turnId: "turn",
+                toolCallId: kind == "model" ? nil : "call-1",
+                userIntent: kind == "model" && op == "prompt" ? "Write hello world" : nil,
+                modelPrompt: kind == "model" && op == "prompt" ? "recorded context" : nil,
+                modelResponse: response, toolName: toolName,
+                inputTokens: input, outputTokens: output,
+                source: kind == "network" ? "lsof-network" : "agentsight:workbuddy-local",
+                remoteHost: remoteHost)
+        }
+        let rows = [
+            row("model", "prompt", 0),
+            row("tool", "call", 1, toolName: "Write", command: "Write hello.cpp", input: 74_727, output: 108),
+            row("file", "update", 2, toolName: "Write", command: "Write hello.cpp"),
+            row("tool", "result", 3, toolName: "Write", response: "created"),
+            row("network", "connect", 4, toolName: "Write", remoteHost: "203.0.113.1"),
+            row("model", "response", 5, response: "Done", input: 74_878, output: 119)
+        ]
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: rows).first)
+        let snapshot = AgentTaskSnapshot.build(session: session, turnID: "turn")
+
+        XCTAssertEqual(snapshot.activities.tools.count, 1)
+        XCTAssertEqual(snapshot.activities.tools.first?.state, .completed)
+        XCTAssertEqual(snapshot.activities.toolResults.count, 1)
+        XCTAssertEqual(snapshot.activities.files.count, 1)
+        XCTAssertEqual(snapshot.activities.network.count, 1)
+        XCTAssertEqual(snapshot.metrics.toolCallCount, 1)
+        XCTAssertEqual(snapshot.metrics.llmResponseCount, 1)
+        XCTAssertEqual(snapshot.metrics.inputTokens, 149_605)
+        XCTAssertEqual(snapshot.metrics.outputTokens, 227)
+        XCTAssertEqual(snapshot.capture.state, .degraded)
+        XCTAssertTrue(snapshot.capture.missingCapabilities.contains("completeModelRequestBody"))
+    }
+
+    func testMemoryReminderIsRecordedAsInstructionWithoutInventingMemoryContents() throws {
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project",
+            command: nil, agent: "workbuddy", op: "prompt", severity: "info",
+            ts: Date(timeIntervalSince1970: 1), action: "sent", sessionId: "session",
+            turnId: "turn", userIntent: "Hello",
+            modelPrompt: "<memory_and_skills_reminder>Write to MEMORY.md after substantive work.</memory_and_skills_reminder><user_query>Hello</user_query>",
+            source: "agentsight:workbuddy-local")
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: [prompt]).first)
+        let snapshot = AgentTaskSnapshot.build(session: session, turnID: "turn")
+
+        XCTAssertEqual(snapshot.schemaVersion, 4)
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.assessment, .instructionsOnly)
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.contextSegments.count, 1)
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.contextSegments.first?.kind, .usageInstructions)
+        XCTAssertTrue(snapshot.activities.memory.isEmpty)
+        XCTAssertTrue(snapshot.analysis.memoryEvidence.contentMatches.isEmpty)
+        XCTAssertEqual(snapshot.analysis.contextExposure?.items.first { $0.category == .memory }?.present, false)
+    }
+
+    func testMemoryFileContentMatchCarriesBothEvidenceIDsAndCaptureBoundary() throws {
+        let content = "Persistent user preference: answer in Chinese and cite the source."
+        let change = GuardEvent(kind: "file", ruleId: "memory", path: "/tmp/.workbuddy/memory/MEMORY.md",
+            command: nil, agent: "workbuddy", op: "modify", severity: "info",
+            ts: Date(timeIntervalSince1970: 1), action: "observed", sessionId: "session",
+            turnId: "turn", afterContent: content, source: "memory-live:workbuddy")
+        let request = GuardEvent(kind: "model", ruleId: "network-body", path: "/tmp",
+            command: nil, agent: "workbuddy", op: "network_prompt", severity: "info",
+            ts: Date(timeIntervalSince1970: 2), action: "captured_complete", sessionId: "session",
+            turnId: "turn", modelPrompt: "<memory_context>\(content)</memory_context>",
+            source: "agentsight:workbuddy-network-body")
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: [change, request]).first)
+        let snapshot = AgentTaskSnapshot.build(session: session, turnID: "turn")
+
+        XCTAssertEqual(snapshot.activities.memory.count, 1)
+        XCTAssertEqual(snapshot.activities.memory.first?.operation, .update)
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.assessment, .memoryContentInCompleteRequest)
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.contentMatches.first?.memoryEventID, change.id.uuidString)
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.contentMatches.first?.requestEventID, request.id.uuidString)
+    }
+
+    func testIdentityContextInLocalTraceIsMemoryContentNotJustInstructions() throws {
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp/project",
+            command: nil, agent: "workbuddy", op: "prompt", severity: "info",
+            ts: Date(timeIntervalSince1970: 100), action: "sent", sessionId: "session",
+            turnId: "turn", userIntent: "Create a skill", modelPrompt: "<user_query>Create a skill</user_query>",
+            source: "agentsight:workbuddy-local")
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let traceURL = root.appendingPathComponent("trace_example.json")
+        let body = #"[{"content":"<identity_context>\n## USER.md\nPath: /tmp/.workbuddy/USER.md\n# USER.md - About Your Human\nPrefers Chinese answers.\n</identity_context>"}]"#
+        let trace: [String: Any] = [
+            "trace": ["traceId": "trace_example", "workerPid": 42,
+                      "startedAt": "1970-01-01T00:01:41.000Z"],
+            "spans": [["type": "generation", "spanId": "span_1",
+                       "startedAt": "1970-01-01T00:01:42.000Z", "toolInput": body]]]
+        try JSONSerialization.data(withJSONObject: trace).write(to: traceURL)
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 103)],
+            ofItemAtPath: traceURL.path)
+        let requests = WorkBuddyTraceRequests.load(events: [prompt], root: root)
+        let report = AgentMemoryEvidenceReport.build(events: [prompt], requests: requests)
+
+        XCTAssertEqual(requests.count, 1)
+        XCTAssertEqual(requests.first?.completeness, .partial)
+        XCTAssertEqual(report.assessment, .memoryContentObservedLocally)
+        XCTAssertEqual(report.contextSegments.first?.sourcePaths, ["/tmp/.workbuddy/USER.md"])
+        XCTAssertEqual(report.contextSegments.first { $0.kind == .memoryFileContent }?.sourcePaths,
+            ["/tmp/.workbuddy/USER.md"])
+        XCTAssertTrue(report.contentMatches.isEmpty)
+    }
+
+    func testNetworkSocketInModelTurnIsNotAutomaticallyModelTraffic() {
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "-",
+            command: nil, agent: "workbuddy", op: "prompt", severity: "info",
+            ts: Date(timeIntervalSince1970: 1), action: "sent", sessionId: "s",
+            turnId: "t", source: "agentsight:workbuddy-local")
+        let socket = GuardEvent(kind: "network", ruleId: "socket", path: "-",
+            command: nil, agent: "workbuddy", op: "connect", severity: "info",
+            ts: Date(timeIntervalSince1970: 2), action: "observed", sessionId: "s",
+            turnId: "t", source: "lsof-network", remoteHost: "203.0.113.9", remotePort: 443)
+        let flows = NetworkFlowEvidence.build(events: [prompt, socket])
+        XCTAssertEqual(flows.first?.category, .unknown)
+        XCTAssertEqual(flows.first?.grade, .correlated)
+    }
+
+    func testNetworkFlowsSeparateSSHAndAgentWebAccess() {
+        let at = Date(timeIntervalSince1970: 10)
+        let webCall = GuardEvent(kind: "tool", ruleId: "tool", path: "-",
+            command: "WebFetch(https://example.org)", agent: "workbuddy", op: "call",
+            severity: "info", ts: at, action: "requested", toolCallId: "web-1",
+            toolName: "WebFetch", source: "agentsight:workbuddy-local")
+        let webSocket = GuardEvent(kind: "network", ruleId: "socket", path: "-",
+            command: nil, agent: "workbuddy", op: "connect", severity: "info",
+            ts: at.addingTimeInterval(1), action: "observed", toolCallId: "web-1",
+            source: "lsof-network", remoteHost: "203.0.113.8", remotePort: 443)
+        let sshSocket = GuardEvent(kind: "network", ruleId: "socket", path: "-",
+            command: nil, agent: "workbuddy", op: "connect", severity: "info",
+            ts: at.addingTimeInterval(2), action: "observed", source: "lsof-network",
+            remoteHost: "203.0.113.7", remotePort: 22)
+        let flows = NetworkFlowEvidence.build(events: [webCall, webSocket, sshSocket])
+        XCTAssertTrue(flows.contains { $0.category == .web })
+        XCTAssertTrue(flows.contains { $0.category == .remote })
+    }
+
+    func testOptionalHistoricalWorkBuddyTraceRoundTrip() throws {
+        guard let path = ProcessInfo.processInfo.environment["AGENTREINS_WORKBUDDY_SESSION"],
+              let turnID = ProcessInfo.processInfo.environment["AGENTREINS_WORKBUDDY_TURN"] else {
+            throw XCTSkip("Set WorkBuddy session and turn environment variables for local validation")
+        }
+        let events = WorkBuddySight.parseSession(URL(fileURLWithPath: path), fullHistory: true)
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: events).first)
+        let snapshot = AgentTaskSnapshot.build(session: session, turnID: turnID)
+        let traceRequests = snapshot.outboundRequests.filter { $0.evidenceSource == "workbuddy-local-trace" }
+        let fileSegments = snapshot.analysis.memoryEvidence.contextSegments.filter {
+            $0.kind == .memoryFileContent
+        }
+        XCTAssertGreaterThanOrEqual(traceRequests.count, 20)
+        XCTAssertEqual(snapshot.journey.rounds.count, traceRequests.count)
+        XCTAssertEqual(Set(traceRequests.compactMap(\.traceID)).count, 2)
+        XCTAssertTrue(snapshot.journey.rounds.allSatisfy {
+            $0.requestSections.contains { $0.category == "identity_context" }
+        })
+        XCTAssertEqual(Set(fileSegments.flatMap(\.sourcePaths).map { URL(fileURLWithPath: $0).lastPathComponent }),
+            Set(["SOUL.md", "IDENTITY.md", "USER.md"]))
+        XCTAssertEqual(snapshot.analysis.memoryEvidence.coverage, .partialOrUnverifiedContext)
     }
 
     func testCaptureHealthDetectsSequenceGap() {
@@ -224,16 +464,25 @@ final class AgentEventProtocolTests: XCTestCase {
     }
 
     func testLegacyEvidenceProjectsPromptContextToolAndNetworkWithoutInventingLayerType() {
-        let event = GuardEvent(kind: "network", ruleId: "", path: "-",
-                               command: "curl https://example.com", agent: "codex", op: "connect",
+        let prompt = GuardEvent(kind: "model", ruleId: "", path: "-",
+                               command: nil, agent: "codex", op: "prompt",
                                severity: "info", ts: Date(), action: "seen",
-                               sessionId: "s", turnId: "t", toolCallId: "call-1",
+                               sessionId: "s", turnId: "t",
                                userIntent: "Check the endpoint", modelPrompt: "system + user prompt",
-                               modelResponse: "Endpoint is healthy", toolName: "shell", model: "gpt",
+                               model: "gpt", source: "codex-jsonl")
+        let tool = GuardEvent(kind: "tool", ruleId: "", path: "-",
+                               command: "curl https://example.com", agent: "codex", op: "call",
+                               severity: "info", ts: Date().addingTimeInterval(1), action: "requested",
+                               sessionId: "s", turnId: "t", toolCallId: "call-1",
+                               toolName: "shell", model: "gpt", source: "codex-jsonl")
+        let network = GuardEvent(kind: "network", ruleId: "", path: "-",
+                               command: nil, agent: "codex", op: "connect",
+                               severity: "info", ts: Date().addingTimeInterval(2), action: "seen",
+                               sessionId: "s", turnId: "t", toolCallId: "call-1",
                                inputTokens: 120, outputTokens: 30, source: "codex-jsonl",
                                attributionConfidence: .confirmed, remoteHost: "93.184.216.34",
                                remoteDomain: "example.com")
-        let projected = LegacyGuardEventAdapter.project([event], projectID: "project")
+        let projected = LegacyGuardEventAdapter.project([prompt, tool, network], projectID: "project")
         XCTAssertTrue(projected.contains { if case .userPrompt = $0.payload { return true }; return false })
         let context = projected.compactMap { envelope -> ContextAssemblySnapshot? in
             if case let .contextPrepared(value) = envelope.payload { return value }

@@ -32,9 +32,11 @@ struct AgentEventMetrics: Codable, Equatable, Sendable {
         var toolCallIDs = Set<String>()
         var toolResultIDs = Set<String>()
         var commandIDs = Set<String>()
-        var inputTokens = 0
-        var outputTokens = 0
-        var totalCost = 0.0
+        // A trace can span multiple model steps (for example a tool decision
+        // followed by a final answer). Source event identity is the stable
+        // boundary for a usage record; repeated projections of that same
+        // record take the largest values, while distinct records add up.
+        var usageBySourceEvent: [String: (input: Int, output: Int, cost: Double)] = [:]
 
         for event in events {
             byKind[event.canonicalKind, default: 0] += 1
@@ -42,9 +44,12 @@ struct AgentEventMetrics: Codable, Equatable, Sendable {
             case .contextPrepared:
                 requestKeys.insert(event.correlation?.requestID ?? event.id)
             case let .contextUsage(usage):
-                inputTokens += usage.inputTokens ?? 0
-                outputTokens += usage.outputTokens ?? 0
-                totalCost += usage.cost ?? 0
+                let key = event.correlation?.sourceEventID ?? event.id
+                let previous = usageBySourceEvent[key] ?? (0, 0, 0)
+                usageBySourceEvent[key] = (
+                    max(previous.input, usage.inputTokens ?? 0),
+                    max(previous.output, usage.outputTokens ?? 0),
+                    max(previous.cost, usage.cost ?? 0))
             case let .toolCall(call):
                 toolCallIDs.insert(call.callID)
                 if isCommandTool(call.toolName) {
@@ -56,6 +61,9 @@ struct AgentEventMetrics: Codable, Equatable, Sendable {
                 break
             }
         }
+        let inputTokens = usageBySourceEvent.values.reduce(0) { $0 + $1.input }
+        let outputTokens = usageBySourceEvent.values.reduce(0) { $0 + $1.output }
+        let totalCost = usageBySourceEvent.values.reduce(0) { $0 + $1.cost }
 
         return AgentEventMetrics(
             eventCount: events.count, sessionCount: sessions.count,

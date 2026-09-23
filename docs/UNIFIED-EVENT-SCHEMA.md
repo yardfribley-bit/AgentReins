@@ -43,6 +43,9 @@ confidence, and an explicit capture boundary:
   the request body at the HTTPS flow boundary.
 - `preEncryptionRequestBody`: a native adapter recorded the provider request
   before encryption.
+- `preEncryptionRequestProjection`: a native pre-encryption Model I/O record
+  was reassembled into messages/tools/metadata, but byte-for-byte completeness
+  of the provider body is not established.
 - `agentRecordedContext`: the Agent recorded context associated with a request,
   but the exact wire body is not proven.
 - `contextFragment`: one contributing context layer, not a complete request.
@@ -55,11 +58,46 @@ required before using outbound context as forensic or RAG evidence.
 `AgentTaskSnapshot` is the single platform contract shared by JSON export,
 frontend projections, analysis, and future RAG builders. Its modules are:
 
+Schema version 3 adds WorkBuddy trace request prefixes, structured model
+responses, MCP call projections, and classified network flows. Trace matching
+requires a unique nearby anchor trace at the start of the selected turn;
+continuation traces must share its worker PID and remain within the turn's
+time boundary. Ambiguous anchors are omitted. Trace inputs remain
+`agentRecordedContext` and `partial`,
+not verified HTTPS bodies. Network flows distinguish model endpoints, SSH,
+agent web/API access, infrastructure, and unknown traffic. A socket merely
+occurring in a model turn is not classified as model traffic.
+
+Schema version 4 adds `journey.rounds`: ordered request evidence, parsed
+request sections, a response (with exact trace-ID or temporal correlation
+clearly identified), and subsequent tool calls with outputs, file activity,
+and measured duration. Unassigned responses and tools remain explicit rather
+than being forced into a nearby round. The task reader offers this chain next
+to the raw JSON; captured reasoning is labeled as a recorded summary, not
+assumed to be the model's complete private reasoning.
+
+`analysis.memoryEvidence` separates memory usage
+instructions (`contextSegments.kind=usageInstructions`) from candidate memory
+content blocks, WorkBuddy `identity_context` file contents, and exact matches to
+observed memory file contents. A reminder
+that mentions `MEMORY.md` is preserved as evidence but does not establish a
+memory read, memory change, or transfer of that file's contents. Each exact
+match retains both source event IDs and the request capture boundary. Memory
+file events also project to `activities.memory` when the file path is known.
+
 - `task`: stable task/session/turn identity and time boundary.
 - `capture`: evidence health, sources, gaps, and missing capabilities.
 - `conversation`: user input, model output, reasoning, models, and traces.
-- `outboundRequests`: captured Agent-to-LLM request evidence.
-- `activities`: tools, results, commands, files, network, and memory.
+- `outboundRequests`: captured Agent-to-LLM request evidence, including source
+  locator and completeness boundary.
+- `externalRequests`: content-bearing non-model requests, including WorkBuddy
+  memory recall. A recall HTTP request is not counted as an LLM call merely
+  because it uses the same host as chat completions.
+- `modelResponses`: time-stamped model-to-Agent content with source event ID.
+- `journey`: request-centered multi-round execution chain with unassigned
+  evidence retained.
+- `activities`: tools, MCP calls, results, commands, files, classified network
+  flows, and memory.
 - `analysis`: economics, exposure, relay, egress, memory, code, verification.
 - `metrics`: one agent-neutral definition of task counters.
 - `events` and `sourceEvents`: normalized and source-level evidence.

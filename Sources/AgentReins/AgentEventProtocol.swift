@@ -414,6 +414,11 @@ struct ProjectSupervisorSnapshot: Codable, Sendable {
 /// deliberately conservative: ambiguous legacy fields become `.unknown`
 /// context instead of being mislabeled as system instructions or memory.
 enum LegacyGuardEventAdapter {
+    private static func mcpServerName(_ toolName: String?) -> String? {
+        guard let toolName, toolName.lowercased().hasPrefix("mcp__") else { return nil }
+        let components = toolName.components(separatedBy: "__")
+        return components.count >= 3 && !components[1].isEmpty ? components[1] : nil
+    }
     static func project(_ events: [GuardEvent], projectID: String,
                         startingSequence: UInt64 = 0) -> [AgentEventEnvelope] {
         let ordered = events.sorted { lhs, rhs in
@@ -453,10 +458,12 @@ enum LegacyGuardEventAdapter {
         }
 
         for event in ordered {
-            if let intent = event.userIntent?.trimmingCharacters(in: .whitespacesAndNewlines), !intent.isEmpty {
+            if event.kind == "model", event.op == "prompt",
+               let intent = event.userIntent?.trimmingCharacters(in: .whitespacesAndNewlines), !intent.isEmpty {
                 append(.userPrompt(UserPromptEvidence(rawText: intent, digest: nil, requirementIDs: [])), from: event)
             }
-            if let prompt = event.modelPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty {
+            if ["model", "context"].contains(event.kind),
+               let prompt = event.modelPrompt?.trimmingCharacters(in: .whitespacesAndNewlines), !prompt.isEmpty {
                 let userBytes = event.userIntent?.utf8.count ?? 0
                 let layer = ContextLayerEvidence(
                     id: "\(event.id.uuidString):legacy-context", kind: .unknown,
@@ -470,17 +477,19 @@ enum LegacyGuardEventAdapter {
                     estimatedTokens: event.inputTokens, model: event.model,
                     provider: nil, route: event.remoteDomain ?? event.remoteHost)), from: event)
             }
-            if let response = event.modelResponse?.trimmingCharacters(in: .whitespacesAndNewlines), !response.isEmpty {
+            if event.kind == "model", event.op == "response",
+               let response = event.modelResponse?.trimmingCharacters(in: .whitespacesAndNewlines), !response.isEmpty {
                 append(.modelMessage(ModelMessageEvidence(role: .assistant, text: response, digest: nil,
                                                            model: event.model, provider: nil,
                                                            finishReason: event.action)), from: event)
             }
-            if let callID = event.toolCallId, event.toolName != nil || event.command != nil {
+            if event.kind == "tool", event.op == "call", let callID = event.toolCallId {
                 let state: ToolCallState = event.action.lowercased().contains("fail") ? .failed :
                     (event.endedAt == nil ? .running : .completed)
                 append(.toolCall(ToolCallLifecycleEvidence(
                     callID: callID, toolName: event.toolName ?? "unknown",
-                    serverName: nil, arguments: event.command, argumentsDigest: nil,
+                    serverName: mcpServerName(event.toolName),
+                    arguments: event.command, argumentsDigest: nil,
                     state: state, startedAt: event.startedAt ?? event.ts,
                     completedAt: event.endedAt, exitCode: nil,
                     evidenceIDs: [event.id.uuidString])), from: event)
@@ -489,6 +498,12 @@ enum LegacyGuardEventAdapter {
                         append(.fileActivity(file), from: event)
                     }
                 }
+            }
+            if event.kind == "tool", event.op == "result", let callID = event.toolCallId {
+                let output = event.modelResponse
+                append(.toolOutput(ToolOutputEvidence(
+                    callID: callID, output: output, outputDigest: nil,
+                    byteCount: output?.utf8.count ?? 0, truncated: false)), from: event)
             }
             if event.kind == "file" || event.relatedPath != nil || event.fileDiff != nil {
                 let operation = fileOperation(event.op)
@@ -500,6 +515,24 @@ enum LegacyGuardEventAdapter {
                         afterDigest: event.afterContent.map { SessionCommitAttributor.digest(Data($0.utf8)) },
                         patch: event.fileDiff, toolCallID: event.toolCallId,
                         attribution: confidence(for: event))), from: event)
+                    if event.kind == "file", AgentMemoryEvidenceReport.isKnownMemoryStore(target) {
+                        let memoryOperation: MemoryActivityOperation
+                        switch operation {
+                        case .read: memoryOperation = .retrieve
+                        case .create: memoryOperation = .create
+                        case .delete: memoryOperation = .delete
+                        case .modify, .rename: memoryOperation = .update
+                        }
+                        let scope: ProjectMemoryScope = target.hasPrefix(FileManager.default.homeDirectoryForCurrentUser
+                            .appendingPathComponent(".workbuddy").path + "/") ? .user : .project
+                        append(.memoryActivity(MemoryActivityEvidence(
+                            operation: memoryOperation, scope: scope, key: nil,
+                            storageLocator: target,
+                            beforeDigest: event.beforeContent.map { SessionCommitAttributor.digest(Data($0.utf8)) },
+                            afterDigest: event.afterContent.map { SessionCommitAttributor.digest(Data($0.utf8)) },
+                            summary: "Observed \(event.op) of Agent memory file",
+                            toolCallID: event.toolCallId)), from: event)
+                    }
                 }
             }
             if event.kind == "network", let destination = event.remoteDomain ?? event.remoteHost {

@@ -83,6 +83,28 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         XCTAssertEqual(WorkBuddyNetworkEvidence.project(record).first?.remoteHost, "203.0.113.20")
     }
 
+    func testMemoryRecallIsExternalRequestNotModelRequest() throws {
+        let body = Data(#"{"query":"remember the project"}"#.utf8)
+        let record = WorkBuddyNetworkCaptureRecord(
+            observedAt: Date(), host: "copilot.tencent.com",
+            path: "/agenttool/v1/intent/recall", method: "POST",
+            httpVersion: "HTTP/2", contentEncoding: nil,
+            declaredContentLength: body.count, capturedWireBodyBytes: body.count,
+            requestBodyBase64: body.base64EncodedString(), requestSHA256: sha256(body),
+            responseStatus: 200, responseComplete: true,
+            responseBodyBase64: Data(#"{"memories":[]}"#.utf8).base64EncodedString())
+        let events = WorkBuddyNetworkEvidence.project(record)
+        let session = try XCTUnwrap(AgentSessionSnapshot.build(from: events).first)
+        let snapshot = AgentTaskSnapshot.build(session: session, turnID: events[0].turnId)
+
+        XCTAssertEqual(events[0].kind, "network")
+        XCTAssertEqual(events[0].op, "memory_recall")
+        XCTAssertTrue(snapshot.outboundRequests.isEmpty)
+        XCTAssertEqual(snapshot.externalRequests.first?.purpose, "agentMemoryRecall")
+        XCTAssertEqual(snapshot.externalRequests.first?.requestPath, "/agenttool/v1/intent/recall")
+        XCTAssertEqual(snapshot.externalRequests.first?.responseBody, #"{"memories":[]}"#)
+    }
+
     @MainActor
     func testUniqueUserTextCorrelatesNetworkBodyToNativeTurn() throws {
         let resolver = EventAttributionResolver(window: 45)

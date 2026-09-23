@@ -52,6 +52,7 @@ enum WorkBuddyNetworkEvidence {
               SHA256.hash(data: requestData).hex == record.requestSHA256.lowercased() else { return [] }
 
         let requestComplete = record.declaredContentLength.map { $0 == record.capturedWireBodyBytes } ?? false
+        let isModelRoute = record.path != "/agenttool/v1/intent/recall"
         let requestObject = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any]
         let intent = userIntent(in: requestObject)
         let model = requestObject?["model"] as? String
@@ -59,6 +60,7 @@ enum WorkBuddyNetworkEvidence {
         let session = "workbuddy-network:\(identity)"
         let metadata = json([
             "capture": "complete HTTPS request body",
+            "requestPath": record.path,
             "httpVersion": record.httpVersion,
             "contentEncoding": record.contentEncoding ?? "identity",
             "declaredContentLength": record.declaredContentLength ?? -1,
@@ -77,11 +79,14 @@ enum WorkBuddyNetworkEvidence {
             ? "complete HTTPS request body; declared and captured lengths match"
             : "complete HTTPS request body + same-flow domain/IP/socket endpoint"
         var events = [GuardEvent(
-            id: uuid("\(identity):request"), kind: "model", ruleId: "workbuddy_network_request_body",
+            id: uuid("\(identity):request"), kind: isModelRoute ? "model" : "network",
+            ruleId: isModelRoute ? "workbuddy_network_request_body" : "workbuddy_memory_recall_request",
             path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: metadata,
-            agent: "workbuddy", op: "network_prompt", severity: "info", ts: record.observedAt,
+            agent: "workbuddy", op: isModelRoute ? "network_prompt" : "memory_recall",
+            severity: "info", ts: record.observedAt,
             action: requestComplete ? "captured_complete" : "captured_partial", sessionId: session,
-            turnId: identity, userIntent: intent, modelPrompt: String(decoding: requestData, as: UTF8.self),
+            traceId: "workbuddy-http:\(identity)", turnId: identity,
+            userIntent: intent, modelPrompt: String(decoding: requestData, as: UTF8.self),
             model: model, source: "agentsight:workbuddy-network-body",
             attributionConfidence: .confirmed,
             attributionMethod: requestComplete ? routeMethod
@@ -92,12 +97,17 @@ enum WorkBuddyNetworkEvidence {
         if let encoded = record.responseBodyBase64, let responseData = Data(base64Encoded: encoded) {
             let parsed = parseResponse(responseData)
             events.append(GuardEvent(
-                id: uuid("\(identity):response"), kind: "model", ruleId: "workbuddy_network_response_body",
+                id: uuid("\(identity):response"), kind: isModelRoute ? "model" : "network",
+                ruleId: isModelRoute ? "workbuddy_network_response_body" : "workbuddy_memory_recall_response",
                 path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: nil,
-                agent: "workbuddy", op: "network_response", severity: "info", ts: record.observedAt,
+                agent: "workbuddy", op: isModelRoute ? "network_response" : "memory_recall_response",
+                severity: "info", ts: record.observedAt,
                 action: record.responseComplete ? "received_complete" : "received_partial",
-                sessionId: session, turnId: identity, userIntent: intent,
-                modelReasoning: parsed.reasoning, modelResponse: parsed.text, model: parsed.model ?? model,
+                sessionId: session, traceId: "workbuddy-http:\(identity)",
+                turnId: identity, userIntent: intent,
+                modelReasoning: isModelRoute ? parsed.reasoning : nil,
+                modelResponse: isModelRoute ? parsed.text : String(decoding: responseData, as: UTF8.self),
+                model: isModelRoute ? parsed.model ?? model : nil,
                 inputTokens: parsed.inputTokens, outputTokens: parsed.outputTokens,
                 cachedTokens: parsed.cachedTokens, reasoningTokens: parsed.reasoningTokens,
                 source: "agentsight:workbuddy-network-body", attributionConfidence: .confirmed,

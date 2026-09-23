@@ -57,11 +57,13 @@ struct AgentOperationsCenterView: View {
     @State private var egressReaderMode: EgressReaderMode = .organized
     @State private var egressReaderPage = 0
     @State private var selectedTaskJSON: TaskJSONDocument?
+    @State private var taskReaderShowsJSON = false
 
     private struct TaskJSONDocument: Identifiable {
         let id = UUID()
         let title: String
         let json: String
+        let snapshot: AgentTaskSnapshot
     }
 
     private enum EgressReaderMode: String, CaseIterable {
@@ -2390,7 +2392,8 @@ struct AgentOperationsCenterView: View {
             let export = AgentTaskJSONExport.build(session: session, turnID: turnID)
             selectedTaskJSON = TaskJSONDocument(
                 title: "\(session.agentDisplayName) · \(turnID ?? session.id)",
-                json: try export.prettyJSON())
+                json: try export.prettyJSON(), snapshot: export)
+            taskReaderShowsJSON = false
         } catch {
             projectionError = "任务 JSON 生成失败：\(error.localizedDescription)"
         }
@@ -2406,16 +2409,26 @@ struct AgentOperationsCenterView: View {
                     Text(document.title).font(.system(size: 17, weight: .bold))
                 }
                 Spacer()
+                Picker("视图", selection: $taskReaderShowsJSON) {
+                    Text("执行链路").tag(false)
+                    Text("原始 JSON").tag(true)
+                }.pickerStyle(.segmented).frame(width: 190)
                 Button(language.language == .english ? "Copy JSON" : "复制 JSON") {
                     NSPasteboard.general.clearContents()
                     NSPasteboard.general.setString(document.json, forType: .string)
                 }.buttonStyle(.borderedProminent).tint(cyan)
             }
-            TextEditor(text: .constant(document.json))
-                .font(.system(size: 11, design: .monospaced))
-                .scrollContentBackground(.hidden)
-                .padding(8).background(canvas, in: RoundedRectangle(cornerRadius: 8))
-                .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
+            if taskReaderShowsJSON {
+                TextEditor(text: .constant(document.json))
+                    .font(.system(size: 11, design: .monospaced))
+                    .scrollContentBackground(.hidden)
+                    .padding(8).background(canvas, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
+            } else {
+                AgentTaskJourneyView(snapshot: document.snapshot)
+                    .background(canvas, in: RoundedRectangle(cornerRadius: 8))
+                    .overlay(RoundedRectangle(cornerRadius: 8).stroke(border))
+            }
         }
         .padding(18).frame(minWidth: 900, minHeight: 680)
         .background(panel).environment(\.colorScheme, .dark)

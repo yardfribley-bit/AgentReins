@@ -1,6 +1,6 @@
 import Foundation
 
-enum NetworkTrafficCategory: String, CaseIterable, Sendable {
+enum NetworkTrafficCategory: String, CaseIterable, Codable, Sendable {
     case model = "MODEL TRAFFIC"
     case web = "AGENT WEB & APIS"
     case remote = "REMOTE OPERATIONS"
@@ -8,7 +8,7 @@ enum NetworkTrafficCategory: String, CaseIterable, Sendable {
     case unknown = "UNKNOWN / NEEDS ATTRIBUTION"
 }
 
-enum NetworkEvidenceGrade: String, Sendable {
+enum NetworkEvidenceGrade: String, Codable, Sendable {
     case observed = "Observed"
     case correlated = "Correlated"
     case inferred = "Inferred"
@@ -18,7 +18,7 @@ enum NetworkEvidenceGrade: String, Sendable {
 /// A user-facing projection of raw network evidence. It preserves the observed
 /// endpoint and keeps purpose/turn attribution separate so a socket is never
 /// presented as proof of encrypted payload contents.
-struct NetworkFlowEvidence: Identifiable, Sendable {
+struct NetworkFlowEvidence: Identifiable, Codable, Sendable {
     let id: String
     let category: NetworkTrafficCategory
     let domain: String?
@@ -36,10 +36,6 @@ struct NetworkFlowEvidence: Identifiable, Sendable {
     var destination: String { domain ?? ip ?? "Unknown destination" }
 
     static func build(events: [GuardEvent]) -> [NetworkFlowEvidence] {
-        let modelTurns = Set(events.compactMap { event -> String? in
-            guard event.kind == "model", let session = event.sessionId, let turn = event.turnId else { return nil }
-            return "\(session)|\(turn)"
-        })
         let webToolCalls = Set(events.compactMap { event -> String? in
             guard event.kind == "tool", let call = event.toolCallId else { return nil }
             let value = "\(event.toolName ?? "") \(event.command ?? "")".lowercased()
@@ -49,13 +45,13 @@ struct NetworkFlowEvidence: Identifiable, Sendable {
             event.kind == "network" || event.remoteDomain != nil || event.remoteHost != nil
         }
         let grouped = Dictionary(grouping: network) { event in
-            let category = category(for: event, modelTurns: modelTurns, webToolCalls: webToolCalls)
+            let category = category(for: event, webToolCalls: webToolCalls)
             let destination = (event.remoteDomain ?? event.remoteHost ?? "unknown").lowercased()
             return "\(category.rawValue)|\(destination)|\(event.remotePort ?? 0)|\(event.agent ?? "unknown")"
         }
         return grouped.compactMap { key, rows in
             guard let latest = rows.max(by: { $0.ts < $1.ts }) else { return nil }
-            let category = category(for: latest, modelTurns: modelTurns, webToolCalls: webToolCalls)
+            let category = category(for: latest, webToolCalls: webToolCalls)
             let domain = latest.remoteDomain.flatMap { IPGeolocationStore.isPublicIPAddress($0) ? nil : $0 }
             let rawHost = latest.remoteHost
             let ip = rawHost.flatMap { IPGeolocationStore.isPublicIPAddress($0) ? $0 : nil }
@@ -74,9 +70,12 @@ struct NetworkFlowEvidence: Identifiable, Sendable {
         }
     }
 
-    private static func category(for event: GuardEvent, modelTurns: Set<String>,
+    private static func category(for event: GuardEvent,
                                  webToolCalls: Set<String>) -> NetworkTrafficCategory {
         let command = event.command?.lowercased() ?? ""
+        if event.op == "memory_recall" || event.op == "memory_recall_response" {
+            return .infrastructure
+        }
         if event.remotePort == 22 || command.range(of: #"\b(?:ssh|scp|sftp|rsync)\b"#, options: .regularExpression) != nil {
             return .remote
         }
@@ -85,10 +84,8 @@ struct NetworkFlowEvidence: Identifiable, Sendable {
         if event.kind == "model" || assessment.kind == .modelProvider || assessment.kind == .modelRelay {
             return .model
         }
-        if let session = event.sessionId, let turn = event.turnId,
-           modelTurns.contains("\(session)|\(turn)") {
-            return .model
-        }
+        // Sharing a turn with an LLM request is not enough to identify a
+        // socket as model traffic; tools and telemetry run in that same turn.
         if let call = event.toolCallId, webToolCalls.contains(call) { return .web }
         if assessment.kind == .developerService || assessment.kind == .externalContent {
             return .web
@@ -124,6 +121,9 @@ struct NetworkFlowEvidence: Identifiable, Sendable {
             if event.command?.lowercased().contains("git ") == true { return "Source control access · Git" }
             return "External content or developer service"
         case .infrastructure:
+            if event.op == "memory_recall" || event.op == "memory_recall_response" {
+                return "Agent memory recall service"
+            }
             return "Agent support, telemetry, or local service"
         case .unknown:
             return "Connection observed; business purpose not proven"

@@ -72,8 +72,8 @@ struct ContextExposureReport: Codable, Equatable, Sendable {
             (.environment, lower.contains("<user_info") || lower.contains("os version:"),
              matches(["OS version", "Shell", "IDE theme", "Workspace folder"], in: lower)),
             (.identity, !paths.isEmpty || lower.contains("<identity_context"), paths),
-            (.memory, lower.contains("memory") || lower.contains("user.md"),
-             matches(["memory reminder", "USER.md"], in: lower)),
+            (.memory, AgentMemoryEvidenceReport.containsMemoryContentCandidate(joined),
+             matches(["<memory>", "<memory_context>"], in: lower)),
             (.skills, lower.contains("skill") || events.contains { $0.toolName?.lowercased().contains("skill") == true },
              matches(["skills", "SKILL.md", "agent policy"], in: lower)),
             (.project, lower.contains("<project_context") || lower.contains("<project_layout")
