@@ -3,32 +3,17 @@ import SwiftUI
 /// Single-purpose shell for the live situation-awareness experience. Legacy
 /// dashboards are removed so unrelated state cannot invalidate the live graph.
 struct ContentView: View {
-    private enum Page: String, CaseIterable { case dashboard = "Dashboard", operations = "Operations" }
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
     @EnvironmentObject private var agentDiscovery: AgentDiscoveryManager
     @StateObject private var liveDashboard = LiveDashboardViewModel()
 
-    @State private var selectedSession: AgentSessionSnapshot?
-    @State private var selectedIncident: SecurityIncident?
-    @State private var page: Page = .dashboard
     private let healthTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
 
     private var observing: Bool { fileGuard.running || processGuard.running }
     var body: some View {
-        VStack(spacing: 0) {
-            HStack {
-                Picker("页面", selection: $page) {
-                    ForEach(Page.allCases, id: \.self) { Text($0.rawValue).tag($0) }
-                }.pickerStyle(.segmented).frame(width: 260)
-                Spacer()
-            }
-            .padding(.horizontal, 20).padding(.vertical, 10)
-            .background(.bar)
-            Divider()
-            pageContent
-        }
+        TaskWorkspaceView(sessions: liveDashboard.snapshot.sessions, observing: observing)
         .frame(minWidth: 1100, minHeight: 720)
         .task {
             refreshLiveDashboard()
@@ -40,38 +25,6 @@ struct ContentView: View {
         .onReceive(processGuard.$processInventory) { liveDashboard.updateProcesses($0) }
         .onReceive(agentDiscovery.$agents) { liveDashboard.updateAgents($0) }
         .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true) }
-        .sheet(item: $selectedSession) { SessionEvidenceSheet(session: $0) }
-        .sheet(item: $selectedIncident) {
-            ForensicCaseWorkspaceView(incident: $0, events: liveDashboard.snapshot.events,
-                                      health: liveDashboard.snapshot.health)
-        }
-    }
-
-    @ViewBuilder private var pageContent: some View {
-        switch page {
-        case .dashboard:
-            UnifiedMetricsDashboardView(
-                dataRevision: liveDashboard.snapshot.evidenceRevision,
-                sessions: liveDashboard.snapshot.sessions,
-                events: liveDashboard.snapshot.events,
-                incidents: liveDashboard.snapshot.incidents,
-                health: liveDashboard.snapshot.health,
-                observing: observing,
-                discoveredAgents: liveDashboard.snapshot.discoveredAgents,
-                onSession: { selectedSession = $0 })
-        case .operations:
-            AgentOperationsCenterView(
-                dataRevision: liveDashboard.snapshot.evidenceRevision,
-                sessions: liveDashboard.snapshot.sessions,
-                events: liveDashboard.snapshot.events,
-                incidents: liveDashboard.snapshot.incidents,
-                health: liveDashboard.snapshot.health,
-                observing: observing,
-                processInventory: liveDashboard.snapshot.processInventory,
-                discoveredAgents: liveDashboard.snapshot.discoveredAgents,
-                onSession: { selectedSession = $0 },
-                onIncident: { selectedIncident = $0 })
-        }
     }
 
     private func refreshLiveDashboard() {

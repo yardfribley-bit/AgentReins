@@ -29,9 +29,8 @@ struct AgentTaskJourneyView: View {
                                         Text(round.requestedAt, style: .time)
                                             .font(.caption.monospacedDigit())
                                     }
-                                    Text(round.response == nil ? "等待或缺少模型响应" :
-                                            "模型响应 · \(round.toolSteps.count) 次工具调用")
-                                        .font(.caption).foregroundStyle(.secondary)
+                                    Text(roundSummary(round))
+                                        .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                                     Text(round.model ?? round.response?.model ?? "模型未记录")
                                         .font(.caption).foregroundStyle(.secondary)
                                 }
@@ -167,9 +166,19 @@ struct AgentTaskJourneyView: View {
     }
 
     private func toolDisclosure(_ step: AgentTaskJourney.ToolStep) -> some View {
-        DisclosureGroup("工具 · \(step.call.toolName) · \(step.call.state.rawValue)" +
-            step.durationMS.map { String(format: " · %.0f ms", $0) }.orEmpty) {
-            VStack(alignment: .leading, spacing: 8) {
+        let narrative = HumanActionNarrative.build(step)
+        return VStack(alignment: .leading, spacing: 7) {
+            Text(narrative.headline).font(.system(size: 14, weight: .semibold))
+            Text(narrative.explanation).font(.system(size: 13))
+            Text(narrative.outcome)
+                .font(.caption).foregroundStyle(step.call.state == .failed ? Color.orange : Color.secondary)
+            if let duration = narrative.duration {
+                Text("耗时 \(duration)").font(.caption.monospacedDigit()).foregroundStyle(.secondary)
+            }
+            DisclosureGroup("查看命令、参数与原始结果") {
+                VStack(alignment: .leading, spacing: 8) {
+                Text("原始工具：\(step.call.toolName)")
+                    .font(.caption.monospaced()).foregroundStyle(.secondary)
                 Text("Call ID: \(step.call.callID)")
                     .font(.caption.monospaced()).foregroundStyle(.secondary)
                 if let server = step.call.serverName {
@@ -189,9 +198,24 @@ struct AgentTaskJourneyView: View {
                         .font(.caption)
                     if let patch = file.patch { evidenceText(patch, height: 180) }
                 }
+                }
+                .padding(.leading, 10)
             }
-            .padding(.leading, 12)
         }
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .background(Color.secondary.opacity(0.08), in: RoundedRectangle(cornerRadius: 9))
+    }
+
+    private func roundSummary(_ round: AgentTaskJourney.Round) -> String {
+        if let step = round.toolSteps.first {
+            let first = HumanActionNarrative.build(step).headline
+            return round.toolSteps.count == 1 ? first : "\(first) · 另有 \(round.toolSteps.count - 1) 步"
+        }
+        if let response = round.response {
+            return String(response.content.replacingOccurrences(of: "\n", with: " ").prefix(80))
+        }
+        return "等待响应或响应证据未采集"
     }
 
     private func evidenceText(_ text: String, height: CGFloat) -> some View {
@@ -203,7 +227,7 @@ struct AgentTaskJourneyView: View {
 
     private var summary: String {
         let duration = snapshot.task.startedAt.flatMap { start in
-            snapshot.task.endedAt.map { String(format: " · 任务耗时 %.1f 秒", max(0, $0.timeIntervalSince(start))) }
+            snapshot.task.endedAt.map { String(format: " · 已观测跨度 %.1f 秒", max(0, $0.timeIntervalSince(start))) }
         } ?? ""
         return "\(snapshot.journey.rounds.count) 轮模型请求 · \(snapshot.activities.tools.count) 次工具调用\(duration)。按采集证据排列；时间关联不等于已证明因果关系。"
     }

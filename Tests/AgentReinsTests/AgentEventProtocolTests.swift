@@ -449,6 +449,26 @@ final class AgentEventProtocolTests: XCTestCase {
         XCTAssertEqual(try database.nextAgentEventSequence(sessionID: "session"), 2)
     }
 
+    func testRecentTaskIndexUsesCapturedUserTitle() throws {
+        let url = FileManager.default.temporaryDirectory
+            .appendingPathComponent("agentreins-task-index-\(UUID().uuidString).sqlite3")
+        defer {
+            try? FileManager.default.removeItem(at: url)
+            try? FileManager.default.removeItem(atPath: url.path + "-wal")
+            try? FileManager.default.removeItem(atPath: url.path + "-shm")
+        }
+        let database = try EvidenceDatabase(url: url)
+        try database.appendAgentEvents([
+            event(sequence: 1, payload: .userPrompt(UserPromptEvidence(
+                rawText: "编写 hello.cpp", digest: nil, requirementIDs: []))),
+            event(sequence: 2, payload: .turnState(.executingTool))
+        ])
+        let tasks = try database.recentTasks(limit: 10)
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks.first?.title, "编写 hello.cpp")
+        XCTAssertEqual(tasks.first?.eventCount, 2)
+    }
+
     func testLegacyProjectionContinuesPersistedSessionSequence() {
         let first = GuardEvent(kind: "model", ruleId: "", path: "/tmp/project",
                                command: nil, agent: "codex", op: "prompt", severity: "info",

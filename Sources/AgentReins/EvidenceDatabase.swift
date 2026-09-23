@@ -170,6 +170,7 @@ final class EvidenceDatabase: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS agent_event_project_time ON agent_event_stream(project_id,occurred_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_session_sequence ON agent_event_stream(session_id,sequence)")
+        try execute("CREATE INDEX IF NOT EXISTS agent_event_task_sequence ON agent_event_stream(session_id,turn_id,sequence)")
         try execute("""
             CREATE TABLE IF NOT EXISTS code_change_index (
               change_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
@@ -454,6 +455,46 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
         }
         return events
+    }
+
+    func recentTasks(limit: Int) throws -> [StoredTaskSummary] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+          WITH recent AS (
+            SELECT session_id, turn_id, MAX(agent_id) AS agent_id,
+                   MIN(occurred_at) AS started_at, MAX(occurred_at) AS last_at,
+                   COUNT(*) AS event_count
+            FROM agent_event_stream WHERE turn_id IS NOT NULL
+            GROUP BY session_id, turn_id
+            ORDER BY last_at DESC LIMIT ?
+          )
+          SELECT recent.session_id, recent.turn_id, recent.agent_id,
+                 recent.started_at, recent.last_at, recent.event_count,
+                 (SELECT json_extract(CAST(prompt.payload AS TEXT), '$.payload.userPrompt._0.rawText')
+                  FROM agent_event_stream AS prompt
+                  WHERE prompt.session_id = recent.session_id AND prompt.turn_id = recent.turn_id
+                    AND json_type(CAST(prompt.payload AS TEXT), '$.payload.userPrompt') IS NOT NULL
+                  ORDER BY prompt.sequence ASC LIMIT 1)
+          FROM recent ORDER BY recent.last_at DESC
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare recent tasks")
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(max(1, min(limit, 200))))
+        var result: [StoredTaskSummary] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let sessionID = text(statement, 0),
+                  let turnID = text(statement, 1),
+                  let agentID = text(statement, 2) else { continue }
+            result.append(StoredTaskSummary(sessionID: sessionID, turnID: turnID,
+                agentID: agentID, title: text(statement, 6),
+                startedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 3)),
+                lastObservedAt: Date(timeIntervalSince1970: sqlite3_column_double(statement, 4)),
+                eventCount: Int(sqlite3_column_int64(statement, 5))))
+        }
+        return result
     }
 
     func nextAgentEventSequence(sessionID: String) throws -> UInt64 {

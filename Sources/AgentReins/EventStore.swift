@@ -142,6 +142,42 @@ final class EventStore: ObservableObject {
         }
     }
 
+    /// Build the full task off the UI thread. Long tasks may have thousands
+    /// of events and request bodies, so opening or refreshing one must not
+    /// block interaction with the live overview.
+    func loadTask(sessionID: String, turnID: String?,
+                  completion: @escaping (Result<AgentTaskSnapshot, Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable))
+            return
+        }
+        persistenceQueue.async {
+            let result: Result<AgentTaskSnapshot, Error>
+            do {
+                let sessions = AgentSessionSnapshot.build(from: try database.events(sessionId: sessionID))
+                guard let session = sessions.first(where: { $0.id == sessionID }) else {
+                    throw EventStoreReadError.sessionNotFound(sessionID)
+                }
+                result = .success(AgentTaskSnapshot.build(session: session, turnID: turnID))
+            } catch {
+                result = .failure(error)
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func loadRecentTasks(limit: Int = 60,
+                         completion: @escaping (Result<[StoredTaskSummary], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable))
+            return
+        }
+        persistenceQueue.async {
+            let result = Result { try database.recentTasks(limit: limit) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
     func loadHistoricalSecurityEvidence(limit: Int = 1_500,
                                         completion: @escaping (Result<[GuardEvent], Error>) -> Void) {
         guard let database else {
