@@ -4,6 +4,15 @@ import XCTest
 @testable import AgentReins
 
 final class WorkBuddyNetworkEvidenceTests: XCTestCase {
+    func testDefaultProxyArgumentsAreLoopbackOnlyAndUseBundledAddon() throws {
+        let addon = URL(fileURLWithPath: "/Applications/AgentReins.app/Contents/Resources/workbuddy_network_capture.py")
+        let arguments = WorkBuddyNetworkCapture.proxyArguments(addon: addon)
+
+        XCTAssertTrue(arguments.contains("127.0.0.1"))
+        XCTAssertTrue(arguments.contains(String(WorkBuddyNetworkCapture.proxyPort)))
+        XCTAssertTrue(arguments.contains(addon.path))
+    }
+
     func testProjectsCompleteRequestAndStreamingReasoningWithoutTruncation() throws {
         let longContext = String(repeating: "project-context-", count: 8_000)
         let request = try JSONSerialization.data(withJSONObject: [
@@ -31,6 +40,12 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         XCTAssertEqual(events[1].modelResponse, "Done")
         XCTAssertEqual(events[1].inputTokens, 6_225)
         XCTAssertEqual(events[1].reasoningTokens, 52)
+        XCTAssertEqual(events[0].remoteDomain, "copilot.tencent.com")
+        XCTAssertEqual(events[0].remoteHost, "203.0.113.19")
+        XCTAssertEqual(events[0].remotePort, 443)
+        XCTAssertEqual(events[0].localAddress, "127.0.0.1:53124")
+        XCTAssertTrue(events[0].attributionMethod?.contains("same-flow") == true)
+        XCTAssertTrue(events[0].command?.contains(events[0].remoteHost ?? "missing") == true)
 
         let session = try XCTUnwrap(AgentSessionSnapshot.build(from: events).first)
         let audit = try XCTUnwrap(AgentEgressAudit.build(session: session).first)
@@ -53,6 +68,19 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
             responseStatus: 200, responseComplete: true, responseBodyBase64: nil)
 
         XCTAssertTrue(WorkBuddyNetworkEvidence.project(record).isEmpty)
+    }
+
+    func testAcceptsCurrentWorkBuddyV1ChatEndpoint() throws {
+        let request = Data(#"{"messages":[{"role":"user","content":"hello"}]}"#.utf8)
+        let record = WorkBuddyNetworkCaptureRecord(
+            observedAt: Date(), host: "copilot.tencent.com", path: "/v1/chat/completions",
+            method: "POST", httpVersion: "HTTP/2", contentEncoding: nil,
+            declaredContentLength: request.count, capturedWireBodyBytes: request.count,
+            requestBodyBase64: request.base64EncodedString(), requestSHA256: sha256(request),
+            responseStatus: 200, responseComplete: true, responseBodyBase64: nil,
+            clientAddress: "127.0.0.1:53001", remoteHost: "203.0.113.20", remotePort: 443)
+
+        XCTAssertEqual(WorkBuddyNetworkEvidence.project(record).first?.remoteHost, "203.0.113.20")
     }
 
     @MainActor
@@ -104,7 +132,8 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
             declaredContentLength: request.count, capturedWireBodyBytes: request.count,
             requestBodyBase64: request.base64EncodedString(), requestSHA256: sha256(request),
             responseStatus: 200, responseComplete: true,
-            responseBodyBase64: response.base64EncodedString())
+            responseBodyBase64: response.base64EncodedString(),
+            clientAddress: "127.0.0.1:53124", remoteHost: "203.0.113.19", remotePort: 443)
     }
 
     private func sha256(_ data: Data) -> String {

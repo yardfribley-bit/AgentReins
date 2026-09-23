@@ -15,12 +15,39 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
     let responseStatus: Int?
     let responseComplete: Bool
     let responseBodyBase64: String?
+    let clientAddress: String?
+    let remoteHost: String?
+    let remotePort: Int?
+
+    init(observedAt: Date, host: String, path: String, method: String, httpVersion: String,
+         contentEncoding: String?, declaredContentLength: Int?, capturedWireBodyBytes: Int,
+         requestBodyBase64: String, requestSHA256: String, responseStatus: Int?,
+         responseComplete: Bool, responseBodyBase64: String?, clientAddress: String? = nil,
+         remoteHost: String? = nil, remotePort: Int? = nil) {
+        self.observedAt = observedAt
+        self.host = host
+        self.path = path
+        self.method = method
+        self.httpVersion = httpVersion
+        self.contentEncoding = contentEncoding
+        self.declaredContentLength = declaredContentLength
+        self.capturedWireBodyBytes = capturedWireBodyBytes
+        self.requestBodyBase64 = requestBodyBase64
+        self.requestSHA256 = requestSHA256
+        self.responseStatus = responseStatus
+        self.responseComplete = responseComplete
+        self.responseBodyBase64 = responseBodyBase64
+        self.clientAddress = clientAddress
+        self.remoteHost = remoteHost
+        self.remotePort = remotePort
+    }
 }
 
 enum WorkBuddyNetworkEvidence {
     static func project(_ record: WorkBuddyNetworkCaptureRecord) -> [GuardEvent] {
         guard record.host.lowercased() == "copilot.tencent.com",
-              ["/v2/chat/completions", "/agenttool/v1/intent/recall"].contains(record.path),
+              ["/v1/chat/completions", "/v2/chat/completions", "/v3/chat/completions",
+               "/agenttool/v1/intent/recall"].contains(record.path),
               let requestData = Data(base64Encoded: record.requestBodyBase64),
               SHA256.hash(data: requestData).hex == record.requestSHA256.lowercased() else { return [] }
 
@@ -38,8 +65,17 @@ enum WorkBuddyNetworkEvidence {
             "capturedWireBodyBytes": record.capturedWireBodyBytes,
             "decodedBodyBytes": requestData.count,
             "requestSHA256": record.requestSHA256,
-            "protocolComplete": requestComplete
+            "protocolComplete": requestComplete,
+            "clientAddress": record.clientAddress ?? "not captured",
+            "remoteHost": record.remoteHost ?? "not captured",
+            "remotePort": record.remotePort ?? 443,
+            "routeCorrelation": record.remoteHost == nil
+                ? "domain captured; socket endpoint unavailable"
+                : "request body and socket endpoint observed in the same HTTPS flow"
         ])
+        let routeMethod = record.remoteHost == nil
+            ? "complete HTTPS request body; declared and captured lengths match"
+            : "complete HTTPS request body + same-flow domain/IP/socket endpoint"
         var events = [GuardEvent(
             id: uuid("\(identity):request"), kind: "model", ruleId: "workbuddy_network_request_body",
             path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: metadata,
@@ -48,9 +84,10 @@ enum WorkBuddyNetworkEvidence {
             turnId: identity, userIntent: intent, modelPrompt: String(decoding: requestData, as: UTF8.self),
             model: model, source: "agentsight:workbuddy-network-body",
             attributionConfidence: .confirmed,
-            attributionMethod: requestComplete ? "complete HTTPS request body; declared and captured lengths match"
+            attributionMethod: requestComplete ? routeMethod
                                                : "HTTPS request body captured without a matching declared length",
-            remotePort: 443, remoteDomain: record.host)]
+            localAddress: record.clientAddress, remoteHost: record.remoteHost,
+            remotePort: record.remotePort ?? 443, remoteDomain: record.host)]
 
         if let encoded = record.responseBodyBase64, let responseData = Data(base64Encoded: encoded) {
             let parsed = parseResponse(responseData)
@@ -66,7 +103,8 @@ enum WorkBuddyNetworkEvidence {
                 source: "agentsight:workbuddy-network-body", attributionConfidence: .confirmed,
                 attributionMethod: record.responseComplete ? "complete HTTPS response boundary verified"
                                                            : "HTTPS response body captured without a complete boundary",
-                remotePort: 443, remoteDomain: record.host))
+                localAddress: record.clientAddress, remoteHost: record.remoteHost,
+                remotePort: record.remotePort ?? 443, remoteDomain: record.host))
         }
         return events
     }

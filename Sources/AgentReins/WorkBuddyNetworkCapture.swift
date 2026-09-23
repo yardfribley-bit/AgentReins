@@ -1,17 +1,19 @@
 import Foundation
 import SwiftUI
 
-/// Consumes complete WorkBuddy HTTPS request/response records produced by the
-/// local audit proxy. The proxy is opt-in; this collector never changes the
-/// system proxy or trust store.
+/// Starts the bundled WorkBuddy audit proxy by default and consumes its complete
+/// request/response records. It never changes the system proxy or trust store;
+/// an already-running WorkBuddy process still needs a controlled restart to use it.
 @MainActor
 final class WorkBuddyNetworkCapture: ObservableObject {
     @Published private(set) var connected = false
+    @Published private(set) var proxyRunning = false
     @Published private(set) var lastUpdate: Date?
-    @Published private(set) var detail = "Waiting for the opt-in WorkBuddy audit proxy"
+    @Published private(set) var detail = "Starting the WorkBuddy audit proxy"
     var onEvents: (([GuardEvent]) -> Void)?
 
     private var timer: Timer?
+    private var proxy: Process?
     private var offset: UInt64 = 0
     private let queue = DispatchQueue(label: "com.agentspec.workbuddy-network", qos: .utility)
     private let database = try? EvidenceDatabase()
@@ -26,6 +28,7 @@ final class WorkBuddyNetworkCapture: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
+        startProxy()
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -35,6 +38,54 @@ final class WorkBuddyNetworkCapture: ObservableObject {
     func stop() {
         timer?.invalidate()
         timer = nil
+        if proxy?.isRunning == true { proxy?.terminate() }
+        proxy = nil
+        proxyRunning = false
+    }
+
+    private func startProxy() {
+        guard proxy == nil else { return }
+        guard let executable = Self.mitmdumpURL(),
+              let addon = Bundle.main.url(forResource: "workbuddy_network_capture", withExtension: "py") else {
+            detail = "WorkBuddy audit proxy unavailable: mitmdump or bundled addon was not found"
+            return
+        }
+        let process = Process()
+        process.executableURL = executable
+        process.arguments = Self.proxyArguments(addon: addon)
+        var environment = ProcessInfo.processInfo.environment
+        environment["AGENTREINS_WORKBUDDY_NETWORK_JSONL"] = captureURL.path
+        process.environment = environment
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+        process.terminationHandler = { [weak self] process in
+            DispatchQueue.main.async {
+                guard let self, self.proxy === process else { return }
+                self.proxyRunning = false
+                self.detail = "WorkBuddy audit proxy stopped with exit code \(process.terminationStatus)"
+            }
+        }
+        do {
+            try process.run()
+            proxy = process
+            proxyRunning = true
+            detail = "Audit proxy ready on 127.0.0.1:\(Self.proxyPort); waiting for WorkBuddy traffic"
+        } catch {
+            detail = "WorkBuddy audit proxy failed to start: \(error.localizedDescription)"
+        }
+    }
+
+    nonisolated static let proxyPort = 18_891
+
+    nonisolated static func proxyArguments(addon: URL) -> [String] {
+        ["--listen-host", "127.0.0.1", "--listen-port", String(proxyPort),
+         "--set", "connection_strategy=lazy", "--scripts", addon.path]
+    }
+
+    nonisolated static func mitmdumpURL(fileManager: FileManager = .default) -> URL? {
+        ["/opt/homebrew/bin/mitmdump", "/usr/local/bin/mitmdump", "/usr/bin/mitmdump"]
+            .first(where: { fileManager.isExecutableFile(atPath: $0) })
+            .map(URL.init(fileURLWithPath:))
     }
 
     private func poll() {
@@ -46,20 +97,24 @@ final class WorkBuddyNetworkCapture: ObservableObject {
             if let raw = result.raw { try? database?.appendRaw([raw]) }
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.connected = result.fileExists
-                self.detail = result.fileExists
-                    ? (result.malformed == 0 ? "Complete WorkBuddy HTTPS body collector connected"
-                                             : "WorkBuddy HTTPS collector found \(result.malformed) malformed records")
-                    : "Waiting for the opt-in WorkBuddy audit proxy"
+                let isFresh = self.lastUpdate.map { Date().timeIntervalSince($0) < 120 } ?? false
+                self.connected = self.proxyRunning && isFresh
+                if result.malformed > 0 {
+                    self.detail = "WorkBuddy HTTPS collector found \(result.malformed) malformed records"
+                } else if self.connected {
+                    self.detail = "Complete WorkBuddy HTTPS body and route collector connected"
+                } else if self.proxyRunning {
+                    self.detail = "Audit proxy is running; WorkBuddy traffic has not reached it yet"
+                }
                 self.offset = result.nextOffset
                 if !result.events.isEmpty {
-                    self.lastUpdate = Date()
+                    self.lastUpdate = result.events.map(\.ts).max()
                     self.onEvents?(result.events)
                 }
                 try? self.database?.updateHealth(CollectorHealthRecord(
                     source: "workbuddy-network-body",
-                    state: !result.fileExists ? .failed : result.malformed > 0 ? .degraded : .healthy,
-                    lastSuccess: result.fileExists ? Date() : nil, lagSeconds: nil,
+                    state: !self.proxyRunning ? .failed : result.malformed > 0 || !self.connected ? .degraded : .healthy,
+                    lastSuccess: self.connected ? Date() : nil, lagSeconds: nil,
                     accepted: result.events.count, malformed: result.malformed, dropped: 0,
                     detail: self.detail))
             }

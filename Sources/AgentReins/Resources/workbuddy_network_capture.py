@@ -13,10 +13,19 @@ from pathlib import Path
 
 
 ALLOWED_HOST = "copilot.tencent.com"
-ALLOWED_PATHS = {"/v2/chat/completions", "/agenttool/v1/intent/recall"}
+ALLOWED_PATHS = {
+    "/v1/chat/completions",
+    "/v2/chat/completions",
+    "/v3/chat/completions",
+    "/agenttool/v1/intent/recall",
+}
 OUTPUT = Path(os.environ.get(
     "AGENTREINS_WORKBUDDY_NETWORK_JSONL",
     "~/Library/Application Support/AgentReins/workbuddy-network.jsonl",
+)).expanduser()
+ROUTE_OUTPUT = Path(os.environ.get(
+    "AGENTREINS_WORKBUDDY_ROUTE_JSONL",
+    "~/Library/Application Support/AgentReins/workbuddy-network-routes.jsonl",
 )).expanduser()
 
 
@@ -24,7 +33,37 @@ def _iso_now():
     return datetime.datetime.now(datetime.timezone.utc).isoformat().replace("+00:00", "Z")
 
 
+def _endpoint(value):
+    if not value:
+        return None
+    host, port = value[0], value[1]
+    return f"[{host}]:{port}" if ":" in host else f"{host}:{port}"
+
+
+def _append_jsonl(path, record):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    try:
+        os.write(fd, (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+    finally:
+        os.close(fd)
+
+
 def response(flow):
+    server_address = flow.server_conn.ip_address
+    _append_jsonl(ROUTE_OUTPUT, {
+        "observedAt": _iso_now(),
+        "host": flow.request.pretty_host,
+        # Strip the query string because it can contain user or session data.
+        "path": flow.request.path.split("?", 1)[0],
+        "method": flow.request.method,
+        "httpVersion": flow.request.http_version,
+        "responseStatus": flow.response.status_code if flow.response else None,
+        "clientAddress": _endpoint(flow.client_conn.peername),
+        "remoteHost": server_address[0] if server_address else None,
+        "remotePort": server_address[1] if server_address else None,
+    })
+
     if flow.request.pretty_host.lower() != ALLOWED_HOST:
         return
     if flow.request.path.split("?", 1)[0] not in ALLOWED_PATHS:
@@ -48,10 +87,10 @@ def response(flow):
         "responseStatus": flow.response.status_code if flow.response else None,
         "responseComplete": flow.response is not None and flow.response.timestamp_end is not None,
         "responseBodyBase64": base64.b64encode(decoded_response).decode("ascii") if flow.response else None,
+        # These values come from the exact mitmproxy flow carrying the body.
+        # They prove route correlation without guessing from a nearby socket.
+        "clientAddress": _endpoint(flow.client_conn.peername),
+        "remoteHost": server_address[0] if server_address else None,
+        "remotePort": server_address[1] if server_address else None,
     }
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(OUTPUT, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        os.write(fd, (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
-    finally:
-        os.close(fd)
+    _append_jsonl(OUTPUT, record)
