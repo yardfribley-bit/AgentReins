@@ -14,6 +14,16 @@ final class WorkBuddySight: ObservableObject {
     private var seen = Set<UUID>()
     private var lastPoll = Date.distantPast
     private var fileSizes: [String: UInt64] = [:]
+    struct ParserState: Codable {
+        var offset: UInt64 = 0
+        var lastIntent: [String: String] = [:]
+        var lastReasoning: [String: String] = [:]
+        var currentTurn: [String: String] = [:]
+        var toolNames: [String: String] = [:]
+        var lastModelEndpoint: [String: String] = [:]
+    }
+    private var parserStates: [String: ParserState] = [:]
+    private var isPolling = false
     private let evidenceDatabase = try? EvidenceDatabase()
     private var lastHealthPersist = Date.distantPast
     private var acceptedEvents = 0
@@ -24,6 +34,9 @@ final class WorkBuddySight: ObservableObject {
 
     func start() {
         guard timer == nil else { return }
+        if let states = try? evidenceDatabase?.parserStates(source: "workbuddy") {
+            parserStates = states.compactMapValues { try? JSONDecoder().decode(ParserState.self, from: $0) }
+        }
         if fileSizes.isEmpty, let saved = try? evidenceDatabase?.checkpoints(source: "workbuddy") {
             fileSizes = saved
         }
@@ -37,20 +50,34 @@ final class WorkBuddySight: ObservableObject {
     func stop() { timer?.invalidate(); timer = nil }
 
     private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
         let root = ("~/.workbuddy/projects" as NSString).expandingTildeInPath
         let changedAfter = lastPoll
         let previousSizes = fileSizes
         let database = evidenceDatabase
+        let previousStates = parserStates
         lastPoll = Date()
         queue.async { [weak self] in
             let batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
-                                              previousSizes: previousSizes)
+                                              previousSizes: previousSizes, previousStates: previousStates)
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false
-            do { try database?.appendRaw(batch.raw) } catch { rawWriteFailed = true }
+            do {
+                guard let database else { throw CocoaError(.fileWriteUnknown) }
+                try database.persistCollected(raw: batch.raw, events: batch.events)
+                for (path, state) in batch.states {
+                    try database.saveParserState(source: "workbuddy", stream: path, state: JSONEncoder().encode(state))
+                    try database.saveCheckpoint(SourceCheckpoint(source: "workbuddy", stream: path,
+                        offset: Int64(state.offset), fingerprint: nil, updatedAt: Date()))
+                }
+            } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.isPolling = false
+                guard !rawWriteFailed else { self.collectionFailures += 1; return }
+                self.parserStates.merge(batch.states) { _, new in new }
                 let isConnected = FileManager.default.fileExists(atPath: root)
                 if self.connected != isConnected { self.connected = isConnected }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
@@ -63,13 +90,6 @@ final class WorkBuddySight: ObservableObject {
                 if !fresh.isEmpty {
                     self.onEvents?(fresh)
                     self.lastUpdate = Date()
-                }
-                // Delivery precedes checkpointing so interruption can only
-                // replay stable IDs; it cannot acknowledge unseen evidence.
-                for (stream, offset) in batch.sizes {
-                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
-                        source: "workbuddy", stream: stream, offset: Int64(offset),
-                        fingerprint: nil, updatedAt: Date()))
                 }
                 if Date().timeIntervalSince(self.lastHealthPersist) >= 10 || !self.connected {
                     self.lastHealthPersist = Date()
@@ -85,11 +105,11 @@ final class WorkBuddySight: ObservableObject {
     }
 
     private nonisolated static func readRecentEvents(root: String, changedAfter: Date,
-                                                     previousSizes: [String: UInt64])
-        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int) {
+                                                     previousSizes: [String: UInt64], previousStates: [String: ParserState])
+        -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int, states: [String: ParserState]) {
         let fm = FileManager.default
         guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1) }
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1, [:]) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64)] = []
         for case let url as URL in enumerator where url.pathExtension == "jsonl" {
@@ -107,24 +127,74 @@ final class WorkBuddySight: ObservableObject {
             previousOffset: previousSizes[$0.0.path], maximumInitialBytes: 512 * 1_024) }
         var sizes = Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) })
         for record in raw { sizes[record.stream] = RawLogCapture.safeCheckpoint(for: record) }
-        return (selected.flatMap { parseSession($0.0) },
-                sizes, raw,
-                max(0, selected.count - raw.count))
+        var states: [String: ParserState] = [:]
+        var events: [GuardEvent] = []
+        for (url, _, size) in selected {
+            guard let captured = raw.first(where: { $0.stream == url.path }) else { continue }
+            var state = previousStates[url.path] ?? ParserState()
+            if state.offset > size { state = ParserState() }
+            let emitFrom = previousStates[url.path] == nil
+                ? (previousSizes[url.path] ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)) : state.offset
+            if previousStates[url.path] == nil {
+                // One-time upgrade seeding is bounded; never scan an entire old
+                // session just to initialize the live parser. Unknown old turns
+                // remain unknown until a user message supplies their identity.
+                state.offset = emitFrom > 512 * 1_024 ? emitFrom - 512 * 1_024 : 0
+            }
+            events += readIncremental(url, state: &state, emitFrom: emitFrom, through: UInt64(captured.offsetEnd))
+            states[url.path] = state
+            sizes[url.path] = state.offset
+        }
+        return (events, sizes, raw, max(0, selected.count - raw.count), states)
     }
 
     nonisolated static func parseSession(_ url: URL, fullHistory: Bool = false,
                                          modelCatalogURL: URL? = nil) -> [GuardEvent] {
         guard let text = sessionText(url, fullHistory: fullHistory) else { return [] }
         let configuredEndpoints = modelEndpoints(catalogURL: modelCatalogURL)
-        var lastIntent: [String: String] = [:]
-        var lastReasoning: [String: String] = [:]
-        var currentTurn: [String: String] = [:]
-        var toolNames: [String: String] = [:]
-        var lastModelEndpoint: [String: String] = [:]
+        var state = ParserState()
+        return parseText(text, url: url, state: &state, configuredEndpoints: configuredEndpoints)
+    }
+
+    nonisolated static func readIncremental(_ url: URL, state: inout ParserState, emitFrom: UInt64? = nil, through end: UInt64? = nil) -> [GuardEvent] {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return [] }
+        defer { try? handle.close() }
+        try? handle.seek(toOffset: state.offset)
+        let threshold = emitFrom ?? state.offset
+        let endpoints = modelEndpoints(catalogURL: nil)
+        var pending = Data(), result: [GuardEvent] = []
+        var readOffset = state.offset
+        while end == nil || readOffset < end! {
+            let remaining = end.map { min(UInt64(256 * 1_024), $0 - readOffset) } ?? UInt64(256 * 1_024)
+            guard let chunk = try? handle.read(upToCount: Int(remaining)), !chunk.isEmpty else { break }
+            readOffset += UInt64(chunk.count)
+            pending.append(chunk)
+            while let newline = pending.firstIndex(of: 0x0A) {
+                let count = pending.distance(from: pending.startIndex, to: newline) + 1
+                let rows = String(data: pending.prefix(count), encoding: .utf8) ?? ""
+                let events = parseText(rows, url: url, state: &state, configuredEndpoints: endpoints)
+                state.offset += UInt64(count)
+                if state.offset > threshold { result += events }
+                pending.removeFirst(count)
+            }
+        }
+        return result
+    }
+
+    private nonisolated static func parseText(_ text: String, url: URL, state: inout ParserState,
+                                               configuredEndpoints: [String: String]) -> [GuardEvent] {
+        var lastIntent = state.lastIntent, lastReasoning = state.lastReasoning
+        var currentTurn = state.currentTurn, toolNames = state.toolNames
+        var lastModelEndpoint = state.lastModelEndpoint
+        defer {
+            state.lastIntent = lastIntent; state.lastReasoning = lastReasoning
+            state.currentTurn = currentTurn; state.toolNames = toolNames
+            state.lastModelEndpoint = lastModelEndpoint
+        }
         var result: [GuardEvent] = []
         // 启动时只读取活跃窗口；完整历史已在 EventStore，避免重复解析巨型会话。
         let lines = text.split(whereSeparator: \.isNewline)
-        for line in fullHistory ? ArraySlice(lines) : lines.suffix(400) {
+        for line in lines {
             guard let data = String(line).data(using: .utf8),
                   let row = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let rawId = row["id"] as? String else { continue }

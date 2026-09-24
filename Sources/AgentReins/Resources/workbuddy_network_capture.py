@@ -49,7 +49,19 @@ def _append_jsonl(path, record):
         os.close(fd)
 
 
+def request(flow):
+    _capture(flow, "request")
+
+
 def response(flow):
+    _capture(flow, "response")
+
+
+def error(flow):
+    _capture(flow, "error")
+
+
+def _capture(flow, stage):
     server_address = flow.server_conn.ip_address
     _append_jsonl(ROUTE_OUTPUT, {
         "observedAt": _iso_now(),
@@ -74,6 +86,9 @@ def response(flow):
     decoded_response = flow.response.get_content(strict=False) if flow.response else b""
     declared = flow.request.headers.get("content-length")
     record = {
+        "flowID": flow.id,
+        "captureStage": stage,
+        "transportError": str(flow.error) if flow.error else None,
         "observedAt": _iso_now(),
         "host": flow.request.pretty_host,
         "path": flow.request.path.split("?", 1)[0],

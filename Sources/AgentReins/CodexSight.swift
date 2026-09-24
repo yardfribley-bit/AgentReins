@@ -49,11 +49,15 @@ final class CodexSight: ObservableObject {
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false
-            do { try database?.appendRaw(batch.raw) } catch { rawWriteFailed = true }
+            do {
+                guard let database else { throw CocoaError(.fileWriteUnknown) }
+                try database.persistCollected(raw: batch.raw, events: batch.events)
+            } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 let isConnected = FileManager.default.fileExists(atPath: root)
                 self.isPolling = false
+                guard !rawWriteFailed else { self.collectionFailures += 1; return }
                 if isConnected { self.isInitialPoll = false }
                 if self.connected != isConnected { self.connected = isConnected }
                 self.fileSizes.merge(batch.sizes) { _, new in new }

@@ -185,6 +185,10 @@ final class EvidenceDatabase: @unchecked Sendable {
         try execute("CREATE INDEX IF NOT EXISTS agent_event_project_time ON agent_event_stream(project_id,occurred_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_session_sequence ON agent_event_stream(session_id,sequence)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_task_sequence ON agent_event_stream(session_id,turn_id,sequence)")
+        try execute("CREATE TABLE IF NOT EXISTS task_summary(session_id TEXT NOT NULL,turn_id TEXT NOT NULL,agent_id TEXT NOT NULL,started_at REAL NOT NULL,last_at REAL NOT NULL,event_count INTEGER NOT NULL,PRIMARY KEY(session_id,turn_id)) WITHOUT ROWID")
+        try execute("CREATE INDEX IF NOT EXISTS task_summary_time ON task_summary(last_at DESC,session_id,turn_id)")
+        try execute("CREATE TABLE IF NOT EXISTS task_summary_version(version INTEGER PRIMARY KEY)")
+        try execute("CREATE TABLE IF NOT EXISTS collector_parser_state(source TEXT NOT NULL,stream TEXT NOT NULL,state BLOB NOT NULL,PRIMARY KEY(source,stream)) WITHOUT ROWID")
         try execute("""
             CREATE TABLE IF NOT EXISTS code_change_index (
               change_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
@@ -279,6 +283,45 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
             try? FileManager.default.moveItem(at: temporary, to: backupURL)
         }
+    }
+
+    /// Checkpoints may advance only after all three durable representations succeed.
+    /// Each write is idempotent; interruption before the checkpoint replays safely.
+    func persistCollected(raw: [RawEvidenceRecord], events: [GuardEvent]) throws {
+        try appendRaw(raw)
+        try append(events)
+        for (sessionID, rows) in Dictionary(grouping: events.filter { $0.sessionId != nil }, by: { $0.sessionId! }) {
+            let session = AgentSessionSnapshot.build(from: rows).first
+            let workspace = SupervisedWorkspaceResolver.resolve(session?.workspace)
+            let project = workspace.kind == .unassigned ? "unattributed:\(sessionID)" : workspace.id
+            try appendAgentEvents(LegacyGuardEventAdapter.project(rows, projectID: project,
+                startingSequence: try nextAgentEventSequence(sessionID: sessionID) - 1))
+        }
+    }
+
+    func parserStates(source: String) throws -> [String: Data] {
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT stream,state FROM collector_parser_state WHERE source=?", -1, &stmt, nil) == SQLITE_OK else { throw failure("parser state") }
+        defer { sqlite3_finalize(stmt) }
+        bind(source, at: 1, to: stmt)
+        var result: [String: Data] = [:]
+        while sqlite3_step(stmt) == SQLITE_ROW {
+            if let stream = text(stmt, 0), let bytes = sqlite3_column_blob(stmt, 1) {
+                result[stream] = Data(bytes: bytes, count: Int(sqlite3_column_bytes(stmt, 1)))
+            }
+        }
+        return result
+    }
+
+    func saveParserState(source: String, stream: String, state: Data) throws {
+        lock.lock(); defer { lock.unlock() }
+        var stmt: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "INSERT OR REPLACE INTO collector_parser_state VALUES(?,?,?)", -1, &stmt, nil) == SQLITE_OK else { throw failure("save parser state") }
+        defer { sqlite3_finalize(stmt) }
+        bind(source, at: 1, to: stmt); bind(stream, at: 2, to: stmt)
+        _ = state.withUnsafeBytes { sqlite3_bind_blob(stmt, 3, $0.baseAddress, Int32(state.count), SQLITE_TRANSIENT) }
+        guard sqlite3_step(stmt) == SQLITE_DONE else { throw failure("save parser state") }
     }
 
     func append(_ events: [GuardEvent]) throws {
@@ -391,6 +434,19 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
             // Persist invalidation in the same transaction as evidence so a
             // restart cannot lose deferred indexing work.
+            var summary: OpaquePointer?
+            let summarySQL = "INSERT INTO task_summary VALUES(?,?,?,?,?,1) ON CONFLICT(session_id,turn_id) DO UPDATE SET agent_id=excluded.agent_id,started_at=MIN(started_at,excluded.started_at),last_at=MAX(last_at,excluded.last_at),event_count=event_count+1"
+            guard sqlite3_prepare_v2(handle, summarySQL, -1, &summary, nil) == SQLITE_OK else { throw failure("prepare task summary") }
+            defer { sqlite3_finalize(summary) }
+            for event in inserted {
+                guard let turn = event.turnID else { continue }
+                bind(event.sessionID, at: 1, to: summary); bind(turn, at: 2, to: summary)
+                bind(event.agentID, at: 3, to: summary)
+                sqlite3_bind_double(summary, 4, event.occurredAt.timeIntervalSince1970)
+                sqlite3_bind_double(summary, 5, event.occurredAt.timeIntervalSince1970)
+                guard sqlite3_step(summary) == SQLITE_DONE else { throw failure("update task summary") }
+                sqlite3_reset(summary); sqlite3_clear_bindings(summary)
+            }
             var dirty: OpaquePointer?
             guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO dirty_code_sessions VALUES(?,?)", -1, &dirty, nil) == SQLITE_OK else {
                 throw failure("prepare index invalidation")
@@ -512,14 +568,22 @@ final class EvidenceDatabase: @unchecked Sendable {
 
     func recentTasks(limit: Int, before: Date? = nil, offset: Int = 0) throws -> [StoredTaskSummary] {
         lock.lock(); defer { lock.unlock() }
+        // One-time lazy migration on the task-read queue, never at app launch.
+        var version: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT version FROM task_summary_version WHERE version=1", -1, &version, nil) == SQLITE_OK else { throw failure("summary version") }
+        let migrated = sqlite3_step(version) == SQLITE_ROW
+        sqlite3_finalize(version)
+        if !migrated {
+            try executeUnlocked("BEGIN IMMEDIATE")
+            do {
+                try executeUnlocked("INSERT OR REPLACE INTO task_summary SELECT session_id,turn_id,MAX(agent_id),MIN(occurred_at),MAX(occurred_at),COUNT(*) FROM agent_event_stream WHERE turn_id IS NOT NULL GROUP BY session_id,turn_id")
+                try executeUnlocked("INSERT OR IGNORE INTO task_summary_version VALUES(1)")
+                try executeUnlocked("COMMIT")
+            } catch { try? executeUnlocked("ROLLBACK"); throw error }
+        }
         let sql = """
           WITH recent AS (
-            SELECT session_id, turn_id, MAX(agent_id) AS agent_id,
-                   MIN(occurred_at) AS started_at, MAX(occurred_at) AS last_at,
-                   COUNT(*) AS event_count
-            FROM agent_event_stream WHERE turn_id IS NOT NULL
-            GROUP BY session_id, turn_id
-            HAVING MAX(occurred_at) < ?
+            SELECT * FROM task_summary WHERE last_at < ?
             ORDER BY last_at DESC, session_id, turn_id LIMIT ? OFFSET ?
           )
           SELECT recent.session_id, recent.turn_id, recent.agent_id,
@@ -934,7 +998,7 @@ final class EvidenceDatabase: @unchecked Sendable {
     func verifyIntegrity() throws -> Bool {
         lock.lock(); defer { lock.unlock() }
         var statement: OpaquePointer?
-        let sql = "SELECT source,stream,offset_start,offset_end,payload_sha256,previous_hash,record_hash FROM raw_evidence WHERE record_hash IS NOT NULL ORDER BY observed_at,evidence_key"
+        let sql = "SELECT source,stream,offset_start,offset_end,payload_sha256,previous_hash,record_hash,payload FROM raw_evidence WHERE record_hash IS NOT NULL ORDER BY observed_at,evidence_key"
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("integrity prepare") }
         defer { sqlite3_finalize(statement) }
         var hashes = Set<String>()
@@ -943,6 +1007,9 @@ final class EvidenceDatabase: @unchecked Sendable {
             guard let source = text(statement, 0), let stream = text(statement, 1),
                   let digest = text(statement, 4), let storedHash = text(statement, 6) else { return false }
             let storedPrevious = text(statement, 5)
+            let length = Int(sqlite3_column_bytes(statement, 7))
+            let payload = sqlite3_column_blob(statement, 7).map { Data(bytes: $0, count: length) } ?? Data()
+            guard SHA256.hash(data: payload).map({ String(format: "%02x", $0) }).joined() == digest else { return false }
             let material = "\(storedPrevious ?? "GENESIS")|\(source)|\(stream)|\(sqlite3_column_int64(statement, 2))|\(sqlite3_column_int64(statement, 3))|\(digest)"
             let computed = SHA256.hash(data: Data(material.utf8)).map { String(format: "%02x", $0) }.joined()
             guard computed == storedHash else { return false }

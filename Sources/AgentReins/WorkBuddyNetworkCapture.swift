@@ -94,7 +94,13 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         let database = database
         queue.async { [weak self] in
             let result = Self.read(url: url, offset: previous)
-            if let raw = result.raw { try? database?.appendRaw([raw]) }
+            do {
+                guard let database else { return }
+                // Network events still need native session attribution on the main actor.
+                // The offset is runtime-only and restarts at zero, so persisted raw data
+                // remains replayable without preempting the corrected event identities.
+                try database.appendRaw(result.raw.map { [$0] } ?? [])
+            } catch { return } // Do not advance the read offset before durable evidence.
             DispatchQueue.main.async {
                 guard let self else { return }
                 let isFresh = self.lastUpdate.map { Date().timeIntervalSince($0) < 120 } ?? false

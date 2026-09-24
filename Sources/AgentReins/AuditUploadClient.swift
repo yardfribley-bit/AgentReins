@@ -1,16 +1,64 @@
 import Foundation
 
-/// Explicit per-device enrollment, durable queue, one upload at a time.
-/// No history scan. Tests/custom EventStores never instantiate this client.
+private final class AuditNoRedirect: NSObject, URLSessionTaskDelegate, @unchecked Sendable {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
+                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
+        completionHandler(nil) // Evidence and enrollment credentials never follow redirects.
+    }
+}
+
+/// Main actor only schedules work. Queue IO, encoding and network live on the worker.
 @MainActor
 final class AuditUploadClient {
-    struct Configuration: Codable {
+    struct Configuration: Codable, Sendable {
         let endpoint: URL
         let deviceID: String
         let token: String
         let enabledAt: Date
         let uploadEnabled: Bool
     }
+    private weak var store: EventStore?
+    private let worker: AuditUploadWorker
+    private var timer: Timer?
+    private var busy = false
+    init?(store: EventStore) {
+        let directory = EventStore.defaultURL().deletingLastPathComponent().appendingPathComponent("CloudAudit", isDirectory: true)
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        guard let data = try? Data(contentsOf: directory.appendingPathComponent("device.json")),
+              let config = try? decoder.decode(Configuration.self, from: data), config.uploadEnabled,
+              config.endpoint.scheme == "https", !config.token.isEmpty else { return nil }
+        self.store = store
+        worker = AuditUploadWorker(config: config, directory: directory)
+        timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.tick() }
+        }
+    }
+    func observe(_ evidence: [GuardEvent], progress: [String: TaskLiveProgress]) {
+        let keys = Set(evidence.compactMap { event -> String? in
+            guard let s = event.sessionId, let t = event.turnId else { return nil }
+            return "\(s)\u{0}\(t)"
+        })
+        let items = keys.compactMap { progress[$0] }
+        Task { await worker.observe(items) }
+    }
+    private func tick() async {
+        guard !busy, let store else { return }
+        busy = true; defer { busy = false }
+        guard let job = await worker.next() else { return }
+        if job.prepared == nil {
+            let result = await withCheckedContinuation { continuation in
+                store.loadTask(sessionID: job.sessionID, turnID: job.turnID) { continuation.resume(returning: $0) }
+            }
+            switch result {
+            case .success(let snapshot): await worker.prepare(job, snapshot: snapshot)
+            case .failure: await worker.fail(job.key, message: "任务证据尚未可读")
+            }
+        }
+        await worker.sendSlice(job.key)
+    }
+}
+
+actor AuditUploadWorker {
     struct Pending: Codable {
         let sessionID: String
         let turnID: String
@@ -18,6 +66,11 @@ final class AuditUploadClient {
         var notBefore: Date
         var retries: Int
         var followups: Int
+        var prepared: AuditBlockProtocol.Prepared?
+        var probeOffset: Int?
+        var missing: [String]?
+        var rejected: String?
+        var key: String { "\(sessionID)\u{0}\(turnID)" }
     }
     struct State: Codable {
         var sequence = 0
@@ -27,176 +80,158 @@ final class AuditUploadClient {
         var lastError: String?
         var uploadedTasks = 0
     }
-    private let config: Configuration
+    private let config: AuditUploadClient.Configuration
     private let directory: URL
-    private let encoder: JSONEncoder
-    private var state: State
-    private weak var store: EventStore?
-    private var timer: Timer?
-    private var busy = false
     private let session: URLSession
-
-    init?(store: EventStore) {
-        directory = EventStore.defaultURL().deletingLastPathComponent().appendingPathComponent("CloudAudit", isDirectory: true)
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
-        guard let data = try? Data(contentsOf: directory.appendingPathComponent("device.json")),
-              let config = try? decoder.decode(Configuration.self, from: data),
-              config.uploadEnabled, config.endpoint.scheme == "https", !config.token.isEmpty else { return nil }
-        self.config = config
-        self.store = store
-        encoder = JSONEncoder()
-        encoder.dateEncodingStrategy = .iso8601
-        encoder.outputFormatting = [.sortedKeys]
-        state = (try? Data(contentsOf: directory.appendingPathComponent("queue.json")))
-            .flatMap { try? decoder.decode(State.self, from: $0) } ?? State()
+    private var state = State()
+    private var loaded = false
+    private let encoder: JSONEncoder
+    init(config: AuditUploadClient.Configuration, directory: URL, session: URLSession? = nil) {
+        self.config = config; self.directory = directory
         let settings = URLSessionConfiguration.ephemeral
-        settings.timeoutIntervalForRequest = 45
-        settings.timeoutIntervalForResource = 90
+        settings.timeoutIntervalForRequest = 30; settings.timeoutIntervalForResource = 60
         settings.httpMaximumConnectionsPerHost = 1
-        session = URLSession(configuration: settings)
-        timer = Timer.scheduledTimer(withTimeInterval: 10, repeats: true) { [weak self] _ in
-            Task { @MainActor in self?.tick() }
-        }
+        self.session = session ?? URLSession(configuration: settings, delegate: AuditNoRedirect(), delegateQueue: nil)
+        encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
     }
-
-    func observe(_ evidence: [GuardEvent], progress: [String: TaskLiveProgress]) {
-        let keys = Set(evidence.compactMap { event -> String? in
-            guard let s = event.sessionId, let t = event.turnId else { return nil }
-            return "\(s)\u{0}\(t)"
-        })
-        for key in keys {
-            guard let item = progress[key],
-                  AuditUploadScope(enabledAt: config.enabledAt).permits(taskStartedAt: item.startedAt, observedUserRequest: !item.modelRequests.isEmpty) else { continue }
-            if var old = state.pending[key] {
-                old.generation += 1
-                old.followups = 0
-                state.pending[key] = old
-            } else {
-                state.pending[key] = Pending(sessionID: item.sessionID, turnID: item.turnID,
-                    generation: 1, notBefore: Date().addingTimeInterval(8), retries: 0, followups: 0)
+    private var blocks: URL { directory.appendingPathComponent("blocks", isDirectory: true) }
+    private func load() throws {
+        guard !loaded else { return }
+        let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
+        let current = directory.appendingPathComponent("queue-v2.json")
+        let legacy = directory.appendingPathComponent("queue.json")
+        if FileManager.default.fileExists(atPath: current.path) {
+            state = try decoder.decode(State.self, from: Data(contentsOf: current))
+        } else {
+            if FileManager.default.fileExists(atPath: legacy.path) {
+                state = try decoder.decode(State.self, from: Data(contentsOf: legacy))
             }
+            let inflight = directory.appendingPathComponent("inflight.json")
+            if FileManager.default.fileExists(atPath: inflight.path) {
+                let packet = try JSONSerialization.jsonObject(with: Data(contentsOf: inflight)) as? [String: Any]
+                guard let packet, let snapshot = packet["snapshot"] as? [String: Any],
+                      let task = snapshot["task"] as? [String: Any], let s = task["sessionID"] as? String,
+                      let t = task["turnID"] as? String else { throw CocoaError(.fileReadCorruptFile) }
+                let key = "\(s)\u{0}\(t)"
+                state.sequence = max(state.sequence, packet["sequence"] as? Int ?? 0)
+                if state.pending[key] == nil {
+                    state.pending[key] = Pending(sessionID: s, turnID: t, generation: packet["generation"] as? Int ?? 1,
+                        notBefore: Date(), retries: 0, followups: 0)
+                }
+            }
+            try persist()
         }
-        persist()
+        loaded = true
     }
-
-    private func persist() {
+    private func persist() throws {
+        let url = directory.appendingPathComponent("queue-v2.json")
+        try encoder.encode(state).write(to: url, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+    }
+    func observe(_ items: [TaskLiveProgress]) {
         do {
-            try encoder.encode(state).write(to: directory.appendingPathComponent("queue.json"), options: .atomic)
-            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: directory.appendingPathComponent("queue.json").path)
-        } catch { state.lastError = "审计上传队列无法持久化：\(error.localizedDescription)" }
-    }
-
-    private func tick() {
-        guard !busy, let store else { return }
-        // A prepared packet survives process termination and is retried verbatim.
-        let packetURL = directory.appendingPathComponent("inflight.json")
-        if let packet = try? Data(contentsOf: packetURL) {
-            busy = true
-            send(packet)
-            return
-        }
-        guard let (key, pending) = state.pending.filter({ $0.value.notBefore <= Date() })
-            .min(by: { $0.value.notBefore < $1.value.notBefore }) else { return }
-        busy = true
-        store.loadTask(sessionID: pending.sessionID, turnID: pending.turnID) { [weak self] result in
-            guard let self else { return }
-            switch result {
-            case .failure:
-                self.fail(key, message: "任务证据尚未可读，稍后重试")
-            case .success(let snapshot):
-                guard AuditUploadScope(enabledAt: self.config.enabledAt).permits(
-                    taskStartedAt: snapshot.task.startedAt, observedUserRequest: !snapshot.conversation.userInputs.isEmpty),
-                    snapshot.sourceEvents.contains(where: { $0.kind == "model" && $0.op == "prompt" }) else {
-                    self.state.pending.removeValue(forKey: key)
-                    self.persist(); self.busy = false; return
-                }
-                self.state.sequence += 1
-                self.persist()
-                let sequence = self.state.sequence
-                // Encoding large task bodies must not block the main UI.
-                Task {
-                    let config = self.config
-                    let encoded = await Task.detached(priority: .utility) { () -> Data? in
-                        let encoder = JSONEncoder()
-                        encoder.dateEncodingStrategy = .iso8601
-                        encoder.outputFormatting = [.sortedKeys]
-                        return try? encoder.encode(Packet(deviceID: config.deviceID, identity: AuditDeviceIdentity.capture(), sequence: sequence,
-                            queueKey: key, generation: pending.generation, snapshot: snapshot))
-                    }.value
-                    guard let encoded, encoded.count <= 64 * 1024 * 1024 else {
-                        self.fail(key, message: "任务正文超过单次 64 MiB 限制或编码失败；未截断上传")
-                        return
-                    }
-                    do {
-                        try encoded.write(to: packetURL, options: .atomic)
-                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: packetURL.path)
-                        self.send(encoded)
-                    } catch { self.fail(key, message: "待上传原文无法保存") }
+            try load()
+            for item in items where AuditUploadScope(enabledAt: config.enabledAt).permits(taskStartedAt: item.startedAt, observedUserRequest: !item.modelRequests.isEmpty) {
+                let key = "\(item.sessionID)\u{0}\(item.turnID)"
+                if var old = state.pending[key] {
+                    old.generation += 1; old.followups = 0; state.pending[key] = old
+                } else {
+                    state.pending[key] = Pending(sessionID: item.sessionID, turnID: item.turnID, generation: 1,
+                        notBefore: Date().addingTimeInterval(3), retries: 0, followups: 0)
                 }
             }
-        }
+            try persist()
+        } catch { state.lastError = "审计队列持久化失败：\(error.localizedDescription)" }
     }
-
-    private struct Packet: Encodable {
-        let deviceID: String
-        let identity: AuditDeviceIdentity
-        let sequence: Int
-        let queueKey: String
-        let generation: Int
-        let snapshot: AgentTaskSnapshot
+    func next() -> Pending? {
+        do {
+            try load()
+            return state.pending.values.filter { $0.rejected == nil && $0.notBefore <= Date() }.min { $0.notBefore < $1.notBefore }
+        } catch { state.lastError = "审计队列读取失败：\(error.localizedDescription)"; return nil }
     }
-
-    private func send(_ data: Data) {
-        guard let packet = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-              let key = packet["queueKey"] as? String, let generation = packet["generation"] as? Int else {
-            busy = false; state.lastError = "待上传原文损坏，请检查 inflight.json"; persist(); return
-        }
-        if let pending = state.pending[key], pending.notBefore > Date() { busy = false; return }
+    func prepare(_ job: Pending, snapshot: AgentTaskSnapshot) {
+        do {
+            guard AuditUploadScope(enabledAt: config.enabledAt).permits(taskStartedAt: snapshot.task.startedAt,
+                observedUserRequest: !snapshot.conversation.userInputs.isEmpty),
+                snapshot.sourceEvents.contains(where: { $0.kind == "model" && $0.op == "prompt" }) else {
+                fail(job.key, message: "等待新任务请求证据，未上传历史数据"); return
+            }
+            state.sequence += 1; try persist()
+            let prepared = try AuditBlockProtocol.prepare(snapshot, directory: blocks, sequence: state.sequence, generation: job.generation)
+            guard var current = state.pending[job.key] else { return }
+            current.prepared = prepared; current.probeOffset = 0; current.missing = []
+            state.pending[job.key] = current; try persist()
+        } catch { fail(job.key, message: "任务分块失败：\(error.localizedDescription)") }
+    }
+    private func request(_ fields: [String: Any]) async throws -> [String: Any] {
+        var packet = fields; packet["protocol"] = 2; packet["deviceID"] = config.deviceID
         var request = URLRequest(url: config.endpoint)
         request.httpMethod = "POST"
         request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         request.setValue("Bearer \(config.token)", forHTTPHeaderField: "Authorization")
         request.setValue(config.deviceID, forHTTPHeaderField: "X-AgentReins-Device")
-        Task {
-            do {
-                let (response, metadata) = try await session.upload(for: request, from: data)
-                guard (metadata as? HTTPURLResponse)?.statusCode == 200,
-                      let receipt = try JSONSerialization.jsonObject(with: response) as? [String: Any],
-                      receipt["persisted"] as? Bool == true,
-                      let id = receipt["receiptID"] as? String else {
-                    self.fail(key, message: "上传未获入库回执，HTTP \((metadata as? HTTPURLResponse)?.statusCode ?? 0)")
-                    return
-                }
-                state.lastReceiptID = id
-                state.lastReceivedAt = receipt["receivedAt"] as? String
-                state.lastError = nil
-                state.uploadedTasks += 1
-                if var current = state.pending[key] {
-                    if current.generation == generation {
-                        // Trace files may arrive after the last transcript event.
-                        current.followups += 1
-                        if current.followups > 2 { state.pending.removeValue(forKey: key) }
-                        else { current.notBefore = Date().addingTimeInterval(30); state.pending[key] = current }
-                    } else {
-                        current.notBefore = Date().addingTimeInterval(10)
-                        current.retries = 0; state.pending[key] = current
+        let data = try JSONSerialization.data(withJSONObject: packet)
+        let (body, response) = try await session.upload(for: request, from: data)
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw NSError(domain: "AuditHTTP", code: (response as? HTTPURLResponse)?.statusCode ?? 0)
+        }
+        guard let result = try JSONSerialization.jsonObject(with: body) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
+        return result
+    }
+    func sendSlice(_ key: String) async {
+        guard let prepared = state.pending[key]?.prepared, state.pending[key]?.rejected == nil else { return }
+        do {
+            // Bounded work per task: a failing/large task cannot monopolize the queue.
+            for _ in 0..<8 {
+                guard let before = state.pending[key] else { return }
+                if let digest = before.missing?.first {
+                    let data = try Data(contentsOf: blocks.appendingPathComponent(digest))
+                    guard AuditBlockProtocol.hash(data) == digest else { throw CocoaError(.fileReadCorruptFile) }
+                    let ack = try await request(["op": "block", "hash": digest, "data": data.base64EncodedString()])
+                    guard ack["stored"] as? String == digest else { throw CocoaError(.fileReadCorruptFile) }
+                    state.pending[key]?.missing?.removeFirst()
+                } else if (before.probeOffset ?? 0) < prepared.hashes.count {
+                    let offset = before.probeOffset ?? 0, end = min(offset + 512, prepared.hashes.count)
+                    let hashes = Array(prepared.hashes[offset..<end])
+                    let ack = try await request(["op": "probe", "hashes": hashes])
+                    guard let missing = ack["missing"] as? [String], Set(missing).isSubset(of: Set(hashes)) else { throw CocoaError(.fileReadCorruptFile) }
+                    state.pending[key]?.probeOffset = end; state.pending[key]?.missing = missing
+                } else {
+                    let identity = try JSONSerialization.jsonObject(with: encoder.encode(prepared.identity))
+                    let ack = try await request(["op": "commit", "root": prepared.root, "sequence": prepared.sequence, "identity": identity])
+                    guard ack["persisted"] as? Bool == true, let receipt = ack["receiptID"] as? String,
+                          ack["sequence"] as? Int == prepared.sequence else { throw CocoaError(.fileReadCorruptFile) }
+                    state.lastReceiptID = receipt; state.lastReceivedAt = ack["receivedAt"] as? String
+                    state.lastError = nil; state.uploadedTasks += 1
+                    if var current = state.pending[key] {
+                        current.prepared = nil; current.missing = nil; current.probeOffset = nil; current.retries = 0
+                        if current.generation == prepared.generation { current.followups += 1 }
+                        current.notBefore = Date().addingTimeInterval(current.generation == prepared.generation ? 30 : 3)
+                        state.pending[key] = current.followups > 2 ? nil : current
                     }
+                    try persist(); return
                 }
-                persist()
-                try FileManager.default.removeItem(at: directory.appendingPathComponent("inflight.json"))
-                busy = false
-            } catch { fail(key, message: "上传网络或回执处理失败：\(error.localizedDescription)") }
+                state.pending[key]?.notBefore = Date().addingTimeInterval(1)
+                try persist()
+            }
+        } catch {
+            let error = error as NSError
+            if error.domain == "AuditHTTP", [400, 413, 422].contains(error.code) {
+                state.pending[key]?.rejected = "服务端拒绝 HTTP \(error.code)，保留待处理证据"
+            }
+            if error.domain == "AuditHTTP", error.code == 409 {
+                state.pending[key]?.probeOffset = 0; state.pending[key]?.missing = []
+            }
+            fail(key, message: "分块上传失败：\(error.localizedDescription)")
         }
     }
-
-    private func fail(_ key: String, message: String) {
-        if var pending = state.pending[key] {
-            pending.retries += 1
-            pending.notBefore = Date().addingTimeInterval(min(300, pow(2, Double(min(8, pending.retries))) * 5))
-            state.pending[key] = pending
+    func fail(_ key: String, message: String) {
+        if var current = state.pending[key] {
+            current.retries += 1
+            current.notBefore = Date().addingTimeInterval(min(300, pow(2, Double(min(8, current.retries))) * 5))
+            state.pending[key] = current
         }
         state.lastError = message
-        persist(); busy = false
+        do { try persist() } catch { state.lastError = "审计队列无法持久化：\(error.localizedDescription)" }
     }
 }

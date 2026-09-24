@@ -51,7 +51,7 @@ test('audit UI: explicit demo, evidence tabs, empty/error states, paging and lit
     await page.locator('#ara-retry').click();
     await page.locator('.case').waitFor();
     assert.equal(await page.locator('#ara-reviewed').isVisible(), false);
-    assert.match(await page.locator('#ara-json').textContent(), /"simulation": false/);
+    assert.match(await page.locator('#ara-json').textContent(), /展开后按需读取/);
     assert.equal(await page.locator('#ara-facts script').count(), 0);
     payload = { schemaVersion: 1, items: [{ id: 'case-2', record }], nextCursor: null };
     await page.locator('#ara-more').click();
@@ -78,7 +78,7 @@ test('incremental refresh adds WorkBuddy, preserves open evidence, and updates o
       const url = new URL(route.request().url());
       if(url.pathname.startsWith('/api/')) {
         let payload;
-        if(url.pathname.endsWith('/1')){detailReads++;payload={schemaVersion:1,record:changed?{...full,receipt:'new-receipt'}:full};}
+        if(/\/1\/(request|memory)$/.test(url.pathname)){detailReads++;payload={schemaVersion:1,record:changed?{...full,receipt:'new-receipt'}:full};}
         else if(url.searchParams.has('after')){
           updates++;
           payload={schemaVersion:1,items:updates===1?[{id:'2',record:{...record,title:'WorkBuddy 新任务'}},{id:'1',record:{...record,receipt:'new-receipt'}}]:[],updateCursor:'3',nextCursor:null};

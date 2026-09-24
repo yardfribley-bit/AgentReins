@@ -408,8 +408,15 @@ final class EventStore: ObservableObject {
                         // Live ingestion must not regroup the entire project.
                     }
                     try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
-                    try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence),
-                                                    turns: affectedTurns)
+                    // The live UI ring is not an authoritative history. Include
+                    // persisted evidence before replacing any task projection.
+                    for turn in affectedTurns {
+                        let stored = try database.events(sessionId: turn.sessionId, turnID: turn.turnId)
+                        let delta = evidence.filter { $0.sessionId == turn.sessionId && $0.turnId == turn.turnId }
+                        let complete = Array(Dictionary((stored + delta).map { ($0.id, $0) },
+                                                        uniquingKeysWith: { _, new in new }).values)
+                        try database.replaceModelRoutes(ModelRouteEvidence.build(events: complete), turns: [turn])
+                    }
                     try database.upsertMemoryCommits(MemoryCommitEvidence.build(events: affectedEvidence))
                     let health = try database.healthRecords()
                     DispatchQueue.main.async {

@@ -18,12 +18,19 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
     let clientAddress: String?
     let remoteHost: String?
     let remotePort: Int?
+    let flowID: String?
+    let captureStage: String?
+    let transportError: String?
 
     init(observedAt: Date, host: String, path: String, method: String, httpVersion: String,
          contentEncoding: String?, declaredContentLength: Int?, capturedWireBodyBytes: Int,
          requestBodyBase64: String, requestSHA256: String, responseStatus: Int?,
          responseComplete: Bool, responseBodyBase64: String?, clientAddress: String? = nil,
-         remoteHost: String? = nil, remotePort: Int? = nil) {
+         remoteHost: String? = nil, remotePort: Int? = nil, flowID: String? = nil,
+         captureStage: String? = nil, transportError: String? = nil) {
+        self.flowID = flowID
+        self.captureStage = captureStage
+        self.transportError = transportError
         self.observedAt = observedAt
         self.host = host
         self.path = path
@@ -56,10 +63,12 @@ enum WorkBuddyNetworkEvidence {
         let requestObject = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any]
         let intent = userIntent(in: requestObject)
         let model = requestObject?["model"] as? String
-        let identity = String(record.requestSHA256.prefix(20))
+        let identity = record.flowID ?? String(record.requestSHA256.prefix(20))
         let session = "workbuddy-network:\(identity)"
         let metadata = json([
             "capture": "complete HTTPS request body",
+            "captureStage": record.captureStage ?? "legacy_response",
+            "transportError": record.transportError ?? "none",
             "requestPath": record.path,
             "httpVersion": record.httpVersion,
             "contentEncoding": record.contentEncoding ?? "identity",
@@ -94,7 +103,19 @@ enum WorkBuddyNetworkEvidence {
             localAddress: record.clientAddress, remoteHost: record.remoteHost,
             remotePort: record.remotePort ?? 443, remoteDomain: record.host)]
 
-        if let encoded = record.responseBodyBase64, let responseData = Data(base64Encoded: encoded) {
+        if record.captureStage == "response" || record.captureStage == "error" {
+            events = [GuardEvent(
+                id: uuid("\(identity):transport:\(record.captureStage!)"), kind: "network",
+                ruleId: "workbuddy_network_transport", path: record.path, command: metadata,
+                agent: "workbuddy", op: record.captureStage == "error" ? "error" : "response",
+                severity: record.captureStage == "error" ? "warning" : "info", ts: record.observedAt,
+                action: record.captureStage == "error" ? "failed" : "received", sessionId: session,
+                traceId: "workbuddy-http:\(identity)", turnId: identity, userIntent: intent,
+                source: "agentsight:workbuddy-network-body", attributionConfidence: .confirmed,
+                attributionMethod: "same HTTPS flow identifier", localAddress: record.clientAddress,
+                remoteHost: record.remoteHost, remotePort: record.remotePort ?? 443, remoteDomain: record.host)]
+        }
+        if record.captureStage != "request", let encoded = record.responseBodyBase64, let responseData = Data(base64Encoded: encoded) {
             let parsed = parseResponse(responseData)
             events.append(GuardEvent(
                 id: uuid("\(identity):response"), kind: isModelRoute ? "model" : "network",

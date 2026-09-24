@@ -67,6 +67,47 @@ class AuditTests(unittest.TestCase):
         self.store.ingest(packet,'device',self.device)
         packet['snapshot']['conversation']['userInputs']=['changed']
         with self.assertRaises(ValueError): self.store.ingest(packet,'device',self.device)
+
+    def test_blocks_missing_retry_dedup_and_selective_read(self):
+        def upload(value):
+            data = json.dumps(value, separators=(',', ':')).encode()
+            digest = hashlib.sha256(data).hexdigest()
+            packet = dict(protocol=2, deviceID='device', op='block', hash=digest, data=base64.b64encode(data).decode())
+            first = self.request('/api/audit/ingest', packet, device=True)
+            self.assertEqual(first, self.request('/api/audit/ingest', packet, device=True))
+            return digest
+        snapshot = self.packet()['snapshot']
+        children = {key: upload({'t': 'j', 'v': value}) for key, value in snapshot.items()}
+        root = upload({'t': 'o', 'v': children})
+        probe = self.request('/api/audit/ingest', dict(protocol=2, deviceID='device', op='probe', hashes=[root, '0'*64]), device=True)
+        self.assertEqual(probe['missing'], ['0'*64])
+        commit = dict(protocol=2, deviceID='device', op='commit', root='0'*64, sequence=1)
+        with self.assertRaises(HTTPError) as error: self.request('/api/audit/ingest', commit, device=True)
+        self.assertEqual(error.exception.code, 409)
+        commit['root'] = root
+        ack = self.request('/api/audit/ingest', commit, device=True)
+        self.assertEqual(ack, self.request('/api/audit/ingest', commit, device=True))
+        commit['sequence'] = 2
+        self.request('/api/audit/ingest', commit, device=True)
+        full = self.request('/api/audit/cases/1/snapshot', admin=True)
+        self.assertEqual(full['snapshot'], snapshot)
+        selected = self.request('/api/audit/cases/1/request', admin=True)['record']
+        self.assertEqual(list(selected['views']), ['request'])
+        self.assertNotIn('snapshot', selected)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT SUM(length(body)) FROM evidence').fetchone()[0], 0)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshot_bodies').fetchone()[0], 0)
+        self.assertEqual(self.store.blocks.missing('another-device', [root]), [root])
+        with self.assertRaises(ValueError): self.store.blocks.put('device', root, base64.b64encode(b'tampered').decode())
+
+    def test_legacy_revisions_share_body_storage(self):
+        packet = self.packet()
+        for sequence in range(1, 4):
+            packet['sequence'] = sequence
+            self.store.ingest(packet, 'device', self.device)
+        with self.store.connect() as db:
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM evidence').fetchone()[0], 3)
+            self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshot_bodies').fetchone()[0], 1)
         packet = self.packet(); packet['snapshot']['sourceEvents']=[]
         with self.assertRaises(ValueError): self.store.ingest(packet,'device',self.device)
 
@@ -86,7 +127,8 @@ class AuditTests(unittest.TestCase):
         full = self.request('/api/audit/cases/1', admin=True)['record']
         self.assertEqual(full['who'], '使用者：employee · 设备：Office Mac · 内网 IP：192.168.1.11')
         self.assertEqual(full['identity'], packet['identity'])
-        self.assertEqual(full['snapshot'], packet['snapshot'])
+        self.assertNotIn('snapshot', full)
+        self.assertEqual(self.request('/api/audit/cases/1/snapshot', admin=True)['snapshot'], packet['snapshot'])
         packet['identity']['localUser'] = 'different'
         with self.assertRaises(ValueError): self.store.ingest(packet, 'device', self.device)
         packet['sequence'] = 2

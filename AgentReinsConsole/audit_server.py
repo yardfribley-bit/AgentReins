@@ -9,6 +9,9 @@ import json
 import os
 from pathlib import Path
 import sqlite3
+import threading
+from contextlib import contextmanager
+from audit_blocks import Blocks, MissingBlock
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
@@ -79,7 +82,7 @@ def display_summary(raw):
     return summary
 
 
-def details(snapshot, summary):
+def details(snapshot, summary, include_snapshot=False):
     a = snapshot.get('activities', {})
     analysis = snapshot.get('analysis', {})
     result = dict(summary)
@@ -101,13 +104,16 @@ def details(snapshot, summary):
                     'raw': {'identity': summary.get('identity'), 'tools': a.get('tools'), 'toolResults': a.get('toolResults'), 'files': a.get('files'), 'mcpCalls': a.get('mcpCalls'),
                             'sourceEvents': snapshot.get('sourceEvents'), 'contextExposure': analysis.get('contextExposure'), 'egressAudit': analysis.get('egressAudit')}}
     }
-    result['snapshot'] = snapshot
+    if include_snapshot:
+        result['snapshot'] = snapshot
     return result
 
 
 class Store:
     def __init__(self, path):
         self.path = str(path)
+        self.blocks = Blocks(str(path) + '.blocks')
+        self.assembly_slot = threading.BoundedSemaphore(1)
         with self.connect() as db:
             db.executescript('''
             PRAGMA journal_mode=WAL;
@@ -118,17 +124,55 @@ class Store:
               UNIQUE(device,task,sequence));
             CREATE TABLE IF NOT EXISTS access_log(id INTEGER PRIMARY KEY, at TEXT, actor TEXT, action TEXT, target TEXT);
             CREATE TABLE IF NOT EXISTS evidence_identity(receipt TEXT PRIMARY KEY, identity TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS snapshot_bodies(digest TEXT PRIMARY KEY,body BLOB NOT NULL);
             ''')
             if 'revision' not in [r['name'] for r in db.execute('PRAGMA table_info(cases)')]:
                 db.execute('ALTER TABLE cases ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
             db.execute('CREATE INDEX IF NOT EXISTS cases_revision ON cases(revision)')
+            columns = {r['name'] for r in db.execute('PRAGMA table_info(evidence)')}
+            for column in ['root_hash', 'body_digest']:
+                if column not in columns: db.execute(f'ALTER TABLE evidence ADD COLUMN {column} TEXT')
 
+    @contextmanager
     def connect(self):
         db = sqlite3.connect(self.path, timeout=15)
         db.row_factory = sqlite3.Row
-        return db
+        try:
+            with db: yield db
+        finally: db.close()
 
-    def ingest(self, packet, device_id, device):
+    def audit(self, actor, action, target):
+        with self.connect() as db:
+            db.execute('INSERT INTO access_log(at,actor,action,target) VALUES(?,?,?,?)', (utc(), actor, action, target))
+
+    def snapshot(self, row, keys=None):
+        if row['root_hash']:
+            if not self.assembly_slot.acquire(blocking=False): raise OSError('assembly_busy')
+            try: return self.blocks.assemble(row['device'], row['root_hash'], keys)
+            finally: self.assembly_slot.release()
+        body = row['body']
+        if row['body_digest']:
+            with self.connect() as db:
+                body = db.execute('SELECT body FROM snapshot_bodies WHERE digest=?', (row['body_digest'],)).fetchone()[0]
+        value = json.loads(body)
+        return value if keys is None else {k:v for k,v in value.items() if k in keys}
+
+    def ingest_v2(self, packet, device_id, device):
+        if packet.get('deviceID') != device_id: raise ValueError('invalid_device')
+        operation = packet.get('op')
+        if operation == 'probe': return {'missing': self.blocks.missing(device_id, packet.get('hashes'))}
+        if operation == 'block':
+            self.blocks.put(device_id, packet.get('hash'), packet.get('data'))
+            return {'stored': packet['hash']}
+        if operation != 'commit': raise ValueError('invalid_operation')
+        root = packet['root']
+        if not self.assembly_slot.acquire(blocking=False): raise OSError('assembly_busy')
+        try:
+            snapshot = self.blocks.assemble(device_id, root)
+            return self.ingest(dict(packet, snapshot=snapshot), device_id, device, root=root)
+        finally: self.assembly_slot.release()
+
+    def ingest(self, packet, device_id, device, root=None):
         identity = validate_identity(packet.get('identity'))
         snapshot = packet.get('snapshot', {})
         task = snapshot.get('task', {})
@@ -148,6 +192,7 @@ class Store:
         if timestamp(task['startedAt']) > datetime.now(timezone.utc).timestamp() + 300:
             raise ValueError('future_task_rejected')
         body = json.dumps(snapshot, ensure_ascii=False, separators=(',', ':')).encode()
+        body_digest = hashlib.sha256(body).hexdigest()
         identity_body = json.dumps(identity, ensure_ascii=False, sort_keys=True, separators=(',', ':')) if identity else None
         digest = hashlib.sha256(body + (identity_body.encode() if identity_body else b'')).hexdigest()
         receipt = hashlib.sha256(f'{device_id}:{task["taskID"]}:{sequence}'.encode()).hexdigest()
@@ -159,7 +204,10 @@ class Store:
                     raise ValueError('sequence_content_conflict')
                 return dict(receiptID=receipt, receivedAt=prior['received'], sequence=sequence, persisted=True)
             summary = summarize(snapshot, device, receipt, now, identity)
-            db.execute('INSERT INTO evidence VALUES(?,?,?,?,?,?,?)', (receipt, device_id, task['taskID'], sequence, digest, now, body))
+            if not root:
+                db.execute('INSERT OR IGNORE INTO snapshot_bodies VALUES(?,?)', (body_digest, body))
+            db.execute('INSERT INTO evidence(receipt,device,task,sequence,digest,received,body,root_hash,body_digest) VALUES(?,?,?,?,?,?,?,?,?)',
+                (receipt, device_id, task['taskID'], sequence, digest, now, b'', root, None if root else body_digest))
             if identity_body:
                 db.execute('INSERT INTO evidence_identity VALUES(?,?)', (receipt, identity_body))
             revision = db.execute('INSERT INTO access_log(at,actor,action,target) VALUES(?,?,?,?)', (now, device_id, 'ingest', receipt)).lastrowid
@@ -218,17 +266,28 @@ def handler(config, store, public):
                         else:
                             rows = db.execute('SELECT id,summary,revision FROM cases WHERE revision>? ORDER BY revision LIMIT ?', (after, limit + 1)).fetchall()
                             watermark = rows[limit-1]['revision'] if len(rows) > limit else max(after, watermark)
-                        db.execute('INSERT INTO access_log(at,actor,action,target) VALUES(?,?,?,?)', (utc(), config['admin']['username'], 'list', str(cursor)))
+                    store.audit(config['admin']['username'], 'list', str(cursor))
                     return self.send_json(200, dict(schemaVersion=1, items=[dict(id=str(r['id']), record=display_summary(r['summary'])) for r in rows[:limit]],
                         updateCursor=str(watermark), nextCursor=str(rows[limit-1]['id']) if after is None and len(rows)>limit else None))
                 if url.path.startswith('/api/audit/cases/'):
-                    case_id = int(url.path.rsplit('/', 1)[1])
+                    parts = url.path.strip('/').split('/')
+                    case_id = int(parts[3])
+                    section = parts[4] if len(parts) == 5 else None
+                    if len(parts) > 5 or section not in [None, 'snapshot', 'request', 'memory', 'relay', 'process']:
+                        return self.send_json(404, {'error': 'not_found'})
                     with store.connect() as db:
-                        row = db.execute('SELECT c.summary,e.body FROM cases c JOIN evidence e ON e.receipt=c.latest WHERE c.id=?', (case_id,)).fetchone()
+                        row = db.execute('SELECT c.summary,e.* FROM cases c JOIN evidence e ON e.receipt=c.latest WHERE c.id=?', (case_id,)).fetchone()
                         if not row:
                             return self.send_json(404, {'error': 'not_found'})
-                        db.execute('INSERT INTO access_log(at,actor,action,target) VALUES(?,?,?,?)', (utc(), config['admin']['username'], 'read_full_evidence', str(case_id)))
-                    return self.send_json(200, dict(schemaVersion=1, record=details(json.loads(row['body']), display_summary(row['summary']))))
+                    store.audit(config['admin']['username'], 'read_' + (section or 'detail'), str(case_id))
+                    if section == 'snapshot':
+                        return self.send_json(200, dict(schemaVersion=1, identity=display_summary(row['summary']).get('identity'), snapshot=store.snapshot(row)))
+                    keys = {'request': ['outboundRequests','modelResponses','externalRequests','capture','metrics'],
+                            'memory': ['analysis','activities'], 'relay': ['analysis','activities'],
+                            'process': ['analysis','activities','sourceEvents']}.get(section)
+                    record = details(store.snapshot(row, keys), display_summary(row['summary']))
+                    if section: record['views'] = {section: record['views'][section]}
+                    return self.send_json(200, dict(schemaVersion=1, record=record))
                 files = {'/': ('index.html', 'text/html'), '/audit.js': ('audit.js', 'text/javascript'), '/audit.css': ('audit.css', 'text/css')}
                 if url.path not in files:
                     return self.send_json(404, {'error': 'not_found'})
@@ -242,6 +301,8 @@ def handler(config, store, public):
                 self.wfile.write(data)
             except (ValueError, TypeError):
                 self.send_json(400, {'error': 'invalid_request'})
+            except (OSError, sqlite3.Error):
+                self.send_json(503, {'error': 'temporarily_unavailable'})
 
         def do_POST(self):
             if urlsplit(self.path).path != '/api/audit/ingest':
@@ -262,8 +323,12 @@ def handler(config, store, public):
                 packet = json.loads(body)
                 if not isinstance(packet, dict):
                     raise ValueError('invalid_packet')
-                receipt = store.ingest(packet, device_id, device)
+                if packet.get('protocol') == 2 and length > 1024 * 1024:
+                    return self.send_json(413, {'error': 'block_packet_size_limit'})
+                receipt = store.ingest_v2(packet, device_id, device) if packet.get('protocol') == 2 else store.ingest(packet, device_id, device)
                 self.send_json(200, receipt)
+            except MissingBlock as error:
+                self.send_json(409, {'error': 'missing_block', 'hash': str(error)})
             except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
                 self.send_json(400, {'error': 'invalid_or_out_of_scope_task'})
             except (OSError, sqlite3.Error):
