@@ -19,6 +19,8 @@
 
 ---
 
+The separate [enterprise audit console](AgentReinsConsole/README.md) is included in this repository. Explicitly enrolled clients can upload complete evidence for tasks started after activation over HTTPS; unenrolled clients do not upload. The console provides device/account attribution and incremental audit updates, independently of the product website.
+
 Coding agents can edit files, run commands, call tools, read memory, and send private context to model providers in seconds. Their logs contain activity, but often fail to answer the questions that matter after a task:
 
 - What did I ask the agent to do?

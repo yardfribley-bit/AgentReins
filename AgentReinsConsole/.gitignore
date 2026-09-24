@@ -1,0 +1,11 @@
+node_modules/
+__pycache__/
+*.pyc
+*.sqlite3*
+device.json
+server-config.json
+管理员登录.txt
+test-results/
+.env
+.env.*
+!.env.example

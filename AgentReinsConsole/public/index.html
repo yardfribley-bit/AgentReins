@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta name="referrer" content="no-referrer"><meta name="color-scheme" content="light dark"><title>数据流向审计 · AgentReins</title><link rel="stylesheet" href="./audit.css"></head><body>
+<div id="ar-audit" aria-label="AgentReins 企业审计管理端原型">
+
+<header><div class="brand">Agent<em>Reins</em> <span class="sub">企业审计管理端</span></div><span class="sub"><span id="ara-mode">正在连接审计服务</span></span></header>
+<main>
+<div class="row"><div><h1>数据流向审计</h1><p class="sub">进程读取了什么 → 发送了什么 → 发给了谁</p></div><span class="sub"><button id="ara-mode-toggle" type="button">查看演示数据</button></span></div>
+<div id="ara-counts" class="counts"><span>本页关联任务 <b>3</b></span><span>已观测敏感外发 <b>1</b></span><span>待确认发送 <b>1</b></span><span>仅观测读取 <b>1</b></span></div>
+<section class="panel" aria-label="待审计任务"><div class="row"><h2>需要核对的记录</h2><span class="sub">选择一条，查看关联证据</span></div><p id="ara-load-status" role="status"></p><div id="ara-cases"></div><button id="ara-more" type="button" hidden>加载更早记录</button><button id="ara-retry" type="button">刷新</button></section>
+<section id="ara-detail" class="panel" aria-label="数据流向详情" hidden>
+<div class="row"><div><h2 id="ara-title"></h2><p id="ara-who" class="sub"></p></div><button id="ara-reviewed" class="cursor-interaction" type="button">标记已核对（演示）</button></div>
+<div class="alert"><b id="ara-conclusion"></b><p id="ara-limit" class="sub"></p></div>
+<div class="chain" aria-label="数据流向证据链">
+<button data-tab="process" type="button" class="cursor-interaction"><span>01 / 哪个进程</span><b id="ara-process"></b><span>身份、父子进程、读取事件 →</span></button>
+<button data-tab="memory" type="button" class="cursor-interaction"><span>02 / 哪些数据</span><b id="ara-data"></b><span>文件、记忆版本与原文 →</span></button>
+<button data-tab="request" type="button" class="cursor-interaction"><span>03 / 发出了什么</span><b id="ara-send"></b><span>请求原文与发送依据 →</span></button>
+<button data-tab="relay" type="button" class="cursor-interaction"><span>04 / 发给了谁</span><b id="ara-target"></b><span>实际连接、位置与归属 →</span></button>
+</div>
+<div class="tabs" aria-label="审计证据类别"><button data-tab="request" type="button" class="cursor-interaction">上传内容与敏感信息</button><button data-tab="memory" type="button" class="cursor-interaction">记忆提取与携带</button><button data-tab="relay" type="button" class="cursor-interaction">中转节点与位置</button><button data-tab="process" type="button" class="cursor-interaction">进程与读取行为</button></div>
+<div class="compare"><div><h3>帮助理解 · 每项结论说明依据</h3><div id="ara-facts"></div></div><div><div class="row"><h3 id="ara-evidence-title">原始证据</h3><button id="ara-copy" type="button" class="cursor-interaction">复制当前证据</button></div><pre id="ara-evidence"></pre><span class="sub">演示内容完整展示，未以脱敏内容替代原文。</span></div></div>
+<div class="receipt"><div class="row"><b>这份证据是否已到企业审计服务器？</b><span id="ara-receipt" class="status"></span></div><p class="sub">此处是终端 → 企业审计端的回执；与 Agent → 模型／中转的外发分开记录。</p></div>
+<details><summary class="cursor-interaction">完整关联 JSON 与证据编号</summary><pre id="ara-json"></pre></details>
+<p id="ara-feedback" class="note" aria-live="polite"></p>
+</section>
+</main>
+
+</div>
+
+<script src="./audit.js" defer></script></body></html>

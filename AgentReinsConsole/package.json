@@ -1,0 +1,10 @@
+{
+  "name": "agentreins-enterprise-console",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "start": "node dev-server.cjs",
+    "test": "node --test tests/audit-ui.cjs"
+  },
+  "devDependencies": { "playwright": "1.58.2" }
+}

@@ -1,0 +1,19 @@
+[Unit]
+Description=AgentReins enterprise audit API
+After=network.target
+[Service]
+Type=simple
+User=agentreins-audit
+Group=agentreins-audit
+WorkingDirectory=/opt/agentreins-console
+ExecStart=/usr/bin/python3 /opt/agentreins-console/audit_server.py
+Restart=on-failure
+UMask=0077
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/agentreins-audit
+Environment=PYTHONDONTWRITEBYTECODE=1
+[Install]
+WantedBy=multi-user.target
