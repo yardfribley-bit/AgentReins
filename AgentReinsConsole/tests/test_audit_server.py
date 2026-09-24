@@ -84,7 +84,7 @@ class AuditTests(unittest.TestCase):
         packet['identity'] = dict(localUser='employee', deviceName='Office Mac', localIPs=['192.168.1.11'], observedAt='2026-01-02T00:00:01Z')
         self.store.ingest(packet, 'device', self.device)
         full = self.request('/api/audit/cases/1', admin=True)['record']
-        self.assertEqual(full['who'], 'employee · Office Mac · 192.168.1.11')
+        self.assertEqual(full['who'], '使用者：employee · 设备：Office Mac · 内网 IP：192.168.1.11')
         self.assertEqual(full['identity'], packet['identity'])
         self.assertEqual(full['snapshot'], packet['snapshot'])
         packet['identity']['localUser'] = 'different'
@@ -92,9 +92,13 @@ class AuditTests(unittest.TestCase):
         packet['sequence'] = 2
         packet.pop('identity')
         self.store.ingest(packet, 'device', self.device)
+        listing = self.request('/api/audit/cases', admin=True)
+        self.assertIn('使用者：未采集', listing['items'][0]['record']['who'])
+        self.assertIn('设备：未采集', listing['items'][0]['record']['who'])
+        self.assertIn('内网 IP：未采集', listing['items'][0]['record']['who'])
         full = self.request('/api/audit/cases/1', admin=True)['record']
-        self.assertIn('使用者未采集', full['who'])
-        self.assertIn('内网 IP 未采集', full['who'])
+        self.assertIn('使用者：未采集', full['who'])
+        self.assertIn('内网 IP：未采集', full['who'])
         with self.store.connect() as db:
             self.assertEqual(json.loads(db.execute('SELECT identity FROM evidence_identity').fetchone()[0])['localUser'], 'employee')
 

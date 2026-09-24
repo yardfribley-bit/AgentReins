@@ -57,9 +57,9 @@ def summarize(snapshot, device, receipt, received, identity=None):
     flows = activities.get('networkFlows', [])
     title = next(iter(snapshot.get('conversation', {}).get('userInputs', [])), '任务原话未采集')
     subject = identity or {}
-    who = ' · '.join([subject.get('localUser') or '使用者未采集',
-                      subject.get('deviceName') or device.get('label') or '设备名称未采集',
-                      '、'.join(subject.get('localIPs', [])) or '内网 IP 未采集'])
+    who = ' · '.join(['使用者：' + (subject.get('localUser') or '未采集'),
+                      '设备：' + (subject.get('deviceName') or '未采集'),
+                      '内网 IP：' + ('、'.join(subject.get('localIPs', [])) or '未采集')])
     return dict(title=title[:240], who=who, identity=identity,
                 summary=f"{len(requests)} 条请求证据 · {len(flows)} 条外联证据",
                 process=task['agentID'], data=f"{len(activities.get('files', []))} 条文件活动",
@@ -68,6 +68,15 @@ def summarize(snapshot, device, receipt, received, identity=None):
                 conclusion='真实终端证据已接收；请逐项核对请求内容、记忆与实际连接。',
                 limit='请求正文或加密前捕获不单独证明发送完成；未采集的记录不等于未发生。',
                 receipt=f"已接收 · {receipt} · {received}", memoryAssessment=memory.get('assessment', 'unknown'))
+
+
+def display_summary(raw):
+    summary = json.loads(raw)
+    # Historical summaries predate identity capture. Do not reinterpret a
+    # hostname/IP enrollment label as a verified user or device name.
+    if not summary.get('identity'):
+        summary['who'] = '使用者：未采集 · 设备：未采集 · 内网 IP：未采集'
+    return summary
 
 
 def details(snapshot, summary):
@@ -210,7 +219,7 @@ def handler(config, store, public):
                             rows = db.execute('SELECT id,summary,revision FROM cases WHERE revision>? ORDER BY revision LIMIT ?', (after, limit + 1)).fetchall()
                             watermark = rows[limit-1]['revision'] if len(rows) > limit else max(after, watermark)
                         db.execute('INSERT INTO access_log(at,actor,action,target) VALUES(?,?,?,?)', (utc(), config['admin']['username'], 'list', str(cursor)))
-                    return self.send_json(200, dict(schemaVersion=1, items=[dict(id=str(r['id']), record=json.loads(r['summary'])) for r in rows[:limit]],
+                    return self.send_json(200, dict(schemaVersion=1, items=[dict(id=str(r['id']), record=display_summary(r['summary'])) for r in rows[:limit]],
                         updateCursor=str(watermark), nextCursor=str(rows[limit-1]['id']) if after is None and len(rows)>limit else None))
                 if url.path.startswith('/api/audit/cases/'):
                     case_id = int(url.path.rsplit('/', 1)[1])
@@ -219,7 +228,7 @@ def handler(config, store, public):
                         if not row:
                             return self.send_json(404, {'error': 'not_found'})
                         db.execute('INSERT INTO access_log(at,actor,action,target) VALUES(?,?,?,?)', (utc(), config['admin']['username'], 'read_full_evidence', str(case_id)))
-                    return self.send_json(200, dict(schemaVersion=1, record=details(json.loads(row['body']), json.loads(row['summary']))))
+                    return self.send_json(200, dict(schemaVersion=1, record=details(json.loads(row['body']), display_summary(row['summary']))))
                 files = {'/': ('index.html', 'text/html'), '/audit.js': ('audit.js', 'text/javascript'), '/audit.css': ('audit.css', 'text/css')}
                 if url.path not in files:
                     return self.send_json(404, {'error': 'not_found'})
