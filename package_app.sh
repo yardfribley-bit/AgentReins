@@ -14,10 +14,22 @@ BUILD_DATE="${AGENTREINS_BUILD_DATE:-$(date -u '+%Y-%m-%dT%H:%M:%SZ')}"
 SIGNING_IDENTITY="${CODE_SIGN_IDENTITY:--}"
 BUILD_JOBS="${AGENTREINS_BUILD_JOBS:-2}"
 TARGET_ARCHS="${AGENTREINS_ARCHS:-x86_64}"
+CONFIGURATION="${AGENTREINS_CONFIGURATION:-release}"
+if [[ "$CONFIGURATION" != "release" && "$CONFIGURATION" != "debug" ]]; then
+  echo "error: AGENTREINS_CONFIGURATION must be debug or release" >&2
+  exit 1
+fi
 
 ARM_SCRATCH="$PROJECT_DIR/.build/arm64"
 INTEL_SCRATCH="$PROJECT_DIR/.build/x86_64"
-if [[ "$TARGET_ARCHS" == "x86_64" ]]; then
+if [[ "$CONFIGURATION" == "debug" ]]; then
+  # UI review reuses the incremental test build and never replaces the release bundle.
+  APP_BUNDLE="$PROJECT_DIR/.build/preview/AgentReins.app"
+  BUILD_NUMBER="ui-v2-$BUILD_NUMBER"
+  TARGET_ARCHS="$(uname -m)"
+  swift build -c debug -j "$BUILD_JOBS"
+  INTEL_BIN_DIR="$(swift build -c debug --show-bin-path)"
+elif [[ "$TARGET_ARCHS" == "x86_64" ]]; then
   echo "==> Building Intel release binary (x86_64)"
   swift build -c release -j "$BUILD_JOBS" --arch x86_64 --scratch-path "$INTEL_SCRATCH"
   INTEL_BIN_DIR="$(swift build -c release --arch x86_64 --scratch-path "$INTEL_SCRATCH" --show-bin-path)"
@@ -32,7 +44,7 @@ fi
 echo "==> Creating $APP_NAME.app"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
-if [[ "$TARGET_ARCHS" == "x86_64" ]]; then
+if [[ "$CONFIGURATION" == "debug" || "$TARGET_ARCHS" == "x86_64" ]]; then
   cp "$INTEL_BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
   cp "$INTEL_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
 else
@@ -83,7 +95,9 @@ codesign --force --deep --options runtime --timestamp --sign "$SIGNING_IDENTITY"
 echo "==> Verifying package"
 codesign --verify --deep --strict --verbose=2 "$APP_BUNDLE"
 ARCHITECTURES="$(lipo -archs "$APP_BUNDLE/Contents/MacOS/$APP_NAME")"
-if [[ "$TARGET_ARCHS" == "x86_64" ]]; then
+if [[ "$CONFIGURATION" == "debug" ]]; then
+  [[ "$ARCHITECTURES" == "$TARGET_ARCHS" ]] || { echo "error: unexpected debug architecture: $ARCHITECTURES" >&2; exit 1; }
+elif [[ "$TARGET_ARCHS" == "x86_64" ]]; then
   [[ "$ARCHITECTURES" == "x86_64" ]] || { echo "error: expected x86_64, found: $ARCHITECTURES" >&2; exit 1; }
 else
   [[ "$ARCHITECTURES" == *arm64* && "$ARCHITECTURES" == *x86_64* ]] || {

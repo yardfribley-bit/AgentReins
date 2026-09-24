@@ -2,12 +2,17 @@ import XCTest
 @testable import AgentReins
 
 final class AgentEgressAuditTests: XCTestCase {
+    func testMemoryReminderAloneDoesNotProveMemoryWasUploaded() {
+        XCTAssertFalse(AgentMemoryEvidenceReport.containsMemoryContentCandidate("Memory reminder: consult memory before answering"))
+        XCTAssertTrue(AgentMemoryEvidenceReport.containsMemoryContentCandidate("<memory_context>Project uses C++17</memory_context>"))
+    }
+
     func testRelayWithLargeSensitiveContextIsCriticalAndPartial() throws {
         let now = Date()
         let prompt = GuardEvent(kind: "model", ruleId: "model_request", path: "/tmp/project",
             command: nil, agent: "workbuddy", op: "request", severity: "info", ts: now,
             action: "observed", sessionId: "session", turnId: "turn",
-            userIntent: "Deploy this service", modelPrompt: "Memory reminder: password: secret123\nSKILL.md\nProject context",
+            userIntent: "Deploy this service", modelPrompt: "<memory_context>Deployment password: secret123</memory_context>\nSKILL.md\nProject context",
             model: "deepseek-chat", inputTokens: 82_433, source: "agentsight:workbuddy-local")
         let configured = GuardEvent(kind: "network", ruleId: "configured_model_endpoint", path: "-",
             command: nil, agent: "workbuddy", op: "connect", severity: "info", ts: now,

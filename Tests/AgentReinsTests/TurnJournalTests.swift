@@ -1298,12 +1298,15 @@ final class TurnJournalTests: XCTestCase {
 
         let flows = NetworkFlowEvidence.build(events: rows)
 
-        XCTAssertEqual(flows.first { $0.category == .model }?.grade, .correlated)
-        XCTAssertEqual(flows.first { $0.category == .model }?.ip, "104.18.3.115")
-        XCTAssertNil(flows.first { $0.category == .model }?.domain)
+        // A same-turn socket establishes association, not model destination identity.
+        XCTAssertFalse(flows.contains { $0.category == .model })
+        let associatedSocket = try XCTUnwrap(flows.first { $0.ip == "104.18.3.115" })
+        XCTAssertEqual(associatedSocket.category, .unknown)
+        XCTAssertEqual(associatedSocket.grade, .correlated)
+        XCTAssertNil(associatedSocket.domain)
         XCTAssertEqual(flows.first { $0.category == .web }?.grade, .inferred)
         XCTAssertEqual(flows.first { $0.category == .remote }?.purpose, "SSH remote operation")
-        XCTAssertEqual(flows.first { $0.category == .unknown }?.grade, .observed)
+        XCTAssertEqual(flows.first { $0.ip == "198.51.100.9" }?.grade, .observed)
     }
 
     func testModelRequestForensicsSeparatesEconomicsExposureAndTraffic() throws {

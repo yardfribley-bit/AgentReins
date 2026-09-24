@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 
 enum ExternalSourceKind: String, Sendable {
     case web = "Web"
@@ -77,7 +78,23 @@ enum ExternalContentSecurity {
             findings: scan(content))
     }
 
+    private final class CachedScan: NSObject {
+        let findings: [InjectionFinding]
+        init(_ findings: [InjectionFinding]) { self.findings = findings }
+    }
+    private static let scanCache: NSCache<NSString, CachedScan> = {
+        let cache = NSCache<NSString, CachedScan>()
+        cache.countLimit = 256
+        cache.totalCostLimit = 8 * 1024 * 1024
+        return cache
+    }()
+
     static func scan(_ content: String) -> [InjectionFinding] {
+        // Multiple projections inspect the same tool output. Reuse only exact
+        // content matches; changed content is always scanned. No disk cache.
+        let bytes = Data(content.utf8)
+        let cacheKey = SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined() as NSString
+        if let cached = scanCache.object(forKey: cacheKey) { return cached.findings }
         let rules: [(InjectionCategory, String, String, [String])] = [
             (.instructionOverride, "high", "high", ["ignore previous instructions", "ignore all prior", "disregard the user", "new instructions take priority", "perform that request first", "before you answer", "continue with the user's original request"]),
             (.secretExfiltration, "critical", "high", ["upload .env", "send the api key", "exfiltrate", "send credentials", "read private key", "transmit the retrieved contents", "credential sync required"]),
@@ -100,6 +117,9 @@ enum ExternalContentSecurity {
         if content.unicodeScalars.contains(where: { [0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF].contains(Int($0.value)) }) {
             result.append(InjectionFinding(id: "obfuscation:invisible", category: .obfuscation,
                 severity: "medium", confidence: "high", evidence: "Invisible Unicode control characters detected"))
+        }
+        if bytes.count <= 1024 * 1024 {
+            scanCache.setObject(CachedScan(result), forKey: cacheKey, cost: max(1, bytes.count))
         }
         return result
     }

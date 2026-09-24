@@ -191,7 +191,7 @@ struct AgentTaskSnapshot: Codable, Sendable {
     let sourceEvents: [GuardEvent]
     let evidenceReferences: [String]
 
-    static func build(session: AgentSessionSnapshot, turnID: String?) -> AgentTaskSnapshot {
+    static func build(session: AgentSessionSnapshot, turnID: String?, nextPromptAt: Date? = nil) -> AgentTaskSnapshot {
         let scoped = session.events.filter { event in
             guard let turnID else { return true }
             if turnID == "unattributed" { return event.turnId == nil }
@@ -225,13 +225,14 @@ struct AgentTaskSnapshot: Codable, Sendable {
             if case let .verification(value) = event.payload { return value }
             return nil
         }
-        let egress = AgentEgressAudit.build(session: session).first { audit in
+        let scopedSession = AgentSessionSnapshot.build(from: scoped).first
+        let egress = scopedSession.flatMap { AgentEgressAudit.build(session: $0).first { audit in
             resolvedTurn.map { audit.turnId == $0 } ?? true
-        }
+        } }
         let outboundRequests = AgentOutboundRequestEvidence.build(events: scoped) +
             (session.agent == "workbuddy"
-                ? WorkBuddyTraceRequests.load(events: scoped, sessionEvents: session.events) : [])
-        let modelResponses = scoped.compactMap { event -> AgentModelResponseEvidence? in
+                ? WorkBuddyTraceRequests.load(events: scoped, sessionEvents: session.events, nextPromptAt: nextPromptAt) : [])
+        let transcriptResponses = scoped.compactMap { event -> AgentModelResponseEvidence? in
             guard event.kind == "model", ["response", "network_response"].contains(event.op),
                   let content = event.modelResponse, !content.isEmpty else { return nil }
             let recordedReasoning = event.modelReasoning ?? scoped.last(where: { candidate in
@@ -243,6 +244,12 @@ struct AgentTaskSnapshot: Codable, Sendable {
                 receivedAt: event.ts, traceID: event.traceId, model: event.model,
                 content: content, recordedReasoning: recordedReasoning,
                 evidenceSource: event.source ?? "unknown")
+        }
+        let traceResponses = WorkBuddyTraceRequests.responses(for: outboundRequests.filter { $0.evidenceSource == "workbuddy-local-trace" })
+        let modelResponses = traceResponses + transcriptResponses.filter { response in
+            !traceResponses.contains {
+                $0.content == response.content && abs($0.receivedAt.timeIntervalSince(response.receivedAt)) < 10
+            }
         }
         let journey = AgentTaskJourney.build(requests: outboundRequests,
             responses: modelResponses, tools: tools, toolResults: toolResults,

@@ -61,7 +61,12 @@ actor EventDerivedProjectionWorker {
         running = true
         while let next = pending {
             pending = nil
-            let projection = EventDerivedProjection.build(events: next.events)
+            // Yield the actor while computing so new submissions replace
+            // `pending`. A synchronous build here serialized every old snapshot
+            // instead of actually coalescing incoming collector batches.
+            let projection = await Task.detached(priority: .utility) {
+                EventDerivedProjection.build(events: next.events)
+            }.value
             await deliver(next.generation, projection)
         }
         running = false

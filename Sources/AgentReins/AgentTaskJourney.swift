@@ -59,7 +59,8 @@ struct AgentTaskJourney: Codable, Sendable {
         var usedTools = Set<String>()
         let rounds = selected.enumerated().map { index, request -> Round in
             let nextAt = index + 1 < selected.count ? selected[index + 1].capturedAt : Date.distantFuture
-            let exact = orderedResponses.first { response in
+            let spanResponse = orderedResponses.first { $0.eventID == request.eventID + ":response" }
+            let exact = spanResponse ?? orderedResponses.first { response in
                 !usedResponses.contains(response.eventID) &&
                     request.traceID != nil && response.traceID == request.traceID &&
                     response.receivedAt >= request.capturedAt.addingTimeInterval(-1) &&
@@ -78,11 +79,11 @@ struct AgentTaskJourney: Codable, Sendable {
             }
             associatedTools.forEach { usedTools.insert($0.callID) }
             return Round(ordinal: index + 1, requestEventID: request.eventID,
-                requestedAt: request.capturedAt, model: request.model,
+                requestedAt: request.capturedAt, model: request.model ?? response?.model,
                 evidenceSource: request.evidenceSource, captureMode: request.captureMode,
                 completeness: request.completeness, bodyBytes: request.bodyBytes,
                 requestSections: sections(in: request), response: response,
-                responseCorrelation: exact != nil ? "exactTraceID" : response != nil ? "temporalSequence" : "notObserved",
+                responseCorrelation: spanResponse != nil ? "exactGenerationSpan" : exact != nil ? "exactTraceID" : response != nil ? "temporalSequence" : "notObserved",
                 toolSteps: associatedTools.map(toolStep),
                 requestToResponseMS: response.map {
                     max(0, $0.receivedAt.timeIntervalSince(request.capturedAt) * 1_000)

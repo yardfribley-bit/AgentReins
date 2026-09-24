@@ -29,6 +29,21 @@ struct IndexedCodeChange: Codable, Identifiable, Sendable {
 }
 
 enum CodeChangeIndexer {
+    private struct TurnKey: Hashable {
+        let session: String
+        let turn: String?
+    }
+
+    /// Network, token and model-output batches cannot change this projection.
+    static func needsRefresh(_ events: [AgentEventEnvelope]) -> Bool {
+        events.contains {
+            switch $0.payload {
+            case .userPrompt, .contextPrepared, .toolCall, .fileActivity, .checkpoint, .verification: return true
+            default: return false
+            }
+        }
+    }
+
     static func build(events: [AgentEventEnvelope]) -> [IndexedCodeChange] {
         let ordered = events.sorted {
             if $0.occurredAt == $1.occurredAt { return $0.sequence < $1.sequence }
@@ -51,17 +66,25 @@ enum CodeChangeIndexer {
             return value
         }
 
+        // Resolve turn metadata once, not by rescanning the session for every
+        // file. Keep the original first-prompt / latest-context semantics.
+        var prompts: [TurnKey: UserPromptEvidence] = [:]
+        var contexts: [TurnKey: ContextAssemblySnapshot] = [:]
+        for event in ordered {
+            let key = TurnKey(session: event.sessionID, turn: event.turnID)
+            switch event.payload {
+            case .userPrompt(let value):
+                if prompts[key] == nil { prompts[key] = value }
+            case .contextPrepared(let value): contexts[key] = value
+            default: break
+            }
+        }
+
         return ordered.compactMap { event in
             guard case let .fileActivity(file) = event.payload else { return nil }
-            let sameTurn = ordered.filter { $0.sessionID == event.sessionID && $0.turnID == event.turnID }
-            let prompt = sameTurn.compactMap { row -> UserPromptEvidence? in
-                guard case let .userPrompt(value) = row.payload else { return nil }
-                return value
-            }.first
-            let context = sameTurn.compactMap { row -> ContextAssemblySnapshot? in
-                guard case let .contextPrepared(value) = row.payload else { return nil }
-                return value
-            }.last
+            let key = TurnKey(session: event.sessionID, turn: event.turnID)
+            let prompt = prompts[key]
+            let context = contexts[key]
             let commits = checkpoints.filter { checkpoint in
                 checkpoint.touchedPaths.contains { pathsMatch($0, file.path) }
             }.map(\.commitHash)

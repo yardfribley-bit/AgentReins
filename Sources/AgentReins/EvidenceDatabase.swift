@@ -70,6 +70,19 @@ final class EvidenceDatabase: @unchecked Sendable {
             ) WITHOUT ROWID
             """)
         try execute("CREATE INDEX IF NOT EXISTS evidence_time ON evidence_records(observed_at DESC)")
+        // Session detail used to scan and JSON-decode every historical record.
+        // SQLite can use this expression index for the existing session query.
+        try execute("""
+            CREATE INDEX IF NOT EXISTS evidence_session_time ON evidence_records(
+              json_extract(CAST(payload AS TEXT), '$.sessionId'), observed_at, ingested_at
+            )
+            """)
+        try execute("""
+            CREATE INDEX IF NOT EXISTS evidence_task_time ON evidence_records(
+              json_extract(CAST(payload AS TEXT), '$.sessionId'),
+              json_extract(CAST(payload AS TEXT), '$.turnId'), observed_at, ingested_at
+            )
+            """)
         try execute("""
             CREATE TABLE IF NOT EXISTS raw_evidence (
               evidence_key TEXT PRIMARY KEY, source TEXT NOT NULL, stream TEXT NOT NULL,
@@ -168,6 +181,7 @@ final class EvidenceDatabase: @unchecked Sendable {
               UNIQUE(session_id, sequence)
             ) WITHOUT ROWID
             """)
+        try execute("CREATE TABLE IF NOT EXISTS dirty_code_sessions(project_id TEXT NOT NULL, session_id TEXT NOT NULL, PRIMARY KEY(project_id,session_id)) WITHOUT ROWID")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_project_time ON agent_event_stream(project_id,occurred_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_session_sequence ON agent_event_stream(session_id,sequence)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_task_sequence ON agent_event_stream(session_id,turn_id,sequence)")
@@ -336,10 +350,12 @@ final class EvidenceDatabase: @unchecked Sendable {
     /// constraint makes replay idempotent and turns competing payloads for one
     /// sequence into a visible capture error instead of silently rewriting
     /// evidence.
-    func appendAgentEvents(_ events: [AgentEventEnvelope]) throws {
-        guard !events.isEmpty else { return }
+    @discardableResult
+    func appendAgentEvents(_ events: [AgentEventEnvelope]) throws -> [AgentEventEnvelope] {
+        guard !events.isEmpty else { return [] }
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("BEGIN IMMEDIATE")
+        var inserted: [AgentEventEnvelope] = []
         do {
             let sql = """
               INSERT OR IGNORE INTO agent_event_stream(event_id,project_id,agent_id,session_id,
@@ -369,10 +385,25 @@ final class EvidenceDatabase: @unchecked Sendable {
                 }
                 bind(digest, at: 12, to: statement)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append agent event") }
+                if sqlite3_changes(handle) > 0 { inserted.append(event) }
                 sqlite3_reset(statement)
                 sqlite3_clear_bindings(statement)
             }
+            // Persist invalidation in the same transaction as evidence so a
+            // restart cannot lose deferred indexing work.
+            var dirty: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO dirty_code_sessions VALUES(?,?)", -1, &dirty, nil) == SQLITE_OK else {
+                throw failure("prepare index invalidation")
+            }
+            defer { sqlite3_finalize(dirty) }
+            for event in inserted where CodeChangeIndexer.needsRefresh([event]) {
+                bind(event.projectID, at: 1, to: dirty)
+                bind(event.sessionID, at: 2, to: dirty)
+                guard sqlite3_step(dirty) == SQLITE_DONE else { throw failure("invalidate code index") }
+                sqlite3_reset(dirty); sqlite3_clear_bindings(dirty)
+            }
             try executeUnlocked("COMMIT")
+            return inserted
         } catch {
             try? executeUnlocked("ROLLBACK")
             throw error
@@ -401,6 +432,28 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
         }
         return events
+    }
+
+    func dirtyCodeSessions(projectID: String) throws -> [String] {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT session_id FROM dirty_code_sessions WHERE project_id=?", -1, &statement, nil) == SQLITE_OK else { throw failure("read dirty indexes") }
+        defer { sqlite3_finalize(statement) }
+        bind(projectID, at: 1, to: statement)
+        var sessions: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let id = text(statement, 0) { sessions.append(id) }
+        }
+        return sessions
+    }
+
+    func clearDirtyCodeSession(projectID: String, sessionID: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "DELETE FROM dirty_code_sessions WHERE project_id=? AND session_id=?", -1, &statement, nil) == SQLITE_OK else { throw failure("clear dirty index") }
+        defer { sqlite3_finalize(statement) }
+        bind(projectID, at: 1, to: statement); bind(sessionID, at: 2, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("clear dirty index") }
     }
 
     /// On-demand compatibility read used only when a project has no canonical
@@ -457,7 +510,7 @@ final class EvidenceDatabase: @unchecked Sendable {
         return events
     }
 
-    func recentTasks(limit: Int) throws -> [StoredTaskSummary] {
+    func recentTasks(limit: Int, before: Date? = nil, offset: Int = 0) throws -> [StoredTaskSummary] {
         lock.lock(); defer { lock.unlock() }
         let sql = """
           WITH recent AS (
@@ -466,7 +519,8 @@ final class EvidenceDatabase: @unchecked Sendable {
                    COUNT(*) AS event_count
             FROM agent_event_stream WHERE turn_id IS NOT NULL
             GROUP BY session_id, turn_id
-            ORDER BY last_at DESC LIMIT ?
+            HAVING MAX(occurred_at) < ?
+            ORDER BY last_at DESC, session_id, turn_id LIMIT ? OFFSET ?
           )
           SELECT recent.session_id, recent.turn_id, recent.agent_id,
                  recent.started_at, recent.last_at, recent.event_count,
@@ -475,14 +529,16 @@ final class EvidenceDatabase: @unchecked Sendable {
                   WHERE prompt.session_id = recent.session_id AND prompt.turn_id = recent.turn_id
                     AND json_type(CAST(prompt.payload AS TEXT), '$.payload.userPrompt') IS NOT NULL
                   ORDER BY prompt.sequence ASC LIMIT 1)
-          FROM recent ORDER BY recent.last_at DESC
+          FROM recent ORDER BY recent.last_at DESC, recent.session_id, recent.turn_id
           """
         var statement: OpaquePointer?
         guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
             throw failure("prepare recent tasks")
         }
         defer { sqlite3_finalize(statement) }
-        sqlite3_bind_int(statement, 1, Int32(max(1, min(limit, 200))))
+        sqlite3_bind_double(statement, 1, before?.timeIntervalSince1970 ?? Date.distantFuture.timeIntervalSince1970)
+        sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 200))))
+        sqlite3_bind_int(statement, 3, Int32(max(0, offset)))
         var result: [StoredTaskSummary] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let sessionID = text(statement, 0),
@@ -1072,11 +1128,15 @@ final class EvidenceDatabase: @unchecked Sendable {
         return result
     }
 
-    func events(sessionId: String) throws -> [GuardEvent] {
+    func events(sessionId: String, turnID: String? = nil) throws -> [GuardEvent] {
         lock.lock(); defer { lock.unlock() }
+        let turnFilter = turnID == nil ? "" : (turnID == "unattributed"
+            ? "AND json_extract(CAST(payload AS TEXT), '$.turnId') IS NULL"
+            : "AND json_extract(CAST(payload AS TEXT), '$.turnId') = ?")
         let sql = """
           SELECT payload FROM evidence_records
           WHERE json_extract(CAST(payload AS TEXT), '$.sessionId') = ?
+          \(turnFilter)
           ORDER BY observed_at ASC, ingested_at ASC
           """
         var statement: OpaquePointer?
@@ -1085,6 +1145,7 @@ final class EvidenceDatabase: @unchecked Sendable {
         }
         defer { sqlite3_finalize(statement) }
         bind(sessionId, at: 1, to: statement)
+        if let turnID, turnID != "unattributed" { bind(turnID, at: 2, to: statement) }
         var result: [GuardEvent] = []
         var ids = Set<UUID>()
         while sqlite3_step(statement) == SQLITE_ROW {
@@ -1096,6 +1157,27 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
         }
         return result
+    }
+
+    /// Read only the next prompt timestamp, never another task's request body.
+    func nextPromptDate(sessionID: String, turnID: String, after: Date) throws -> Date? {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+          SELECT MIN(observed_at) FROM evidence_records
+          WHERE json_extract(CAST(payload AS TEXT), '$.sessionId') = ? AND observed_at > ?
+            AND json_extract(CAST(payload AS TEXT), '$.turnId') != ?
+            AND json_extract(CAST(payload AS TEXT), '$.kind') = 'model'
+            AND json_extract(CAST(payload AS TEXT), '$.op') = 'prompt'
+          """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare prompt boundary") }
+        defer { sqlite3_finalize(statement) }
+        bind(sessionID, at: 1, to: statement)
+        sqlite3_bind_double(statement, 2, after.timeIntervalSince1970)
+        bind(turnID, at: 3, to: statement)
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
+        return Date(timeIntervalSince1970: sqlite3_column_double(statement, 0))
     }
 
     func saveCheckpoint(_ checkpoint: SourceCheckpoint) throws {

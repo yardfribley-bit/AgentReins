@@ -3,6 +3,21 @@ import XCTest
 @testable import AgentReins
 
 final class TaskLiveProgressTests: XCTestCase {
+    func testOrphanResponseIsNotANewCurrentTask() {
+        let start = Date(timeIntervalSince1970: 100)
+        var progress = TaskLiveProgress(sessionID: "s", turnID: "t", startedAt: start,
+            lastActivityAt: start, phase: .preparing)
+        progress.ingest(GuardEvent(kind: "model", ruleId: "test", path: "-", command: nil,
+            agent: "codex", op: "response", severity: "info", ts: start, action: "completed",
+            sessionId: "s", turnId: "t", outputTokens: 500))
+        XCTAssertFalse(progress.isCurrentTask(since: start.addingTimeInterval(-1)))
+        progress.ingest(GuardEvent(kind: "model", ruleId: "test", path: "-", command: nil,
+            agent: "codex", op: "prompt", severity: "info", ts: start.addingTimeInterval(-2), action: "sent",
+            sessionId: "s", turnId: "t", userIntent: "."))
+        XCTAssertFalse(progress.isCurrentTask(since: start.addingTimeInterval(-1)))
+        XCTAssertTrue(progress.isCurrentTask(since: start.addingTimeInterval(-3)))
+    }
+
     func testIncrementalProgressSurvivesLongTaskAndRepeatedEvidence() {
         let start = Date(timeIntervalSince1970: 1_700_000_000)
         var progress = TaskLiveProgress(sessionID: "session", turnID: "turn",

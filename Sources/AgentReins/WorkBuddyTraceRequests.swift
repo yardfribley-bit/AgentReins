@@ -5,7 +5,7 @@ import Foundation
 /// session transcript. Anchor on one trace at the user prompt, then accept
 /// continuation traces from the same worker within that turn's time boundary.
 enum WorkBuddyTraceRequests {
-    static func load(events: [GuardEvent], sessionEvents: [GuardEvent]? = nil,
+    static func load(events: [GuardEvent], sessionEvents: [GuardEvent]? = nil, nextPromptAt: Date? = nil,
                      root: URL = FileManager.default.homeDirectoryForCurrentUser
         .appendingPathComponent(".workbuddy/traces")) -> [AgentOutboundRequestEvidence] {
         guard let prompt = events.first(where: { $0.agent == "workbuddy" && $0.op == "prompt" }),
@@ -19,7 +19,7 @@ enum WorkBuddyTraceRequests {
                 $0.sessionId == prompt.sessionId && $0.ts > prompt.ts &&
                 $0.turnId != prompt.turnId
         }.map(\.ts).min()
-        let latest = min(turnEnd.addingTimeInterval(30), nextPrompt ?? .distantFuture)
+        let latest = min(turnEnd.addingTimeInterval(30), min(nextPrompt ?? .distantFuture, nextPromptAt ?? .distantFuture))
         var candidates: [(traceID: String, path: String, workerPID: Int,
                           started: Date, spans: [[String: Any]])] = []
         for case let url as URL in enumerator where url.pathExtension == "json" &&
@@ -54,7 +54,7 @@ enum WorkBuddyTraceRequests {
             return AgentOutboundRequestEvidence(
                 id: "outbound:\(candidate.traceID):\(spanID)",
                 eventID: "trace:\(candidate.traceID):\(spanID)",
-                capturedAt: started, model: span["model"] as? String,
+                capturedAt: started, model: span["model"] as? String ?? outputObjects(span).compactMap { $0["model"] as? String }.first,
                 destination: nil, traceID: candidate.traceID, requestID: spanID,
                 userIntent: prompt.userIntent, body: body, bodyBytes: bytes.count,
                 bodySHA256: digest, evidenceSource: "workbuddy-local-trace",
@@ -63,6 +63,40 @@ enum WorkBuddyTraceRequests {
                 confidence: .confirmed)
             }
         }
+    }
+
+    /// Responses live inside the same generation span as the request. Match
+    /// by span identity, never by assuming the nearest response belongs to it.
+    static func responses(for requests: [AgentOutboundRequestEvidence]) -> [AgentModelResponseEvidence] {
+        var result: [AgentModelResponseEvidence] = []
+        for (path, rows) in Dictionary(grouping: requests.filter { $0.sourceLocator != nil }, by: { $0.sourceLocator! }) {
+            guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)),
+                  let document = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+                  let spans = document["spans"] as? [[String: Any]] else { continue }
+            for request in rows {
+                guard let span = spans.first(where: { $0["spanId"] as? String == request.requestID }),
+                      let ended = (span["endedAt"] as? String).flatMap(parseDate) else { continue }
+                let objects = outputObjects(span)
+                let messages = objects.flatMap { $0["choices"] as? [[String: Any]] ?? [] }
+                    .compactMap { $0["message"] as? [String: Any] }
+                let text = messages.compactMap { $0["content"] as? String }.joined(separator: "\n")
+                guard !text.isEmpty else { continue }
+                let reasoning = messages.compactMap { $0["reasoning_content"] as? String }.joined(separator: "\n")
+                result.append(AgentModelResponseEvidence(eventID: request.eventID + ":response",
+                    receivedAt: ended, traceID: request.traceID,
+                    model: objects.compactMap { $0["model"] as? String }.first ?? request.model,
+                    content: text, recordedReasoning: reasoning.isEmpty ? nil : reasoning,
+                    evidenceSource: "workbuddy-local-trace"))
+            }
+        }
+        return result.sorted { $0.receivedAt < $1.receivedAt }
+    }
+
+    static func outputObjects(_ span: [String: Any]) -> [[String: Any]] {
+        guard let text = span["toolOutput"] as? String, let data = text.data(using: .utf8),
+              let value = try? JSONSerialization.jsonObject(with: data) else { return [] }
+        if let array = value as? [[String: Any]] { return array }
+        return (value as? [String: Any]).map { [$0] } ?? []
     }
 
     private static func parseDate(_ value: String) -> Date? {

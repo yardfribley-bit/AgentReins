@@ -22,6 +22,7 @@ struct TaskLiveProgress: Sendable {
         case runningTool = "执行工具"
         case processingResult = "处理工具结果"
         case responding = "模型响应"
+        case completed = "Agent 已报告完成"
         case failed = "执行失败"
     }
 
@@ -32,6 +33,10 @@ struct TaskLiveProgress: Sendable {
 
     var inputTokens: Int { usage.values.reduce(0) { $0 + $1.input } }
     var outputTokens: Int { usage.values.reduce(0) { $0 + $1.output } }
+
+    func isCurrentTask(since boundary: Date) -> Bool {
+        !modelRequests.isEmpty && startedAt >= boundary && lastActivityAt >= boundary
+    }
 
     mutating func ingest(_ event: GuardEvent) {
         startedAt = min(startedAt, event.startedAt ?? event.ts)
@@ -45,7 +50,10 @@ struct TaskLiveProgress: Sendable {
         else if event.kind == "tool", event.op == "call" { phase = .runningTool }
         else if event.kind == "tool", event.op == "result" { phase = .processingResult }
         else if event.kind == "model", event.op == "prompt" { phase = .waitingForModel }
-        else if event.kind == "model", event.op == "response" { phase = .responding }
+        else if event.kind == "model", event.op == "response" {
+            phase = ["completed", "final_answer", "end_turn", "stop_sequence"].contains(event.action.lowercased())
+                ? .completed : .responding
+        }
     }
 
     private mutating func updateCounts(_ event: GuardEvent) {

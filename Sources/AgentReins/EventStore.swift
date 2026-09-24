@@ -14,9 +14,13 @@ enum EventStoreReadError: LocalizedError {
     }
 }
 
-/// 所有安全信号的统一、本地事件仓库。事件跨 App 重启保留，不上传网络。
+/// 所有安全信号的统一、本地事件仓库。事件跨 App 重启保留；
+/// 仅显式注册云审计后，由独立上传客户端发送启用后的新任务。
 @MainActor
 final class EventStore: ObservableObject {
+    /// The overview shows only activity observed during this app run. Older
+    /// evidence is available through the explicit history query instead.
+    let liveSince = Date()
     /// A single revision publishes a coherent evidence snapshot. Publishing
     /// each derived array separately caused 4-7 full dashboard redraws for one
     /// collector batch.
@@ -37,9 +41,13 @@ final class EventStore: ObservableObject {
     private let database: EvidenceDatabase?
     private let evidenceBuffer: EvidenceBufferActor?
     private let persistenceQueue = DispatchQueue(label: "com.agentspec.eventstore.persistence", qos: .utility)
+    // UI reads must not wait behind a live collector's growing write backlog.
+    // EvidenceDatabase serializes access to its SQLite handle internally.
+    private let taskReadQueue = DispatchQueue(label: "com.agentspec.eventstore.task-read", qos: .userInitiated)
     private let projectionWorker = EventDerivedProjectionWorker()
     private let maximumEvents = 500
     private var projectionGeneration: UInt64 = 0
+    private var auditUploader: AuditUploadClient?
 
     init(fileURL: URL = EventStore.defaultURL()) {
         self.fileURL = fileURL
@@ -54,6 +62,9 @@ final class EventStore: ObservableObject {
         evidenceBuffer = openedDatabase.map(EvidenceBufferActor.init(database:))
         load()
         refreshCollectorHealth(publish: false)
+        if fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL {
+            auditUploader = AuditUploadClient(store: self)
+        }
     }
 
     nonisolated static func defaultURL() -> URL {
@@ -151,14 +162,19 @@ final class EventStore: ObservableObject {
             completion(.failure(EventStoreReadError.databaseUnavailable))
             return
         }
-        persistenceQueue.async {
+        taskReadQueue.async {
             let result: Result<AgentTaskSnapshot, Error>
             do {
-                let sessions = AgentSessionSnapshot.build(from: try database.events(sessionId: sessionID))
+                let rows = try database.events(sessionId: sessionID, turnID: turnID)
+                let sessions = AgentSessionSnapshot.build(from: rows)
                 guard let session = sessions.first(where: { $0.id == sessionID }) else {
                     throw EventStoreReadError.sessionNotFound(sessionID)
                 }
-                result = .success(AgentTaskSnapshot.build(session: session, turnID: turnID))
+                let boundary: Date?
+                if let turnID, let prompt = rows.first(where: { $0.kind == "model" && $0.op == "prompt" }) {
+                    boundary = try database.nextPromptDate(sessionID: sessionID, turnID: turnID, after: prompt.ts)
+                } else { boundary = nil }
+                result = .success(AgentTaskSnapshot.build(session: session, turnID: turnID, nextPromptAt: boundary))
             } catch {
                 result = .failure(error)
             }
@@ -166,14 +182,14 @@ final class EventStore: ObservableObject {
         }
     }
 
-    func loadRecentTasks(limit: Int = 60,
+    func loadRecentTasks(limit: Int = 20, before: Date? = nil, offset: Int = 0,
                          completion: @escaping (Result<[StoredTaskSummary], Error>) -> Void) {
         guard let database else {
             completion(.failure(EventStoreReadError.databaseUnavailable))
             return
         }
-        persistenceQueue.async {
-            let result = Result { try database.recentTasks(limit: limit) }
+        taskReadQueue.async {
+            let result = Result { try database.recentTasks(limit: limit, before: before, offset: offset) }
             DispatchQueue.main.async { completion(result) }
         }
     }
@@ -224,6 +240,7 @@ final class EventStore: ObservableObject {
         persistenceQueue.async {
             let result = Result {
                 try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                try Self.refreshDirtyCodeIndexes(projectID: projectID, database: database)
                 return try database.codeChanges(projectID: projectID, path: path, limit: limit)
             }
             DispatchQueue.main.async { completion(result) }
@@ -238,6 +255,7 @@ final class EventStore: ObservableObject {
         persistenceQueue.async {
             let result = Result {
                 try Self.restoreCanonicalProjectHistoryIfNeeded(projectID: projectID, database: database)
+                try Self.refreshDirtyCodeIndexes(projectID: projectID, database: database)
                 // Change sets are a replaceable projection. Rebuild only when
                 // the user opens this project's history so parser/indexer fixes
                 // take effect without a costly all-project startup migration.
@@ -291,6 +309,15 @@ final class EventStore: ObservableObject {
                 events: try database.agentEvents(projectID: projectID), changes: changes))
     }
 
+    nonisolated private static func refreshDirtyCodeIndexes(projectID: String, database: EvidenceDatabase) throws {
+        // Only called on persistenceQueue: ingestion cannot invalidate a
+        // session between rebuilding and acknowledging it.
+        for sessionID in try database.dirtyCodeSessions(projectID: projectID) {
+            try database.upsertCodeChanges(CodeChangeIndexer.build(events: try database.agentEvents(sessionID: sessionID)))
+            try database.clearDirtyCodeSession(projectID: projectID, sessionID: sessionID)
+        }
+    }
+
     func recordMemoryFindings(_ findings: [MemoryFinding], scannedAt: Date) {
         guard !findings.isEmpty else { return }
         let newEvents = findings.map { finding in
@@ -326,6 +353,7 @@ final class EventStore: ObservableObject {
             progress.ingest(event)
             taskProgress[key] = progress
         }
+        auditUploader?.observe(evidence, progress: taskProgress)
         if taskProgress.count > 64 {
             let retained = taskProgress.values.sorted { $0.lastActivityAt > $1.lastActivityAt }.prefix(64)
             taskProgress = Dictionary(uniqueKeysWithValues: retained.map {
@@ -376,12 +404,8 @@ final class EventStore: ObservableObject {
                                 startingSequence: try database.nextAgentEventSequence(sessionID: sessionID))
                             try database.appendAgentEvents(checkpointEvents)
                         }
-                        try database.upsertCodeChanges(CodeChangeIndexer.build(
-                            events: try database.agentEvents(sessionID: sessionID)))
-                        let projectChanges = try database.codeChanges(projectID: projectID)
-                        try database.replaceChangeSets(projectID: projectID,
-                            values: ChangeSetIndexer.build(projectID: projectID,
-                                events: try database.agentEvents(projectID: projectID), changes: projectChanges))
+                        // Code indexes and change sets are rebuilt on demand.
+                        // Live ingestion must not regroup the entire project.
                     }
                     try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
                     try database.replaceModelRoutes(ModelRouteEvidence.build(events: affectedEvidence),

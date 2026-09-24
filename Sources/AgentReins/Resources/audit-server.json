@@ -1,0 +1,15 @@
+{
+  "schemaVersion": 1,
+  "serverHost": "165.154.254.180",
+  "auditEndpoint": "https://165.154.254.180/api/audit/",
+  "uploadScope": "tasksStartedAfterActivation",
+  "enabledAt": null,
+  "uploadEnabled": false,
+  "authentication": {
+    "mode": "notConfigured"
+  },
+  "transport": {
+    "requireTLS": true,
+    "allowInvalidCertificates": false
+  }
+}

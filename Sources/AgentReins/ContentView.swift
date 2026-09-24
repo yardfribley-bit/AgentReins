@@ -13,7 +13,7 @@ struct ContentView: View {
 
     private var observing: Bool { fileGuard.running || processGuard.running }
     var body: some View {
-        TaskWorkspaceView(sessions: liveDashboard.snapshot.sessions, observing: observing)
+        TaskWorkspaceView(sessions: liveDashboard.snapshot.sessions, observing: observing, agents: agentDiscovery.agents)
         .frame(minWidth: 1100, minHeight: 720)
         .task {
             refreshLiveDashboard()
