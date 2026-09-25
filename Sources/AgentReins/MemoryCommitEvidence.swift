@@ -14,6 +14,8 @@ struct MemoryCommitEvidence: Codable, Equatable, Sendable {
     let turnId: String
     let agent: String
     let toolCallId: String?
+    /// Exact collector event that recorded this mutation (nil on old rows).
+    var writeEventId: String? = nil
     let processId: Int32?
     let storagePath: String?
     let changeKind: MemoryChangeKind
@@ -38,7 +40,10 @@ struct MemoryCommitEvidence: Codable, Equatable, Sendable {
             return candidates.map { event in
                 let path = event.path == "-" ? pathFromTool(event) : event.path
                 let kind = changeKind(event)
-                let diff = event.fileDiff ?? bounded(event.command)
+                // Preserve the actual memory payload when a collector provides
+                // it; hashes alone cannot answer what was written or when an
+                // exact value first entered persistent memory.
+                let diff = event.fileDiff ?? bounded(event.afterContent) ?? bounded(event.command)
                 let reasons = riskReasons(event: event, rows: rows, diff: diff)
                 let confidence = event.beforeContent != nil || event.afterContent != nil
                     ? event.attributionConfidence ?? .confirmed
@@ -46,6 +51,7 @@ struct MemoryCommitEvidence: Codable, Equatable, Sendable {
                 let stable = "\(session)|\(turn)|\(event.id.uuidString)|\(path ?? "unknown")"
                 return MemoryCommitEvidence(commitId: sha256(stable), sessionId: session, turnId: turn,
                     agent: event.agent ?? first.agent ?? "unknown", toolCallId: event.toolCallId,
+                    writeEventId: event.id.uuidString,
                     processId: event.processId, storagePath: path, changeKind: kind,
                     beforeHash: event.beforeContent.map(sha256), afterHash: event.afterContent.map(sha256),
                     contentDiff: diff, summary: summary(kind: kind, path: path),

@@ -6,6 +6,64 @@ import XCTest
 /// Opt-in native rendering: no collectors, no production database, no installed
 /// app replacement. Images exercise production views with controlled evidence.
 final class TaskStoryVisualTests: XCTestCase {
+    @MainActor func testRenderSecurityDecision() async throws {
+        guard let output = ProcessInfo.processInfo.environment["AGENTREINS_UI_REVIEW_DIR"] else {
+            throw XCTSkip("Set UI review output directory")
+        }
+        let directory = URL(fileURLWithPath: output)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let event = GuardEvent(kind: "network", ruleId: "fixture", path: "-", command: nil,
+            agent: "WorkBuddy", op: "connect", severity: "medium", ts: Date(), action: "observed",
+            source: "测试证据", remoteHost: "203.0.113.20", remotePort: 443, remoteDomain: "gateway.example")
+        try await render(ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("我的 Agent，哪些行为需要留意？").font(.title2)
+                Text("界面测试数据 · 非真实任务").foregroundStyle(.secondary)
+                SecurityDecisionView(summary: "观察到 WorkBuddy 连接模型中转入口，需核对发送内容。",
+                    recommendation: "核对该地址是否由你配置，再查看原始请求。仅凭连接记录不能确定发生了数据泄露。",
+                    events: [event])
+            }.padding(24)
+        }.background(TaskStoryStyle.background), to: directory.appendingPathComponent("security-decisions.png"))
+    }
+    @MainActor func testRenderHistorySecurityPrototype() async throws {
+        guard let output = ProcessInfo.processInfo.environment["AGENTREINS_UI_REVIEW_DIR"] else {
+            throw XCTSkip("Set UI review output directory")
+        }
+        let directory = URL(fileURLWithPath: output)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let store = EventStore(fileURL: directory.appendingPathComponent("review-events.json"))
+        let analyzer = SemanticAnalyzer()
+        try await render(TaskWorkspaceView(sessions: [], observing: false, initialSurface: .history)
+            .environmentObject(store).environmentObject(analyzer),
+            to: directory.appendingPathComponent("history-review.png"))
+        let fixtureDatabase = try EvidenceDatabase(url: directory.appendingPathComponent("review-events.json.sqlite3"))
+        try fixtureDatabase.append([GuardEvent(kind: "alert", ruleId: "credential_in_tool_arguments",
+            path: "/example/report.txt", command: "测试证据：非真实凭据", agent: "workbuddy",
+            op: "call", severity: "high", ts: Date(), action: "observed", sessionId: "ui-fixture",
+            turnId: "review", toolName: "Bash")])
+        try await Task.sleep(for: .milliseconds(500))
+        try await render(TaskWorkspaceView(sessions: [], observing: false, initialSurface: .security)
+            .environmentObject(store).environmentObject(analyzer),
+            to: directory.appendingPathComponent("security-review.png"))
+        for (name, section) in [("rules-review", SecurityGovernanceView.Section.rules), ("ai-review", .analysis)] {
+            try await render(ScrollView {
+                SecurityGovernanceView(section: section).padding(24)
+            }.environmentObject(store).background(TaskStoryStyle.background),
+                to: directory.appendingPathComponent("\(name).png"))
+        }
+        let summary = TaskAggregates(topTokenTasks: [
+            .init(sessionID: "fixture-a", turnID: "a", title: "重构审计上传模块", agent: "Codex", inputTokens: 453840, outputTokens: 28320),
+            .init(sessionID: "fixture-b", turnID: "b", title: "整理本月差旅报销表", agent: "WorkBuddy", inputTokens: 21000, outputTokens: 3000)
+        ], agents: [.init(value: "codex", tasks: 2, occurrences: 2, inputTokens: 474840, outputTokens: 31320)],
+           repeatedTools: [], modelInputAddresses: [])
+        try await render(ScrollView {
+            VStack(alignment: .leading, spacing: 18) {
+                Text("查找任务，理解过去发生了什么").font(.title2.bold())
+                Text("界面测试数据 · 非真实任务").foregroundStyle(.secondary)
+                HistoryAggregateReview(summary: summary, question: "哪个任务 Token 最多？") { _, _ in }
+            }.padding(24)
+        }.background(TaskStoryStyle.background), to: directory.appendingPathComponent("ranking-review.png"))
+    }
     @MainActor func testRenderToolCompanion() async throws {
         guard let output = ProcessInfo.processInfo.environment["AGENTREINS_UI_REVIEW_DIR"] else { throw XCTSkip("Set UI review output directory") }
         let directory = URL(fileURLWithPath: output)
@@ -98,7 +156,8 @@ final class TaskStoryVisualTests: XCTestCase {
 
     @MainActor private func render<V: View>(_ view: V, to url: URL) async throws {
         _ = NSApplication.shared
-        let host = NSHostingView(rootView: view.environment(\.colorScheme, .light))
+        let host = NSHostingView(rootView: view.environmentObject(SemanticAnalyzer())
+            .environmentObject(AlertPolicyStore()).environment(\.colorScheme, .light))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1180, height: 900),
                               styleMask: [.borderless], backing: .buffered, defer: false)
         window.isReleasedWhenClosed = false

@@ -20,6 +20,33 @@ struct RawEvidenceRecord: Sendable {
     let payload: Data
 }
 
+struct EvidenceParseJob: Sendable {
+    let key: String
+    let token: String
+    let event: GuardEvent
+}
+
+struct EvidenceAnalysisJob: Sendable {
+    let sessionID: String
+    let turnID: String
+    let revision: Int64
+    let token: String
+}
+
+struct TaskSearchJob: Sendable {
+    let sessionID: String
+    let turnID: String
+    let revision: Int64
+}
+
+struct AuditOutboxJob: Sendable {
+    let sessionID: String
+    let turnID: String
+    let revision: Int64
+    let token: String
+    let snapshot: AgentTaskSnapshot
+}
+
 struct CollectorHealthRecord: Equatable, Sendable {
     enum State: String, Sendable { case healthy, degraded, failed }
 
@@ -37,12 +64,17 @@ struct CollectorHealthRecord: Equatable, Sendable {
 /// blocking readers, and stable evidence keys make replay idempotent.
 final class EvidenceDatabase: @unchecked Sendable {
     private var handle: OpaquePointer?
-    private let lock = NSLock()
+    private var readConnection: EvidenceReadConnection?
+    private let lock = NSRecursiveLock()
+    private var auditUploadEnabled = false
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
     init(url: URL = EvidenceDatabase.defaultURL()) throws {
         encoder = JSONEncoder()
+        // Content hashes are persistent identities; dictionary key order must
+        // not turn an identical record into a new evidence revision on replay.
+        encoder.outputFormatting = [.sortedKeys]
         encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601
@@ -70,7 +102,99 @@ final class EvidenceDatabase: @unchecked Sendable {
             ) WITHOUT ROWID
             """)
         try execute("CREATE INDEX IF NOT EXISTS evidence_time ON evidence_records(observed_at DESC)")
+        try execute("CREATE INDEX IF NOT EXISTS evidence_event_lookup ON evidence_records(event_id,ingested_at DESC)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS evidence_parse_jobs(
+              evidence_key TEXT PRIMARY KEY REFERENCES evidence_records(evidence_key),
+              state TEXT NOT NULL DEFAULT 'pending', token TEXT,
+              lease_until REAL NOT NULL DEFAULT 0, attempts INTEGER NOT NULL DEFAULT 0,
+              not_before REAL NOT NULL DEFAULT 0, last_error TEXT
+            ) WITHOUT ROWID
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS evidence_parse_ready ON evidence_parse_jobs(state,not_before,lease_until)")
+        try execute("CREATE TABLE IF NOT EXISTS evidence_parse_order(position INTEGER PRIMARY KEY AUTOINCREMENT,evidence_key TEXT NOT NULL UNIQUE REFERENCES evidence_parse_jobs(evidence_key),partition_key TEXT NOT NULL)")
+        try execute("CREATE INDEX IF NOT EXISTS evidence_parse_partition ON evidence_parse_order(partition_key,position)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS evidence_analysis_jobs(
+              session_id TEXT NOT NULL,turn_id TEXT NOT NULL,revision INTEGER NOT NULL DEFAULT 1,
+              completed_revision INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL DEFAULT 'pending',
+              token TEXT,lease_until REAL NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
+              not_before REAL NOT NULL DEFAULT 0,last_error TEXT,
+              PRIMARY KEY(session_id,turn_id)
+            ) WITHOUT ROWID
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS evidence_analysis_ready ON evidence_analysis_jobs(state,not_before,lease_until)")
+        try execute("CREATE TABLE IF NOT EXISTS task_snapshot_projection(session_id TEXT NOT NULL,turn_id TEXT NOT NULL,revision INTEGER NOT NULL,payload BLOB NOT NULL,generated_at REAL NOT NULL,PRIMARY KEY(session_id,turn_id)) WITHOUT ROWID")
+        try execute("CREATE TABLE IF NOT EXISTS task_search_jobs(session_id TEXT NOT NULL,turn_id TEXT NOT NULL,revision INTEGER NOT NULL,completed_revision INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL DEFAULT 'pending',PRIMARY KEY(session_id,turn_id)) WITHOUT ROWID")
+        try addColumnIfMissing(table: "task_search_jobs", column: "state", definition: "TEXT NOT NULL DEFAULT 'pending'")
+        try execute("CREATE INDEX IF NOT EXISTS task_search_ready ON task_search_jobs(state,session_id,turn_id)")
+        try execute("CREATE TABLE IF NOT EXISTS task_search_backfill(id INTEGER PRIMARY KEY CHECK(id=1),session_id TEXT NOT NULL,turn_id TEXT NOT NULL,complete INTEGER NOT NULL)")
+        try execute("INSERT OR IGNORE INTO task_search_backfill VALUES(1,'','',0)")
+        try execute("""
+            CREATE TABLE IF NOT EXISTS audit_upload_outbox(
+              session_id TEXT NOT NULL,turn_id TEXT NOT NULL,revision INTEGER NOT NULL,
+              completed_revision INTEGER NOT NULL DEFAULT 0,state TEXT NOT NULL DEFAULT 'pending',
+              token TEXT,lease_until REAL NOT NULL DEFAULT 0,attempts INTEGER NOT NULL DEFAULT 0,
+              not_before REAL NOT NULL DEFAULT 0,last_error TEXT,receipt_id TEXT,
+              PRIMARY KEY(session_id,turn_id)
+            ) WITHOUT ROWID
+            """)
+        try execute("CREATE INDEX IF NOT EXISTS audit_upload_ready ON audit_upload_outbox(state,not_before,lease_until)")
+        try execute("CREATE TABLE IF NOT EXISTS evidence_pipeline_migrations(version INTEGER PRIMARY KEY)")
+        // Existing queue positions are established once, atomically. Subsequent
+        // admissions allocate monotonic positions in the evidence transaction.
+        try execute("BEGIN IMMEDIATE")
+        do {
+            var migration: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "SELECT 1 FROM evidence_pipeline_migrations WHERE version=1", -1, &migration, nil) == SQLITE_OK else { throw failure("read pipeline migration") }
+            let migrated = sqlite3_step(migration) == SQLITE_ROW
+            sqlite3_finalize(migration)
+            if !migrated {
+            try execute("""
+                INSERT OR IGNORE INTO evidence_parse_order(evidence_key,partition_key)
+                SELECT j.evidence_key,
+                  json_array(COALESCE(json_extract(CAST(e.payload AS TEXT),'$.agent'),'unknown'),
+                    COALESCE(json_extract(CAST(e.payload AS TEXT),'$.sessionId'),e.source))
+                FROM evidence_parse_jobs j CROSS JOIN evidence_records e ON e.evidence_key=j.evidence_key
+                ORDER BY e.ingested_at,j.evidence_key
+                """)
+            try execute("INSERT OR IGNORE INTO evidence_pipeline_migrations VALUES(1)")
+            }
+            try execute("COMMIT")
+        } catch { try? execute("ROLLBACK"); throw error }
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS evidence_parse_admission AFTER INSERT ON evidence_parse_jobs
+            BEGIN
+              INSERT INTO evidence_parse_order(evidence_key,partition_key)
+              SELECT NEW.evidence_key,
+                json_array(COALESCE(json_extract(CAST(payload AS TEXT),'$.agent'),'unknown'),
+                  COALESCE(json_extract(CAST(payload AS TEXT),'$.sessionId'),source))
+              FROM evidence_records WHERE evidence_key=NEW.evidence_key;
+            END
+            """)
         // Session detail used to scan and JSON-decode every historical record.
+        // Security consumes immutable evidence positions, not task-sized JSON.
+        // Historical admissions are backfilled by a bounded worker, never at startup.
+        try execute("CREATE TABLE IF NOT EXISTS security_evidence_inputs(position INTEGER PRIMARY KEY AUTOINCREMENT,evidence_key TEXT NOT NULL UNIQUE,session_id TEXT NOT NULL,turn_id TEXT NOT NULL,tool_call_id TEXT,operation TEXT)")
+        try addColumnIfMissing(table: "security_evidence_inputs", column: "tool_call_id", definition: "TEXT")
+        try addColumnIfMissing(table: "security_evidence_inputs", column: "operation", definition: "TEXT")
+        try execute("CREATE INDEX IF NOT EXISTS security_input_task ON security_evidence_inputs(session_id,turn_id,position)")
+        try execute("CREATE INDEX IF NOT EXISTS security_input_call ON security_evidence_inputs(session_id,turn_id,tool_call_id,operation,position)")
+        try execute("CREATE TABLE IF NOT EXISTS security_evidence_tasks(session_id TEXT NOT NULL,turn_id TEXT NOT NULL,revision INTEGER NOT NULL,updated REAL NOT NULL,PRIMARY KEY(session_id,turn_id)) WITHOUT ROWID")
+        try execute("CREATE INDEX IF NOT EXISTS security_tasks_activity ON security_evidence_tasks(updated DESC)")
+        try execute("CREATE TABLE IF NOT EXISTS security_input_backfill(id INTEGER PRIMARY KEY,last_position INTEGER NOT NULL)")
+        try execute("INSERT OR IGNORE INTO security_input_backfill VALUES(1,0)")
+        try execute("""
+            CREATE TRIGGER IF NOT EXISTS security_input_revision AFTER INSERT ON security_evidence_inputs
+            BEGIN
+              INSERT INTO security_evidence_tasks SELECT NEW.session_id,NEW.turn_id,NEW.position,observed_at
+                FROM evidence_records WHERE evidence_key=NEW.evidence_key
+              ON CONFLICT(session_id,turn_id) DO UPDATE SET revision=MAX(revision,excluded.revision),updated=MAX(updated,excluded.updated);
+            END
+            """)
+        // Security input admission is intentionally performed by the durable
+        // processor in small batches, outside the hot evidence write path.
+        // A trigger here would JSON-decode every event while the Agent is live.
         // SQLite can use this expression index for the existing session query.
         try execute("""
             CREATE INDEX IF NOT EXISTS evidence_session_time ON evidence_records(
@@ -164,6 +288,10 @@ final class EvidenceDatabase: @unchecked Sendable {
             """)
         try execute("CREATE INDEX IF NOT EXISTS memory_commit_turn ON memory_commits(session_id,turn_id,observed_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS memory_commit_agent ON memory_commits(agent,observed_at DESC)")
+        try execute("CREATE TABLE IF NOT EXISTS memory_commit_addresses(address TEXT NOT NULL,commit_id TEXT NOT NULL,session_id TEXT NOT NULL,turn_id TEXT NOT NULL,observed_at REAL NOT NULL,storage_path TEXT,confidence TEXT NOT NULL,PRIMARY KEY(address,commit_id)) WITHOUT ROWID")
+        try execute("CREATE INDEX IF NOT EXISTS memory_address_time ON memory_commit_addresses(address,observed_at DESC)")
+        try execute("CREATE VIRTUAL TABLE IF NOT EXISTS memory_commit_fts USING fts5(commit_id UNINDEXED,content,tokenize='trigram')")
+        try backfillMemorySearchIndexIfNeeded()
         try execute("""
             CREATE TABLE IF NOT EXISTS agent_event_stream (
               event_id TEXT PRIMARY KEY,
@@ -185,9 +313,15 @@ final class EvidenceDatabase: @unchecked Sendable {
         try execute("CREATE INDEX IF NOT EXISTS agent_event_project_time ON agent_event_stream(project_id,occurred_at DESC)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_session_sequence ON agent_event_stream(session_id,sequence)")
         try execute("CREATE INDEX IF NOT EXISTS agent_event_task_sequence ON agent_event_stream(session_id,turn_id,sequence)")
-        try execute("CREATE TABLE IF NOT EXISTS task_summary(session_id TEXT NOT NULL,turn_id TEXT NOT NULL,agent_id TEXT NOT NULL,started_at REAL NOT NULL,last_at REAL NOT NULL,event_count INTEGER NOT NULL,PRIMARY KEY(session_id,turn_id)) WITHOUT ROWID")
+        try execute("CREATE TABLE IF NOT EXISTS task_summary(session_id TEXT NOT NULL,turn_id TEXT NOT NULL,agent_id TEXT NOT NULL,started_at REAL NOT NULL,last_at REAL NOT NULL,event_count INTEGER NOT NULL,title TEXT,title_checked INTEGER NOT NULL DEFAULT 1,PRIMARY KEY(session_id,turn_id)) WITHOUT ROWID")
+        try addColumnIfMissing(table: "task_summary", column: "title", definition: "TEXT")
+        try addColumnIfMissing(table: "task_summary", column: "title_checked", definition: "INTEGER NOT NULL DEFAULT 0")
         try execute("CREATE INDEX IF NOT EXISTS task_summary_time ON task_summary(last_at DESC,session_id,turn_id)")
+        try execute("CREATE INDEX IF NOT EXISTS task_summary_agent_time ON task_summary(agent_id,last_at DESC,session_id,turn_id)")
+        try execute("CREATE INDEX IF NOT EXISTS task_summary_title_pending ON task_summary(session_id,turn_id) WHERE title_checked=0")
         try execute("CREATE TABLE IF NOT EXISTS task_summary_version(version INTEGER PRIMARY KEY)")
+        try execute("CREATE TABLE IF NOT EXISTS task_summary_backfill_state(id INTEGER PRIMARY KEY CHECK(id=1),last_session_id TEXT NOT NULL,last_turn_id TEXT NOT NULL,completed INTEGER NOT NULL)")
+        try execute("INSERT OR IGNORE INTO task_summary_backfill_state VALUES(1,'','',0)")
         try execute("CREATE TABLE IF NOT EXISTS collector_parser_state(source TEXT NOT NULL,stream TEXT NOT NULL,state BLOB NOT NULL,PRIMARY KEY(source,stream)) WITHOUT ROWID")
         try execute("""
             CREATE TABLE IF NOT EXISTS code_change_index (
@@ -216,13 +350,19 @@ final class EvidenceDatabase: @unchecked Sendable {
             )
             """)
         try execute("CREATE INDEX IF NOT EXISTS requirement_document_change_set ON requirement_documents(change_set_id,version DESC)")
+        readConnection = try EvidenceReadConnection(url: url)
     }
 
-    deinit { sqlite3_close(handle) }
+    deinit { readConnection = nil; sqlite3_close(handle) }
 
     static func defaultURL() -> URL {
         let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
         return base.appendingPathComponent("AgentGuard/evidence.sqlite3")
+    }
+
+    func setAuditUploadEnabled(_ enabled: Bool) {
+        lock.lock(); defer { lock.unlock() }
+        auditUploadEnabled = enabled
     }
 
     static func openRecovering(url: URL = defaultURL()) throws -> EvidenceDatabase {
@@ -287,16 +427,20 @@ final class EvidenceDatabase: @unchecked Sendable {
 
     /// Checkpoints may advance only after all three durable representations succeed.
     /// Each write is idempotent; interruption before the checkpoint replays safely.
-    func persistCollected(raw: [RawEvidenceRecord], events: [GuardEvent]) throws {
-        try appendRaw(raw)
-        try append(events)
-        for (sessionID, rows) in Dictionary(grouping: events.filter { $0.sessionId != nil }, by: { $0.sessionId! }) {
-            let session = AgentSessionSnapshot.build(from: rows).first
-            let workspace = SupervisedWorkspaceResolver.resolve(session?.workspace)
-            let project = workspace.kind == .unassigned ? "unattributed:\(sessionID)" : workspace.id
-            try appendAgentEvents(LegacyGuardEventAdapter.project(rows, projectID: project,
-                startingSequence: try nextAgentEventSequence(sessionID: sessionID) - 1))
-        }
+    func persistCollected(raw: [RawEvidenceRecord], events: [GuardEvent],
+                          checkpoints: [SourceCheckpoint] = [],
+                          parserStates: [(source: String, stream: String, state: Data)] = []) throws {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            try appendRaw(raw, withinTransaction: true)
+            try append(events, withinTransaction: true)
+            for state in parserStates {
+                try saveParserState(source: state.source, stream: state.stream, state: state.state)
+            }
+            for checkpoint in checkpoints { try saveCheckpoint(checkpoint) }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
     }
 
     func parserStates(source: String) throws -> [String: Data] {
@@ -325,17 +469,67 @@ final class EvidenceDatabase: @unchecked Sendable {
     }
 
     func append(_ events: [GuardEvent]) throws {
-        guard !events.isEmpty else { return }
+        try append(events, withinTransaction: false)
+    }
+
+    /// Metadata-only bounded catch-up; payloads remain in the evidence store.
+    func advanceSecurityInputIndex(limit: Int = 25) throws {
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            let count = max(1, min(limit, 100))
+            // Admit a bounded recent window independently of the historical cursor.
+            // Existing keys are removed before reading and decoding their bodies.
+            try executeUnlocked("""
+                INSERT OR IGNORE INTO security_evidence_inputs(evidence_key,session_id,turn_id,tool_call_id,operation)
+                SELECT o.evidence_key,json_extract(CAST(e.payload AS TEXT),'$.sessionId'),json_extract(CAST(e.payload AS TEXT),'$.turnId'),json_extract(CAST(e.payload AS TEXT),'$.toolCallId'),json_extract(CAST(e.payload AS TEXT),'$.op')
+                FROM (SELECT evidence_key FROM (SELECT evidence_key,position FROM evidence_parse_order ORDER BY position DESC LIMIT 100) recent
+                  WHERE NOT EXISTS(SELECT 1 FROM security_evidence_inputs i WHERE i.evidence_key=recent.evidence_key)
+                  ORDER BY position DESC LIMIT \(count)) o
+                JOIN evidence_records e ON e.evidence_key=o.evidence_key
+                WHERE e.observed_at>=unixepoch()-120
+                  AND json_extract(CAST(e.payload AS TEXT),'$.sessionId') IS NOT NULL
+                  AND json_extract(CAST(e.payload AS TEXT),'$.turnId') IS NOT NULL
+                """)
+            try executeUnlocked("""
+                INSERT OR IGNORE INTO security_evidence_inputs(evidence_key,session_id,turn_id,tool_call_id,operation)
+                SELECT o.evidence_key,json_extract(CAST(e.payload AS TEXT),'$.sessionId'),json_extract(CAST(e.payload AS TEXT),'$.turnId'),json_extract(CAST(e.payload AS TEXT),'$.toolCallId'),json_extract(CAST(e.payload AS TEXT),'$.op')
+                FROM (SELECT position,evidence_key FROM evidence_parse_order
+                  WHERE position>(SELECT last_position FROM security_input_backfill WHERE id=1)
+                  ORDER BY position LIMIT \(count)) o
+                JOIN evidence_records e ON e.evidence_key=o.evidence_key
+                WHERE json_extract(CAST(e.payload AS TEXT),'$.sessionId') IS NOT NULL
+                  AND json_extract(CAST(e.payload AS TEXT),'$.turnId') IS NOT NULL
+                """)
+            try executeUnlocked("""
+                UPDATE security_input_backfill SET last_position=COALESCE((SELECT MAX(position) FROM
+                (SELECT position FROM evidence_parse_order WHERE position>last_position ORDER BY position LIMIT \(count))),last_position)
+                WHERE id=1
+                """)
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    private func append(_ events: [GuardEvent], withinTransaction: Bool) throws {
+        guard !events.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        if !withinTransaction { try executeUnlocked("BEGIN IMMEDIATE") }
         do {
             let sql = "INSERT OR IGNORE INTO evidence_records(evidence_key,event_id,source,observed_at,payload,payload_sha256,ingested_at) VALUES(?,?,?,?,?,?,?)"
             var statement: OpaquePointer?
             guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare append") }
             defer { sqlite3_finalize(statement) }
+            var work: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO evidence_parse_jobs(evidence_key) VALUES(?)", -1, &work, nil) == SQLITE_OK else { throw failure("prepare durable parse work") }
+            defer { sqlite3_finalize(work) }
             for event in events {
                 let payload = try encoder.encode(event)
-                let digest = SHA256.hash(data: payload).map { String(format: "%02x", $0) }.joined()
+                let digits = Array("0123456789abcdef".utf8)
+                var hex = [UInt8](); hex.reserveCapacity(64)
+                for byte in SHA256.hash(data: payload) {
+                    hex.append(digits[Int(byte >> 4)]); hex.append(digits[Int(byte & 15)])
+                }
+                let digest = String(decoding: hex, as: UTF8.self)
                 bind("\(event.id.uuidString):\(digest)", at: 1, to: statement)
                 bind(event.id.uuidString, at: 2, to: statement)
                 bind(event.source ?? "unknown", at: 3, to: statement)
@@ -346,20 +540,102 @@ final class EvidenceDatabase: @unchecked Sendable {
                 bind(digest, at: 6, to: statement)
                 sqlite3_bind_double(statement, 7, Date().timeIntervalSince1970)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append") }
+                if sqlite3_changes(handle) > 0 {
+                    bind("\(event.id.uuidString):\(digest)", at: 1, to: work)
+                    guard sqlite3_step(work) == SQLITE_DONE else { throw failure("register parse work") }
+                    sqlite3_reset(work); sqlite3_clear_bindings(work)
+                }
                 sqlite3_reset(statement)
                 sqlite3_clear_bindings(statement)
             }
-            try executeUnlocked("COMMIT")
+            if !withinTransaction { try executeUnlocked("COMMIT") }
         } catch {
-            try? executeUnlocked("ROLLBACK")
+            if !withinTransaction { try? executeUnlocked("ROLLBACK") }
             throw error
         }
     }
 
-    func appendRaw(_ records: [RawEvidenceRecord]) throws {
-        guard !records.isEmpty else { return }
+    /// One record per lease bounds the number of large bodies resident at once.
+    /// A single worker owns sequence allocation; expired leases are fenced at commit.
+    func claimParseJob(now: Date = Date(), leaseSeconds: TimeInterval = 60) throws -> EvidenceParseJob? {
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var row: OpaquePointer?
+            let sql = """
+                SELECT j.evidence_key,e.payload FROM evidence_parse_jobs j
+                JOIN evidence_records e ON e.evidence_key=j.evidence_key
+                JOIN evidence_parse_order ordering ON ordering.evidence_key=j.evidence_key
+                WHERE ((j.state='pending' AND j.not_before<=?)
+                   OR (j.state='running' AND j.lease_until<=?))
+                AND NOT EXISTS(
+                  SELECT 1 FROM evidence_parse_order predecessor
+                  JOIN evidence_parse_jobs older ON older.evidence_key=predecessor.evidence_key
+                  WHERE predecessor.partition_key=ordering.partition_key
+                    AND predecessor.position<ordering.position
+                    AND older.state!='done'
+                )
+                ORDER BY ordering.position LIMIT 1
+                """
+            guard sqlite3_prepare_v2(handle, sql, -1, &row, nil) == SQLITE_OK else { throw failure("prepare parse claim") }
+            defer { sqlite3_finalize(row) }
+            sqlite3_bind_double(row, 1, now.timeIntervalSince1970)
+            sqlite3_bind_double(row, 2, now.timeIntervalSince1970)
+            let step = sqlite3_step(row)
+            if step == SQLITE_DONE { try executeUnlocked("COMMIT"); return nil }
+            guard step == SQLITE_ROW, let key = text(row, 0),
+                  let bytes = sqlite3_column_blob(row, 1) else { throw failure("read parse work") }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(row, 1)))
+            let token = UUID().uuidString
+            var claim: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "UPDATE evidence_parse_jobs SET state='running',token=?,lease_until=?,attempts=attempts+1 WHERE evidence_key=?", -1, &claim, nil) == SQLITE_OK else { throw failure("prepare lease") }
+            defer { sqlite3_finalize(claim) }
+            bind(token, at: 1, to: claim)
+            sqlite3_bind_double(claim, 2, now.addingTimeInterval(leaseSeconds).timeIntervalSince1970)
+            bind(key, at: 3, to: claim)
+            guard sqlite3_step(claim) == SQLITE_DONE else { throw failure("claim parse work") }
+            // Invalid persisted JSON is isolated without blocking other records.
+            let decoded = Result { try decoder.decode(GuardEvent.self, from: data) }
+            switch decoded {
+            case .success(let event):
+                try executeUnlocked("COMMIT")
+                return EvidenceParseJob(key: key, token: token, event: event)
+            case .failure:
+                var quarantine: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "UPDATE evidence_parse_jobs SET state='isolated',last_error='Invalid evidence JSON',token=NULL WHERE evidence_key=?", -1, &quarantine, nil) == SQLITE_OK else { throw failure("prepare quarantine") }
+                defer { sqlite3_finalize(quarantine) }
+                bind(key, at: 1, to: quarantine)
+                guard sqlite3_step(quarantine) == SQLITE_DONE else { throw failure("quarantine evidence") }
+                try executeUnlocked("COMMIT")
+                return nil
+            }
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func retryParseJob(_ job: EvidenceParseJob, message: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = """
+            UPDATE evidence_parse_jobs SET state=CASE WHEN attempts>=8 THEN 'isolated' ELSE 'pending' END,
+            not_before=?+MIN(300,5*(1<<MIN(attempts,6))),token=NULL,last_error=?
+            WHERE evidence_key=? AND token=? AND state='running'
+            """
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare parse retry") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
+        bind(String(message.prefix(512)), at: 2, to: statement)
+        bind(job.key, at: 3, to: statement); bind(job.token, at: 4, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("schedule parse retry") }
+    }
+
+    func appendRaw(_ records: [RawEvidenceRecord]) throws {
+        try appendRaw(records, withinTransaction: false)
+    }
+
+    private func appendRaw(_ records: [RawEvidenceRecord], withinTransaction: Bool) throws {
+        guard !records.isEmpty else { return }
+        lock.lock(); defer { lock.unlock() }
+        if !withinTransaction { try executeUnlocked("BEGIN IMMEDIATE") }
         do {
             let sql = "INSERT OR IGNORE INTO raw_evidence(evidence_key,source,stream,offset_start,offset_end,fingerprint,observed_at,payload,payload_sha256,previous_hash,record_hash) VALUES(?,?,?,?,?,?,?,?,?,?,?)"
             var statement: OpaquePointer?
@@ -385,8 +661,11 @@ final class EvidenceDatabase: @unchecked Sendable {
             if let previousHash {
                 try setRawHashUnlocked(previousHash)
             }
-            try executeUnlocked("COMMIT")
-        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+            if !withinTransaction { try executeUnlocked("COMMIT") }
+        } catch {
+            if !withinTransaction { try? executeUnlocked("ROLLBACK") }
+            throw error
+        }
     }
 
     /// Appends canonical Agent events atomically. The `(session_id, sequence)`
@@ -394,12 +673,20 @@ final class EvidenceDatabase: @unchecked Sendable {
     /// sequence into a visible capture error instead of silently rewriting
     /// evidence.
     @discardableResult
-    func appendAgentEvents(_ events: [AgentEventEnvelope]) throws -> [AgentEventEnvelope] {
-        guard !events.isEmpty else { return [] }
+    func appendAgentEvents(_ events: [AgentEventEnvelope], completing job: EvidenceParseJob? = nil) throws -> [AgentEventEnvelope] {
+        guard !events.isEmpty || job != nil else { return [] }
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("BEGIN IMMEDIATE")
         var inserted: [AgentEventEnvelope] = []
         do {
+            if let job {
+                var check: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "SELECT 1 FROM evidence_parse_jobs WHERE evidence_key=? AND token=? AND state='running' AND lease_until>?", -1, &check, nil) == SQLITE_OK else { throw failure("prepare lease fence") }
+                defer { sqlite3_finalize(check) }
+                bind(job.key, at: 1, to: check); bind(job.token, at: 2, to: check)
+                sqlite3_bind_double(check, 3, Date().timeIntervalSince1970)
+                guard sqlite3_step(check) == SQLITE_ROW else { throw failure("expired parse lease") }
+            }
             let sql = """
               INSERT OR IGNORE INTO agent_event_stream(event_id,project_id,agent_id,session_id,
               turn_id,sequence,occurred_at,observed_at,source,confidence,payload,payload_sha256)
@@ -428,14 +715,20 @@ final class EvidenceDatabase: @unchecked Sendable {
                 }
                 bind(digest, at: 12, to: statement)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("append agent event") }
-                if sqlite3_changes(handle) > 0 { inserted.append(event) }
+                if sqlite3_changes(handle) > 0 {
+                    inserted.append(event)
+                } else if job != nil {
+                    // A concurrent canonical writer may have taken this sequence.
+                    // Never acknowledge durable work after INSERT OR IGNORE hid it.
+                    throw failure("canonical event conflict; retry parse work")
+                }
                 sqlite3_reset(statement)
                 sqlite3_clear_bindings(statement)
             }
             // Persist invalidation in the same transaction as evidence so a
             // restart cannot lose deferred indexing work.
             var summary: OpaquePointer?
-            let summarySQL = "INSERT INTO task_summary VALUES(?,?,?,?,?,1) ON CONFLICT(session_id,turn_id) DO UPDATE SET agent_id=excluded.agent_id,started_at=MIN(started_at,excluded.started_at),last_at=MAX(last_at,excluded.last_at),event_count=event_count+1"
+            let summarySQL = "INSERT INTO task_summary(session_id,turn_id,agent_id,started_at,last_at,event_count,title,title_checked) VALUES(?,?,?,?,?,1,?,1) ON CONFLICT(session_id,turn_id) DO UPDATE SET agent_id=excluded.agent_id,started_at=MIN(started_at,excluded.started_at),last_at=MAX(last_at,excluded.last_at),event_count=event_count+1,title=COALESCE(task_summary.title,excluded.title)"
             guard sqlite3_prepare_v2(handle, summarySQL, -1, &summary, nil) == SQLITE_OK else { throw failure("prepare task summary") }
             defer { sqlite3_finalize(summary) }
             for event in inserted {
@@ -444,6 +737,11 @@ final class EvidenceDatabase: @unchecked Sendable {
                 bind(event.agentID, at: 3, to: summary)
                 sqlite3_bind_double(summary, 4, event.occurredAt.timeIntervalSince1970)
                 sqlite3_bind_double(summary, 5, event.occurredAt.timeIntervalSince1970)
+                if case let .userPrompt(prompt) = event.payload {
+                    bind(prompt.rawText, at: 6, to: summary)
+                } else {
+                    sqlite3_bind_null(summary, 6)
+                }
                 guard sqlite3_step(summary) == SQLITE_DONE else { throw failure("update task summary") }
                 sqlite3_reset(summary); sqlite3_clear_bindings(summary)
             }
@@ -457,6 +755,51 @@ final class EvidenceDatabase: @unchecked Sendable {
                 bind(event.sessionID, at: 2, to: dirty)
                 guard sqlite3_step(dirty) == SQLITE_DONE else { throw failure("invalidate code index") }
                 sqlite3_reset(dirty); sqlite3_clear_bindings(dirty)
+            }
+            var analysis: OpaquePointer?
+            let analysisSQL = "INSERT INTO evidence_analysis_jobs(session_id,turn_id) VALUES(?,?) ON CONFLICT(session_id,turn_id) DO UPDATE SET revision=revision+1,state='pending',not_before=0,last_error=NULL"
+            guard sqlite3_prepare_v2(handle, analysisSQL, -1, &analysis, nil) == SQLITE_OK else { throw failure("prepare analysis work") }
+            defer { sqlite3_finalize(analysis) }
+            for key in Set(inserted.compactMap { event -> String? in
+                guard let turn = event.turnID else { return nil }
+                return "\(event.sessionID)\u{0}\(turn)"
+            }) {
+                let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
+                bind(String(parts[0]), at: 1, to: analysis); bind(String(parts[1]), at: 2, to: analysis)
+                guard sqlite3_step(analysis) == SQLITE_DONE else { throw failure("register analysis work") }
+                sqlite3_reset(analysis); sqlite3_clear_bindings(analysis)
+            }
+            // When enterprise upload is enabled, its outbox is invalidated in
+            // the same commit as canonical evidence. Local-only installs do
+            // not accumulate work that no consumer can ever drain.
+            if auditUploadEnabled {
+                var outbox: OpaquePointer?
+                let outboxSQL = """
+                  INSERT INTO audit_upload_outbox(session_id,turn_id,revision)
+                  SELECT session_id,turn_id,revision FROM evidence_analysis_jobs
+                  WHERE session_id=? AND turn_id=?
+                  ON CONFLICT(session_id,turn_id) DO UPDATE SET
+                    revision=excluded.revision,state='pending',token=NULL,lease_until=0,
+                    not_before=0,last_error=NULL
+                  """
+                guard sqlite3_prepare_v2(handle, outboxSQL, -1, &outbox, nil) == SQLITE_OK else { throw failure("prepare audit outbox") }
+                defer { sqlite3_finalize(outbox) }
+                for key in Set(inserted.compactMap { event -> String? in
+                    guard let turn = event.turnID else { return nil }
+                    return "\(event.sessionID)\u{0}\(turn)"
+                }) {
+                    let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
+                    bind(String(parts[0]), at: 1, to: outbox); bind(String(parts[1]), at: 2, to: outbox)
+                    guard sqlite3_step(outbox) == SQLITE_DONE else { throw failure("register audit outbox") }
+                    sqlite3_reset(outbox); sqlite3_clear_bindings(outbox)
+                }
+            }
+            if let job {
+                var ack: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "UPDATE evidence_parse_jobs SET state='done',token=NULL,last_error=NULL WHERE evidence_key=? AND token=?", -1, &ack, nil) == SQLITE_OK else { throw failure("prepare parse confirmation") }
+                defer { sqlite3_finalize(ack) }
+                bind(job.key, at: 1, to: ack); bind(job.token, at: 2, to: ack)
+                guard sqlite3_step(ack) == SQLITE_DONE else { throw failure("confirm parse work") }
             }
             try executeUnlocked("COMMIT")
             return inserted
@@ -566,24 +909,17 @@ final class EvidenceDatabase: @unchecked Sendable {
         return events
     }
 
-    func recentTasks(limit: Int, before: Date? = nil, offset: Int = 0) throws -> [StoredTaskSummary] {
-        lock.lock(); defer { lock.unlock() }
-        // One-time lazy migration on the task-read queue, never at app launch.
-        var version: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, "SELECT version FROM task_summary_version WHERE version=1", -1, &version, nil) == SQLITE_OK else { throw failure("summary version") }
-        let migrated = sqlite3_step(version) == SQLITE_ROW
-        sqlite3_finalize(version)
-        if !migrated {
-            try executeUnlocked("BEGIN IMMEDIATE")
-            do {
-                try executeUnlocked("INSERT OR REPLACE INTO task_summary SELECT session_id,turn_id,MAX(agent_id),MIN(occurred_at),MAX(occurred_at),COUNT(*) FROM agent_event_stream WHERE turn_id IS NOT NULL GROUP BY session_id,turn_id")
-                try executeUnlocked("INSERT OR IGNORE INTO task_summary_version VALUES(1)")
-                try executeUnlocked("COMMIT")
-            } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    func recentTasks(limit: Int, before: Date? = nil, offset: Int = 0,
+                     after cursor: StoredTaskSummary? = nil) throws -> [StoredTaskSummary] {
+        if let readConnection {
+            return try readConnection.recentTasks(limit: limit, before: before, offset: offset, after: cursor)
         }
+        lock.lock(); defer { lock.unlock() }
+        let cursorClause = cursor == nil ? "" :
+            "AND (last_at < ? OR (last_at = ? AND (session_id,turn_id) > (?,?)))"
         let sql = """
           WITH recent AS (
-            SELECT * FROM task_summary WHERE last_at < ?
+            SELECT * FROM task_summary WHERE last_at < ? \(cursorClause)
             ORDER BY last_at DESC, session_id, turn_id LIMIT ? OFFSET ?
           )
           SELECT recent.session_id, recent.turn_id, recent.agent_id,
@@ -600,9 +936,17 @@ final class EvidenceDatabase: @unchecked Sendable {
             throw failure("prepare recent tasks")
         }
         defer { sqlite3_finalize(statement) }
-        sqlite3_bind_double(statement, 1, before?.timeIntervalSince1970 ?? Date.distantFuture.timeIntervalSince1970)
-        sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 200))))
-        sqlite3_bind_int(statement, 3, Int32(max(0, offset)))
+        var bindIndex: Int32 = 1
+        sqlite3_bind_double(statement, bindIndex, before?.timeIntervalSince1970 ?? Date.distantFuture.timeIntervalSince1970)
+        bindIndex += 1
+        if let cursor {
+            sqlite3_bind_double(statement, bindIndex, cursor.lastObservedAt.timeIntervalSince1970); bindIndex += 1
+            sqlite3_bind_double(statement, bindIndex, cursor.lastObservedAt.timeIntervalSince1970); bindIndex += 1
+            bind(cursor.sessionID, at: bindIndex, to: statement); bindIndex += 1
+            bind(cursor.turnID, at: bindIndex, to: statement); bindIndex += 1
+        }
+        sqlite3_bind_int(statement, bindIndex, Int32(max(1, min(limit, 200)))); bindIndex += 1
+        sqlite3_bind_int(statement, bindIndex, Int32(max(0, offset)))
         var result: [StoredTaskSummary] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let sessionID = text(statement, 0),
@@ -615,6 +959,121 @@ final class EvidenceDatabase: @unchecked Sendable {
                 eventCount: Int(sqlite3_column_int64(statement, 5))))
         }
         return result
+    }
+
+    /// Incrementally materialize summaries for pre-existing events. A bounded
+    /// batch runs as a short transaction and stores its cursor atomically, so
+    /// history queries never initiate a whole-database GROUP BY.
+    @discardableResult
+    func backfillTaskSummaries(limit: Int = 25) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var version: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "SELECT 1 FROM task_summary_version WHERE version=1", -1, &version, nil) == SQLITE_OK else { throw failure("prepare task summary version") }
+            let alreadyComplete = sqlite3_step(version) == SQLITE_ROW
+            sqlite3_finalize(version)
+            if alreadyComplete {
+                try executeUnlocked("UPDATE task_summary_backfill_state SET completed=1 WHERE id=1")
+                try executeUnlocked("COMMIT")
+                return true
+            }
+            var state: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "SELECT last_session_id,last_turn_id,completed FROM task_summary_backfill_state WHERE id=1", -1, &state, nil) == SQLITE_OK else { throw failure("prepare task summary backfill state") }
+            defer { sqlite3_finalize(state) }
+            guard sqlite3_step(state) == SQLITE_ROW,
+                  let lastSession = text(state, 0), let lastTurn = text(state, 1) else { throw failure("read task summary backfill state") }
+            if sqlite3_column_int(state, 2) != 0 {
+                try executeUnlocked("COMMIT")
+                return true
+            }
+            var cursor: OpaquePointer?
+            let cursorSQL = "SELECT session_id,turn_id FROM agent_event_stream WHERE turn_id IS NOT NULL AND (session_id,turn_id)>(?,?) GROUP BY session_id,turn_id ORDER BY session_id,turn_id LIMIT ?"
+            guard sqlite3_prepare_v2(handle, cursorSQL, -1, &cursor, nil) == SQLITE_OK else { throw failure("prepare task summary backfill page") }
+            defer { sqlite3_finalize(cursor) }
+            bind(lastSession, at: 1, to: cursor); bind(lastTurn, at: 2, to: cursor)
+            sqlite3_bind_int(cursor, 3, Int32(max(1, min(limit, 100))))
+            var keys: [(String, String)] = []
+            while sqlite3_step(cursor) == SQLITE_ROW {
+                if let session = text(cursor, 0), let turn = text(cursor, 1) { keys.append((session, turn)) }
+            }
+            if keys.isEmpty {
+                try executeUnlocked("INSERT OR IGNORE INTO task_summary_version VALUES(1)")
+                try executeUnlocked("UPDATE task_summary_backfill_state SET completed=1 WHERE id=1")
+                try executeUnlocked("COMMIT")
+                return true
+            }
+            var aggregate: OpaquePointer?
+            let aggregateSQL = "SELECT MAX(agent_id),MIN(occurred_at),MAX(occurred_at),COUNT(*) FROM agent_event_stream WHERE session_id=? AND turn_id=?"
+            guard sqlite3_prepare_v2(handle, aggregateSQL, -1, &aggregate, nil) == SQLITE_OK else { throw failure("prepare task summary aggregate") }
+            defer { sqlite3_finalize(aggregate) }
+            var write: OpaquePointer?
+            let writeSQL = "INSERT OR REPLACE INTO task_summary(session_id,turn_id,agent_id,started_at,last_at,event_count) VALUES(?,?,?,?,?,?)"
+            guard sqlite3_prepare_v2(handle, writeSQL, -1, &write, nil) == SQLITE_OK else { throw failure("prepare task summary backfill write") }
+            defer { sqlite3_finalize(write) }
+            for (session, turn) in keys {
+                bind(session, at: 1, to: aggregate); bind(turn, at: 2, to: aggregate)
+                guard sqlite3_step(aggregate) == SQLITE_ROW, let agent = text(aggregate, 0) else { throw failure("aggregate task summary") }
+                bind(session, at: 1, to: write); bind(turn, at: 2, to: write); bind(agent, at: 3, to: write)
+                sqlite3_bind_double(write, 4, sqlite3_column_double(aggregate, 1))
+                sqlite3_bind_double(write, 5, sqlite3_column_double(aggregate, 2))
+                sqlite3_bind_int64(write, 6, sqlite3_column_int64(aggregate, 3))
+                guard sqlite3_step(write) == SQLITE_DONE else { throw failure("write task summary") }
+                sqlite3_reset(aggregate); sqlite3_clear_bindings(aggregate)
+                sqlite3_reset(write); sqlite3_clear_bindings(write)
+            }
+            let last = keys[keys.count - 1]
+            var update: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "UPDATE task_summary_backfill_state SET last_session_id=?,last_turn_id=? WHERE id=1", -1, &update, nil) == SQLITE_OK else { throw failure("prepare task summary cursor") }
+            bind(last.0, at: 1, to: update); bind(last.1, at: 2, to: update)
+            guard sqlite3_step(update) == SQLITE_DONE else { sqlite3_finalize(update); throw failure("save task summary cursor") }
+            sqlite3_finalize(update)
+            try executeUnlocked("COMMIT")
+            return false
+        } catch {
+            try? executeUnlocked("ROLLBACK")
+            throw error
+        }
+    }
+
+    /// Legacy summaries gained a materialized title after their original
+    /// creation. Fill it once in bounded idle batches; a task with no captured
+    /// user prompt is marked checked so it is never scanned again.
+    @discardableResult
+    func backfillTaskTitles(limit: Int = 25) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var select: OpaquePointer?
+            let sql = "SELECT session_id,turn_id FROM task_summary WHERE title_checked=0 ORDER BY session_id,turn_id LIMIT ?"
+            guard sqlite3_prepare_v2(handle, sql, -1, &select, nil) == SQLITE_OK else { throw failure("prepare title backfill") }
+            defer { sqlite3_finalize(select) }
+            sqlite3_bind_int(select, 1, Int32(max(1, min(limit, 100))))
+            var keys: [(String, String)] = []
+            while sqlite3_step(select) == SQLITE_ROW {
+                if let session = text(select, 0), let turn = text(select, 1) { keys.append((session, turn)) }
+            }
+            if keys.isEmpty { try executeUnlocked("COMMIT"); return true }
+            var update: OpaquePointer?
+            let updateSQL = """
+                UPDATE task_summary SET title=COALESCE(title,(
+                  SELECT json_extract(CAST(prompt.payload AS TEXT),'$.payload.userPrompt._0.rawText')
+                  FROM agent_event_stream prompt
+                  WHERE prompt.session_id=task_summary.session_id AND prompt.turn_id=task_summary.turn_id
+                    AND json_type(CAST(prompt.payload AS TEXT),'$.payload.userPrompt') IS NOT NULL
+                  ORDER BY prompt.sequence LIMIT 1)),title_checked=1
+                WHERE session_id=? AND turn_id=?
+                """
+            guard sqlite3_prepare_v2(handle, updateSQL, -1, &update, nil) == SQLITE_OK else { throw failure("prepare title backfill update") }
+            defer { sqlite3_finalize(update) }
+            for (session, turn) in keys {
+                bind(session, at: 1, to: update); bind(turn, at: 2, to: update)
+                guard sqlite3_step(update) == SQLITE_DONE else { throw failure("backfill title") }
+                sqlite3_reset(update); sqlite3_clear_bindings(update)
+            }
+            try executeUnlocked("COMMIT")
+            return keys.count < max(1, min(limit, 100))
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
     }
 
     func nextAgentEventSequence(sessionID: String) throws -> UInt64 {
@@ -821,10 +1280,275 @@ final class EvidenceDatabase: @unchecked Sendable {
         return records
     }
 
+    func claimAnalysisJob(now: Date = Date(), leaseSeconds: TimeInterval = 120) throws -> EvidenceAnalysisJob? {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var row: OpaquePointer?
+            let sql = "SELECT session_id,turn_id,revision FROM evidence_analysis_jobs WHERE (state='pending' AND not_before<=?) OR (state='running' AND lease_until<=?) ORDER BY not_before,session_id,turn_id LIMIT 1"
+            guard sqlite3_prepare_v2(handle, sql, -1, &row, nil) == SQLITE_OK else { throw failure("prepare analysis claim") }
+            defer { sqlite3_finalize(row) }
+            sqlite3_bind_double(row, 1, now.timeIntervalSince1970); sqlite3_bind_double(row, 2, now.timeIntervalSince1970)
+            let step = sqlite3_step(row)
+            if step == SQLITE_DONE { try executeUnlocked("COMMIT"); return nil }
+            guard step == SQLITE_ROW, let session = text(row, 0), let turn = text(row, 1) else { throw failure("read analysis work") }
+            let revision = sqlite3_column_int64(row, 2), token = UUID().uuidString
+            var claim: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "UPDATE evidence_analysis_jobs SET state='running',token=?,lease_until=?,attempts=attempts+1 WHERE session_id=? AND turn_id=? AND revision=?", -1, &claim, nil) == SQLITE_OK else { throw failure("prepare analysis lease") }
+            defer { sqlite3_finalize(claim) }
+            bind(token, at: 1, to: claim); sqlite3_bind_double(claim, 2, now.addingTimeInterval(leaseSeconds).timeIntervalSince1970)
+            bind(session, at: 3, to: claim); bind(turn, at: 4, to: claim); sqlite3_bind_int64(claim, 5, revision)
+            guard sqlite3_step(claim) == SQLITE_DONE, sqlite3_changes(handle) == 1 else { throw failure("claim analysis work") }
+            try executeUnlocked("COMMIT")
+            return EvidenceAnalysisJob(sessionID: session, turnID: turn, revision: revision, token: token)
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    /// Schedules only legacy tasks that have a materialized history summary but
+    /// no analysis work yet. This runs in bounded batches while the app is idle;
+    /// unlike live event admission it deliberately creates no upload outbox row.
+    @discardableResult
+    func enqueueHistoricalAnalysisJobs(limit: Int = 25) throws -> Int {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var statement: OpaquePointer?
+            let sql = """
+              INSERT OR IGNORE INTO evidence_analysis_jobs(session_id,turn_id)
+              SELECT s.session_id,s.turn_id FROM task_summary s
+              LEFT JOIN evidence_analysis_jobs j
+                ON j.session_id=s.session_id AND j.turn_id=s.turn_id
+              WHERE j.session_id IS NULL
+              ORDER BY s.session_id,s.turn_id LIMIT ?
+              """
+            guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare historical analysis admission") }
+            defer { sqlite3_finalize(statement) }
+            sqlite3_bind_int(statement, 1, Int32(max(1, min(limit, 100))))
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("enqueue historical analysis") }
+            let inserted = Int(sqlite3_changes(handle))
+            try executeUnlocked("COMMIT")
+            return inserted
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func retryAnalysisJob(_ job: EvidenceAnalysisJob, message: String) throws {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "UPDATE evidence_analysis_jobs SET state=CASE WHEN attempts>=8 THEN 'isolated' ELSE 'pending' END,not_before=?+MIN(300,5*(1<<MIN(attempts,6))),token=NULL,last_error=? WHERE session_id=? AND turn_id=? AND revision=? AND token=?"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare analysis retry") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970); bind(String(message.prefix(512)), at: 2, to: statement)
+        bind(job.sessionID, at: 3, to: statement); bind(job.turnID, at: 4, to: statement)
+        sqlite3_bind_int64(statement, 5, job.revision); bind(job.token, at: 6, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("retry analysis work") }
+    }
+
+    func completeAnalysisJob(_ job: EvidenceAnalysisJob,
+                             assessments: [ForensicAssessmentRecord],
+                             routes: [ModelRouteEvidence],
+                             memory: [MemoryCommitEvidence],
+                             snapshot: AgentTaskSnapshot) throws {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            try upsertAssessments(assessments)
+            try replaceModelRoutes(routes, turns: [(job.sessionID, job.turnID)])
+            try upsertMemoryCommits(memory)
+            let snapshotPayload = try encoder.encode(snapshot)
+            var projection: OpaquePointer?
+            let projectionSQL = "INSERT INTO task_snapshot_projection VALUES(?,?,?,?,?) ON CONFLICT(session_id,turn_id) DO UPDATE SET revision=excluded.revision,payload=excluded.payload,generated_at=excluded.generated_at WHERE excluded.revision>=revision"
+            guard sqlite3_prepare_v2(handle, projectionSQL, -1, &projection, nil) == SQLITE_OK else { throw failure("prepare task projection") }
+            defer { sqlite3_finalize(projection) }
+            bind(job.sessionID, at: 1, to: projection); bind(job.turnID, at: 2, to: projection)
+            sqlite3_bind_int64(projection, 3, job.revision)
+            _ = snapshotPayload.withUnsafeBytes { sqlite3_bind_blob(projection, 4, $0.baseAddress, Int32(snapshotPayload.count), SQLITE_TRANSIENT) }
+            sqlite3_bind_double(projection, 5, Date().timeIntervalSince1970)
+            guard sqlite3_step(projection) == SQLITE_DONE else { throw failure("write task projection") }
+            var searchJob: OpaquePointer?
+            let searchSQL = "INSERT INTO task_search_jobs(session_id,turn_id,revision) VALUES(?,?,?) ON CONFLICT(session_id,turn_id) DO UPDATE SET revision=MAX(revision,excluded.revision),state='pending'"
+            guard sqlite3_prepare_v2(handle, searchSQL, -1, &searchJob, nil) == SQLITE_OK else { throw failure("prepare search work") }
+            defer { sqlite3_finalize(searchJob) }
+            bind(job.sessionID, at: 1, to: searchJob); bind(job.turnID, at: 2, to: searchJob)
+            sqlite3_bind_int64(searchJob, 3, job.revision)
+            guard sqlite3_step(searchJob) == SQLITE_DONE else { throw failure("register search work") }
+            var ack: OpaquePointer?
+            let sql = "UPDATE evidence_analysis_jobs SET state='done',completed_revision=revision,token=NULL,last_error=NULL WHERE session_id=? AND turn_id=? AND revision=? AND token=? AND state='running' AND lease_until>?"
+            guard sqlite3_prepare_v2(handle, sql, -1, &ack, nil) == SQLITE_OK else { throw failure("prepare analysis confirmation") }
+            defer { sqlite3_finalize(ack) }
+            bind(job.sessionID, at: 1, to: ack); bind(job.turnID, at: 2, to: ack)
+            sqlite3_bind_int64(ack, 3, job.revision); bind(job.token, at: 4, to: ack); sqlite3_bind_double(ack, 5, Date().timeIntervalSince1970)
+            guard sqlite3_step(ack) == SQLITE_DONE, sqlite3_changes(handle) == 1 else { throw failure("stale analysis lease") }
+            try executeUnlocked("COMMIT")
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func taskSnapshot(sessionID: String, turnID: String) throws -> AgentTaskSnapshot? {
+        guard let readConnection else {
+            throw NSError(domain: "EvidenceDatabase", code: Int(SQLITE_MISUSE),
+                          userInfo: [NSLocalizedDescriptionKey: "task detail read connection unavailable"])
+        }
+        return try readConnection.taskSnapshot(sessionID: sessionID, turnID: turnID)
+    }
+
+    func nextTaskSearchJob() throws -> TaskSearchJob? {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "SELECT session_id,turn_id,revision FROM task_search_jobs WHERE state='pending' AND completed_revision<revision ORDER BY session_id,turn_id LIMIT 1"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare next task search work") }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW,
+              let session = text(statement, 0), let turn = text(statement, 1) else { return nil }
+        return TaskSearchJob(sessionID: session, turnID: turn, revision: sqlite3_column_int64(statement, 2))
+    }
+
+    func restartTaskSearchBackfill() throws {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("UPDATE task_search_backfill SET session_id='',turn_id='',complete=0 WHERE id=1")
+    }
+
+    func completeTaskSearchJob(_ job: TaskSearchJob) throws {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "UPDATE task_search_jobs SET completed_revision=?,state='done' WHERE session_id=? AND turn_id=? AND revision=? AND completed_revision<?"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare search completion") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int64(statement, 1, job.revision)
+        bind(job.sessionID, at: 2, to: statement); bind(job.turnID, at: 3, to: statement)
+        sqlite3_bind_int64(statement, 4, job.revision); sqlite3_bind_int64(statement, 5, job.revision)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("complete search work") }
+        // A newer revision can be admitted while this one is indexed. Its job
+        // remains pending and the index is advanced again on the next slice.
+    }
+
+    @discardableResult
+    func enqueueTaskSearchBackfill(limit: Int = 25) throws -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            var state: OpaquePointer?
+            guard sqlite3_prepare_v2(handle, "SELECT session_id,turn_id,complete FROM task_search_backfill WHERE id=1", -1, &state, nil) == SQLITE_OK else { throw failure("prepare search backfill cursor") }
+            defer { sqlite3_finalize(state) }
+            guard sqlite3_step(state) == SQLITE_ROW,
+                  let session = text(state, 0), let turn = text(state, 1) else { throw failure("read search backfill cursor") }
+            if sqlite3_column_int(state, 2) != 0 { try executeUnlocked("COMMIT"); return true }
+            var rows: OpaquePointer?
+            let sql = "SELECT session_id,turn_id,revision FROM task_snapshot_projection WHERE (session_id,turn_id)>(?,?) ORDER BY session_id,turn_id LIMIT ?"
+            guard sqlite3_prepare_v2(handle, sql, -1, &rows, nil) == SQLITE_OK else { throw failure("prepare search backfill page") }
+            defer { sqlite3_finalize(rows) }
+            bind(session, at: 1, to: rows); bind(turn, at: 2, to: rows)
+            sqlite3_bind_int(rows, 3, Int32(max(1, min(limit, 100))))
+            var page: [TaskSearchJob] = []
+            while sqlite3_step(rows) == SQLITE_ROW {
+                if let session = text(rows, 0), let turn = text(rows, 1) {
+                    page.append(TaskSearchJob(sessionID: session, turnID: turn,
+                        revision: sqlite3_column_int64(rows, 2)))
+                }
+            }
+            var insert: OpaquePointer?
+            let insertSQL = "INSERT INTO task_search_jobs(session_id,turn_id,revision) VALUES(?,?,?) ON CONFLICT(session_id,turn_id) DO UPDATE SET revision=MAX(revision,excluded.revision),completed_revision=0,state='pending'"
+            guard sqlite3_prepare_v2(handle, insertSQL, -1, &insert, nil) == SQLITE_OK else { throw failure("prepare search backfill insert") }
+            defer { sqlite3_finalize(insert) }
+            for job in page {
+                bind(job.sessionID, at: 1, to: insert); bind(job.turnID, at: 2, to: insert)
+                sqlite3_bind_int64(insert, 3, job.revision)
+                guard sqlite3_step(insert) == SQLITE_DONE else { throw failure("backfill search job") }
+                sqlite3_reset(insert); sqlite3_clear_bindings(insert)
+            }
+            if let last = page.last {
+                var update: OpaquePointer?
+                guard sqlite3_prepare_v2(handle, "UPDATE task_search_backfill SET session_id=?,turn_id=? WHERE id=1", -1, &update, nil) == SQLITE_OK else { throw failure("prepare search backfill update") }
+                bind(last.sessionID, at: 1, to: update); bind(last.turnID, at: 2, to: update)
+                guard sqlite3_step(update) == SQLITE_DONE else { sqlite3_finalize(update); throw failure("save search backfill cursor") }
+                sqlite3_finalize(update)
+            }
+            let complete = page.count < max(1, min(limit, 100))
+            if complete { try executeUnlocked("UPDATE task_search_backfill SET complete=1 WHERE id=1") }
+            try executeUnlocked("COMMIT")
+            return complete
+        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+    }
+
+    func claimAuditUploadJob(now: Date = Date(), leaseSeconds: TimeInterval = 180) throws -> AuditOutboxJob? {
+        lock.lock()
+        var claimed: (session: String, turn: String, revision: Int64, token: String)?
+        do {
+            try executeUnlocked("BEGIN IMMEDIATE")
+            var row: OpaquePointer?
+            let sql = """
+              SELECT o.session_id,o.turn_id,o.revision
+              FROM audit_upload_outbox o
+              WHERE ((o.state='pending' AND o.not_before<=?) OR
+                     (o.state='running' AND o.lease_until<=?))
+                AND EXISTS (SELECT 1 FROM task_snapshot_projection p
+                  WHERE p.session_id=o.session_id AND p.turn_id=o.turn_id AND p.revision>=o.revision)
+              ORDER BY o.not_before,o.session_id,o.turn_id LIMIT 1
+              """
+            guard sqlite3_prepare_v2(handle, sql, -1, &row, nil) == SQLITE_OK else { throw failure("prepare audit outbox claim") }
+            defer { sqlite3_finalize(row) }
+            sqlite3_bind_double(row, 1, now.timeIntervalSince1970)
+            sqlite3_bind_double(row, 2, now.timeIntervalSince1970)
+            let step = sqlite3_step(row)
+            if step == SQLITE_ROW {
+                guard let session = text(row, 0), let turn = text(row, 1) else { throw failure("read audit outbox") }
+                let revision = sqlite3_column_int64(row, 2), token = UUID().uuidString
+                var claim: OpaquePointer?
+                let claimSQL = "UPDATE audit_upload_outbox SET state='running',token=?,lease_until=?,attempts=attempts+1 WHERE session_id=? AND turn_id=? AND revision=?"
+                guard sqlite3_prepare_v2(handle, claimSQL, -1, &claim, nil) == SQLITE_OK else { throw failure("prepare audit outbox lease") }
+                defer { sqlite3_finalize(claim) }
+                bind(token, at: 1, to: claim)
+                sqlite3_bind_double(claim, 2, now.addingTimeInterval(leaseSeconds).timeIntervalSince1970)
+                bind(session, at: 3, to: claim); bind(turn, at: 4, to: claim)
+                sqlite3_bind_int64(claim, 5, revision)
+                guard sqlite3_step(claim) == SQLITE_DONE, sqlite3_changes(handle) == 1 else { throw failure("claim audit outbox") }
+                claimed = (session, turn, revision, token)
+            } else if step != SQLITE_DONE { throw failure("read audit outbox") }
+            try executeUnlocked("COMMIT")
+        } catch {
+            try? executeUnlocked("ROLLBACK")
+            lock.unlock()
+            throw error
+        }
+        lock.unlock()
+        guard let claimed else { return nil }
+        guard let snapshot = try taskSnapshot(sessionID: claimed.session, turnID: claimed.turn) else {
+            throw failure("claimed audit snapshot missing")
+        }
+        return AuditOutboxJob(sessionID: claimed.session, turnID: claimed.turn,
+                              revision: claimed.revision, token: claimed.token, snapshot: snapshot)
+    }
+
+    func retryAuditUploadJob(_ job: AuditOutboxJob, message: String,
+                             retryAfter: TimeInterval? = nil) throws {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "UPDATE audit_upload_outbox SET state='pending',not_before=?+CASE WHEN ?>=0 THEN ? ELSE MIN(300,5*(1<<MIN(attempts,6))) END,token=NULL,lease_until=0,last_error=? WHERE session_id=? AND turn_id=? AND revision=? AND token=?"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare audit outbox retry") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, Date().timeIntervalSince1970)
+        let serverDelay = retryAfter.map { max(1, min(3600, $0)) } ?? -1
+        sqlite3_bind_double(statement, 2, serverDelay); sqlite3_bind_double(statement, 3, serverDelay)
+        bind(String(message.prefix(512)), at: 4, to: statement)
+        bind(job.sessionID, at: 5, to: statement); bind(job.turnID, at: 6, to: statement)
+        sqlite3_bind_int64(statement, 7, job.revision); bind(job.token, at: 8, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("retry audit outbox") }
+    }
+
+    func completeAuditUploadJob(_ job: AuditOutboxJob, receiptID: String?) throws {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        let sql = "UPDATE audit_upload_outbox SET state='done',completed_revision=revision,token=NULL,lease_until=0,last_error=NULL,receipt_id=? WHERE session_id=? AND turn_id=? AND revision=? AND token=? AND state='running'"
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare audit outbox confirmation") }
+        defer { sqlite3_finalize(statement) }
+        bindOptional(receiptID, at: 1, to: statement)
+        bind(job.sessionID, at: 2, to: statement); bind(job.turnID, at: 3, to: statement)
+        sqlite3_bind_int64(statement, 4, job.revision); bind(job.token, at: 5, to: statement)
+        guard sqlite3_step(statement) == SQLITE_DONE, sqlite3_changes(handle) == 1 else { throw failure("stale audit outbox lease") }
+    }
+
     func upsertAssessments(_ records: [ForensicAssessmentRecord]) throws {
         guard !records.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
-        try executeUnlocked("BEGIN IMMEDIATE")
+        try executeUnlocked("SAVEPOINT assessment_write")
         do {
             let sql = """
               INSERT INTO forensic_assessments(assessment_id,session_id,turn_id,agent,assessment_type,
@@ -850,14 +1574,14 @@ final class EvidenceDatabase: @unchecked Sendable {
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert assessment") }
                 sqlite3_reset(statement); sqlite3_clear_bindings(statement)
             }
-            try executeUnlocked("COMMIT")
-        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+            try executeUnlocked("RELEASE assessment_write")
+        } catch { try? executeUnlocked("ROLLBACK TO assessment_write"); try? executeUnlocked("RELEASE assessment_write"); throw error }
     }
 
     func replaceModelRoutes(_ records: [ModelRouteEvidence], turns: [(sessionId: String, turnId: String)]) throws {
         guard !turns.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
-        try executeUnlocked("BEGIN IMMEDIATE")
+        try executeUnlocked("SAVEPOINT model_route_write")
         do {
             var deleteStatement: OpaquePointer?
             guard sqlite3_prepare_v2(handle,
@@ -895,8 +1619,8 @@ final class EvidenceDatabase: @unchecked Sendable {
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert model route") }
                 sqlite3_reset(statement); sqlite3_clear_bindings(statement)
             }
-            try executeUnlocked("COMMIT")
-        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+            try executeUnlocked("RELEASE model_route_write")
+        } catch { try? executeUnlocked("ROLLBACK TO model_route_write"); try? executeUnlocked("RELEASE model_route_write"); throw error }
     }
 
     func upsertModelRoutes(_ records: [ModelRouteEvidence]) throws {
@@ -927,7 +1651,7 @@ final class EvidenceDatabase: @unchecked Sendable {
     func upsertMemoryCommits(_ records: [MemoryCommitEvidence]) throws {
         guard !records.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
-        try executeUnlocked("BEGIN IMMEDIATE")
+        try executeUnlocked("SAVEPOINT memory_commit_write")
         do {
             let sql = """
               INSERT INTO memory_commits(commit_id,session_id,turn_id,agent,storage_path,risk,
@@ -950,9 +1674,140 @@ final class EvidenceDatabase: @unchecked Sendable {
                 bind(digest, at: 10, to: statement)
                 guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("upsert memory commit") }
                 sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+                try indexMemoryCommitAddresses(record)
+                try indexMemoryCommitText(record)
             }
-            try executeUnlocked("COMMIT")
-        } catch { try? executeUnlocked("ROLLBACK"); throw error }
+            try executeUnlocked("RELEASE memory_commit_write")
+        } catch { try? executeUnlocked("ROLLBACK TO memory_commit_write"); try? executeUnlocked("RELEASE memory_commit_write"); throw error }
+    }
+
+    /// Exact-IP lookup over normalized memory-write evidence. This intentionally
+    /// avoids scanning source JSON or requiring a task snapshot projection.
+    func searchMemoryCommits(address: String, limit: Int = 500) throws -> [MemoryCommitEvidence] {
+        lock.lock(); defer { lock.unlock() }
+        let sql = """
+            SELECT c.payload FROM memory_commit_addresses a
+            JOIN memory_commits c ON c.commit_id=a.commit_id
+            WHERE a.address=? ORDER BY a.observed_at DESC LIMIT ?
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare memory address lookup") }
+        defer { sqlite3_finalize(statement) }
+        bind(address, at: 1, to: statement); sqlite3_bind_int(statement, 2, Int32(max(1, min(limit, 5_000))))
+        var result: [MemoryCommitEvidence] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let record = try? decoder.decode(MemoryCommitEvidence.self, from: payload) { result.append(record) }
+        }
+        return result
+    }
+
+    func searchMemoryCommits(terms: [String], agent: String?, startDate: String?, endDate: String?,
+                             limit: Int = 100) throws -> [MemoryCommitEvidence] {
+        lock.lock(); defer { lock.unlock() }
+        let usable = terms.map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { $0.unicodeScalars.count >= 3 }
+        var clauses: [String] = []
+        if agent != nil { clauses.append("m.agent=?") }
+        if let start = startDate.flatMap(Self.historyDate) { clauses.append("m.observed_at>=\(start.timeIntervalSince1970)") }
+        if let end = endDate.flatMap(Self.historyDate) { clauses.append("m.observed_at<\(end.timeIntervalSince1970)") }
+        if !usable.isEmpty { clauses.append("memory_commit_fts MATCH ?") }
+        let sql = """
+            SELECT m.payload FROM memory_commits m
+            \(usable.isEmpty ? "" : "JOIN memory_commit_fts ON memory_commit_fts.commit_id=m.commit_id")
+            \(clauses.isEmpty ? "" : "WHERE " + clauses.joined(separator: " AND "))
+            ORDER BY m.observed_at DESC LIMIT ?
+            """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare memory history search") }
+        defer { sqlite3_finalize(statement) }
+        var index: Int32 = 1
+        if let agent { bind(agent, at: index, to: statement); index += 1 }
+        if !usable.isEmpty {
+            let expression = usable.map { "\"\($0.replacingOccurrences(of: "\"", with: "\"\""))\"" }.joined(separator: " OR ")
+            bind(expression, at: index, to: statement); index += 1
+        }
+        sqlite3_bind_int(statement, index, Int32(max(1, min(limit, 500))))
+        var result: [MemoryCommitEvidence] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let record = try? decoder.decode(MemoryCommitEvidence.self, from: payload) { result.append(record) }
+        }
+        return result
+    }
+
+    private static func historyDate(_ value: String) -> Date? {
+        let formatter = DateFormatter(); formatter.dateFormat = "yyyy-MM-dd"; formatter.isLenient = false
+        return formatter.date(from: value)
+    }
+
+    private func backfillMemorySearchIndexIfNeeded() throws {
+        var check: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT 1 FROM evidence_pipeline_migrations WHERE version=3", -1, &check, nil) == SQLITE_OK else { throw failure("prepare memory search migration check") }
+        let done = sqlite3_step(check) == SQLITE_ROW
+        sqlite3_finalize(check)
+        guard !done else { return }
+        var rows: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT payload FROM memory_commits", -1, &rows, nil) == SQLITE_OK else { throw failure("prepare memory search migration") }
+        defer { sqlite3_finalize(rows) }
+        var records: [MemoryCommitEvidence] = []
+        while sqlite3_step(rows) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(rows, 0) else { continue }
+            let payload = Data(bytes: bytes, count: Int(sqlite3_column_bytes(rows, 0)))
+            if let record = try? decoder.decode(MemoryCommitEvidence.self, from: payload) { records.append(record) }
+        }
+        for record in records {
+            try indexMemoryCommitAddresses(record)
+            try indexMemoryCommitText(record)
+        }
+        var migration: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO evidence_pipeline_migrations(version) VALUES(3)", -1, &migration, nil) == SQLITE_OK else { throw failure("prepare memory search migration marker") }
+        defer { sqlite3_finalize(migration) }
+        guard sqlite3_step(migration) == SQLITE_DONE else { throw failure("save memory search migration marker") }
+    }
+
+    private func indexMemoryCommitAddresses(_ record: MemoryCommitEvidence) throws {
+        var remove: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "DELETE FROM memory_commit_addresses WHERE commit_id=?", -1, &remove, nil) == SQLITE_OK else { throw failure("prepare memory address refresh") }
+        bind(record.commitId, at: 1, to: remove)
+        guard sqlite3_step(remove) == SQLITE_DONE else { sqlite3_finalize(remove); throw failure("refresh memory address facts") }
+        sqlite3_finalize(remove)
+        guard let content = record.contentDiff else { return }
+        let regex = try! NSRegularExpression(pattern: #"(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9.])"#)
+        let values = regex.matches(in: content, range: NSRange(content.startIndex..., in: content)).compactMap { match -> String? in
+            guard let range = Range(match.range, in: content) else { return nil }
+            let address = String(content[range])
+            return IPGeolocationStore.isIPAddress(address) ? address : nil
+        }
+        guard !values.isEmpty else { return }
+        let sql = "INSERT OR IGNORE INTO memory_commit_addresses(address,commit_id,session_id,turn_id,observed_at,storage_path,confidence) VALUES(?,?,?,?,?,?,?)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare memory address index") }
+        defer { sqlite3_finalize(statement) }
+        for address in Set(values) {
+            bind(address, at: 1, to: statement); bind(record.commitId, at: 2, to: statement)
+            bind(record.sessionId, at: 3, to: statement); bind(record.turnId, at: 4, to: statement)
+            sqlite3_bind_double(statement, 5, record.observedAt.timeIntervalSince1970)
+            bindOptional(record.storagePath, at: 6, to: statement); bind(record.confidence.rawValue, at: 7, to: statement)
+            guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("index memory address") }
+            sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+        }
+    }
+
+    private func indexMemoryCommitText(_ record: MemoryCommitEvidence) throws {
+        var remove: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "DELETE FROM memory_commit_fts WHERE commit_id=?", -1, &remove, nil) == SQLITE_OK else { throw failure("prepare memory text refresh") }
+        bind(record.commitId, at: 1, to: remove)
+        guard sqlite3_step(remove) == SQLITE_DONE else { sqlite3_finalize(remove); throw failure("refresh memory text facts") }
+        sqlite3_finalize(remove)
+        var insert: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "INSERT INTO memory_commit_fts(commit_id,content) VALUES(?,?)", -1, &insert, nil) == SQLITE_OK else { throw failure("prepare memory text index") }
+        defer { sqlite3_finalize(insert) }
+        bind(record.commitId, at: 1, to: insert)
+        bind([record.storagePath ?? "", record.summary, record.contentDiff ?? ""].joined(separator: "\n"), at: 2, to: insert)
+        guard sqlite3_step(insert) == SQLITE_DONE else { throw failure("index memory text") }
     }
 
     func memoryCommits(sessionId: String, turnId: String) throws -> [MemoryCommitEvidence] {
@@ -1051,6 +1906,44 @@ final class EvidenceDatabase: @unchecked Sendable {
             }
         }
         return result
+    }
+
+    func recentSecurityReviewEvidence(limit: Int) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        // Limit before decoding/filtering: opening the UI never sorts every raw JSON payload.
+        let sql = "SELECT payload FROM evidence_records ORDER BY observed_at DESC LIMIT ?"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare bounded security review")
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_int(statement, 1, Int32(min(max(limit, 1), 500)))
+        var result: [GuardEvent] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
+            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+            if let event = try? decoder.decode(GuardEvent.self, from: data) { result.append(event) }
+        }
+        return result
+    }
+
+    func securityEvidence(ids: [String]) throws -> [GuardEvent] {
+        lock.lock(); defer { lock.unlock() }
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT payload FROM evidence_records WHERE event_id=? ORDER BY ingested_at DESC LIMIT 1", -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare security evidence lookup")
+        }
+        defer { sqlite3_finalize(statement) }
+        var result: [GuardEvent] = []
+        for id in Set(ids.compactMap { UUID(uuidString: $0)?.uuidString }).sorted().prefix(200) {
+            bind(id, at: 1, to: statement)
+            if sqlite3_step(statement) == SQLITE_ROW, let bytes = sqlite3_column_blob(statement, 0) {
+                let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
+                if let event = try? decoder.decode(GuardEvent.self, from: data) { result.append(event) }
+            }
+            sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+        }
+        return result.sorted { $0.ts < $1.ts }
     }
 
     func historicalSecurityCandidates(limit: Int) throws -> [GuardEvent] {
@@ -1196,55 +2089,20 @@ final class EvidenceDatabase: @unchecked Sendable {
     }
 
     func events(sessionId: String, turnID: String? = nil) throws -> [GuardEvent] {
-        lock.lock(); defer { lock.unlock() }
-        let turnFilter = turnID == nil ? "" : (turnID == "unattributed"
-            ? "AND json_extract(CAST(payload AS TEXT), '$.turnId') IS NULL"
-            : "AND json_extract(CAST(payload AS TEXT), '$.turnId') = ?")
-        let sql = """
-          SELECT payload FROM evidence_records
-          WHERE json_extract(CAST(payload AS TEXT), '$.sessionId') = ?
-          \(turnFilter)
-          ORDER BY observed_at ASC, ingested_at ASC
-          """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else {
-            throw failure("prepare session read")
+        guard let readConnection else {
+            throw NSError(domain: "EvidenceDatabase", code: Int(SQLITE_MISUSE),
+                          userInfo: [NSLocalizedDescriptionKey: "task event read connection unavailable"])
         }
-        defer { sqlite3_finalize(statement) }
-        bind(sessionId, at: 1, to: statement)
-        if let turnID, turnID != "unattributed" { bind(turnID, at: 2, to: statement) }
-        var result: [GuardEvent] = []
-        var ids = Set<UUID>()
-        while sqlite3_step(statement) == SQLITE_ROW {
-            guard let bytes = sqlite3_column_blob(statement, 0) else { continue }
-            let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(statement, 0)))
-            let event = try decoder.decode(GuardEvent.self, from: data)
-            if ids.insert(event.id).inserted {
-                result.append(event)
-            }
-        }
-        return result
+        return try readConnection.events(sessionID: sessionId, turnID: turnID)
     }
 
     /// Read only the next prompt timestamp, never another task's request body.
     func nextPromptDate(sessionID: String, turnID: String, after: Date) throws -> Date? {
-        lock.lock(); defer { lock.unlock() }
-        let sql = """
-          SELECT MIN(observed_at) FROM evidence_records
-          WHERE json_extract(CAST(payload AS TEXT), '$.sessionId') = ? AND observed_at > ?
-            AND json_extract(CAST(payload AS TEXT), '$.turnId') != ?
-            AND json_extract(CAST(payload AS TEXT), '$.kind') = 'model'
-            AND json_extract(CAST(payload AS TEXT), '$.op') = 'prompt'
-          """
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare prompt boundary") }
-        defer { sqlite3_finalize(statement) }
-        bind(sessionID, at: 1, to: statement)
-        sqlite3_bind_double(statement, 2, after.timeIntervalSince1970)
-        bind(turnID, at: 3, to: statement)
-        guard sqlite3_step(statement) == SQLITE_ROW,
-              sqlite3_column_type(statement, 0) != SQLITE_NULL else { return nil }
-        return Date(timeIntervalSince1970: sqlite3_column_double(statement, 0))
+        guard let readConnection else {
+            throw NSError(domain: "EvidenceDatabase", code: Int(SQLITE_MISUSE),
+                          userInfo: [NSLocalizedDescriptionKey: "prompt boundary read connection unavailable"])
+        }
+        return try readConnection.nextPromptDate(sessionID: sessionID, turnID: turnID, after: after)
     }
 
     func saveCheckpoint(_ checkpoint: SourceCheckpoint) throws {

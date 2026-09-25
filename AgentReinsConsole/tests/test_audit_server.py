@@ -81,11 +81,14 @@ class AuditTests(unittest.TestCase):
         root = upload({'t': 'o', 'v': children})
         probe = self.request('/api/audit/ingest', dict(protocol=2, deviceID='device', op='probe', hashes=[root, '0'*64]), device=True)
         self.assertEqual(probe['missing'], ['0'*64])
+        self.assertEqual(probe['serverStatus'], 'accepting')
+        self.assertEqual(probe['missingCount'], 1)
         commit = dict(protocol=2, deviceID='device', op='commit', root='0'*64, sequence=1)
         with self.assertRaises(HTTPError) as error: self.request('/api/audit/ingest', commit, device=True)
         self.assertEqual(error.exception.code, 409)
         commit['root'] = root
         ack = self.request('/api/audit/ingest', commit, device=True)
+        self.assertEqual(ack['serverStatus'], 'committed')
         self.assertEqual(ack, self.request('/api/audit/ingest', commit, device=True))
         commit['sequence'] = 2
         self.request('/api/audit/ingest', commit, device=True)
@@ -99,6 +102,22 @@ class AuditTests(unittest.TestCase):
             self.assertEqual(db.execute('SELECT COUNT(*) FROM snapshot_bodies').fetchone()[0], 0)
         self.assertEqual(self.store.blocks.missing('another-device', [root]), [root])
         with self.assertRaises(ValueError): self.store.blocks.put('device', root, base64.b64encode(b'tampered').decode())
+
+    def test_receiver_backpressure_returns_retry_after(self):
+        self.store.assembly_slot.acquire()
+        try:
+            packet = dict(protocol=2, deviceID='device', op='commit', root='0'*64, sequence=1)
+            request = Request(self.url + '/api/audit/ingest', data=json.dumps(packet).encode(),
+                headers={'Authorization': 'Bearer device-secret', 'X-AgentReins-Device': 'device'})
+            with self.assertRaises(HTTPError) as error:
+                urlopen(request)
+            self.assertEqual(error.exception.code, 503)
+            self.assertEqual(error.exception.headers.get('Retry-After'), '5')
+            payload = json.loads(error.exception.read())
+            self.assertEqual(payload['serverStatus'], 'backpressure')
+            self.assertEqual(payload['retryAfterMs'], 5000)
+        finally:
+            self.store.assembly_slot.release()
 
     def test_legacy_revisions_share_body_storage(self):
         packet = self.packet()

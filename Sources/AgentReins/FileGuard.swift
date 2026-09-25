@@ -29,7 +29,7 @@ final class FileGuard: ObservableObject {
     }
     private var pendingAnalyses: [String: PendingAnalysis] = [:]
     private let lock = NSLock()
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase: EvidenceDatabase?
     private var acceptedEvents = 0
     private var lastHealthPersist = Date.distantPast
 
@@ -40,7 +40,11 @@ final class FileGuard: ObservableObject {
         return dir
     }
 
-    init(backupRoot: URL = FileGuard.defaultBackupRoot()) { self.backupRoot = backupRoot }
+    init(backupRoot: URL = FileGuard.defaultBackupRoot(),
+         evidenceDatabase: EvidenceDatabase? = try? EvidenceDatabase()) {
+        self.backupRoot = backupRoot
+        self.evidenceDatabase = evidenceDatabase
+    }
 
     /// 规则变化时由 UI 同步进来（主线程调用）。后台建立备份，不阻塞 UI。
     func setRules(_ r: [Rule]) {

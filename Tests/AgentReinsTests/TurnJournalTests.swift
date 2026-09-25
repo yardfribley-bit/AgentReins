@@ -730,7 +730,7 @@ final class TurnJournalTests: XCTestCase {
         try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try "let value = 1\n".write(to: watched, atomically: true, encoding: .utf8)
-        let guardrail = FileGuard(backupRoot: backups)
+        let guardrail = FileGuard(backupRoot: backups, evidenceDatabase: nil)
         guardrail.setRules([Rule(id: "file-benchmark", kind: "file", watch: [watched.path], pattern: nil,
                                  ops: ["modify"], severity: "high", action: "protect", restore: false,
                                  message: "benchmark", naturalLanguage: nil)])
@@ -756,7 +756,7 @@ final class TurnJournalTests: XCTestCase {
         try FileManager.default.createDirectory(at: backups, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
         try "let token = \"safe\"\n".write(to: watched, atomically: true, encoding: .utf8)
-        let guardrail = FileGuard(backupRoot: backups)
+        let guardrail = FileGuard(backupRoot: backups, evidenceDatabase: nil)
         guardrail.setRules([Rule(id: "file-debounce", kind: "file", watch: [watched.path], pattern: nil,
                                  ops: ["modify"], severity: "high", action: "protect", restore: false,
                                  message: "debounce", naturalLanguage: nil)])
@@ -2672,7 +2672,7 @@ final class TurnJournalTests: XCTestCase {
         let record = MemoryCommitEvidence(commitId: "commit-1", sessionId: "session", turnId: "turn",
             agent: "workbuddy", toolCallId: "memory-call", processId: nil,
             storagePath: "/Users/me/.workbuddy/memory/a_memory.md", changeKind: .update,
-            beforeHash: "before", afterHash: "after", contentDiff: "+Theme: dark",
+            beforeHash: "before", afterHash: "after", contentDiff: "+Theme: dark\n+server_ip: 192.168.1.39",
             summary: "Update persistent memory", risk: "info", riskReasons: [],
             confidence: .inferred, attributionMethod: "known agent memory path + bounded 45s time window",
             observedAt: Date(timeIntervalSince1970: 10), evidenceEventIds: ["event-1"])
@@ -2682,6 +2682,21 @@ final class TurnJournalTests: XCTestCase {
 
         XCTAssertEqual(try database.memoryCommits(sessionId: "session", turnId: "turn"), [record])
         XCTAssertTrue(try database.memoryCommits(sessionId: "session", turnId: "other").isEmpty)
+        XCTAssertEqual(try database.searchMemoryCommits(address: "192.168.1.39").first?.commitId, "commit-1")
+        XCTAssertEqual(try database.searchMemoryCommits(terms: ["Theme"], agent: "workbuddy",
+            startDate: nil, endDate: nil).first?.commitId, "commit-1")
+        XCTAssertTrue(try database.searchMemoryCommits(address: "192.168.1.40").isEmpty)
+
+        let replacement = MemoryCommitEvidence(commitId: record.commitId, sessionId: record.sessionId,
+            turnId: record.turnId, agent: record.agent, toolCallId: record.toolCallId,
+            processId: record.processId, storagePath: record.storagePath, changeKind: record.changeKind,
+            beforeHash: record.beforeHash, afterHash: record.afterHash, contentDiff: "+Theme: light",
+            summary: record.summary, risk: record.risk, riskReasons: record.riskReasons,
+            confidence: record.confidence, attributionMethod: record.attributionMethod,
+            observedAt: record.observedAt, evidenceEventIds: record.evidenceEventIds)
+        try database.upsertMemoryCommits([replacement])
+        XCTAssertTrue(try database.searchMemoryCommits(address: "192.168.1.39").isEmpty,
+            "Replacing a memory commit must remove stale indexed addresses")
     }
 
     func testModelProviderTrafficDoesNotImplyExternalMemoryPoisoning() throws {

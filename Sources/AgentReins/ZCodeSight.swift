@@ -8,7 +8,7 @@ import SwiftUI
 /// and private keys are deliberately outside the projected event boundary.
 @MainActor
 final class ZCodeSight: ObservableObject {
-    private static let modelIOCheckpointSource = "zcode-model-io-v2"
+    nonisolated private static let modelIOCheckpointSource = "zcode-model-io-v2"
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
     var onEvents: (([GuardEvent]) -> Void)?
@@ -21,6 +21,7 @@ final class ZCodeSight: ObservableObject {
     private let evidenceDatabase = try? EvidenceDatabase()
     private var accepted = 0
     private var malformed = 0
+    private var isPolling = false
 
     nonisolated static var root: URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".zcode")
@@ -46,6 +47,8 @@ final class ZCodeSight: ObservableObject {
     func stop() { timer?.invalidate(); timer = nil }
 
     private func poll() {
+        guard !isPolling else { return }
+        isPolling = true
         let previousFingerprint = databaseFingerprint
         let previousOffsets = logOffsets
         let evidenceDatabase = evidenceDatabase
@@ -55,31 +58,36 @@ final class ZCodeSight: ObservableObject {
             let logs = Self.readLogs(previousOffsets: previousOffsets)
             let modelIO = Self.readModelIO(previousOffsets: previousOffsets)
             let raw = (snapshot.map { [$0.rawEvidence] } ?? []) + logs.raw + modelIO.raw
+            let projected = (snapshot?.events ?? []) + logs.events + modelIO.events
+            let checkpoints = logs.offsets.map { stream, offset in
+                SourceCheckpoint(source: "zcode", stream: stream, offset: Int64(offset),
+                                 fingerprint: nil, updatedAt: Date())
+            } + modelIO.offsets.map { stream, offset in
+                SourceCheckpoint(source: Self.modelIOCheckpointSource, stream: stream, offset: Int64(offset),
+                                 fingerprint: nil, updatedAt: Date())
+            }
             var rawWriteFailed = false
-            do { try evidenceDatabase?.appendRaw(raw) } catch { rawWriteFailed = true }
+            do {
+                guard let evidenceDatabase else { throw CocoaError(.fileWriteUnknown) }
+                try evidenceDatabase.persistCollected(raw: raw, events: projected, checkpoints: checkpoints)
+            } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.isPolling = false
+                guard !rawWriteFailed else { self.malformed += 1; return }
                 self.databaseFingerprint = fingerprint
                 let databaseAvailable = FileManager.default.fileExists(atPath: Self.sessionDatabaseURL.path)
                 let available = databaseAvailable || modelIO.available
                 if self.connected != available { self.connected = available }
-                if rawWriteFailed { self.malformed += 1 }
                 self.malformed += logs.malformed + modelIO.malformed
-                let projected = (snapshot?.events ?? []) + logs.events + modelIO.events
                 let fresh = projected.filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
                 for (stream, offset) in logs.offsets {
                     self.logOffsets[stream] = offset
-                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
-                        source: "zcode", stream: stream, offset: Int64(offset),
-                        fingerprint: nil, updatedAt: Date()))
                 }
                 for (stream, offset) in modelIO.offsets {
                     self.logOffsets[stream] = offset
-                    try? self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
-                        source: Self.modelIOCheckpointSource, stream: stream, offset: Int64(offset),
-                        fingerprint: nil, updatedAt: Date()))
                 }
                 try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
                     source: "zcode", state: !available ? .failed : self.malformed > 0 ? .degraded : .healthy,

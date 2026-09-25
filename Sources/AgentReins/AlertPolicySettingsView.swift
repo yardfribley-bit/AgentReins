@@ -129,7 +129,7 @@ struct AlertPolicySettingsView: View {
                     }
                     Text(candidate.condition).font(.system(size: 11)).foregroundStyle(.secondary)
                     HStack(spacing: 14) {
-                        Label("\(candidate.historicalMatches) historical matches", systemImage: "clock.arrow.circlepath")
+                        Label(candidate.historicalSampleCount.map { "\(candidate.historicalMatches) matches / \($0) checked events" } ?? "Historical backtest not recorded", systemImage: "clock.arrow.circlepath")
                         Label(candidate.detector?.title ?? "No executable detector mapping",
                               systemImage: candidate.detector == nil ? "exclamationmark.triangle" : "checkmark.circle")
                     }

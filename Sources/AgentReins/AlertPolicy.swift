@@ -118,6 +118,7 @@ struct AIRuleCandidate: Identifiable, Codable, Hashable, Sendable {
     let falsePositiveRisk: String
     let rationale: String
     let historicalMatches: Int
+    var historicalSampleCount: Int? = nil
     let generatedAt: String?
 }
 
@@ -146,11 +147,11 @@ final class AlertPolicyStore: ObservableObject {
         policies.removeAll { $0.id == policy.id }
     }
 
-    func ingestAIProposals(_ analysis: HistoricalSecurityAnalysis, events: [GuardEvent]) {
+    func ingestAIProposals(_ analysis: HistoricalSecurityAnalysis, events: [GuardEvent]?) {
         let proposals = analysis.rules.filter { $0.origin == "ai_proposed" }.map { rule -> AIRuleCandidate in
             let detector = Self.detector(for: rule)
             let matches: Int
-            if let detector {
+            if let detector, let events {
                 let probe = AlertPolicy(id: "candidate_\(rule.id)", name: rule.name,
                     explanation: rule.condition, enabled: true, severity: rule.severity, notify: false,
                     agentNames: [], projectPaths: [], excludedPaths: [], detector: detector,
@@ -159,7 +160,7 @@ final class AlertPolicyStore: ObservableObject {
             } else {
                 matches = 0
             }
-            return AIRuleCandidate(id: rule.id, name: rule.name, condition: rule.condition,
+            var candidate = AIRuleCandidate(id: rule.id, name: rule.name, condition: rule.condition,
                 severity: rule.severity, detector: detector,
                 verdict: rule.llmSelfExamine.verdict,
                 confidence: rule.llmSelfExamine.confidence,
@@ -167,6 +168,8 @@ final class AlertPolicyStore: ObservableObject {
                 falsePositiveRisk: rule.llmSelfExamine.falsePositiveRisk,
                 rationale: rule.llmSelfExamine.rationale,
                 historicalMatches: matches, generatedAt: analysis.generatedAt)
+            candidate.historicalSampleCount = events?.count
+            return candidate
         }
         let activeCandidateIDs = Set(proposals.map(\.id))
         aiCandidates.removeAll { activeCandidateIDs.contains($0.id) }

@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import Darwin
 
 struct IPGeolocation: Codable, Equatable {
     let ip: String
@@ -78,17 +79,34 @@ final class IPGeolocationStore: ObservableObject {
             isp: value.connection?.isp, fetchedAt: Date())
     }
 
+    nonisolated static func isIPAddress(_ value: String) -> Bool {
+        var ipv4 = in_addr()
+        var ipv6 = in6_addr()
+        return value.withCString { inet_pton(AF_INET, $0, &ipv4) == 1 || inet_pton(AF_INET6, $0, &ipv6) == 1 }
+    }
+
     nonisolated static func isPublicIPAddress(_ value: String) -> Bool {
+        guard isIPAddress(value) else { return false }
         if value.contains(":") {
-            let lower = value.lowercased()
-            return lower != "::1" && !lower.hasPrefix("fe80:") && !lower.hasPrefix("fc") && !lower.hasPrefix("fd")
+            var address = in6_addr()
+            guard value.withCString({ inet_pton(AF_INET6, $0, &address) }) == 1 else { return false }
+            let bytes = withUnsafeBytes(of: address) { Array($0) }
+            // Only global unicast, excluding documentation space; rejects mapped private IPv4 too.
+            return (bytes[0] & 0xe0) == 0x20
+                && !(bytes[0] == 0x20 && bytes[1] == 0x01 && bytes[2] == 0x0d && bytes[3] == 0xb8)
         }
-        let parts = value.split(separator: ".").compactMap { Int($0) }
+        let components = value.split(separator: ".", omittingEmptySubsequences: false)
+        guard components.count == 4, components.allSatisfy({ !$0.isEmpty && $0.allSatisfy(\.isNumber) }) else { return false }
+        let parts = components.compactMap { Int($0) }
         guard parts.count == 4, parts.allSatisfy({ (0...255).contains($0) }) else { return false }
         if parts[0] == 10 || parts[0] == 127 || parts[0] == 0 { return false }
         if parts[0] == 192 && parts[1] == 168 { return false }
         if parts[0] == 172 && (16...31).contains(parts[1]) { return false }
         if parts[0] == 169 && parts[1] == 254 { return false }
+        if parts[0] >= 224 || (parts[0] == 100 && (64...127).contains(parts[1])) { return false }
+        if parts[0] == 192 && parts[1] == 0 { return false }
+        if parts[0] == 198 && (parts[1] == 18 || parts[1] == 19 || (parts[1] == 51 && parts[2] == 100)) { return false }
+        if parts[0] == 203 && parts[1] == 0 && parts[2] == 113 { return false }
         return true
     }
 

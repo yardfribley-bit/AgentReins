@@ -34,20 +34,35 @@ final class EventStore: ObservableObject {
     private(set) var persistenceError: String?
     private(set) var collectorHealth: [CollectorHealthRecord] = []
     private(set) var taskProgress: [String: TaskLiveProgress] = [:]
+    @Published private(set) var historySummaryRevision: UInt64 = 0
+    @Published private(set) var historySummariesReady = false
+    @Published private(set) var historySummaryError: String?
+    @Published private(set) var taskSearchIndexReady = false
+    @Published private(set) var taskSearchIndexedCount = 0
 
     private let fileURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
     private let database: EvidenceDatabase?
+    private let taskSearchWriter: TaskSearchIndex?
+    private let taskSearchReader: TaskSearchIndex?
     private let evidenceBuffer: EvidenceBufferActor?
     private let persistenceQueue = DispatchQueue(label: "com.agentspec.eventstore.persistence", qos: .utility)
     // UI reads must not wait behind a live collector's growing write backlog.
     // EvidenceDatabase serializes access to its SQLite handle internally.
     private let taskReadQueue = DispatchQueue(label: "com.agentspec.eventstore.task-read", qos: .userInitiated)
+    private let historyMaintenanceQueue = DispatchQueue(label: "com.agentspec.eventstore.history-maintenance", qos: .background)
+    private let taskSearchMaintenanceQueue = DispatchQueue(label: "com.agentspec.eventstore.task-search-maintenance", qos: .background)
+    private let taskSearchReadQueue = DispatchQueue(label: "com.agentspec.eventstore.task-search-read", qos: .userInitiated)
     private let projectionWorker = EventDerivedProjectionWorker()
     private let maximumEvents = 500
     private var projectionGeneration: UInt64 = 0
     private var auditUploader: AuditUploadClient?
+    private var historySummaryTask: Task<Void, Never>?
+    private var historyBackfillBatchCount = 0
+    private var durableProcessingTask: Task<Void, Never>?
+    private var durableAnalysisTask: Task<Void, Never>?
+    private var taskSearchTask: Task<Void, Never>?
 
     init(fileURL: URL = EventStore.defaultURL()) {
         self.fileURL = fileURL
@@ -59,11 +74,114 @@ final class EventStore: ObservableObject {
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
         let openedDatabase = try? EvidenceDatabase.openRecovering(url: databaseURL)
         database = openedDatabase
+        taskSearchWriter = openedDatabase.flatMap { _ in try? TaskSearchIndex(evidenceURL: databaseURL) }
+        taskSearchReader = taskSearchWriter == nil ? nil : (try? TaskSearchIndex(evidenceURL: databaseURL))
         evidenceBuffer = openedDatabase.map(EvidenceBufferActor.init(database:))
+        if openedDatabase == nil {
+            historySummaryError = "本地证据数据库不可用，历史摘要暂时无法整理"
+        }
         load()
         refreshCollectorHealth(publish: false)
         if fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL {
-            auditUploader = AuditUploadClient(store: self)
+            if let openedDatabase { auditUploader = AuditUploadClient(database: openedDatabase) }
+            openedDatabase?.setAuditUploadEnabled(auditUploader != nil)
+            startHistorySummaryBackfill(database: openedDatabase)
+            if let openedDatabase {
+                startDurableProcessing(database: openedDatabase)
+                startDurableAnalysis(database: openedDatabase)
+                if let taskSearchWriter { startTaskSearchIndexing(database: openedDatabase, index: taskSearchWriter) }
+            }
+        }
+    }
+
+    deinit {
+        durableProcessingTask?.cancel()
+        durableAnalysisTask?.cancel()
+        historySummaryTask?.cancel()
+        taskSearchTask?.cancel()
+    }
+
+    private func startTaskSearchIndexing(database: EvidenceDatabase, index: TaskSearchIndex) {
+        taskSearchTask = Task { @MainActor [weak self] in
+            try? await Task.sleep(for: .seconds(1))
+            var needsBackfillReset = index.newlyCreated
+            while !Task.isCancelled {
+                guard let self else { return }
+                let active = self.taskProgress.values.contains { progress in
+                    switch progress.phase {
+                    case .completed, .failed: return false
+                    default: return true
+                    }
+                }
+                let result: Result<Bool, Error> = await withCheckedContinuation { continuation in
+                    let reset = needsBackfillReset
+                    self.taskSearchMaintenanceQueue.async {
+                        let result = Result { () throws -> Bool in
+                            try TaskSearchPump.step(database: database, index: index,
+                                                    active: active, initialize: reset)
+                        }
+                        continuation.resume(returning: result)
+                    }
+                }
+                switch result {
+                case .success(let worked):
+                    needsBackfillReset = false
+                    self.taskSearchIndexedCount = (try? index.indexedTaskCount()) ?? self.taskSearchIndexedCount
+                    if worked { self.taskSearchIndexReady = false }
+                    if !worked { self.taskSearchIndexReady = true }
+                    try? await Task.sleep(for: .milliseconds(TaskSearchPump.delayMilliseconds(active: active, worked: worked)))
+                case .failure(let error):
+                    self.taskSearchIndexReady = false
+                    self.historySummaryError = "历史检索索引暂时失败：\(error.localizedDescription)"
+                    try? await Task.sleep(for: .seconds(5))
+                }
+            }
+        }
+    }
+
+    private func startDurableProcessing(database: EvidenceDatabase) {
+        let processor = DurableEvidenceProcessor(database: database)
+        durableProcessingTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    let count = try await processor.processSlice()
+                    if count > 0 { self?.historySummaryRevision &+= 1 }
+                    try await Task.sleep(for: .milliseconds(count > 0 ? 50 : 500))
+                } catch is CancellationError { return }
+                catch {
+                    self?.persistenceError = error.localizedDescription
+                    try? await Task.sleep(for: .seconds(5))
+                }
+            }
+        }
+    }
+
+    private func startDurableAnalysis(database: EvidenceDatabase) {
+        let processor = DurableAnalysisProcessor(database: database)
+        durableAnalysisTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    let processed = try await processor.processOne()
+                    var queuedHistory = 0
+                    let hasActiveTask = self?.taskProgress.values.contains { progress in
+                        switch progress.phase {
+                        case .completed, .failed: return false
+                        default: return true
+                        }
+                    } ?? true
+                    if !processed {
+                        // Active tasks get a single legacy admission per idle
+                        // slice. This guarantees progress without letting a
+                        // backlog of old work dominate live collection.
+                        queuedHistory = try await processor.enqueueHistoricalBatch(limit: hasActiveTask ? 1 : 25)
+                    }
+                    try await Task.sleep(for: .milliseconds(processed || queuedHistory > 0 ? 100 : 750))
+                } catch is CancellationError { return }
+                catch {
+                    self?.persistenceError = error.localizedDescription
+                    try? await Task.sleep(for: .seconds(5))
+                }
+            }
         }
     }
 
@@ -165,6 +283,12 @@ final class EventStore: ObservableObject {
         taskReadQueue.async {
             let result: Result<AgentTaskSnapshot, Error>
             do {
+                if let turnID, let projection = try database.taskSnapshot(sessionID: sessionID, turnID: turnID) {
+                    let commits = try database.memoryCommits(sessionId: sessionID, turnId: turnID)
+                    result = .success(projection.includingMemoryCommits(commits))
+                    DispatchQueue.main.async { completion(result) }
+                    return
+                }
                 let rows = try database.events(sessionId: sessionID, turnID: turnID)
                 let sessions = AgentSessionSnapshot.build(from: rows)
                 guard let session = sessions.first(where: { $0.id == sessionID }) else {
@@ -174,7 +298,9 @@ final class EventStore: ObservableObject {
                 if let turnID, let prompt = rows.first(where: { $0.kind == "model" && $0.op == "prompt" }) {
                     boundary = try database.nextPromptDate(sessionID: sessionID, turnID: turnID, after: prompt.ts)
                 } else { boundary = nil }
-                result = .success(AgentTaskSnapshot.build(session: session, turnID: turnID, nextPromptAt: boundary))
+                let snapshot = AgentTaskSnapshot.build(session: session, turnID: turnID, nextPromptAt: boundary)
+                let commits = try turnID.map { try database.memoryCommits(sessionId: sessionID, turnId: $0) } ?? []
+                result = .success(snapshot.includingMemoryCommits(commits))
             } catch {
                 result = .failure(error)
             }
@@ -183,13 +309,145 @@ final class EventStore: ObservableObject {
     }
 
     func loadRecentTasks(limit: Int = 20, before: Date? = nil, offset: Int = 0,
+                         after cursor: StoredTaskSummary? = nil,
                          completion: @escaping (Result<[StoredTaskSummary], Error>) -> Void) {
         guard let database else {
             completion(.failure(EventStoreReadError.databaseUnavailable))
             return
         }
         taskReadQueue.async {
-            let result = Result { try database.recentTasks(limit: limit, before: before, offset: offset) }
+            let result = Result { try database.recentTasks(limit: limit, before: before, offset: offset, after: cursor) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func searchHistoricalTasks(_ plan: HistoryQueryUnderstanding,
+                               completion: @escaping (Result<(hits: [TaskSearchHit], aggregates: TaskAggregates), Error>) -> Void) {
+        guard let taskSearchReader else {
+            completion(.failure(EventStoreReadError.databaseUnavailable))
+            return
+        }
+        taskSearchReadQueue.async {
+            let result = Result { (hits: try taskSearchReader.search(plan), aggregates: try taskSearchReader.aggregate(plan)) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Exact-IP memory questions first query the structured memory-write facts,
+    /// then append ordinary task mentions so the UI can distinguish the two.
+    func searchHistoricalMemoryAddress(_ address: String,
+                                       completion: @escaping (Result<(hits: [TaskSearchHit], aggregates: TaskAggregates), Error>) -> Void) {
+        let plan = HistoryQueryUnderstanding(agent: nil, startDate: nil, endDate: nil,
+            searchTerms: [address], evidenceKind: nil, requiresAddressInModelInput: false,
+            explanation: "先查明确写入记忆正文的 IP，再列出仅提及该 IP 的任务。")
+        searchHistoricalMemory(plan, address: address, completion: completion)
+    }
+
+    func searchHistoricalMemory(_ plan: HistoryQueryUnderstanding, address: String? = nil,
+                                completion: @escaping (Result<(hits: [TaskSearchHit], aggregates: TaskAggregates), Error>) -> Void) {
+        guard let taskSearchReader, let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable))
+            return
+        }
+        taskSearchReadQueue.async {
+            let result = Result { () -> (hits: [TaskSearchHit], aggregates: TaskAggregates) in
+                // memory_commits is the canonical structured record and may
+                // predate task_snapshot_projection. Query it directly so old
+                // writes remain discoverable without reopening every source.
+                let commits: [MemoryCommitEvidence]
+                if let address {
+                    commits = try database.searchMemoryCommits(address: address)
+                } else {
+                    commits = try database.searchMemoryCommits(terms: plan.searchTerms, agent: plan.agent,
+                        startDate: plan.startDate, endDate: plan.endDate)
+                }
+                let groups = Dictionary(grouping: commits) { "\($0.sessionId)\u{0}\($0.turnId)" }
+                let memory = groups.values.compactMap { writes -> TaskSearchHit? in
+                    guard let latest = writes.max(by: { $0.observedAt < $1.observedAt }),
+                          let earliest = writes.min(by: { $0.observedAt < $1.observedAt }) else { return nil }
+                    let task = StoredTaskSummary(sessionID: latest.sessionId, turnID: latest.turnId,
+                        agentID: latest.agent, title: "写入长期记忆 · \(latest.storagePath ?? "路径未采集")", startedAt: earliest.observedAt,
+                        lastObservedAt: latest.observedAt, eventCount: writes.count)
+                    let detail = writes.sorted { $0.observedAt > $1.observedAt }.map {
+                        "\($0.observedAt.formatted(date: .abbreviated, time: .standard)) · \($0.storagePath ?? "路径未采集") · \($0.confidence.rawValue)"
+                    }.joined(separator: "\n")
+                    return TaskSearchHit(task: task, excerpt: detail, revision: 0, isMemoryWriteMatch: true)
+                }.sorted { $0.task.lastObservedAt > $1.task.lastObservedAt }
+                let memoryIDs = Set(memory.map(\.id))
+                let mentions = try taskSearchReader.search(plan, limit: 100)
+                    .filter { !memoryIDs.contains($0.id) }
+                let hits = Array((memory + mentions).prefix(100))
+                return (hits, try taskSearchReader.aggregate(plan))
+            }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    /// Backfill legacy task summaries in small resumable batches. Active Agent
+    /// work lowers throughput; it never stops historical progress entirely.
+    private func startHistorySummaryBackfill(database: EvidenceDatabase?) {
+        guard let database, historySummaryTask == nil else { return }
+        historySummaryTask = Task { @MainActor [weak self] in
+            // Let live collectors establish their current task before any
+            // legacy scan competes for SQLite write time after launch.
+            try? await Task.sleep(for: .seconds(20))
+            var retryDelay: TimeInterval = 2
+            while !Task.isCancelled {
+                guard let self else { return }
+                let hasActiveTask = self.taskProgress.values.contains { progress in
+                    switch progress.phase {
+                    case .completed, .failed: return false
+                    default: return true
+                    }
+                }
+                let result: Result<Bool, Error> = await withCheckedContinuation { continuation in
+                    self.historyMaintenanceQueue.async {
+                        let result = Result { () throws -> Bool in
+                            let limit = hasActiveTask ? 1 : 25
+                            let summariesDone = try database.backfillTaskSummaries(limit: limit)
+                            return summariesDone ? try database.backfillTaskTitles(limit: limit) : false
+                        }
+                        DispatchQueue.main.async { continuation.resume(returning: result) }
+                    }
+                }
+                switch result {
+                case .success(let done):
+                    retryDelay = 2
+                    self.historySummaryError = nil
+                    self.historySummariesReady = done
+                    self.historyBackfillBatchCount += 1
+                    // Avoid invalidating the entire SwiftUI environment on
+                    // every tiny batch, but make the first newly prepared
+                    // page visible immediately and refresh periodically.
+                    if done || self.historyBackfillBatchCount == 1 || self.historyBackfillBatchCount.isMultiple(of: 5) {
+                        self.historySummaryRevision &+= 1
+                    }
+                    if done { return }
+                case .failure(let error):
+                    self.historySummaryError = error.localizedDescription
+                    try? await Task.sleep(for: .seconds(retryDelay))
+                    retryDelay = min(60, retryDelay * 2)
+                    continue
+                }
+                try? await Task.sleep(for: .seconds(hasActiveTask ? 5 : 2))
+            }
+        }
+    }
+
+    func loadRecentSecurityReview(completion: @escaping (Result<[GuardEvent], Error>) -> Void) {
+        guard let database else {
+            completion(.failure(EventStoreReadError.databaseUnavailable)); return
+        }
+        persistenceQueue.async {
+            let result = Result { try database.recentSecurityReviewEvidence(limit: 200) }
+            DispatchQueue.main.async { completion(result) }
+        }
+    }
+
+    func loadSecurityEvidence(ids: [String], completion: @escaping (Result<[GuardEvent], Error>) -> Void) {
+        guard let database else { completion(.failure(EventStoreReadError.databaseUnavailable)); return }
+        persistenceQueue.async {
+            let result = Result { try database.securityEvidence(ids: ids) }
             DispatchQueue.main.async { completion(result) }
         }
     }
@@ -353,9 +611,22 @@ final class EventStore: ObservableObject {
             progress.ingest(event)
             taskProgress[key] = progress
         }
-        auditUploader?.observe(evidence, progress: taskProgress)
         if taskProgress.count > 64 {
-            let retained = taskProgress.values.sorted { $0.lastActivityAt > $1.lastActivityAt }.prefix(64)
+            // Never evict a live task: the history scheduler uses this map to
+            // decide whether it may consume background I/O and database time.
+            let active = taskProgress.values.filter { progress in
+                switch progress.phase {
+                case .completed, .failed: return false
+                default: return true
+                }
+            }
+            let terminal = taskProgress.values.filter { progress in
+                switch progress.phase {
+                case .completed, .failed: return true
+                default: return false
+                }
+            }.sorted { $0.lastActivityAt > $1.lastActivityAt }
+            let retained = active + Array(terminal.prefix(max(0, 64 - active.count)))
             taskProgress = Dictionary(uniqueKeysWithValues: retained.map {
                 ("\($0.sessionID)\u{0}\($0.turnID)", $0)
             })
@@ -365,26 +636,12 @@ final class EventStore: ObservableObject {
         events = snapshot
         scheduleDerivedProjection(events: snapshot)
         if let database, let evidenceBuffer {
-            let affectedEvidence = evidenceForAffectedTurns(evidence)
-            let affectedTurns = Array(Set(evidence.compactMap { event -> String? in
-                guard let session = event.sessionId, let turn = event.turnId else { return nil }
-                return "\(session)\u{0}\(turn)"
-            })).compactMap { key -> (sessionId: String, turnId: String)? in
-                let parts = key.split(separator: "\u{0}", maxSplits: 1, omittingEmptySubsequences: false)
-                guard parts.count == 2 else { return nil }
-                return (String(parts[0]), String(parts[1]))
-            }
             persistenceQueue.async { [weak self] in
                 do {
                     let grouped = Dictionary(grouping: evidence.filter { $0.sessionId != nil },
                                              by: { $0.sessionId! })
                     for (sessionID, sessionEvidence) in grouped {
                         let session = AgentSessionSnapshot.build(from: sessionEvidence).first
-                        let projectID = Self.canonicalProjectID(session: session, sessionID: sessionID)
-                        let next = try database.nextAgentEventSequence(sessionID: sessionID)
-                        let canonical = LegacyGuardEventAdapter.project(
-                            sessionEvidence, projectID: projectID, startingSequence: next - 1)
-                        try database.appendAgentEvents(canonical)
                         if GitCheckpointIntegration.shouldInspect(sessionEvidence),
                            let workspace = session?.workspace,
                            let repository = GitRepositoryInspector.capture(workspace: workspace) {
@@ -407,17 +664,6 @@ final class EventStore: ObservableObject {
                         // Code indexes and change sets are rebuilt on demand.
                         // Live ingestion must not regroup the entire project.
                     }
-                    try database.upsertAssessments(ForensicAssessmentRecord.build(events: affectedEvidence))
-                    // The live UI ring is not an authoritative history. Include
-                    // persisted evidence before replacing any task projection.
-                    for turn in affectedTurns {
-                        let stored = try database.events(sessionId: turn.sessionId, turnID: turn.turnId)
-                        let delta = evidence.filter { $0.sessionId == turn.sessionId && $0.turnId == turn.turnId }
-                        let complete = Array(Dictionary((stored + delta).map { ($0.id, $0) },
-                                                        uniquingKeysWith: { _, new in new }).values)
-                        try database.replaceModelRoutes(ModelRouteEvidence.build(events: complete), turns: [turn])
-                    }
-                    try database.upsertMemoryCommits(MemoryCommitEvidence.build(events: affectedEvidence))
                     let health = try database.healthRecords()
                     DispatchQueue.main.async {
                         guard let self else { return }
@@ -435,18 +681,6 @@ final class EventStore: ObservableObject {
             Task { await evidenceBuffer.enqueue(evidence, urgent: urgent) }
         } else {
             persistenceError = "SQLite evidence database is unavailable"
-        }
-    }
-
-    private func evidenceForAffectedTurns(_ incoming: [GuardEvent]) -> [GuardEvent] {
-        let keys = Set(incoming.compactMap { event -> String? in
-            guard let session = event.sessionId, let turn = event.turnId else { return nil }
-            return "\(session):\(turn)"
-        })
-        guard !keys.isEmpty else { return [] }
-        return events.filter { event in
-            guard let session = event.sessionId, let turn = event.turnId else { return false }
-            return keys.contains("\(session):\(turn)")
         }
     }
 

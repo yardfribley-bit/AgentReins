@@ -52,9 +52,9 @@ struct NetworkFlowEvidence: Identifiable, Codable, Sendable {
         return grouped.compactMap { key, rows in
             guard let latest = rows.max(by: { $0.ts < $1.ts }) else { return nil }
             let category = category(for: latest, webToolCalls: webToolCalls)
-            let domain = latest.remoteDomain.flatMap { IPGeolocationStore.isPublicIPAddress($0) ? nil : $0 }
+            let domain = latest.remoteDomain.flatMap { IPGeolocationStore.isIPAddress($0) ? nil : $0 }
             let rawHost = latest.remoteHost
-            let ip = rawHost.flatMap { IPGeolocationStore.isPublicIPAddress($0) ? $0 : nil }
+            let ip = rawHost.flatMap { IPGeolocationStore.isIPAddress($0) ? $0 : nil }
             let grade = evidenceGrade(for: latest)
             return NetworkFlowEvidence(id: key, category: category, domain: domain,
                 ip: ip, port: latest.remotePort, agent: latest.agent ?? "Unknown agent",

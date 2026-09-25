@@ -191,6 +191,26 @@ struct AgentTaskSnapshot: Codable, Sendable {
     let sourceEvents: [GuardEvent]
     let evidenceReferences: [String]
 
+    /// Merge normalized persistent-memory commits even when this older task
+    /// has no materialized task-snapshot projection.
+    func includingMemoryCommits(_ commits: [MemoryCommitEvidence]) -> AgentTaskSnapshot {
+        guard !commits.isEmpty else { return self }
+        var merged: [String: MemoryCommitEvidence] = [:]
+        for commit in analysis.memoryCommits { merged[commit.commitId] = commit }
+        for commit in commits { merged[commit.commitId] = commit }
+        let nextAnalysis = Analysis(modelEconomics: analysis.modelEconomics,
+            contextExposure: analysis.contextExposure, memoryEvidence: analysis.memoryEvidence,
+            relaySecurity: analysis.relaySecurity, egressAudit: analysis.egressAudit,
+            memoryCommits: merged.values.sorted { $0.observedAt < $1.observedAt },
+            codeFindings: analysis.codeFindings, verification: analysis.verification)
+        return AgentTaskSnapshot(schemaVersion: schemaVersion, revision: revision,
+            generatedAt: generatedAt, task: task, capture: capture, conversation: conversation,
+            metrics: metrics, outboundRequests: outboundRequests, externalRequests: externalRequests,
+            modelResponses: modelResponses, journey: journey, activities: activities,
+            analysis: nextAnalysis, events: events, sourceEvents: sourceEvents,
+            evidenceReferences: evidenceReferences)
+    }
+
     static func build(session: AgentSessionSnapshot, turnID: String?, nextPromptAt: Date? = nil) -> AgentTaskSnapshot {
         let scoped = session.events.filter { event in
             guard let turnID else { return true }

@@ -1,0 +1,192 @@
+[1/7] Write swift-version--58304C5D6DBC2206.txt
+[3/5] Compiling AgentReinsTests PipelineArchitectureAcceptanceTests.swift
+[4/5] Emitting module AgentReinsTests
+[4/6] Write Objects.LinkFileList
+[5/6] Linking AgentReinsPackageTests
+Build complete! (3.70s)
+Test Suite 'Selected tests' started at 2026-09-25 00:08:25.121.
+Test Suite 'AgentReinsPackageTests.xctest' started at 2026-09-25 00:08:25.123.
+Test Suite 'AgentEventProtocolTests' started at 2026-09-25 00:08:25.123.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testApplyPatchArgumentsDecodeLiteralNewlinesFromRealCodexEvidence]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testApplyPatchArgumentsDecodeLiteralNewlinesFromRealCodexEvidence]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testApplyPatchArgumentsExposeObservedFileOperations]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testApplyPatchArgumentsExposeObservedFileOperations]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCanonicalAgentEventsPersistIdempotently]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCanonicalAgentEventsPersistIdempotently]' passed (0.024 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCaptureHealthDetectsSequenceGap]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCaptureHealthDetectsSequenceGap]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCaptureHealthReportsMissingRequiredSource]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCaptureHealthReportsMissingRequiredSource]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetDoesNotMergeUnrelatedNearbyWork]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetDoesNotMergeUnrelatedNearbyWork]' passed (0.004 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetFollowsOneUserRequestAcrossDialogue]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetFollowsOneUserRequestAcrossDialogue]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetIgnoresCompactedTranscriptBundleAndDeduplicatesOneTurnPrompt]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetIgnoresCompactedTranscriptBundleAndDeduplicatesOneTurnPrompt]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetKeepsCorrectionsAndAcknowledgementsInOneSessionRequirement]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetKeepsCorrectionsAndAcknowledgementsInOneSessionRequirement]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetNeverFallsBackAcrossSessionBoundary]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetNeverFallsBackAcrossSessionBoundary]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetSplitsOneLongLivedTurnAfterStableGap]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testChangeSetSplitsOneLongLivedTurnAfterStableGap]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCodeChangeIndexerAcceptsRepeatedToolLifecycleEvents]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCodeChangeIndexerAcceptsRepeatedToolLifecycleEvents]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCodeChangeIndexPersistsAndQueriesByProjectAndPath]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCodeChangeIndexPersistsAndQueriesByProjectAndPath]' passed (0.018 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCodeChangeIsPrimaryAndCommitIsOptionalMetadata]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCodeChangeIsPrimaryAndCommitIsOptionalMetadata]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testContextSeparatesUserInputFromInjectedLayers]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testContextSeparatesUserInputFromInjectedLayers]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCorrelationRoundTripsAndCanonicalKindsRemainStable]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testCorrelationRoundTripsAndCanonicalKindsRemainStable]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceDoesNotReturnUnrelatedOrFabricatedHistory]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceDoesNotReturnUnrelatedOrFabricatedHistory]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceFindsPromptAgentToolsFilesCommitAndVerification]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceFindsPromptAgentToolsFilesCommitAndVerification]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceKeepsZCodeQueryTurnScopedAndRejectsMalformedPaths]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceKeepsZCodeQueryTurnScopedAndRejectsMalformedPaths]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceUsesModelTermsAsHintsButReturnsOnlyRecordedEvidence]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testFeatureProvenanceUsesModelTermsAsHintsButReturnsOnlyRecordedEvidence]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testGitCheckpointIntegrationPersistsOneCheckpointPerCommit]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testGitCheckpointIntegrationPersistsOneCheckpointPerCommit]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testGitCheckpointIntegrationRecognizesCommitCommand]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testGitCheckpointIntegrationRecognizesCommitCommand]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testGitCommitInspectorReadsCommittedFileDigest]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testGitCommitInspectorReadsCommittedFileDigest]' passed (0.462 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testIdentityContextInLocalTraceIsMemoryContentNotJustInstructions]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testIdentityContextInLocalTraceIsMemoryContentNotJustInstructions]' passed (0.011 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyEnvelopeWithoutCorrelationStillDecodes]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyEnvelopeWithoutCorrelationStillDecodes]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyEvidenceProjectsPromptContextToolAndNetworkWithoutInventingLayerType]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyEvidenceProjectsPromptContextToolAndNetworkWithoutInventingLayerType]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyProjectEventsRestoreOnlySelectedProject]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyProjectEventsRestoreOnlySelectedProject]' passed (0.017 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyProjectionContinuesPersistedSessionSequence]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testLegacyProjectionContinuesPersistedSessionSequence]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testMemoryFileContentMatchCarriesBothEvidenceIDsAndCaptureBoundary]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testMemoryFileContentMatchCarriesBothEvidenceIDsAndCaptureBoundary]' passed (0.009 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testMemoryReminderIsRecordedAsInstructionWithoutInventingMemoryContents]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testMemoryReminderIsRecordedAsInstructionWithoutInventingMemoryContents]' passed (0.053 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testNetworkFlowsSeparateSSHAndAgentWebAccess]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testNetworkFlowsSeparateSSHAndAgentWebAccess]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testNetworkSocketInModelTurnIsNotAutomaticallyModelTraffic]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testNetworkSocketInModelTurnIsNotAutomaticallyModelTraffic]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testOptionalHistoricalWorkBuddyTraceRoundTrip]' started.
+/Users/jatsmith/AgentSpec/AgentGuardApp/Tests/AgentReinsTests/AgentEventProtocolTests.swift:360: -[AgentReinsTests.AgentEventProtocolTests testOptionalHistoricalWorkBuddyTraceRoundTrip] : Test skipped - Set WorkBuddy session and turn environment variables for local validation
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testOptionalHistoricalWorkBuddyTraceRoundTrip]' skipped (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testRecentTaskIndexUsesCapturedUserTitle]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testRecentTaskIndexUsesCapturedUserTitle]' passed (0.020 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testSessionCommitAttributionConfirmsSurvivingAgentContent]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testSessionCommitAttributionConfirmsSurvivingAgentContent]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testSessionCommitAttributionRefusesTimestampOnlyGuess]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testSessionCommitAttributionRefusesTimestampOnlyGuess]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testSupervisorProjectsCurrentWorkWithoutInventingHistory]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testSupervisorProjectsCurrentWorkWithoutInventingHistory]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJourneyKeepsMultipleModelRoundsAndToolCode]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJourneyKeepsMultipleModelRoundsAndToolCode]' passed (0.004 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJSONExportContainsSourceAndNormalizedWorkBuddyEvidence]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJSONExportContainsSourceAndNormalizedWorkBuddyEvidence]' passed (0.070 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJSONMarksVerifiedWorkBuddyNetworkBodyAsComplete]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJSONMarksVerifiedWorkBuddyNetworkBodyAsComplete]' passed (0.007 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJSONSeparatesOneToolLifecycleFromRelatedFileNetworkAndUsageSnapshots]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testTaskJSONSeparatesOneToolLifecycleFromRelatedFileNetworkAndUsageSnapshots]' passed (0.075 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testUniformMetricsDeduplicateToolLifecycleAndCountCanonicalEvents]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testUniformMetricsDeduplicateToolLifecycleAndCountCanonicalEvents]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testUsageAddsDistinctModelStepsEvenWhenTraceIsReused]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testUsageAddsDistinctModelStepsEvenWhenTraceIsReused]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testZCodeModelIOProjectionDoesNotClaimWireCompleteBody]' started.
+Test Case '-[AgentReinsTests.AgentEventProtocolTests testZCodeModelIOProjectionDoesNotClaimWireCompleteBody]' passed (0.001 seconds).
+Test Suite 'AgentEventProtocolTests' passed at 2026-09-25 00:08:25.939.
+	 Executed 44 tests, with 1 test skipped and 0 failures (0 unexpected) in 0.806 (0.816) seconds
+Test Suite 'AuditBlockProtocolTests' started at 2026-09-25 00:08:25.939.
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testFailedTaskDoesNotBlockNextTaskAndQueueSurvivesRestart]' started.
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testFailedTaskDoesNotBlockNextTaskAndQueueSurvivesRestart]' passed (0.013 seconds).
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testLargeBodiesUseBoundedReusableBlocks]' started.
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testLargeBodiesUseBoundedReusableBlocks]' passed (0.094 seconds).
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testNetworkStagesRetainFailedRequestAndDistinctIdenticalCalls]' started.
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testNetworkStagesRetainFailedRequestAndDistinctIdenticalCalls]' passed (0.003 seconds).
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testPayloadTamperingFailsIntegrityWithoutChangingStoredHashes]' started.
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testPayloadTamperingFailsIntegrityWithoutChangingStoredHashes]' passed (0.029 seconds).
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testWorkBuddyIncrementalParserPersistsTurnAcrossLongStreamAndPartialLine]' started.
+Test Case '-[AgentReinsTests.AuditBlockProtocolTests testWorkBuddyIncrementalParserPersistsTurnAcrossLongStreamAndPartialLine]' passed (0.226 seconds).
+Test Suite 'AuditBlockProtocolTests' passed at 2026-09-25 00:08:26.306.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.366 (0.367) seconds
+Test Suite 'AuditUploadScopeTests' started at 2026-09-25 00:08:26.306.
+Test Case '-[AgentReinsTests.AuditUploadScopeTests testOnlyTasksStartedAfterEnrollmentWithObservedRequestAreEligible]' started.
+Test Case '-[AgentReinsTests.AuditUploadScopeTests testOnlyTasksStartedAfterEnrollmentWithObservedRequestAreEligible]' passed (0.001 seconds).
+Test Suite 'AuditUploadScopeTests' passed at 2026-09-25 00:08:26.307.
+	 Executed 1 test, with 0 failures (0 unexpected) in 0.001 (0.001) seconds
+Test Suite 'DurableEvidencePipelineTests' started at 2026-09-25 00:08:26.307.
+Test Case '-[AgentReinsTests.DurableEvidencePipelineTests testExpiredConsumerCannotPublishOrConfirm]' started.
+Test Case '-[AgentReinsTests.DurableEvidencePipelineTests testExpiredConsumerCannotPublishOrConfirm]' passed (0.026 seconds).
+Test Case '-[AgentReinsTests.DurableEvidencePipelineTests testRestartRecoversWorkAndDuplicateReceiptDoesNotRequeue]' started.
+Test Case '-[AgentReinsTests.DurableEvidencePipelineTests testRestartRecoversWorkAndDuplicateReceiptDoesNotRequeue]' passed (0.030 seconds).
+Test Case '-[AgentReinsTests.DurableEvidencePipelineTests testRetryDoesNotBlockAnotherRecord]' started.
+Test Case '-[AgentReinsTests.DurableEvidencePipelineTests testRetryDoesNotBlockAnotherRecord]' passed (0.021 seconds).
+Test Suite 'DurableEvidencePipelineTests' passed at 2026-09-25 00:08:26.384.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.076 (0.077) seconds
+Test Suite 'IndexPerformanceTests' started at 2026-09-25 00:08:26.384.
+Test Case '-[AgentReinsTests.IndexPerformanceTests testCachedScanDoesNotReuseResultForChangedContent]' started.
+Test Case '-[AgentReinsTests.IndexPerformanceTests testCachedScanDoesNotReuseResultForChangedContent]' passed (0.002 seconds).
+Test Case '-[AgentReinsTests.IndexPerformanceTests testPeriodTaskDoesNotReadHistoricalBodies]' started.
+Test Case '-[AgentReinsTests.IndexPerformanceTests testPeriodTaskDoesNotReadHistoricalBodies]' passed (0.032 seconds).
+Test Case '-[AgentReinsTests.IndexPerformanceTests testReplayedEvidenceDoesNotScheduleAnotherRebuild]' started.
+Test Case '-[AgentReinsTests.IndexPerformanceTests testReplayedEvidenceDoesNotScheduleAnotherRebuild]' passed (0.020 seconds).
+Test Case '-[AgentReinsTests.IndexPerformanceTests testTenThousandFilesKeepTurnAttributionWithoutQuadraticScan]' started.
+Test Case '-[AgentReinsTests.IndexPerformanceTests testTenThousandFilesKeepTurnAttributionWithoutQuadraticScan]' passed (0.159 seconds).
+Test Case '-[AgentReinsTests.IndexPerformanceTests testUnrelatedBatchesDoNotRebuildCodeIndex]' started.
+Test Case '-[AgentReinsTests.IndexPerformanceTests testUnrelatedBatchesDoNotRebuildCodeIndex]' passed (0.000 seconds).
+Test Suite 'IndexPerformanceTests' passed at 2026-09-25 00:08:26.599.
+	 Executed 5 tests, with 0 failures (0 unexpected) in 0.214 (0.215) seconds
+Test Suite 'PipelineArchitectureAcceptanceTests' started at 2026-09-25 00:08:26.599.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testConfirmationFailureRollsBackEventsAndSummary]' started.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testConfirmationFailureRollsBackEventsAndSummary]' passed (0.122 seconds).
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testCorruptRecordIsIsolatedAndOtherWorkRemainsReadable]' started.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testCorruptRecordIsIsolatedAndOtherWorkRemainsReadable]' passed (0.021 seconds).
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testDifferentSessionCanProceedDuringRetry]' started.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testDifferentSessionCanProceedDuringRetry]' passed (0.020 seconds).
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testProcessorPersistsResultsAndDoesNotReplayFinishedWork]' started.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testProcessorPersistsResultsAndDoesNotReplayFinishedWork]' passed (0.020 seconds).
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testReceptionRollbackWhenWorkRegistrationFails]' started.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testReceptionRollbackWhenWorkRegistrationFails]' passed (0.020 seconds).
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testSameSessionCannotOvertakeRetryingPredecessor]' started.
+/Users/jatsmith/AgentSpec/AgentGuardApp/Tests/AgentReinsTests/PipelineArchitectureAcceptanceTests.swift:80: error: -[AgentReinsTests.PipelineArchitectureAcceptanceTests testSameSessionCannotOvertakeRetryingPredecessor] : XCTAssertNil failed: "EvidenceParseJob(key: "37DF6F96-3761-4D6A-8C20-C0C1685BDE69:f8c46b399dbf1ebdaa4723a85359afee8e5dd7d9365a842e538e241ee4f350f9", token: "61D6461B-A126-484A-89A0-3DB279DBCA0F", event: AgentReins.GuardEvent(id: 37DF6F96-3761-4D6A-8C20-C0C1685BDE69, kind: "model", ruleId: "fixture", path: "/tmp/fixture", command: nil, agent: Optional("workbuddy"), op: "prompt", severity: "info", ts: 2026-09-24 16:08:26 +0000, action: "sent", sessionId: Optional("session"), traceId: nil, turnId: Optional("turn"), toolCallId: nil, userIntent: Optional("second"), modelDecision: nil, modelReasoning: nil, modelPrompt: Optional("second"), modelResponse: nil, toolName: nil, model: nil, inputTokens: nil, outputTokens: nil, cachedTokens: nil, reasoningTokens: nil, costUSD: nil, beforeContent: nil, afterContent: nil, fileDiff: nil, codeFindings: nil, source: nil, attributionConfidence: nil, attributionMethod: nil, processId: nil, parentProcessId: nil, localAddress: nil, remoteHost: nil, remotePort: nil, remoteDomain: nil, startedAt: nil, endedAt: nil, durationMS: nil, relatedPath: nil))" - V2 requires ordering within a session; a retrying predecessor must fence later work.
+Test Case '-[AgentReinsTests.PipelineArchitectureAcceptanceTests testSameSessionCannotOvertakeRetryingPredecessor]' failed (0.512 seconds).
+Test Suite 'PipelineArchitectureAcceptanceTests' failed at 2026-09-25 00:08:27.316.
+	 Executed 6 tests, with 1 failure (0 unexpected) in 0.716 (0.717) seconds
+Test Suite 'TaskStoryRegressionTests' started at 2026-09-25 00:08:27.316.
+Test Case '-[AgentReinsTests.TaskStoryRegressionTests testHistoryPaginationDoesNotReturnOlderPartOfAlreadyListedTask]' started.
+Test Case '-[AgentReinsTests.TaskStoryRegressionTests testHistoryPaginationDoesNotReturnOlderPartOfAlreadyListedTask]' passed (0.019 seconds).
+Test Case '-[AgentReinsTests.TaskStoryRegressionTests testResponseWithoutRequestRemainsAvailable]' started.
+Test Case '-[AgentReinsTests.TaskStoryRegressionTests testResponseWithoutRequestRemainsAvailable]' passed (0.000 seconds).
+Test Case '-[AgentReinsTests.TaskStoryRegressionTests testTraceOutputProvidesModelAndResponseWithExactSpanLink]' started.
+Test Case '-[AgentReinsTests.TaskStoryRegressionTests testTraceOutputProvidesModelAndResponseWithExactSpanLink]' passed (0.006 seconds).
+Test Suite 'TaskStoryRegressionTests' passed at 2026-09-25 00:08:27.342.
+	 Executed 3 tests, with 0 failures (0 unexpected) in 0.025 (0.025) seconds
+Test Suite 'WorkBuddyNetworkEvidenceTests' started at 2026-09-25 00:08:27.342.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testAcceptsCurrentWorkBuddyV1ChatEndpoint]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testAcceptsCurrentWorkBuddyV1ChatEndpoint]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testDefaultProxyArgumentsAreLoopbackOnlyAndUseBundledAddon]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testDefaultProxyArgumentsAreLoopbackOnlyAndUseBundledAddon]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testMemoryRecallIsExternalRequestNotModelRequest]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testMemoryRecallIsExternalRequestNotModelRequest]' passed (0.005 seconds).
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testProjectsCompleteRequestAndStreamingReasoningWithoutTruncation]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testProjectsCompleteRequestAndStreamingReasoningWithoutTruncation]' passed (0.734 seconds).
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testReaderWaitsForCompleteJSONLine]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testReaderWaitsForCompleteJSONLine]' passed (0.006 seconds).
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testRejectsTamperedRequestBody]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testRejectsTamperedRequestBody]' passed (0.001 seconds).
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testUniqueUserTextCorrelatesNetworkBodyToNativeTurn]' started.
+Test Case '-[AgentReinsTests.WorkBuddyNetworkEvidenceTests testUniqueUserTextCorrelatesNetworkBodyToNativeTurn]' passed (0.005 seconds).
+Test Suite 'WorkBuddyNetworkEvidenceTests' passed at 2026-09-25 00:08:28.096.
+	 Executed 7 tests, with 0 failures (0 unexpected) in 0.752 (0.754) seconds
+Test Suite 'AgentReinsPackageTests.xctest' failed at 2026-09-25 00:08:28.096.
+	 Executed 74 tests, with 1 test skipped and 1 failure (0 unexpected) in 2.956 (2.973) seconds
+Test Suite 'Selected tests' failed at 2026-09-25 00:08:28.096.
+	 Executed 74 tests, with 1 test skipped and 1 failure (0 unexpected) in 2.956 (2.976) seconds
+CODE_INDEX_BENCHMARK files=10000 events=10100 elapsed_s=0.09537303447723389
+◇ Test run started.
+↳ Testing Library Version: 1902
+↳ Target Platform: x86_64-apple-macos14.0
+✔ Test run with 0 tests in 0 suites passed after 0.001 seconds.
+

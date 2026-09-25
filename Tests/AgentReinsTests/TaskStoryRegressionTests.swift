@@ -51,4 +51,28 @@ final class TaskStoryRegressionTests: XCTestCase {
         XCTAssertEqual(try database.recentTasks(limit: 1, offset: 1).first?.turnID, "b")
         XCTAssertEqual(try database.recentTasks(limit: 10, before: Date(timeIntervalSince1970: 3)).map(\.turnID), ["b"])
     }
+
+    func testHistoryKeysetPaginationHandlesEqualTimestampsWithoutOverlap() throws {
+        let directory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let database = try EvidenceDatabase(url: directory.appendingPathComponent("test.sqlite3"))
+        let observed = Date(timeIntervalSince1970: 50)
+        let rows = (1...5).map { index in
+            AgentEventEnvelope(id: "event-\(index)", projectID: "p", agentID: "workbuddy",
+                sessionID: "session-\(index)", turnID: "turn", sequence: 1,
+                occurredAt: observed, observedAt: observed, source: .agentProtocol,
+                confidence: .confirmed, payload: .turnState(.queued))
+        }
+        try database.appendAgentEvents(rows)
+
+        let firstPage = try database.recentTasks(limit: 2)
+        XCTAssertEqual(firstPage.map(\.sessionID), ["session-1", "session-2"])
+        let secondPage = try database.recentTasks(limit: 2, after: firstPage.last)
+        XCTAssertEqual(secondPage.map(\.sessionID), ["session-3", "session-4"])
+        let thirdPage = try database.recentTasks(limit: 2, after: secondPage.last)
+        XCTAssertEqual(thirdPage.map(\.sessionID), ["session-5"])
+        XCTAssertTrue(Set(firstPage.map(\.id)).isDisjoint(with: secondPage.map(\.id)))
+        XCTAssertTrue(Set(secondPage.map(\.id)).isDisjoint(with: thirdPage.map(\.id)))
+    }
 }

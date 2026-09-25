@@ -5,8 +5,9 @@ import SwiftUI
 /// console remain in the repository while this experience is built out, but
 /// are deliberately not the default navigation.
 struct TaskWorkspaceView: View {
-    enum Surface { case overview, live, history }
+    enum Surface { case overview, live, history, security }
     @EnvironmentObject private var eventStore: EventStore
+    @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     let sessions: [AgentSessionSnapshot]
     let observing: Bool
     let agents: [DiscoveredAgent]
@@ -27,6 +28,19 @@ struct TaskWorkspaceView: View {
     @State private var historyError: String?
     @State private var hasMoreHistory = true
     @State private var historyCutoff = Date()
+    @State private var historyQuestion = ""
+    @State private var submittedHistoryQuestion = ""
+    @State private var searchHits: [TaskSearchHit] = []
+    @State private var searchAggregates: TaskAggregates?
+    @State private var searchPlan: HistoryQueryUnderstanding?
+    @State private var searchAnswer: HistorySearchAnswer?
+    @State private var searchLoading = false
+    @State private var searchError: String?
+    @State private var searchGeneration = UUID()
+    @State private var showingAISettings = false
+    @State private var analysisBaseURL = ""
+    @State private var analysisModel = ""
+    @State private var analysisKey = ""
     private let refreshTimer = Timer.publish(every: 3, on: .main, in: .common).autoconnect()
 
     init(sessions: [AgentSessionSnapshot], observing: Bool, initialSurface: Surface = .overview, agents: [DiscoveredAgent] = []) {
@@ -41,12 +55,19 @@ struct TaskWorkspaceView: View {
     private let raised = TaskStoryStyle.soft
     private let line = TaskStoryStyle.border
     private let cyan = TaskStoryStyle.accent
+    private var submittedIntent: HistoryQueryIntent { HistoryQueryIntent.classify(submittedHistoryQuestion) }
+    private var isMemoryQuery: Bool {
+        if case .memoryLineage = submittedIntent { return true }
+        return false
+    }
 
     var body: some View {
         VStack(spacing: 0) {
             header
             Divider().overlay(line)
-            if let taskSnapshot { taskPage(taskSnapshot) }
+            if surface == .security { SecurityReviewWorkspace() }
+            else if surface == .history { history }
+            else if let taskSnapshot { taskPage(taskSnapshot) }
             else if loading {
                 VStack(spacing: 12) {
                     ProgressView("正在读取这项任务…")
@@ -56,14 +77,17 @@ struct TaskWorkspaceView: View {
                     }
                 }.frame(maxWidth: .infinity, maxHeight: .infinity)
             }
-            else if surface == .history { history }
             else if surface == .live { emptyLive }
             else { overview }
         }
         .frame(minWidth: 1050, minHeight: 680)
         .background(canvas)
         .foregroundStyle(TaskStoryStyle.text)
-        .onAppear { if surface == .history && historyTasks.isEmpty { reloadHistory() } }
+        .onAppear {
+            analysisBaseURL = semanticAnalyzer.baseURL
+            analysisModel = semanticAnalyzer.model
+            if surface == .history && historyTasks.isEmpty { reloadHistory() }
+        }
         .onReceive(refreshTimer) { _ in
             guard followingTask, surface == .live, taskSnapshot != nil, !loading, let selectedSessionID,
                   let lastLoadedActivity,
@@ -112,6 +136,10 @@ struct TaskWorkspaceView: View {
                     surface = .history
                     if historyTasks.isEmpty { reloadHistory() }
                 }
+                navButton("本机安全", selected: surface == .security) {
+                    loadGeneration = UUID(); loading = false; taskSnapshot = nil
+                    surface = .security
+                }
             }
             .padding(.leading, 25)
             Spacer()
@@ -147,18 +175,151 @@ struct TaskWorkspaceView: View {
     }
 
     private var history: some View {
+        ScrollViewReader { scroll in
+            historyContent.onChange(of: taskSnapshot?.task.taskID) { value in
+                if value != nil { scroll.scrollTo("history-detail", anchor: .top) }
+            }
+        }
+    }
+
+    private var historyContent: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 16) {
                 HStack {
                     VStack(alignment: .leading, spacing: 5) {
-                        Text("历史任务").font(.system(size: 23, weight: .semibold))
-                        Text("按需读取任务摘要，打开某项后加载它的执行过程。")
+                        Text("查找任务，理解过去发生了什么").font(.system(size: 23, weight: .semibold))
+                        Text("先看到答案，再核对任务与原始证据。")
                             .font(.system(size: 13)).foregroundStyle(.secondary)
                     }
                     Spacer()
+                    Button("分析模型 · \(semanticAnalyzer.configured ? analysisModel : "未配置")") { showingAISettings.toggle() }
                     Button("刷新历史") { reloadHistory() }.buttonStyle(.bordered)
                 }
+                VStack(alignment: .leading, spacing: 9) {
+                    HStack(spacing: 10) {
+                        Image(systemName: "sparkle.magnifyingglass").foregroundStyle(cyan)
+                        TextField("用自然语言提问，例如：上周 WorkBuddy 哪些任务把服务器地址发给模型？",
+                                  text: $historyQuestion)
+                            .textFieldStyle(.plain)
+                            .onSubmit { searchHistory() }
+                        Button(searchLoading ? "检索中…" : "查询分析") { searchHistory() }
+                            .disabled(searchLoading || historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                            .buttonStyle(.borderedProminent)
+                        if searchPlan != nil {
+                            Button("返回列表") { clearHistorySearch() }.buttonStyle(.bordered)
+                        }
+                    }
+                    Text("AI 解析问题；本机任务索引负责检索。回答会附任务依据，可打开核对完整过程。")
+                        .font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        ForEach(["哪个任务 Token 最多？", "10.2.3.4 哪次写入长期记忆？", "哪些任务重复调用工具？"], id: \.self) { question in
+                            Button(question) { historyQuestion = question; searchHistory() }
+                                .buttonStyle(.bordered).disabled(searchLoading)
+                        }
+                    }
+                    Button(showingAISettings ? "收起模型配置" : "配置分析模型") {
+                        showingAISettings.toggle()
+                    }.buttonStyle(.link).font(.caption)
+                    if showingAISettings {
+                        HStack {
+                            TextField("API 地址", text: $analysisBaseURL)
+                            TextField("模型名称", text: $analysisModel)
+                            SecureField("API Key（留空沿用已保存值）", text: $analysisKey)
+                            Button("测试并保存") {
+                                Task {
+                                    let saved = await semanticAnalyzer.configureAndTest(
+                                        baseURL: analysisBaseURL, key: analysisKey, model: analysisModel)
+                                    if saved { analysisKey = ""; showingAISettings = false }
+                                    else { searchError = semanticAnalyzer.lastError }
+                                }
+                            }
+                        }.textFieldStyle(.roundedBorder)
+                    }
+                }
+                .padding(14).background(panel, in: RoundedRectangle(cornerRadius: 10))
+                if let searchError { Text(searchError).font(.caption).foregroundStyle(.orange) }
+                if loading { ProgressView("正在读取所选任务的已解析数据…") }
+                if searchLoading { ProgressView("正在理解问题并查找任务…") }
+                if let searchPlan {
+                    Text("检索理解：\(searchPlan.explanation)")
+                        .font(.caption).foregroundStyle(.secondary)
+                    if let searchAnswer {
+                        VStack(alignment: .leading, spacing: 6) {
+                            Text("分析结果").font(.headline)
+                            Text(searchAnswer.answer)
+                            if !searchAnswer.limitation.isEmpty {
+                                Text(searchAnswer.limitation).font(.caption).foregroundStyle(.secondary)
+                            }
+                        }.padding(16).frame(maxWidth: .infinity, alignment: .leading)
+                            .background(panel, in: RoundedRectangle(cornerRadius: 10))
+                    }
+                    if let summary = searchAggregates, !isMemoryQuery {
+                        HistoryAggregateReview(summary: summary, question: submittedHistoryQuestion) { session, turn in
+                            selectedSessionID = session; selectedTurnID = turn
+                            reloadSelected()
+                        }
+                    }
+                    if isMemoryQuery, let _ = Self.ipAddress(in: submittedHistoryQuestion) {
+                        let memoryMatches = searchHits.filter(\.isMemoryWriteMatch).count
+                        Text(searchHits.isEmpty
+                             ? (eventStore.taskSearchIndexReady
+                                ? "已检查 \(eventStore.taskSearchIndexedCount) 项已索引任务：没有找到记忆写入正文包含该 IP 的记录。若 IP 只出现在任务、上下文或工具参数中，请检查普通提及结果。"
+                                : "历史索引正在整理；当前已索引 \(eventStore.taskSearchIndexedCount) 项任务，索引完成后才能判断是否有匹配记录。")
+                             : "找到 \(memoryMatches) 项明确的记忆写入命中、\(searchHits.count - memoryMatches) 项普通提及。先看写入命中，再打开任务核对时间、文件、工具和上下文。")
+                            .font(.caption).foregroundStyle(.secondary)
+                            .accessibilityIdentifier("memory-lineage-search-status")
+                        if !searchHits.isEmpty {
+                            Text("按 IP 原文检索本机索引；AI 不改写地址，也不预先过滤记忆证据。")
+                                .font(.caption).foregroundStyle(.secondary)
+                        }
+                    }
+                    LazyVStack(alignment: .leading, spacing: 10) {
+                        ForEach(searchHits) { hit in
+                            VStack(alignment: .leading, spacing: 8) {
+                                Button {
+                                    selectedSessionID = hit.task.sessionID
+                                    selectedTurnID = hit.task.turnID
+                                    reloadSelected()
+                                } label: {
+                                    HStack {
+                                        Text(hit.task.title ?? "任务描述未采集").font(.headline)
+                                        Spacer()
+                                        Text(formattedAgentName(hit.task.agentID))
+                                        Image(systemName: "chevron.right")
+                                    }
+                                }.buttonStyle(.plain)
+                                if hit.isMemoryWriteMatch {
+                                    Label("IP 出现在长期记忆写入内容", systemImage: "externaldrive.badge.plus")
+                                        .font(.caption.bold()).foregroundStyle(.orange)
+                                } else if Self.ipAddress(in: submittedHistoryQuestion) != nil {
+                                    Label("普通提及：尚未证明写入记忆", systemImage: "text.magnifyingglass")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                Text(hit.task.startedAt.formatted(date: .abbreviated, time: .shortened))
+                                    .font(.caption).foregroundStyle(.secondary)
+                                if !hit.excerpt.isEmpty {
+                                    DisclosureGroup("查看命中的原始片段") {
+                                        Text(hit.excerpt).font(.system(size: 11, design: .monospaced))
+                                            .textSelection(.enabled)
+                                    }.font(.caption)
+                                }
+                            }.padding(16).background(panel, in: RoundedRectangle(cornerRadius: 10))
+                        }
+                    }
+                    if searchHits.isEmpty && !searchLoading {
+                        Text("当前索引中没有找到有证据支持的任务；历史索引可能仍在后台整理。")
+                            .foregroundStyle(.secondary)
+                    }
+                } else {
                 if historyLoading { ProgressView("正在检索历史任务…") }
+                if !eventStore.historySummariesReady {
+                    Label("正在后台分批整理历史任务，当前列表可能尚未包含全部旧任务。实时任务开始时会暂停。",
+                          systemImage: "clock.arrow.circlepath")
+                        .font(.caption).foregroundStyle(.secondary)
+                }
+                if let summaryError = eventStore.historySummaryError {
+                    Text("历史整理暂时失败：\(summaryError)").font(.caption).foregroundStyle(.orange)
+                }
                 if let historyError { Text(historyError).foregroundStyle(.orange) }
                 if let loadError {
                     Text(loadError).foregroundStyle(.orange)
@@ -205,6 +366,13 @@ struct TaskWorkspaceView: View {
                     }
                 }
                 .storyPanel()
+                }
+                if let taskSnapshot {
+                    taskPage(taskSnapshot)
+                        .frame(height: 680)
+                        .background(panel, in: RoundedRectangle(cornerRadius: 10))
+                        .id("history-detail")
+                }
             }
             .padding(24)
         }
@@ -271,7 +439,7 @@ struct TaskWorkspaceView: View {
                     taskSnapshot = nil; selectedSessionID = nil; selectedTurnID = nil
                     if surface == .live { surface = .overview }
                 } label: {
-                    Label(surface == .history ? "返回历史任务" : "返回任务总览", systemImage: "chevron.left")
+                    Label(surface == .history ? "收起任务详情" : "返回任务总览", systemImage: "chevron.left")
                 }.buttonStyle(.plain).foregroundStyle(cyan)
                 Spacer()
                 if loading { ProgressView().controlSize(.small) }
@@ -281,6 +449,9 @@ struct TaskWorkspaceView: View {
             Text("\(formattedAgentName(snapshot.task.agentID)) · \(surface == .history ? "历史任务" : "当前任务") · \(snapshot.task.startedAt?.formatted(date: .abbreviated, time: .shortened) ?? "开始时间未采集")")
                 .font(.caption.monospaced()).foregroundStyle(.secondary)
             if let loadError { Text(loadError).font(.caption).foregroundStyle(.orange) }
+            if isMemoryQuery {
+                MemoryWriteLineageView(snapshot: snapshot, address: Self.ipAddress(in: submittedHistoryQuestion))
+            }
             AgentTaskJourneyView(snapshot: snapshot, following: $followingTask)
                 .frame(maxWidth: .infinity, maxHeight: .infinity)
                 .id(snapshot.task.taskID)
@@ -378,7 +549,8 @@ struct TaskWorkspaceView: View {
         guard !historyLoading else { return }
         historyLoading = true
         if reset { historyCutoff = Date() }
-        eventStore.loadRecentTasks(limit: 20, before: historyCutoff, offset: reset ? 0 : historyTasks.count) { result in
+        eventStore.loadRecentTasks(limit: 20, before: historyCutoff,
+                                   after: reset ? nil : historyTasks.last) { result in
             historyLoading = false
             switch result {
             case .success(let tasks):
@@ -389,6 +561,89 @@ struct TaskWorkspaceView: View {
                 historyError = error.localizedDescription
             }
         }
+    }
+
+    private func clearHistorySearch() {
+        taskSnapshot = nil; loadGeneration = UUID(); loading = false
+        searchGeneration = UUID()
+        searchPlan = nil; searchAnswer = nil; searchHits = []
+        searchAggregates = nil
+        searchError = nil; searchLoading = false
+    }
+
+    private func searchHistory() {
+        let question = historyQuestion.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !question.isEmpty else { return }
+        submittedHistoryQuestion = question
+        taskSnapshot = nil; loadGeneration = UUID(); loading = false
+        let generation = UUID()
+        searchGeneration = generation
+        searchLoading = true
+        searchError = nil
+        searchAnswer = nil
+        searchHits = []
+        searchAggregates = nil
+        Task {
+            if case .memoryLineage = HistoryQueryIntent.classify(question) {
+                let address = Self.ipAddress(in: question)
+                let plan: HistoryQueryUnderstanding
+                if let address {
+                    plan = HistoryQueryUnderstanding(agent: nil, startDate: nil, endDate: nil,
+                        searchTerms: [address], evidenceKind: nil, requiresAddressInModelInput: false,
+                        explanation: "按 IP 原文检索规范化记忆写入，再列出普通提及并回链上下文。")
+                } else {
+                    guard let understood = await semanticAnalyzer.understandHistoryQuery(question) else {
+                        guard searchGeneration == generation else { return }
+                        searchLoading = false
+                        searchError = semanticAnalyzer.lastError ?? "请先配置并测试 AI 分析模型。"
+                        return
+                    }
+                    plan = understood
+                }
+                guard searchGeneration == generation else { return }
+                searchPlan = plan
+                eventStore.searchHistoricalMemory(plan, address: address) { result in
+                    guard searchGeneration == generation else { return }
+                    searchLoading = false
+                    switch result {
+                    case .success(let result): searchHits = result.hits; searchAggregates = result.aggregates
+                    case .failure(let error): searchError = error.localizedDescription
+                    }
+                }
+                return
+            }
+            guard let plan = await semanticAnalyzer.understandHistoryQuery(question) else {
+                guard searchGeneration == generation else { return }
+                searchLoading = false
+                searchError = semanticAnalyzer.lastError ?? "请先配置并测试 AI 分析模型。"
+                return
+            }
+            guard searchGeneration == generation else { return }
+            searchPlan = plan
+            eventStore.searchHistoricalTasks(plan) { result in
+                guard searchGeneration == generation else { return }
+                searchLoading = false
+                switch result {
+                case .success(let result):
+                    searchHits = result.hits
+                    searchAggregates = result.aggregates
+                    if !question.contains("记忆") { Task {
+                        let answer = await semanticAnalyzer.answerHistoryQuery(question, hits: result.hits, aggregates: result.aggregates)
+                        if searchGeneration == generation { searchAnswer = answer }
+                    } }
+                case .failure(let error): searchError = error.localizedDescription
+                }
+            }
+        }
+    }
+
+    private static func ipAddress(in text: String) -> String? {
+        let pattern = #"(?<![0-9.])(?:\d{1,3}\.){3}\d{1,3}(?![0-9.])"#
+        guard let regex = try? NSRegularExpression(pattern: pattern),
+              let match = regex.firstMatch(in: text, range: NSRange(text.startIndex..., in: text)),
+              let range = Range(match.range, in: text) else { return nil }
+        let address = String(text[range])
+        return IPGeolocationStore.isIPAddress(address) ? address : nil
     }
 }
 

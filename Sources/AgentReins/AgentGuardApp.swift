@@ -92,6 +92,7 @@ struct AgentReinsApp: App {
                     agentDiscovery.observe(processes: inventory)
                 }
                 .task {
+                    semanticAnalyzer.startBackgroundWorker(evidenceURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("AgentGuard/evidence.sqlite3"), policies: alertPolicyStore)
                     fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvents = { events in

@@ -160,10 +160,14 @@ class Store:
     def ingest_v2(self, packet, device_id, device):
         if packet.get('deviceID') != device_id: raise ValueError('invalid_device')
         operation = packet.get('op')
-        if operation == 'probe': return {'missing': self.blocks.missing(device_id, packet.get('hashes'))}
+        if operation == 'probe':
+            missing = self.blocks.missing(device_id, packet.get('hashes'))
+            return {'missing': missing, 'serverStatus': 'accepting',
+                    'missingCount': len(missing), 'retryAfterMs': 0}
         if operation == 'block':
             self.blocks.put(device_id, packet.get('hash'), packet.get('data'))
-            return {'stored': packet['hash']}
+            return {'stored': packet['hash'], 'serverStatus': 'block_persisted',
+                    'retryAfterMs': 0}
         if operation != 'commit': raise ValueError('invalid_operation')
         root = packet['root']
         if not self.assembly_slot.acquire(blocking=False): raise OSError('assembly_busy')
@@ -202,7 +206,8 @@ class Store:
             if prior:
                 if prior['digest'] != digest:
                     raise ValueError('sequence_content_conflict')
-                return dict(receiptID=receipt, receivedAt=prior['received'], sequence=sequence, persisted=True)
+                return dict(receiptID=receipt, receivedAt=prior['received'], sequence=sequence,
+                            persisted=True, serverStatus='committed', retryAfterMs=0)
             summary = summarize(snapshot, device, receipt, now, identity)
             if not root:
                 db.execute('INSERT OR IGNORE INTO snapshot_bodies VALUES(?,?)', (body_digest, body))
@@ -214,7 +219,8 @@ class Store:
             db.execute('''INSERT INTO cases(device,task,sequence,latest,summary,revision) VALUES(?,?,?,?,?,?)
               ON CONFLICT(device,task) DO UPDATE SET sequence=excluded.sequence,latest=excluded.latest,summary=excluded.summary,revision=excluded.revision
               WHERE excluded.sequence>cases.sequence''', (device_id, task['taskID'], sequence, receipt, json.dumps(summary, ensure_ascii=False), revision))
-        return dict(receiptID=receipt, receivedAt=now, sequence=sequence, persisted=True)
+        return dict(receiptID=receipt, receivedAt=now, sequence=sequence, persisted=True,
+                    serverStatus='committed', retryAfterMs=0)
 
 
 def handler(config, store, public):
@@ -222,11 +228,13 @@ def handler(config, store, public):
         def log_message(self, *_):
             pass  # No credentials, query strings or evidence in web logs.
 
-        def send_json(self, code, value):
+        def send_json(self, code, value, headers=None):
             data = json.dumps(value, ensure_ascii=False).encode()
             self.send_response(code)
             self.send_header('Content-Type', 'application/json; charset=utf-8')
             self.send_header('Cache-Control', 'no-store')
+            for name, content in (headers or {}).items():
+                self.send_header(name, str(content))
             self.send_header('Content-Length', str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -332,7 +340,8 @@ def handler(config, store, public):
             except (ValueError, KeyError, TypeError, AttributeError, OverflowError):
                 self.send_json(400, {'error': 'invalid_or_out_of_scope_task'})
             except (OSError, sqlite3.Error):
-                self.send_json(503, {'error': 'persistence_unavailable'})
+                self.send_json(503, {'error': 'persistence_unavailable',
+                    'serverStatus': 'backpressure', 'retryAfterMs': 5000}, {'Retry-After': '5'})
     return Handler
 
 

@@ -7,6 +7,12 @@ private final class AuditNoRedirect: NSObject, URLSessionTaskDelegate, @unchecke
     }
 }
 
+private struct AuditHTTPFailure: LocalizedError {
+    let status: Int
+    let retryAfter: TimeInterval?
+    var errorDescription: String? { "审计服务返回 HTTP \(status)" }
+}
+
 /// Main actor only schedules work. Queue IO, encoding and network live on the worker.
 @MainActor
 final class AuditUploadClient {
@@ -17,48 +23,67 @@ final class AuditUploadClient {
         let enabledAt: Date
         let uploadEnabled: Bool
     }
-    private weak var store: EventStore?
+    private let database: EvidenceDatabase
     private let worker: AuditUploadWorker
+    private let enabledAt: Date
     private var timer: Timer?
     private var busy = false
-    init?(store: EventStore) {
+    init?(database: EvidenceDatabase) {
         let directory = EventStore.defaultURL().deletingLastPathComponent().appendingPathComponent("CloudAudit", isDirectory: true)
         let decoder = JSONDecoder(); decoder.dateDecodingStrategy = .iso8601
         guard let data = try? Data(contentsOf: directory.appendingPathComponent("device.json")),
               let config = try? decoder.decode(Configuration.self, from: data), config.uploadEnabled,
               config.endpoint.scheme == "https", !config.token.isEmpty else { return nil }
-        self.store = store
+        self.database = database
+        enabledAt = config.enabledAt
         worker = AuditUploadWorker(config: config, directory: directory)
         timer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             Task { @MainActor in await self?.tick() }
         }
     }
-    func observe(_ evidence: [GuardEvent], progress: [String: TaskLiveProgress]) {
-        let keys = Set(evidence.compactMap { event -> String? in
-            guard let s = event.sessionId, let t = event.turnId else { return nil }
-            return "\(s)\u{0}\(t)"
-        })
-        let items = keys.compactMap { progress[$0] }
-        Task { await worker.observe(items) }
-    }
     private func tick() async {
-        guard !busy, let store else { return }
+        guard !busy else { return }
         busy = true; defer { busy = false }
-        guard let job = await worker.next() else { return }
-        if job.prepared == nil {
-            let result = await withCheckedContinuation { continuation in
-                store.loadTask(sessionID: job.sessionID, turnID: job.turnID) { continuation.resume(returning: $0) }
+        let database = self.database
+        do {
+            let claimed = try await Task.detached(priority: .background) {
+                try database.claimAuditUploadJob()
+            }.value
+            guard let job = claimed else { return }
+            let snapshot = job.snapshot
+            guard AuditUploadScope(enabledAt: enabledAt).permits(
+                taskStartedAt: snapshot.task.startedAt,
+                observedUserRequest: !snapshot.conversation.userInputs.isEmpty),
+                snapshot.sourceEvents.contains(where: { $0.kind == "model" && $0.op == "prompt" }) else {
+                try await Task.detached(priority: .background) {
+                    try database.completeAuditUploadJob(job, receiptID: "scope-skipped")
+                }.value
+                return
             }
-            switch result {
-            case .success(let snapshot): await worker.prepare(job, snapshot: snapshot)
-            case .failure: await worker.fail(job.key, message: "任务证据尚未可读")
+            do {
+                let receipt = try await worker.upload(snapshot, generation: Int(job.revision))
+                try await Task.detached(priority: .background) {
+                    try database.completeAuditUploadJob(job, receiptID: receipt)
+                }.value
+            } catch {
+                try await Task.detached(priority: .background) {
+                    try database.retryAuditUploadJob(job, message: error.localizedDescription,
+                        retryAfter: (error as? AuditHTTPFailure)?.retryAfter)
+                }.value
             }
+        } catch {
+            // The next timer tick retries durable state; no in-memory work is lost.
         }
-        await worker.sendSlice(job.key)
     }
 }
 
 actor AuditUploadWorker {
+    struct QoSPolicy: Sendable {
+        /// Conservative default for an endpoint agent. Collection and local
+        /// persistence must remain responsive even on a constrained uplink.
+        let bytesPerSecond: Double = 1_048_576
+        let maximumConnections = 1
+    }
     struct Pending: Codable {
         let sessionID: String
         let turnID: String
@@ -83,6 +108,8 @@ actor AuditUploadWorker {
     private let config: AuditUploadClient.Configuration
     private let directory: URL
     private let session: URLSession
+    private let qos = QoSPolicy()
+    private var nextUploadSlot = Date.distantPast
     private var state = State()
     private var loaded = false
     private let encoder: JSONEncoder
@@ -90,7 +117,9 @@ actor AuditUploadWorker {
         self.config = config; self.directory = directory
         let settings = URLSessionConfiguration.ephemeral
         settings.timeoutIntervalForRequest = 30; settings.timeoutIntervalForResource = 60
-        settings.httpMaximumConnectionsPerHost = 1
+        settings.httpMaximumConnectionsPerHost = qos.maximumConnections
+        settings.networkServiceType = .background
+        settings.waitsForConnectivity = true
         self.session = session ?? URLSession(configuration: settings, delegate: AuditNoRedirect(), delegateQueue: nil)
         encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
     }
@@ -173,10 +202,63 @@ actor AuditUploadWorker {
         let data = try JSONSerialization.data(withJSONObject: packet)
         let (body, response) = try await session.upload(for: request, from: data)
         guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
-            throw NSError(domain: "AuditHTTP", code: (response as? HTTPURLResponse)?.statusCode ?? 0)
+            let http = response as? HTTPURLResponse
+            let delay = http?.value(forHTTPHeaderField: "Retry-After").flatMap(TimeInterval.init)
+            throw AuditHTTPFailure(status: http?.statusCode ?? 0, retryAfter: delay)
         }
         guard let result = try JSONSerialization.jsonObject(with: body) as? [String: Any] else { throw CocoaError(.fileReadCorruptFile) }
         return result
+    }
+
+    private func pace(payloadBytes: Int) async throws {
+        let now = Date()
+        if nextUploadSlot > now {
+            try await Task.sleep(for: .seconds(nextUploadSlot.timeIntervalSince(now)))
+        }
+        let base = max(Date(), nextUploadSlot)
+        nextUploadSlot = base.addingTimeInterval(Double(payloadBytes) / qos.bytesPerSecond)
+    }
+
+    /// Upload one durable outbox revision. SQLite owns scheduling/retry state;
+    /// this actor only implements the content-addressed wire protocol.
+    func upload(_ snapshot: AgentTaskSnapshot, generation: Int) async throws -> String {
+        try load()
+        // The task revision is the wire sequence. Retries after an unknown
+        // network result must reuse it so the server returns the same receipt
+        // instead of storing a second logical revision.
+        let stableSequence = max(1, generation)
+        let prepared = try AuditBlockProtocol.prepare(snapshot, directory: blocks,
+                                                       sequence: stableSequence,
+                                                       generation: generation)
+        for offset in stride(from: 0, to: prepared.hashes.count, by: 512) {
+            let hashes = Array(prepared.hashes[offset..<min(offset + 512, prepared.hashes.count)])
+            let probe = try await request(["op": "probe", "hashes": hashes])
+            guard let missing = probe["missing"] as? [String],
+                  Set(missing).isSubset(of: Set(hashes)),
+                  probe["serverStatus"] as? String == "accepting" else { throw CocoaError(.fileReadCorruptFile) }
+            for digest in missing {
+                let data = try Data(contentsOf: blocks.appendingPathComponent(digest))
+                guard AuditBlockProtocol.hash(data) == digest else { throw CocoaError(.fileReadCorruptFile) }
+                try await pace(payloadBytes: data.count)
+                let ack = try await request(["op": "block", "hash": digest,
+                                             "data": data.base64EncodedString()])
+                guard ack["stored"] as? String == digest,
+                      ack["serverStatus"] as? String == "block_persisted" else { throw CocoaError(.fileReadCorruptFile) }
+            }
+        }
+        let identity = try JSONSerialization.jsonObject(with: encoder.encode(prepared.identity))
+        let ack = try await request(["op": "commit", "root": prepared.root,
+                                     "sequence": prepared.sequence, "identity": identity])
+        guard ack["persisted"] as? Bool == true,
+              ack["serverStatus"] as? String == "committed",
+              let receipt = ack["receiptID"] as? String,
+              ack["sequence"] as? Int == prepared.sequence else { throw CocoaError(.fileReadCorruptFile) }
+        state.lastReceiptID = receipt
+        state.lastReceivedAt = ack["receivedAt"] as? String
+        state.lastError = nil
+        state.uploadedTasks += 1
+        try persist()
+        return receipt
     }
     func sendSlice(_ key: String) async {
         guard let prepared = state.pending[key]?.prepared, state.pending[key]?.rejected == nil else { return }
@@ -215,11 +297,11 @@ actor AuditUploadWorker {
                 try persist()
             }
         } catch {
-            let error = error as NSError
-            if error.domain == "AuditHTTP", [400, 413, 422].contains(error.code) {
-                state.pending[key]?.rejected = "服务端拒绝 HTTP \(error.code)，保留待处理证据"
+            let http = error as? AuditHTTPFailure
+            if let status = http?.status, [400, 413, 422].contains(status) {
+                state.pending[key]?.rejected = "服务端拒绝 HTTP \(status)，保留待处理证据"
             }
-            if error.domain == "AuditHTTP", error.code == 409 {
+            if http?.status == 409 {
                 state.pending[key]?.probeOffset = 0; state.pending[key]?.missing = []
             }
             fail(key, message: "分块上传失败：\(error.localizedDescription)")

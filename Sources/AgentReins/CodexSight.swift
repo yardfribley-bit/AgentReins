@@ -51,7 +51,11 @@ final class CodexSight: ObservableObject {
             var rawWriteFailed = false
             do {
                 guard let database else { throw CocoaError(.fileWriteUnknown) }
-                try database.persistCollected(raw: batch.raw, events: batch.events)
+                let checkpoints = batch.sizes.map { stream, offset in
+                    SourceCheckpoint(source: "codex", stream: stream, offset: Int64(offset),
+                                     fingerprint: nil, updatedAt: Date())
+                }
+                try database.persistCollected(raw: batch.raw, events: batch.events, checkpoints: checkpoints)
             } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -71,10 +75,6 @@ final class CodexSight: ObservableObject {
                     self.onEvents?(fresh)
                     self.lastUpdate = Date()
                 }
-                let checkpoints = batch.sizes.map { stream, offset in
-                    SourceCheckpoint(source: "codex", stream: stream, offset: Int64(offset),
-                                     fingerprint: nil, updatedAt: Date())
-                }
                 let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures + self.malformedRows > 0 ? .degraded : .healthy
                 let health = CollectorHealthRecord(
                     source: "codex", state: state, lastSuccess: self.connected ? Date() : nil,
@@ -87,10 +87,6 @@ final class CodexSight: ObservableObject {
                         return
                     }
                     var persistenceFailed = false
-                    for checkpoint in checkpoints {
-                        do { try database.saveCheckpoint(checkpoint) }
-                        catch { persistenceFailed = true }
-                    }
                     do { try database.updateHealth(health) }
                     catch { persistenceFailed = true }
                     if persistenceFailed {

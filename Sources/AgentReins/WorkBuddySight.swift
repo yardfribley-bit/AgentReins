@@ -66,12 +66,15 @@ final class WorkBuddySight: ObservableObject {
             var rawWriteFailed = false
             do {
                 guard let database else { throw CocoaError(.fileWriteUnknown) }
-                try database.persistCollected(raw: batch.raw, events: batch.events)
-                for (path, state) in batch.states {
-                    try database.saveParserState(source: "workbuddy", stream: path, state: JSONEncoder().encode(state))
-                    try database.saveCheckpoint(SourceCheckpoint(source: "workbuddy", stream: path,
-                        offset: Int64(state.offset), fingerprint: nil, updatedAt: Date()))
+                let states = try batch.states.map { path, state in
+                    (source: "workbuddy", stream: path, state: try JSONEncoder().encode(state))
                 }
+                let checkpoints = batch.states.map { path, state in
+                    SourceCheckpoint(source: "workbuddy", stream: path,
+                        offset: Int64(state.offset), fingerprint: nil, updatedAt: Date())
+                }
+                try database.persistCollected(raw: batch.raw, events: batch.events,
+                    checkpoints: checkpoints, parserStates: states)
             } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
