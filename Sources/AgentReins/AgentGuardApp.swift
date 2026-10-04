@@ -105,6 +105,7 @@ struct AgentReinsApp: App {
                         eventStore.record(events.map { attributionResolver.resolve($0) })
                     }
                     liveMemoryMonitor.start()
+                    workBuddySight.onHookSignals = { processGuard.observeHookSignals($0) }
                     workBuddySight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)

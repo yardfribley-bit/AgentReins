@@ -75,11 +75,15 @@ final class EventAttributionResolver: ObservableObject {
             return event
         }
         return event.attributed(sessionId: match.sessionId, turnId: match.turnId,
-                                toolCallId: event.toolCallId, confidence: .confirmed,
+                                toolCallId: event.toolCallId, confidence: .inferred,
                                 method: "unique WorkBuddy user text + bounded \(Int(window))s time window")
     }
 
     func resolve(_ event: GuardEvent) -> GuardEvent {
+        // Observation arms identify processes, not tasks. Keep their raw samples
+        // independent of whichever tool happens to be active in a time window.
+        if event.ruleId == "process_observation" || event.ruleId == "workbuddy_hook_native" { return event }
+
         if let sessionId = event.sessionId, let turnId = event.turnId {
             guard event.kind == "network", event.toolName == nil else { return event }
             let matching = contexts.filter {

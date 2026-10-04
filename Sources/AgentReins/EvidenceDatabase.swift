@@ -63,6 +63,24 @@ struct CollectorHealthRecord: Equatable, Sendable {
 /// Durable local evidence spine. WAL keeps ingestion transactional without
 /// blocking readers, and stable evidence keys make replay idempotent.
 final class EvidenceDatabase: @unchecked Sendable {
+    private static let registryLock = NSLock()
+    private final class WeakDatabase {
+        weak var value: EvidenceDatabase?
+        init(_ value: EvidenceDatabase) { self.value = value }
+    }
+    private static var registry: [String: WeakDatabase] = [:]
+
+    /// One writable connection per database in this process. Independent read
+    /// connections still serve task views without joining the writer backlog.
+    static func shared(url: URL = defaultURL()) throws -> EvidenceDatabase {
+        let canonical = url.standardizedFileURL.resolvingSymlinksInPath()
+        registryLock.lock(); defer { registryLock.unlock() }
+        if let existing = registry[canonical.path]?.value { return existing }
+        let database = try openRecovering(url: canonical)
+        registry[canonical.path] = WeakDatabase(database)
+        return database
+    }
+
     private var handle: OpaquePointer?
     private var readConnection: EvidenceReadConnection?
     private let lock = NSRecursiveLock()
@@ -559,43 +577,53 @@ final class EvidenceDatabase: @unchecked Sendable {
     /// A single worker owns sequence allocation; expired leases are fenced at commit.
     func claimParseJob(now: Date = Date(), leaseSeconds: TimeInterval = 60) throws -> EvidenceParseJob? {
         lock.lock(); defer { lock.unlock() }
-        try executeUnlocked("BEGIN IMMEDIATE")
         do {
             var row: OpaquePointer?
             let sql = """
-                SELECT j.evidence_key,e.payload FROM evidence_parse_jobs j
+                WITH heads AS MATERIALIZED (
+                  SELECT ordering.partition_key,MIN(ordering.position) AS position
+                  FROM evidence_parse_jobs unfinished
+                  JOIN evidence_parse_order ordering ON ordering.evidence_key=unfinished.evidence_key
+                  WHERE unfinished.state!='done'
+                  GROUP BY ordering.partition_key
+                )
+                SELECT j.evidence_key,e.payload FROM heads
+                CROSS JOIN evidence_parse_order ordering ON ordering.position=heads.position
+                CROSS JOIN evidence_parse_jobs j ON j.evidence_key=ordering.evidence_key
                 JOIN evidence_records e ON e.evidence_key=j.evidence_key
-                JOIN evidence_parse_order ordering ON ordering.evidence_key=j.evidence_key
                 WHERE ((j.state='pending' AND j.not_before<=?)
                    OR (j.state='running' AND j.lease_until<=?))
-                AND NOT EXISTS(
-                  SELECT 1 FROM evidence_parse_order predecessor
-                  JOIN evidence_parse_jobs older ON older.evidence_key=predecessor.evidence_key
-                  WHERE predecessor.partition_key=ordering.partition_key
-                    AND predecessor.position<ordering.position
-                    AND older.state!='done'
-                )
                 ORDER BY ordering.position LIMIT 1
                 """
             guard sqlite3_prepare_v2(handle, sql, -1, &row, nil) == SQLITE_OK else { throw failure("prepare parse claim") }
-            defer { sqlite3_finalize(row) }
+            defer { if row != nil { sqlite3_finalize(row) } }
             sqlite3_bind_double(row, 1, now.timeIntervalSince1970)
             sqlite3_bind_double(row, 2, now.timeIntervalSince1970)
             let step = sqlite3_step(row)
-            if step == SQLITE_DONE { try executeUnlocked("COMMIT"); return nil }
+            if step == SQLITE_DONE { return nil }
             guard step == SQLITE_ROW, let key = text(row, 0),
                   let bytes = sqlite3_column_blob(row, 1) else { throw failure("read parse work") }
             let data = Data(bytes: bytes, count: Int(sqlite3_column_bytes(row, 1)))
+            // Selection and JSON decoding must not hold SQLite's writer lease.
+            sqlite3_finalize(row); row = nil
+            let decoded = Result { try decoder.decode(GuardEvent.self, from: data) }
+            try executeUnlocked("BEGIN IMMEDIATE")
             let token = UUID().uuidString
             var claim: OpaquePointer?
-            guard sqlite3_prepare_v2(handle, "UPDATE evidence_parse_jobs SET state='running',token=?,lease_until=?,attempts=attempts+1 WHERE evidence_key=?", -1, &claim, nil) == SQLITE_OK else { throw failure("prepare lease") }
+            guard sqlite3_prepare_v2(handle, "UPDATE evidence_parse_jobs SET state='running',token=?,lease_until=?,attempts=attempts+1 WHERE evidence_key=? AND ((state='pending' AND not_before<=?) OR (state='running' AND lease_until<=?))", -1, &claim, nil) == SQLITE_OK else { throw failure("prepare lease") }
             defer { sqlite3_finalize(claim) }
             bind(token, at: 1, to: claim)
             sqlite3_bind_double(claim, 2, now.addingTimeInterval(leaseSeconds).timeIntervalSince1970)
             bind(key, at: 3, to: claim)
+            sqlite3_bind_double(claim, 4, now.timeIntervalSince1970)
+            sqlite3_bind_double(claim, 5, now.timeIntervalSince1970)
             guard sqlite3_step(claim) == SQLITE_DONE else { throw failure("claim parse work") }
+            // Another process may have leased this record after our selection.
+            guard sqlite3_changes(handle) == 1 else {
+                try executeUnlocked("COMMIT")
+                return nil
+            }
             // Invalid persisted JSON is isolated without blocking other records.
-            let decoded = Result { try decoder.decode(GuardEvent.self, from: data) }
             switch decoded {
             case .success(let event):
                 try executeUnlocked("COMMIT")
@@ -2148,6 +2176,33 @@ final class EvidenceDatabase: @unchecked Sendable {
             if let stream = text(statement, 0) { result[stream] = UInt64(max(0, sqlite3_column_int64(statement, 1))) }
         }
         return result
+    }
+
+    // UI callbacks enqueue a coalesced health snapshot; they never wait for
+    // SQLite's writer lock. Evidence admission remains on the durable pipeline.
+    private let healthWriteQueue = DispatchQueue(label: "com.agentspec.evidence.health", qos: .utility)
+    private let pendingHealthLock = NSLock()
+    private var pendingHealth: [String: CollectorHealthRecord] = [:]
+    private var healthWriteScheduled = false
+
+    func enqueueHealth(_ record: CollectorHealthRecord) {
+        pendingHealthLock.lock()
+        pendingHealth[record.source] = record
+        let schedule = !healthWriteScheduled
+        healthWriteScheduled = true
+        pendingHealthLock.unlock()
+        guard schedule else { return }
+        healthWriteQueue.async { [self] in
+            while true {
+                pendingHealthLock.lock()
+                let batch = Array(pendingHealth.values)
+                pendingHealth.removeAll()
+                if batch.isEmpty { healthWriteScheduled = false }
+                pendingHealthLock.unlock()
+                guard !batch.isEmpty else { return }
+                for record in batch { try? updateHealth(record) }
+            }
+        }
     }
 
     func updateHealth(_ record: CollectorHealthRecord) throws {

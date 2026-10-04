@@ -5,13 +5,14 @@ import SwiftUI
 /// console remain in the repository while this experience is built out, but
 /// are deliberately not the default navigation.
 struct TaskWorkspaceView: View {
-    enum Surface { case overview, live, history, security }
+    enum Surface { case overview, live, history, security, collection }
     @EnvironmentObject private var eventStore: EventStore
     @EnvironmentObject private var semanticAnalyzer: SemanticAnalyzer
     let sessions: [AgentSessionSnapshot]
     let observing: Bool
     let agents: [DiscoveredAgent]
 
+    @State private var showExecutionChain = true
     @State private var selectedSessionID: String?
     @State private var selectedTurnID: String?
     @State private var taskSnapshot: AgentTaskSnapshot?
@@ -65,7 +66,8 @@ struct TaskWorkspaceView: View {
         VStack(spacing: 0) {
             header
             Divider().overlay(line)
-            if surface == .security { SecurityReviewWorkspace() }
+            if surface == .collection { CollectionLiveView() }
+            else if surface == .security { SecurityReviewWorkspace() }
             else if surface == .history { history }
             else if let taskSnapshot { taskPage(taskSnapshot) }
             else if loading {
@@ -135,6 +137,10 @@ struct TaskWorkspaceView: View {
                     loadGeneration = UUID(); loading = false; selectedSessionID = nil; selectedTurnID = nil
                     surface = .history
                     if historyTasks.isEmpty { reloadHistory() }
+                }
+                navButton("采集现场", selected: surface == .collection) {
+                    loadGeneration = UUID(); loading = false; taskSnapshot = nil
+                    surface = .collection
                 }
                 navButton("本机安全", selected: surface == .security) {
                     loadGeneration = UUID(); loading = false; taskSnapshot = nil
@@ -452,9 +458,16 @@ struct TaskWorkspaceView: View {
             if isMemoryQuery {
                 MemoryWriteLineageView(snapshot: snapshot, address: Self.ipAddress(in: submittedHistoryQuestion))
             }
-            AgentTaskJourneyView(snapshot: snapshot, following: $followingTask)
-                .frame(maxWidth: .infinity, maxHeight: .infinity)
-                .id(snapshot.task.taskID)
+            HStack {
+                Button("执行链路") { showExecutionChain = true }.disabled(showExecutionChain)
+                Button("原任务视图") { showExecutionChain = false }.disabled(!showExecutionChain)
+            }
+            Group {
+                if showExecutionChain { ExecutionChainView(snapshot: snapshot) }
+                else { AgentTaskJourneyView(snapshot: snapshot, following: $followingTask) }
+            }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .id(snapshot.task.taskID)
             HStack {
                 Spacer()
                 Button("刷新") { reloadSelected() }.disabled(loading)

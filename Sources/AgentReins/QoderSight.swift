@@ -14,7 +14,7 @@ final class QoderSight: ObservableObject {
     private var fileSizes: [String: UInt64] = [:]
     private var seen = Set<UUID>()
     private let queue = DispatchQueue(label: "com.agentspec.qodersight", qos: .utility)
-    private let database = try? EvidenceDatabase()
+    private let database = try? EvidenceDatabase.shared()
     private var accepted = 0
     private var malformed = 0
 
@@ -36,22 +36,33 @@ final class QoderSight: ObservableObject {
         queue.async { [weak self] in
             let batch = Self.readRecent(root: root, previousSizes: previous)
             var rawWriteFailed = false
-            do { try database?.appendRaw(batch.raw) } catch { rawWriteFailed = true }
+            do {
+                guard let database else { throw EventStoreReadError.databaseUnavailable }
+                let checkpoints = batch.sizes.map { stream, offset in
+                    SourceCheckpoint(source: "qoder", stream: stream, offset: Int64(offset),
+                                     fingerprint: nil, updatedAt: Date())
+                }
+                try database.persistCollected(raw: batch.raw, events: batch.events, checkpoints: checkpoints)
+            } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 let isConnected = FileManager.default.fileExists(atPath: root)
                 if self.connected != isConnected { self.connected = isConnected }
-                if rawWriteFailed { self.malformed += 1 }
+                if rawWriteFailed {
+                    self.malformed += 1
+                    self.database?.enqueueHealth(CollectorHealthRecord(source: "qoder", state: .degraded,
+                        lastSuccess: self.lastUpdate, lagSeconds: nil, accepted: self.accepted,
+                        malformed: self.malformed, dropped: 0, detail: "Persistence failed; checkpoint retained for replay"))
+                    return
+                }
                 self.malformed += batch.malformed
                 let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
                 for (stream, offset) in batch.sizes {
                     self.fileSizes[stream] = offset
-                    try? self.database?.saveCheckpoint(SourceCheckpoint(source: "qoder", stream: stream,
-                        offset: Int64(offset), fingerprint: nil, updatedAt: Date()))
                 }
-                try? self.database?.updateHealth(CollectorHealthRecord(source: "qoder",
+                self.database?.enqueueHealth(CollectorHealthRecord(source: "qoder",
                     state: !self.connected ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: self.connected ? Date() : nil, lagSeconds: nil, accepted: self.accepted,
                     malformed: self.malformed, dropped: 0,

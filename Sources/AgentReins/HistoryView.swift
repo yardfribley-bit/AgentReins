@@ -374,7 +374,7 @@ final class HistoryViewModel: ObservableObject {
     }
 
     init() {
-        database = try? EvidenceDatabase()
+        database = try? EvidenceDatabase.shared()
         reloadSources()
     }
 

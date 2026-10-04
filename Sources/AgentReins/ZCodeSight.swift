@@ -18,7 +18,7 @@ final class ZCodeSight: ObservableObject {
     private var logOffsets: [String: UInt64] = [:]
     private var seen = Set<UUID>()
     private let queue = DispatchQueue(label: "com.agentspec.zcodesight", qos: .utility)
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase = try? EvidenceDatabase.shared()
     private var accepted = 0
     private var malformed = 0
     private var isPolling = false
@@ -89,7 +89,7 @@ final class ZCodeSight: ObservableObject {
                 for (stream, offset) in modelIO.offsets {
                     self.logOffsets[stream] = offset
                 }
-                try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                     source: "zcode", state: !available ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: available ? Date() : nil, lagSeconds: nil,
                     accepted: self.accepted, malformed: self.malformed, dropped: 0,

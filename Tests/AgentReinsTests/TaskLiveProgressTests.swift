@@ -14,7 +14,7 @@ final class TaskLiveProgressTests: XCTestCase {
         progress.ingest(GuardEvent(kind: "model", ruleId: "test", path: "-", command: nil,
             agent: "codex", op: "prompt", severity: "info", ts: start.addingTimeInterval(-2), action: "sent",
             sessionId: "s", turnId: "t", userIntent: "."))
-        XCTAssertFalse(progress.isCurrentTask(since: start.addingTimeInterval(-1)))
+        XCTAssertTrue(progress.isCurrentTask(since: start.addingTimeInterval(-1)))
         XCTAssertTrue(progress.isCurrentTask(since: start.addingTimeInterval(-3)))
     }
 

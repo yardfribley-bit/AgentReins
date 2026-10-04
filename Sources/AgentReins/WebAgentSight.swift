@@ -19,7 +19,7 @@ final class WebAgentSight: ObservableObject {
     private var timer: Timer?
     private var offset: UInt64 = 0
     private let queue = DispatchQueue(label: "com.agentspec.webagentsight", qos: .utility)
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase = try? EvidenceDatabase.shared()
     private let sourceURL: URL
 
     init(sourceURL: URL? = nil) {
@@ -55,12 +55,18 @@ final class WebAgentSight: ObservableObject {
             let checkpoint = record.map(RawLogCapture.safeCheckpoint)
             var rawWriteFailed = false
             if let record {
-                do { try database?.appendRaw([record]) } catch { rawWriteFailed = true }
+                do {
+                    guard let database else { throw EventStoreReadError.databaseUnavailable }
+                    try database.persistCollected(raw: [record], events: events,
+                        checkpoints: [SourceCheckpoint(source: "web-agent", stream: url.path,
+                            offset: Int64(RawLogCapture.safeCheckpoint(for: record)),
+                            fingerprint: record.fingerprint, updatedAt: Date())])
+                } catch { rawWriteFailed = true }
             }
             DispatchQueue.main.async {
                 if self.connected != extensionActive { self.connected = extensionActive }
-                guard let record, let checkpoint else {
-                    try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                guard record != nil, let checkpoint else {
+                    self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                         source: "web-agent", state: self.connected ? .healthy : .failed,
                         lastSuccess: self.connected ? Date() : nil, lagSeconds: nil,
                         accepted: 0, malformed: 0, dropped: 0,
@@ -71,15 +77,12 @@ final class WebAgentSight: ObservableObject {
                     if rawWriteFailed { throw NSError(domain: "AgentReins.WebAgentSight", code: 1) }
                     if !events.isEmpty { self.onEvents?(events); self.lastUpdate = Date() }
                     self.offset = checkpoint
-                    try self.evidenceDatabase?.saveCheckpoint(SourceCheckpoint(
-                        source: "web-agent", stream: url.path, offset: Int64(checkpoint),
-                        fingerprint: record.fingerprint, updatedAt: Date()))
-                    try self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                    self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                         source: "web-agent", state: .healthy, lastSuccess: Date(), lagSeconds: 0,
                         accepted: events.count, malformed: 0, dropped: 0,
                         detail: "Web AI evidence connected through authenticated Native Messaging"))
                 } catch {
-                    try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                    self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                         source: "web-agent", state: .degraded, lastSuccess: self.lastUpdate,
                         lagSeconds: nil, accepted: 0, malformed: 1, dropped: 0,
                         detail: error.localizedDescription))

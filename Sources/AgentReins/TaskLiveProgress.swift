@@ -15,6 +15,7 @@ struct TaskLiveProgress: Sendable {
     var usage: [UUID: Usage] = [:]
     var riskEvents = Set<UUID>()
     var lastTool: String?
+    var hasTaskContext = false
 
     enum Phase: String, Sendable {
         case preparing = "准备上下文"
@@ -35,10 +36,11 @@ struct TaskLiveProgress: Sendable {
     var outputTokens: Int { usage.values.reduce(0) { $0 + $1.output } }
 
     func isCurrentTask(since boundary: Date) -> Bool {
-        !modelRequests.isEmpty && startedAt >= boundary && lastActivityAt >= boundary
+        (!modelRequests.isEmpty || hasTaskContext) && lastActivityAt >= boundary
     }
 
     mutating func ingest(_ event: GuardEvent) {
+        if event.userIntent?.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty == false { hasTaskContext = true }
         startedAt = min(startedAt, event.startedAt ?? event.ts)
         guard event.ts >= lastActivityAt else {
             updateCounts(event)

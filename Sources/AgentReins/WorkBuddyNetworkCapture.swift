@@ -15,8 +15,9 @@ final class WorkBuddyNetworkCapture: ObservableObject {
     private var timer: Timer?
     private var proxy: Process?
     private var offset: UInt64 = 0
+    private var pollInFlight = false
     private let queue = DispatchQueue(label: "com.agentspec.workbuddy-network", qos: .utility)
-    private let database = try? EvidenceDatabase()
+    private let database = try? EvidenceDatabase.shared()
 
     private var captureURL: URL {
         if let path = ProcessInfo.processInfo.environment["AGENTREINS_WORKBUDDY_NETWORK_JSONL"], !path.isEmpty {
@@ -89,35 +90,41 @@ final class WorkBuddyNetworkCapture: ObservableObject {
     }
 
     private func poll() {
+        guard !pollInFlight else { return }
+        pollInFlight = true
         let url = captureURL
         let previous = offset
         let database = database
         queue.async { [weak self] in
             let result = Self.read(url: url, offset: previous)
             do {
-                guard let database else { return }
+                guard let database else { throw CocoaError(.fileWriteUnknown) }
                 // Network events still need native session attribution on the main actor.
                 // The offset is runtime-only and restarts at zero, so persisted raw data
                 // remains replayable without preempting the corrected event identities.
                 try database.appendRaw(result.raw.map { [$0] } ?? [])
-            } catch { return } // Do not advance the read offset before durable evidence.
+            } catch {
+                DispatchQueue.main.async { self?.pollInFlight = false }
+                return // Do not advance the read offset before durable evidence.
+            }
             DispatchQueue.main.async {
                 guard let self else { return }
+                self.pollInFlight = false
                 let isFresh = self.lastUpdate.map { Date().timeIntervalSince($0) < 120 } ?? false
                 self.connected = self.proxyRunning && isFresh
                 if result.malformed > 0 {
                     self.detail = "WorkBuddy HTTPS collector found \(result.malformed) malformed records"
                 } else if self.connected {
-                    self.detail = "Complete WorkBuddy HTTPS body and route collector connected"
+                    self.detail = "WorkBuddy HTTPS records received; completeness is verified per request"
                 } else if self.proxyRunning {
-                    self.detail = "Audit proxy is running; WorkBuddy traffic has not reached it yet"
+                    self.detail = "Audit proxy is running on 18891; WorkBuddy must be launched with this proxy to capture HTTPS bodies"
                 }
                 self.offset = result.nextOffset
                 if !result.events.isEmpty {
                     self.lastUpdate = result.events.map(\.ts).max()
                     self.onEvents?(result.events)
                 }
-                try? self.database?.updateHealth(CollectorHealthRecord(
+                self.database?.enqueueHealth(CollectorHealthRecord(
                     source: "workbuddy-network-body",
                     state: !self.proxyRunning ? .failed : result.malformed > 0 || !self.connected ? .degraded : .healthy,
                     lastSuccess: self.connected ? Date() : nil, lagSeconds: nil,
@@ -137,18 +144,25 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         let size = (try? handle.seekToEnd()) ?? offset
         let start = min(offset, size)
         try? handle.seek(toOffset: start)
-        let payload = handle.readDataToEndOfFile()
+        // Do not load an entire historic capture file on startup. Allow a large
+        // single record, but keep replay and memory bounded.
+        var payload = (try? handle.read(upToCount: 8 * 1024 * 1024)) ?? Data()
+        while !payload.isEmpty, !payload.contains(0x0A), payload.count < 64 * 1024 * 1024,
+              start + UInt64(payload.count) < size {
+            guard let more = try? handle.read(upToCount: 8 * 1024 * 1024), !more.isEmpty else { break }
+            payload.append(more)
+        }
         guard !payload.isEmpty else { return ([], size, 0, true, nil) }
         let safeData: Data
         let nextOffset: UInt64
         if payload.last == 0x0A {
             safeData = payload
-            nextOffset = size
+            nextOffset = start + UInt64(payload.count)
         } else if let newline = payload.lastIndex(of: 0x0A) {
             safeData = Data(payload.prefix(through: newline))
             nextOffset = start + UInt64(newline + 1)
         } else {
-            return ([], start, 0, true, nil)
+            return ([], start, payload.count >= 64 * 1024 * 1024 ? 1 : 0, true, nil)
         }
         let decoder = JSONDecoder()
         decoder.dateDecodingStrategy = .iso8601

@@ -58,6 +58,28 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         XCTAssertEqual(audit.coverage, .complete)
     }
 
+    func testVideoServiceBodiesArePreservedWithoutBeingClassifiedAsModelResponses() throws {
+        for path in ["/v2/videos/generations", "/v2/videos/tasks"] {
+            let body = Data(#"{"prompt":"TLS handshake","task_id":"video-123"}"#.utf8)
+            let response = Data(#"{"status":"completed","video_url":"https://example.test/video.mp4"}"#.utf8)
+            let record = WorkBuddyNetworkCaptureRecord(
+                observedAt: Date(), host: "copilot.tencent.com", path: path,
+                method: "POST", httpVersion: "HTTP/2", contentEncoding: nil,
+                declaredContentLength: body.count, capturedWireBodyBytes: body.count,
+                requestBodyBase64: body.base64EncodedString(), requestSHA256: sha256(body),
+                responseStatus: 200, responseComplete: true,
+                responseBodyBase64: response.base64EncodedString())
+            let events = WorkBuddyNetworkEvidence.project(record)
+            XCTAssertEqual(events.count, 2)
+            XCTAssertEqual(events[0].kind, "network")
+            XCTAssertEqual(events[0].op, "tool_service_request")
+            XCTAssertEqual(events[0].modelPrompt, String(decoding: body, as: UTF8.self))
+            XCTAssertEqual(events[1].op, "tool_service_response")
+            XCTAssertEqual(events[1].modelResponse, String(decoding: response, as: UTF8.self))
+            XCTAssertNil(events[1].modelReasoning)
+        }
+    }
+
     func testRejectsTamperedRequestBody() throws {
         let request = Data(#"{"messages":[]}"#.utf8)
         let record = WorkBuddyNetworkCaptureRecord(
@@ -124,7 +146,8 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
 
         XCTAssertEqual(resolved.sessionId, "native-session")
         XCTAssertEqual(resolved.turnId, "native-turn")
-        XCTAssertEqual(resolved.attributionConfidence, .confirmed)
+        XCTAssertEqual(resolved.attributionConfidence, .inferred,
+                       "Matching text and time cannot confirm a native network-to-turn identity")
     }
 
     func testReaderWaitsForCompleteJSONLine() throws {
@@ -145,6 +168,26 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         let complete = WorkBuddyNetworkCapture.read(url: url, offset: 0)
         XCTAssertEqual(complete.events.count, 2)
         XCTAssertEqual(complete.nextOffset, UInt64(line.count + 1))
+    }
+
+    func testHistoricNetworkReplayIsBoundedAndResumesWithoutLosingRecords() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        defer { try? FileManager.default.removeItem(at: url) }
+        let request = try JSONSerialization.data(withJSONObject: ["messages": [["role": "system",
+            "content": String(repeating: "x", count: 2_000_000)]]])
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let line = try encoder.encode(captureRecord(request: request, response: Data())) + Data([10])
+        var history = Data()
+        for _ in 0..<4 { history.append(line) }
+        try history.write(to: url)
+        let first = WorkBuddyNetworkCapture.read(url: url, offset: 0)
+        XCTAssertGreaterThan(first.nextOffset, 0)
+        XCTAssertLessThan(first.nextOffset, UInt64(history.count))
+        XCTAssertEqual(first.malformed, 0)
+        let second = WorkBuddyNetworkCapture.read(url: url, offset: first.nextOffset)
+        XCTAssertEqual(second.nextOffset, UInt64(history.count))
+        XCTAssertEqual(second.malformed, 0)
+        XCTAssertEqual(first.events.count + second.events.count, 8)
     }
 
     private func captureRecord(request: Data, response: Data, observedAt: Date = Date()) -> WorkBuddyNetworkCaptureRecord {

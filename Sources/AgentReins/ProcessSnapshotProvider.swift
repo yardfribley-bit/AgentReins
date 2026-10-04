@@ -1,3 +1,4 @@
+import AppKit
 import Darwin
 import Foundation
 
@@ -6,12 +7,17 @@ struct ProcessSnapshotRecord: Sendable, Equatable {
     let ppid: String
     let command: String
     let agent: String?
+    let birthIdentity: UInt64?
+    let executablePath: String?
 
-    init(pid: String, ppid: String, command: String, agent: String? = nil) {
+    init(pid: String, ppid: String, command: String, agent: String? = nil,
+         birthIdentity: UInt64? = nil, executablePath: String? = nil) {
         self.pid = pid
         self.ppid = ppid
         self.command = command
         self.agent = agent
+        self.birthIdentity = birthIdentity
+        self.executablePath = executablePath
     }
 }
 
@@ -35,6 +41,11 @@ enum ProcessArgumentRedactor {
 protocol ProcessSnapshotting: Sendable {
     var sourceID: String { get }
     func snapshot() -> [ProcessSnapshotRecord]
+    func invalidateDiscovery()
+}
+
+extension ProcessSnapshotting {
+    func invalidateDiscovery() {}
 }
 
 /// Entitlement-free macOS process inventory. libproc supplies durable PID/PPID
@@ -56,6 +67,12 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         self.agentMarkers = agentMarkers.map { $0.lowercased() }
     }
 
+    func invalidateDiscovery() {
+        stateLock.lock()
+        lastRootDiscovery = .distantPast
+        stateLock.unlock()
+    }
+
     func snapshot() -> [ProcessSnapshotRecord] {
         stateLock.lock()
         let discoverRoots = Date().timeIntervalSince(lastRootDiscovery) >= rootDiscoveryInterval || knownRoots.isEmpty
@@ -72,7 +89,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         let found = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, byteCount) }
         guard found > 0 else { return [] }
 
-        var records: [pid_t: (ppid: pid_t, executable: String)] = [:]
+        var records: [pid_t: (ppid: pid_t, executable: String, birth: UInt64)] = [:]
         for pid in pids.prefix(Int(found)) where pid > 0 {
             guard let identity = identity(pid: pid) else { continue }
             records[pid] = identity
@@ -107,7 +124,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
             let rawCommand = arguments(pid: pid) ?? value.executable
             return ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
                 command: ProcessArgumentRedactor.redact(rawCommand),
-                agent: owners[pid])
+                agent: owners[pid], birthIdentity: value.birth, executablePath: value.executable)
         }
         stateLock.lock()
         cachedAgentRecords = Dictionary(uniqueKeysWithValues: result.compactMap {
@@ -146,7 +163,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
 
     private func agentOwner(for executable: String) -> String? {
         let path = executable.lowercased()
-        if agentMarkers.contains("workbuddy"), path.contains("/applications/workbuddy.app/") { return "workbuddy" }
+        if agentMarkers.contains("workbuddy"), (path.contains("/applications/workbuddy.app/") || path.contains("/.workbuddy/binaries/")) { return "workbuddy" }
         if agentMarkers.contains("chatgpt"), path.contains("/applications/chatgpt.app/") { return "codex" }
         if agentMarkers.contains("cursor"), path.contains("/applications/cursor.app/") { return "cursor" }
         if agentMarkers.contains("zcode"), path.contains("/applications/zcode.app/") { return "zcode" }
@@ -182,14 +199,20 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
             let pid = current.0
             let owner = current.1
             guard visited.insert(pid).inserted else { continue }
-            if let cached = cache[pid] {
-                result.append(cached)
-            } else if let value = identity(pid: pid) {
-                result.append(ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
-                    command: ProcessArgumentRedactor.redact(arguments(pid: pid) ?? value.executable), agent: owner))
+            guard let value = identity(pid: pid) else { continue }
+            let cached = cache[pid]
+            // A dead root or reused PID must not keep an old Agent ownership.
+            if roots.contains(pid), cached?.birthIdentity != value.birth,
+               agentOwner(pid: pid, executable: value.executable) != owner { continue }
+            let command: String
+            if let cached, cached.birthIdentity == value.birth,
+               cached.executablePath == value.executable {
+                command = cached.command
             } else {
-                continue
+                command = ProcessArgumentRedactor.redact(arguments(pid: pid) ?? value.executable)
             }
+            result.append(ProcessSnapshotRecord(pid: String(pid), ppid: String(value.ppid),
+                command: command, agent: owner, birthIdentity: value.birth, executablePath: value.executable))
             pending.append(contentsOf: childPIDs(of: pid).map { ($0, owner) })
         }
         stateLock.lock()
@@ -202,19 +225,20 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
     }
 
     private func childPIDs(of parent: pid_t) -> [pid_t] {
-        let requiredBytes = proc_listchildpids(parent, nil, 0)
-        guard requiredBytes > 0 else { return [] }
-        let count = max(Int(requiredBytes) / MemoryLayout<pid_t>.size, 1)
+        let requiredCount = proc_listchildpids(parent, nil, 0)
+        guard requiredCount > 0 else { return [] }
+        let count = max(Int(requiredCount), 1)
         var pids = [pid_t](repeating: 0, count: count + 8)
         let capacity = Int32(pids.count * MemoryLayout<pid_t>.size)
         let bytes = pids.withUnsafeMutableBytes {
             proc_listchildpids(parent, $0.baseAddress, capacity)
         }
         guard bytes > 0 else { return [] }
-        return Array(pids.prefix(Int(bytes) / MemoryLayout<pid_t>.size).filter { $0 > 0 })
+        // proc_listchildpids returns a PID count, not a byte count.
+        return Array(pids.prefix(Int(bytes)).filter { $0 > 0 })
     }
 
-    private func identity(pid: pid_t) -> (ppid: pid_t, executable: String)? {
+    private func identity(pid: pid_t) -> (ppid: pid_t, executable: String, birth: UInt64)? {
         var info = proc_bsdinfo()
         let size = MemoryLayout<proc_bsdinfo>.size
         let read = withUnsafeMutablePointer(to: &info) {
@@ -232,7 +256,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
             }
         }
         guard !executable.isEmpty else { return nil }
-        return (pid_t(info.pbi_ppid), executable)
+        return (pid_t(info.pbi_ppid), executable, UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec))
     }
 
     private func arguments(pid: pid_t) -> String? {
@@ -287,6 +311,8 @@ struct ResilientProcessSnapshotProvider: ProcessSnapshotting {
     init(agentMarkers: [String]) {
         primary = DarwinLibprocSnapshotProvider(agentMarkers: agentMarkers)
     }
+
+    func invalidateDiscovery() { primary.invalidateDiscovery() }
 
     func snapshot() -> [ProcessSnapshotRecord] {
         let result = primary.snapshot()

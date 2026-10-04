@@ -1,3 +1,4 @@
+import AppKit
 import Foundation
 import SwiftUI
 
@@ -43,11 +44,21 @@ final class ProcessGuard: ObservableObject {
     var onEvent: ((GuardEvent) -> Void)?
     var onEvents: (([GuardEvent]) -> Void)?
 
+    private var applicationObservers: [NSObjectProtocol] = []
+    private var previousProcesses: [String: SnapshotProcess] = [:]
     private var processTimer: Timer?
     private var networkTimer: Timer?
+    private var observationTimer: Timer?
+    private var observationInFlight = false
+    private let hookCorrelation = HookProcessCorrelation()
+    private var receivedHookIDs: [UUID: Date] = [:]
+    private var pendingResourceTriggers: [String: Date] = [:]
+    private var pendingNetworkTriggers: [String: Date] = [:]
+    private let observationCoordinator = ProcessObservationCoordinator()
+    private var observedProcesses: [ProcessSnapshotRecord] = []
     private var processSnapshotInFlight = false
     private var networkSnapshotInFlight = false
-    private typealias SnapshotProcess = (pid: String, ppid: String, cmd: String, agent: String?)
+    private typealias SnapshotProcess = (pid: String, ppid: String, cmd: String, agent: String?, birth: UInt64?, executable: String?)
     private var latestProcesses: [SnapshotProcess] = []
     private var seen: Set<String> = []
     private var seenConnections: [String: Date] = [:]
@@ -60,7 +71,7 @@ final class ProcessGuard: ObservableObject {
     private let networkProvider: any NetworkSnapshotting
     private let proxyDestinationProvider: any ProxyDestinationSnapshotting
     private var recentProxyDestinations: [Int: ProxyDestinationRecord] = [:]
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase = try? EvidenceDatabase.shared()
     private var lastHealthPersist: [String: Date] = [:]
     private var workingCollectionHealth = CollectionHealth()
     private var lastHealthPublish = Date.distantPast
@@ -107,6 +118,20 @@ final class ProcessGuard: ObservableObject {
     func start() {
         guard !running else { return }
         running = true
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
+            applicationObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
+                let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+                let identity = [app?.bundleURL?.path, app?.bundleIdentifier, app?.localizedName]
+                    .compactMap { $0 }.joined(separator: " ").lowercased()
+                guard let self, self.agentMarkers.contains(where: identity.contains) else { return }
+                Task { @MainActor [weak self] in
+                    guard let self, self.running else { return }
+                    self.snapshotProvider.invalidateDiscovery()
+                    self.captureProcesses()
+                }
+            })
+        }
         // Process and network collection deliberately have different cadences.
         // libproc is cheap enough to observe one-second children at 750 ms, while
         // spawning lsof at that rate caused severe recurring CPU spikes.
@@ -120,8 +145,55 @@ final class ProcessGuard: ObservableObject {
                 self?.captureNetwork()
             }
         }
+        observationTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
+            Task { @MainActor [weak self] in self?.captureProcessObservations() }
+        }
         processTimer?.fire()
         networkTimer?.fire()
+    }
+
+    /// Native Hook notification arrives before the transcript/database hot path.
+    /// It requests observation, never blocks execution or invents a tool PID.
+    func observeHookSignals(_ hooks: [GuardEvent]) {
+        let now = Date()
+        receivedHookIDs = receivedHookIDs.filter { now.timeIntervalSince($0.value) < 600 }
+        for hook in hooks where hook.source == "workbuddy-hook" && hook.op != "hook_capture_gap" {
+            guard receivedHookIDs[hook.id] == nil else { continue }
+            receivedHookIDs[hook.id] = now
+            let links = hookCorrelation.observeHook(hook, now: now)
+            let reason = "\(hook.id.uuidString):\(hook.op)"
+            if running {
+                pendingResourceTriggers[reason] = now
+                pendingNetworkTriggers[reason] = now
+            }
+            let data: [String: Any] = ["hookEventID": hook.id.uuidString,
+                "hookOperation": hook.op, "receivedAt": now.timeIntervalSince1970,
+                "hookObservedAt": hook.ts.timeIntervalSince1970,
+                "state": running ? "sampling_requested" : "process_monitor_inactive",
+                "timing": "asynchronous; not an execution barrier",
+                "identity": "native session/call IDs; executor PID remains unknown"]
+            let encoded = (try? JSONSerialization.data(withJSONObject: data, options: [.sortedKeys]))
+                .flatMap { String(data: $0, encoding: .utf8) }
+            let request = GuardEvent(kind: "activity", ruleId: "process_observation", path: "-", command: nil,
+                agent: "workbuddy", op: "hook_capture_request", severity: "info", ts: now, action: "requested",
+                sessionId: hook.sessionId, toolCallId: hook.toolCallId, toolName: hook.toolName,
+                afterContent: encoded, source: "hook-process-coordinator", attributionConfidence: .unknown,
+                attributionMethod: "Hook requests sampling; not proof of tool execution")
+            onEvents?(links + [request])
+        }
+        // Bound burst state. Signals are still preserved independently as raw Hook evidence.
+        if receivedHookIDs.count > 512 {
+            for old in receivedHookIDs.sorted(by: { $0.value < $1.value }).prefix(receivedHookIDs.count - 512) {
+                receivedHookIDs.removeValue(forKey: old.key)
+            }
+        }
+        for old in pendingResourceTriggers.sorted(by: { $0.value < $1.value }).prefix(max(0, pendingResourceTriggers.count - 32)) {
+            pendingResourceTriggers.removeValue(forKey: old.key)
+        }
+        for old in pendingNetworkTriggers.sorted(by: { $0.value < $1.value }).prefix(max(0, pendingNetworkTriggers.count - 32)) {
+            pendingNetworkTriggers.removeValue(forKey: old.key)
+        }
+        if running { captureProcesses() }
     }
 
     private func captureProcesses() {
@@ -137,6 +209,14 @@ final class ProcessGuard: ObservableObject {
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let procs = self.excludingCollectorTree(self.getProcs())
+            let scopedRecords = procs.compactMap { p -> ProcessSnapshotRecord? in
+                guard let agent = p.agent else { return nil }
+                return ProcessSnapshotRecord(pid: p.pid, ppid: p.ppid, command: p.cmd,
+                    agent: agent, birthIdentity: p.birth, executablePath: p.executable)
+            }
+            let armEvents = procs.isEmpty ? [] : self.observationCoordinator.collect(processes: scopedRecords, includeSamples: false)
+            let attachedPIDs = Set(armEvents.filter { $0.op == "process_watch_attached" }.compactMap { $0.processId.map(String.init) })
+            let newlyAttached = scopedRecords.filter { attachedPIDs.contains($0.pid) }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.processSnapshotInFlight = false
@@ -149,17 +229,19 @@ final class ProcessGuard: ObservableObject {
                     return
                 }
                 self.workingCollectionHealth.lastProcessSuccess = Date()
-                self.latestProcesses = procs
                 let byPid = Dictionary(uniqueKeysWithValues: procs.map {
                     ($0.pid, (ppid: $0.ppid, cmd: $0.cmd, agent: $0.agent))
                 })
                 let attributions = self.attributions(byPid: byPid)
+                self.latestProcesses = procs.filter { attributions[$0.pid] != nil }
                 let inventory = procs.filter { attributions[$0.pid] != nil }.map {
                     ProcessSnapshotRecord(pid: $0.pid, ppid: $0.ppid, command: $0.cmd,
-                        agent: self.canonicalAgent(attributions[$0.pid]))
+                        agent: self.canonicalAgent(attributions[$0.pid]),
+                        birthIdentity: $0.birth, executablePath: $0.executable)
                 }.sorted { lhs, rhs in
                     (Int(lhs.pid) ?? 0) < (Int(rhs.pid) ?? 0)
                 }
+                self.observedProcesses = inventory
                 // A process snapshot arrives every 750 ms so short-lived tools
                 // are observable. Publishing an identical 500-process array at
                 // that cadence forced SwiftUI to rebuild the entire posture
@@ -170,13 +252,40 @@ final class ProcessGuard: ObservableObject {
                     self.lastInventoryPublish = Date()
                 }
                 self.process(procs: procs, attributions: attributions)
-                self.persistHealth(source: "process", state: .healthy, detail: nil)
+                self.onEvents?(armEvents + self.hookCorrelation.observeProcesses(inventory))
+                if !self.pendingResourceTriggers.isEmpty { self.captureProcessObservations() }
+                if !self.pendingNetworkTriggers.isEmpty { self.captureNetwork() }
+                // Socket queries run separately, so they cannot hold up process discovery.
+                if !newlyAttached.isEmpty { self.captureNetwork(targets: newlyAttached) }
+                self.persistHealth(source: "process", state: .healthy,
+                    detail: "Scoped Agent-tree snapshots; processes shorter than the sampling interval may be missed")
                 self.publishHealthIfNeeded()
             }
         }
     }
 
-    private func captureNetwork() {
+    private func captureProcessObservations() {
+        guard running, !observationInFlight, !processSnapshotInFlight else { return }
+        observationInFlight = true
+        let trigger = pendingResourceTriggers.isEmpty ? nil : pendingResourceTriggers.keys.sorted().joined(separator: ",")
+        pendingResourceTriggers.removeAll()
+        let processes = trigger == nil ? observedProcesses : hookCorrelation.samplingTargets(observedProcesses)
+        let coordinator = observationCoordinator
+        DispatchQueue.global(qos: .utility).async { [weak self] in
+            let events = coordinator.collect(processes: processes, trigger: trigger)
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                self.observationInFlight = false
+                guard self.running else { return }
+                self.onEvents?(events)
+                if !self.pendingResourceTriggers.isEmpty { self.captureProcessObservations() }
+                self.persistHealth(source: "process-observation", state: .healthy,
+                    detail: "Per-process resource and open-file samples; permission gaps recorded in evidence; no memory content or file-read syscall capture")
+            }
+        }
+    }
+
+    private func captureNetwork(targets: [ProcessSnapshotRecord]? = nil) {
         guard running, !networkSnapshotInFlight else {
             if networkSnapshotInFlight {
                 workingCollectionHealth.skippedNetworkSnapshots += 1
@@ -186,18 +295,37 @@ final class ProcessGuard: ObservableObject {
         }
         networkSnapshotInFlight = true
         let started = Date()
-        let agentPIDs = latestProcesses.map(\.pid)
+        let trigger = pendingNetworkTriggers.isEmpty ? nil : pendingNetworkTriggers.keys.sorted().joined(separator: ",")
+        pendingNetworkTriggers.removeAll()
+        let sampledProcesses = trigger == nil ? (targets ?? observedProcesses) : hookCorrelation.samplingTargets(observedProcesses)
+        let agentPIDs = sampledProcesses.map(\.pid)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let connections = self.networkProvider.snapshot(pids: agentPIDs)
-            let proxyDestinations = self.proxyDestinationProvider.snapshot()
+            let validatedProcesses = sampledProcesses.filter {
+                guard let pid = Int32($0.pid), let birth = $0.birthIdentity else { return false }
+                return LibprocProcessActivitySampler.birthIdentity(pid) == birth
+            }
+            let socketEvents = self.observationCoordinator.observeSockets(processes: validatedProcesses, connections: connections, trigger: trigger)
+            let ipcRecords = LsofUnixSocketSnapshotProvider().snapshot(pids: agentPIDs)
+            let ipcProcesses = validatedProcesses.filter {
+                guard let pid = Int32($0.pid), let birth = $0.birthIdentity else { return false }
+                return LibprocProcessActivitySampler.birthIdentity(pid) == birth
+            }
+            let ipcEvents = self.observationCoordinator.observeIPC(processes: ipcProcesses, records: ipcRecords, trigger: trigger)
+            let proxyDestinations = targets == nil && trigger == nil ? self.proxyDestinationProvider.snapshot() : []
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.networkSnapshotInFlight = false
+                guard self.running else { return }
+                self.onEvents?(socketEvents + ipcEvents)
+                if !self.pendingNetworkTriggers.isEmpty { self.captureNetwork() }
                 self.workingCollectionHealth.lastNetworkDurationMS = Date().timeIntervalSince(started) * 1_000
                 self.workingCollectionHealth.lastNetworkSuccess = Date()
-                self.processNetwork(procs: self.latestProcesses, connections: connections,
-                                    proxyDestinations: proxyDestinations)
+                if targets == nil && trigger == nil {
+                    self.processNetwork(procs: self.latestProcesses, connections: connections,
+                                        proxyDestinations: proxyDestinations)
+                }
                 self.persistHealth(source: "network", state: .healthy,
                                    detail: "Socket evidence is sampled and may miss short connections")
                 self.publishHealthIfNeeded()
@@ -207,8 +335,17 @@ final class ProcessGuard: ObservableObject {
 
     func stop() {
         running = false
+        for observer in applicationObservers { NSWorkspace.shared.notificationCenter.removeObserver(observer) }
+        applicationObservers.removeAll()
+        previousProcesses.removeAll()
         processTimer?.invalidate()
         networkTimer?.invalidate()
+        observationTimer?.invalidate()
+        observationTimer = nil
+        observedProcesses.removeAll()
+        observationCoordinator.reset()
+        hookCorrelation.reset(); receivedHookIDs.removeAll()
+        pendingResourceTriggers.removeAll(); pendingNetworkTriggers.removeAll()
         processTimer = nil
         networkTimer = nil
         processSnapshotInFlight = false
@@ -241,11 +378,20 @@ final class ProcessGuard: ObservableObject {
         let detectedAgents = Array(Set(attributions.values)).sorted()
         if detectedAgents != activeAgents { activeAgents = detectedAgents }
         let agentProcesses = procs.filter { attributions[$0.pid] != nil }
-        let liveKeys = Set(agentProcesses.map { "\($0.pid)|\($0.cmd)" })
+        let liveKeys = Set(agentProcesses.map { "\($0.pid)|\($0.birth ?? 0)|\($0.cmd)" })
         seen.formIntersection(liveKeys)
         var newEvents: [GuardEvent] = []
+        let currentProcesses = Dictionary(uniqueKeysWithValues: agentProcesses.map { ($0.pid, $0) })
+        for (pid, previous) in previousProcesses where currentProcesses[pid] == nil || currentProcesses[pid]?.birth != previous.birth {
+            newEvents.append(GuardEvent(kind: "activity", ruleId: "activity_process_exit", path: "-",
+                command: previous.cmd, agent: previous.agent, op: "process_exit", severity: "info",
+                ts: Date(), action: "observed", source: snapshotProvider.sourceID,
+                attributionConfidence: .inferred, attributionMethod: "process disappeared from scoped snapshot",
+                processId: Int32(pid), parentProcessId: Int32(previous.ppid)))
+        }
+        previousProcesses = currentProcesses
         for p in agentProcesses {
-            let processKey = "\(p.pid)|\(p.cmd)"
+            let processKey = "\(p.pid)|\(p.birth ?? 0)|\(p.cmd)"
             if seen.contains(processKey) { continue }
             seen.insert(processKey)
             let agent = attributions[p.pid]
@@ -256,7 +402,7 @@ final class ProcessGuard: ObservableObject {
                                            pid: p.pid, ppid: p.ppid))
                 notify(title: "AgentReins observed a command", body: "\(r.message) · \(p.cmd)")
             }
-            if matched.isEmpty, let agent, isUserActivity(p.cmd) {
+            if matched.isEmpty, let agent {
                 newEvents.append(makeActivityEvent(command: p.cmd, agent: agent,
                                                    pid: p.pid, ppid: p.ppid))
             }
@@ -283,7 +429,7 @@ final class ProcessGuard: ObservableObject {
         let cutoff = Date().addingTimeInterval(-300)
         recentProxyDestinations = recentProxyDestinations.filter { $0.value.timestamp >= cutoff }
         let agentConnections = connections
-            .filter { attributions[$0.pid] != nil }
+            .filter { attributions[$0.pid] != nil && !$0.isListener && $0.state != "CLOSED" }
             .compactMap(resolveProxyDestination)
         let connectionCutoff = Date().addingTimeInterval(-300)
         seenConnections = seenConnections.filter { $0.value >= connectionCutoff }
@@ -311,7 +457,7 @@ final class ProcessGuard: ObservableObject {
     }
 
     private nonisolated func getProcs() -> [SnapshotProcess] {
-        snapshotProvider.snapshot().map { ($0.pid, $0.ppid, $0.command, $0.agent) }
+        snapshotProvider.snapshot().map { ($0.pid, $0.ppid, $0.command, $0.agent, $0.birthIdentity, $0.executablePath) }
     }
 
     /// The OS snapshot is only a transient discovery index. Find explicit
@@ -414,7 +560,7 @@ final class ProcessGuard: ObservableObject {
         if state != .failed, let last = lastHealthPersist[source], now.timeIntervalSince(last) < 10 { return }
         lastHealthPersist[source] = now
         let isProcess = source == "process"
-        try? evidenceDatabase?.updateHealth(CollectorHealthRecord(
+        evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
             source: source, state: state,
             lastSuccess: isProcess ? workingCollectionHealth.lastProcessSuccess : workingCollectionHealth.lastNetworkSuccess,
             lagSeconds: nil,

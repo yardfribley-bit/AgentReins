@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import CryptoKit
+import Darwin
 
 /// AgentSight 的 WorkBuddy-native 数据源：读取本地会话事件并投影成统一 GuardEvent。
 /// macOS 无 eBPF record，因此这里使用 AgentSight 推荐的 agent-native session fallback。
@@ -9,8 +10,15 @@ final class WorkBuddySight: ObservableObject {
     @Published private(set) var connected = false
     @Published private(set) var lastUpdate: Date?
     var onEvents: (([GuardEvent]) -> Void)?
+    var onHookSignals: (([GuardEvent]) -> Void)?
 
     private var timer: Timer?
+    private var watchers: [String: DispatchSourceFileSystemObject] = [:]
+    private var watchOrder: [String] = []
+    private var debounce: DispatchWorkItem?
+    private var pendingTargets = Set<URL>()
+    private var pendingWakeup = false
+    private let hookRoot: URL
     private var seen = Set<UUID>()
     private var lastPoll = Date.distantPast
     private var fileSizes: [String: UInt64] = [:]
@@ -24,7 +32,14 @@ final class WorkBuddySight: ObservableObject {
     }
     private var parserStates: [String: ParserState] = [:]
     private var isPolling = false
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase: EvidenceDatabase?
+    private let rootURL: URL
+
+    init(rootURL: URL? = nil, database: EvidenceDatabase? = nil, hookRoot: URL? = nil) {
+        self.rootURL = rootURL ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".workbuddy/projects")
+        self.evidenceDatabase = database ?? (try? EvidenceDatabase.shared())
+        self.hookRoot = hookRoot ?? WorkBuddyHookInbox.defaultURL
+    }
     private var lastHealthPersist = Date.distantPast
     private var acceptedEvents = 0
     private var collectionFailures = 0
@@ -40,27 +55,89 @@ final class WorkBuddySight: ObservableObject {
         if fileSizes.isEmpty, let saved = try? evidenceDatabase?.checkpoints(source: "workbuddy") {
             fileSizes = saved
         }
+        try? FileManager.default.createDirectory(at: hookRoot, withIntermediateDirectories: true,
+                                                attributes: [.posixPermissions: 0o700])
+        watch(hookRoot, isInbox: true)
         poll()
-        // Keep the live monitor responsive while avoiding a permanent busy loop.
-        timer = Timer.scheduledTimer(withTimeInterval: 2.0, repeats: true) { [weak self] _ in
+        // File/Hook events handle the hot path; scanning only backs up missed notifications.
+        timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
     }
 
-    func stop() { timer?.invalidate(); timer = nil }
+    func stop() {
+        timer?.invalidate(); timer = nil
+        debounce?.cancel(); debounce = nil
+        for watcher in watchers.values { watcher.cancel() }
+        watchers.removeAll(); watchOrder.removeAll(); pendingTargets.removeAll(); pendingWakeup = false
+    }
 
-    private func poll() {
-        guard !isPolling else { return }
+    private func watch(_ url: URL, isInbox: Bool = false) {
+        guard watchers[url.path] == nil else { return }
+        if !isInbox && watchOrder.count >= 32 {
+            let oldest = watchOrder.removeFirst()
+            watchers.removeValue(forKey: oldest)?.cancel()
+        }
+        let descriptor = open(url.path, O_EVTONLY)
+        guard descriptor >= 0 else { return }
+        let source = DispatchSource.makeFileSystemObjectSource(fileDescriptor: descriptor,
+            eventMask: [.write, .extend, .rename, .delete], queue: queue)
+        source.setEventHandler { [weak self] in
+            Task { @MainActor in
+                if let flags = self?.watchers[url.path]?.data, !flags.intersection([.rename, .delete]).isEmpty {
+                    self?.watchers.removeValue(forKey: url.path)?.cancel()
+                    self?.watchOrder.removeAll { $0 == url.path }
+                }
+                self?.requestCollection(targets: isInbox ? [] : [url])
+            }
+        }
+        source.setCancelHandler { close(descriptor) }
+        watchers[url.path] = source
+        if !isInbox { watchOrder.append(url.path) }
+        source.resume()
+    }
+
+    private func requestCollection(targets: [URL] = []) {
+        guard timer != nil else { return }
+        pendingTargets.formUnion(targets); pendingWakeup = true
+        guard debounce == nil else { return }
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            self.debounce = nil
+            let targets = Array(self.pendingTargets)
+            self.pendingTargets.removeAll(); self.pendingWakeup = false
+            self.poll(targets: targets)
+        }
+        debounce = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
+    }
+
+    private func poll(targets: [URL] = []) {
+        guard !isPolling else {
+            pendingTargets.formUnion(targets); pendingWakeup = true; return
+        }
         isPolling = true
-        let root = ("~/.workbuddy/projects" as NSString).expandingTildeInPath
+        let root = rootURL.path
         let changedAfter = lastPoll
         let previousSizes = fileSizes
         let database = evidenceDatabase
         let previousStates = parserStates
+        let inbox = hookRoot
+        let projects = rootURL
         lastPoll = Date()
         queue.async { [weak self] in
+            let hooks = WorkBuddyHookInbox.read(root: inbox, projects: projects)
+            if !hooks.isEmpty {
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.timer != nil else { return }
+                    self.onHookSignals?(hooks.map(\.event))
+                }
+            }
+            let hinted = Array(Set(targets + hooks.compactMap(\.transcript)))
             let batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
-                                              previousSizes: previousSizes, previousStates: previousStates)
+                                              previousSizes: previousSizes, previousStates: previousStates,
+                                              targets: hinted)
+            let collectedEvents = hooks.map(\.event) + batch.events
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false
@@ -73,18 +150,42 @@ final class WorkBuddySight: ObservableObject {
                     SourceCheckpoint(source: "workbuddy", stream: path,
                         offset: Int64(state.offset), fingerprint: nil, updatedAt: Date())
                 }
-                try database.persistCollected(raw: batch.raw, events: batch.events,
+                try database.persistCollected(raw: hooks.map(\.raw) + batch.raw, events: collectedEvents,
                     checkpoints: checkpoints, parserStates: states)
+                // Only acknowledge our own spool after the evidence transaction succeeds.
+                for hook in hooks { try? FileManager.default.removeItem(at: hook.file) }
             } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.isPolling = false
-                guard !rawWriteFailed else { self.collectionFailures += 1; return }
+                guard self.timer != nil else { return }
+                for path in batch.states.keys { self.watch(URL(fileURLWithPath: path)) }
+                // A hook may arrive just before the transcript is created or appended.
+                // Retry targeted paths; do not wait for the low-frequency scan.
+                if !rawWriteFailed && !hooks.isEmpty {
+                    self.pendingTargets.formUnion(hooks.compactMap(\.transcript))
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                        self?.requestCollection(targets: hooks.compactMap(\.transcript))
+                    }
+                    DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+                        self?.requestCollection(targets: hooks.compactMap(\.transcript))
+                    }
+                }
+                if self.pendingWakeup { self.requestCollection() }
+                guard !rawWriteFailed else {
+                    self.collectionFailures += 1
+                    self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
+                        source: "workbuddy", state: .degraded, lastSuccess: self.lastUpdate,
+                        lagSeconds: nil, accepted: self.acceptedEvents,
+                        malformed: self.collectionFailures + self.malformedRows, dropped: self.partialRows,
+                        detail: "Live evidence write failed; source cursor retained for retry"))
+                    return
+                }
                 self.parserStates.merge(batch.states) { _, new in new }
                 let isConnected = FileManager.default.fileExists(atPath: root)
                 if self.connected != isConnected { self.connected = isConnected }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
-                let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                let fresh = collectedEvents.filter { self.seen.insert($0.id).inserted }
                 self.collectionFailures += batch.rawFailures
                 self.malformedRows += malformed
                 self.partialRows += partial
@@ -97,7 +198,7 @@ final class WorkBuddySight: ObservableObject {
                 if Date().timeIntervalSince(self.lastHealthPersist) >= 10 || !self.connected {
                     self.lastHealthPersist = Date()
                     let state: CollectorHealthRecord.State = !self.connected ? .failed : self.collectionFailures + self.malformedRows > 0 ? .degraded : .healthy
-                    try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                    self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                         source: "workbuddy", state: state, lastSuccess: self.connected ? Date() : nil,
                         lagSeconds: nil, accepted: self.acceptedEvents,
                         malformed: self.collectionFailures + self.malformedRows, dropped: self.partialRows,
@@ -108,24 +209,31 @@ final class WorkBuddySight: ObservableObject {
     }
 
     private nonisolated static func readRecentEvents(root: String, changedAfter: Date,
-                                                     previousSizes: [String: UInt64], previousStates: [String: ParserState])
+                                                     previousSizes: [String: UInt64], previousStates: [String: ParserState], targets: [URL] = [])
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int, states: [String: ParserState]) {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1, [:]) }
-        let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64)] = []
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
-            let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
-            let mtime = values?.contentModificationDate ?? .distantPast
-            let size = UInt64(values?.fileSize ?? 0)
-            if mtime >= cutoff && (mtime >= changedAfter || previousSizes[url.path] != size) {
-                files.append((url, mtime, size))
+        if !targets.isEmpty {
+            for url in targets {
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                      let size = values.fileSize else { continue }
+                files.append((url, values.contentModificationDate ?? .distantPast, UInt64(size)))
+            }
+        } else {
+            guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
+                includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1, [:]) }
+            let cutoff = Date().addingTimeInterval(-7 * 86_400)
+            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
+                let mtime = values?.contentModificationDate ?? .distantPast
+                let size = UInt64(values?.fileSize ?? 0)
+                if mtime >= cutoff && (mtime >= changedAfter || previousSizes[url.path] != size) {
+                    files.append((url, mtime, size))
+                }
             }
         }
-        // Startup establishes one latest conversation only; later polls are
-        // incremental from the persisted byte checkpoint.
-        let selected = files.sorted { $0.1 > $1.1 }.prefix(1)
+        // Latest conversation seeds startup; subsequent sweeps cover concurrent sessions.
+        let selected = files.sorted { $0.1 > $1.1 }.prefix(!targets.isEmpty || !previousStates.isEmpty ? 16 : 1)
         let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy",
             previousOffset: previousSizes[$0.0.path], maximumInitialBytes: 512 * 1_024) }
         var sizes = Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) })
@@ -246,7 +354,7 @@ final class WorkBuddySight: ObservableObject {
                 continue
             }
             if type == "reasoning" {
-                if let reasoning = recursiveText(row["content"] ?? row["rawContent"]) {
+                if let reasoning = recursiveText(row["content"]) ?? recursiveText(row["rawContent"]) {
                     lastReasoning[session] = reasoning
                     let provider = row["providerData"] as? [String: Any] ?? [:]
                     result.append(GuardEvent(id: id, kind: "model", ruleId: "agentsight_model_reasoning",

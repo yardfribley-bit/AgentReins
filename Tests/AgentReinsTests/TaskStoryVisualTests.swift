@@ -124,6 +124,9 @@ final class TaskStoryVisualTests: XCTestCase {
         store.record(evidence)
         let sessions = AgentSessionSnapshot.build(from: evidence)
         let snapshot = AgentTaskSnapshot.build(session: try XCTUnwrap(sessions.first), turnID: "task")
+        try await render(ExecutionChainView(snapshot: snapshot)
+            .padding(24).background(TaskStoryStyle.background),
+            to: directory.appendingPathComponent("v2-execution-chain.png"))
         let agents = [LocalAgentOverviewTests.agent("workbuddy", "WorkBuddy"),
                       LocalAgentOverviewTests.agent("codex", "Codex"),
                       LocalAgentOverviewTests.agent("zcode", "Zcode"),

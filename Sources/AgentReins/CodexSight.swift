@@ -14,7 +14,7 @@ final class CodexSight: ObservableObject {
     private var timer: Timer?
     private var seen = Set<UUID>()
     private var fileSizes: [String: UInt64] = [:]
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase = try? EvidenceDatabase.shared()
     private var acceptedEvents = 0
     private var collectionFailures = 0
     private var malformedRows = 0

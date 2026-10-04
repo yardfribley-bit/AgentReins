@@ -54,12 +54,15 @@ enum WorkBuddyNetworkEvidence {
     static func project(_ record: WorkBuddyNetworkCaptureRecord) -> [GuardEvent] {
         guard record.host.lowercased() == "copilot.tencent.com",
               ["/v1/chat/completions", "/v2/chat/completions", "/v3/chat/completions",
-               "/agenttool/v1/intent/recall"].contains(record.path),
+               "/agenttool/v1/intent/recall", "/v2/videos/generations",
+               "/v2/videos/tasks"].contains(record.path),
               let requestData = Data(base64Encoded: record.requestBodyBase64),
               SHA256.hash(data: requestData).hex == record.requestSHA256.lowercased() else { return [] }
 
         let requestComplete = record.declaredContentLength.map { $0 == record.capturedWireBodyBytes } ?? false
-        let isModelRoute = record.path != "/agenttool/v1/intent/recall"
+        let isModelRoute = ["/v1/chat/completions", "/v2/chat/completions",
+                            "/v3/chat/completions"].contains(record.path)
+        let isMemoryRoute = record.path == "/agenttool/v1/intent/recall"
         let requestObject = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any]
         let intent = userIntent(in: requestObject)
         let model = requestObject?["model"] as? String
@@ -89,9 +92,9 @@ enum WorkBuddyNetworkEvidence {
             : "complete HTTPS request body + same-flow domain/IP/socket endpoint"
         var events = [GuardEvent(
             id: uuid("\(identity):request"), kind: isModelRoute ? "model" : "network",
-            ruleId: isModelRoute ? "workbuddy_network_request_body" : "workbuddy_memory_recall_request",
+            ruleId: isModelRoute ? "workbuddy_network_request_body" : (isMemoryRoute ? "workbuddy_memory_recall_request" : "workbuddy_tool_service_request"),
             path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: metadata,
-            agent: "workbuddy", op: isModelRoute ? "network_prompt" : "memory_recall",
+            agent: "workbuddy", op: isModelRoute ? "network_prompt" : (isMemoryRoute ? "memory_recall" : "tool_service_request"),
             severity: "info", ts: record.observedAt,
             action: requestComplete ? "captured_complete" : "captured_partial", sessionId: session,
             traceId: "workbuddy-http:\(identity)", turnId: identity,
@@ -119,9 +122,9 @@ enum WorkBuddyNetworkEvidence {
             let parsed = parseResponse(responseData)
             events.append(GuardEvent(
                 id: uuid("\(identity):response"), kind: isModelRoute ? "model" : "network",
-                ruleId: isModelRoute ? "workbuddy_network_response_body" : "workbuddy_memory_recall_response",
+                ruleId: isModelRoute ? "workbuddy_network_response_body" : (isMemoryRoute ? "workbuddy_memory_recall_response" : "workbuddy_tool_service_response"),
                 path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: nil,
-                agent: "workbuddy", op: isModelRoute ? "network_response" : "memory_recall_response",
+                agent: "workbuddy", op: isModelRoute ? "network_response" : (isMemoryRoute ? "memory_recall_response" : "tool_service_response"),
                 severity: "info", ts: record.observedAt,
                 action: record.responseComplete ? "received_complete" : "received_partial",
                 sessionId: session, traceId: "workbuddy-http:\(identity)",

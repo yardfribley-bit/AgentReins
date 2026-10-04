@@ -41,7 +41,7 @@ final class FileGuard: ObservableObject {
     }
 
     init(backupRoot: URL = FileGuard.defaultBackupRoot(),
-         evidenceDatabase: EvidenceDatabase? = try? EvidenceDatabase()) {
+         evidenceDatabase: EvidenceDatabase? = try? EvidenceDatabase.shared()) {
         self.backupRoot = backupRoot
         self.evidenceDatabase = evidenceDatabase
     }
@@ -170,7 +170,7 @@ final class FileGuard: ObservableObject {
         }
         if Date().timeIntervalSince(lastHealthPersist) >= 10 {
             lastHealthPersist = Date()
-            try? evidenceDatabase?.updateHealth(CollectorHealthRecord(
+            evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                 source: "file", state: .healthy, lastSuccess: Date(), lagSeconds: nil,
                 accepted: acceptedEvents, malformed: 0, dropped: 0,
                 detail: "Only explicitly protected paths are observed; rapid intermediate writes may be missed"))

@@ -6,7 +6,9 @@ let package = Package(
     platforms: [.macOS(.v13)],
     products: [
         .executable(name: "AgentReins", targets: ["AgentReins"]),
-        .executable(name: "AgentReinsNativeHost", targets: ["AgentReinsNativeHost"])
+        .executable(name: "agentreins_v2", targets: ["AgentReins"]),
+        .executable(name: "AgentReinsNativeHost", targets: ["AgentReinsNativeHost"]),
+        .executable(name: "AgentReinsHook", targets: ["AgentReinsHook"])
     ],
     targets: [
         .executableTarget(
@@ -21,6 +23,8 @@ let package = Package(
             path: "Sources/AgentReinsNativeHost",
             swiftSettings: [ .swiftLanguageMode(.v5) ]
         ),
+        .executableTarget(name: "AgentReinsHook", path: "Sources/AgentReinsHook",
+                          swiftSettings: [.swiftLanguageMode(.v5)]),
         .testTarget(
             name: "AgentReinsTests",
             dependencies: ["AgentReins"],

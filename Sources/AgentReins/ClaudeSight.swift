@@ -41,7 +41,7 @@ final class ClaudeSight: ObservableObject {
     private var fileSizes: [String: UInt64] = [:]
     private var seen = Set<UUID>()
     private let queue = DispatchQueue(label: "com.agentspec.claudesight", qos: .utility)
-    private let database = try? EvidenceDatabase()
+    private let database = try? EvidenceDatabase.shared()
     private var accepted = 0
     private var malformed = 0
     private var isInitialPoll = true

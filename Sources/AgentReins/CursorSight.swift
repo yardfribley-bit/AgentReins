@@ -15,7 +15,7 @@ final class CursorSight: ObservableObject {
     private var timer: Timer?
     private var seen = Set<UUID>()
     private let queue = DispatchQueue(label: "com.agentspec.cursorsight", qos: .utility)
-    private let evidenceDatabase = try? EvidenceDatabase()
+    private let evidenceDatabase = try? EvidenceDatabase.shared()
     private var accepted = 0
     private var malformed = 0
     private var databaseFingerprint: String?
@@ -75,7 +75,7 @@ final class CursorSight: ObservableObject {
                 let fresh = values.flatMap(\.events).filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
-                try? self.evidenceDatabase?.updateHealth(CollectorHealthRecord(
+                self.evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                     source: "cursor", state: !self.connected ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: self.connected ? Date() : nil, lagSeconds: nil, accepted: self.accepted,
                     malformed: self.malformed, dropped: 0,

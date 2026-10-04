@@ -72,7 +72,7 @@ final class EventStore: ObservableObject {
         decoder.dateDecodingStrategy = .iso8601
         let databaseURL = fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
-        let openedDatabase = try? EvidenceDatabase.openRecovering(url: databaseURL)
+        let openedDatabase = try? EvidenceDatabase.shared(url: databaseURL)
         database = openedDatabase
         taskSearchWriter = openedDatabase.flatMap { _ in try? TaskSearchIndex(evidenceURL: databaseURL) }
         taskSearchReader = taskSearchWriter == nil ? nil : (try? TaskSearchIndex(evidenceURL: databaseURL))
@@ -113,20 +113,22 @@ final class EventStore: ObservableObject {
                     default: return true
                     }
                 }
-                let result: Result<Bool, Error> = await withCheckedContinuation { continuation in
+                let result: Result<(worked: Bool, count: Int), Error> = await withCheckedContinuation { continuation in
                     let reset = needsBackfillReset
                     self.taskSearchMaintenanceQueue.async {
-                        let result = Result { () throws -> Bool in
-                            try TaskSearchPump.step(database: database, index: index,
-                                                    active: active, initialize: reset)
+                        let result = Result { () throws -> (worked: Bool, count: Int) in
+                            let worked = try TaskSearchPump.step(database: database, index: index,
+                                                                 active: active, initialize: reset)
+                            return (worked, try index.indexedTaskCount())
                         }
                         continuation.resume(returning: result)
                     }
                 }
                 switch result {
-                case .success(let worked):
+                case .success(let outcome):
+                    let worked = outcome.worked
                     needsBackfillReset = false
-                    self.taskSearchIndexedCount = (try? index.indexedTaskCount()) ?? self.taskSearchIndexedCount
+                    self.taskSearchIndexedCount = outcome.count
                     if worked { self.taskSearchIndexReady = false }
                     if !worked { self.taskSearchIndexReady = true }
                     try? await Task.sleep(for: .milliseconds(TaskSearchPump.delayMilliseconds(active: active, worked: worked)))
@@ -587,9 +589,7 @@ final class EventStore: ObservableObject {
     }
 
     private func load() {
-        // Historical evidence remains queryable in SQLite but is never loaded
-        // into the live product. Native adapters provide exactly their latest
-        // conversation, followed only by incremental changes.
+        // Live collection resumes from durable cursors; history stays on demand.
         events = []
     }
 
@@ -600,7 +600,7 @@ final class EventStore: ObservableObject {
     /// Publish one coherent snapshot per ingest batch. Mutating the @Published
     /// array once per event made SwiftUI rebuild the entire dashboard hundreds
     /// of times while a live session was being tailed.
-    private func commitEvents(_ incoming: [GuardEvent], evidence: [GuardEvent]) {
+    private func commitEvents(_ incoming: [GuardEvent], evidence: [GuardEvent], persist: Bool = true) {
         for event in evidence {
             guard let sessionID = event.sessionId, let turnID = event.turnId else { continue }
             let key = "\(sessionID)\u{0}\(turnID)"
@@ -635,6 +635,7 @@ final class EventStore: ObservableObject {
         if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
         events = snapshot
         scheduleDerivedProjection(events: snapshot)
+        guard persist else { return }
         if let database, let evidenceBuffer {
             persistenceQueue.async { [weak self] in
                 do {

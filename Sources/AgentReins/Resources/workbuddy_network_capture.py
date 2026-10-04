@@ -18,6 +18,8 @@ ALLOWED_PATHS = {
     "/v2/chat/completions",
     "/v3/chat/completions",
     "/agenttool/v1/intent/recall",
+    "/v2/videos/generations",
+    "/v2/videos/tasks",
 }
 OUTPUT = Path(os.environ.get(
     "AGENTREINS_WORKBUDDY_NETWORK_JSONL",
@@ -44,7 +46,12 @@ def _append_jsonl(path, record):
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
     try:
-        os.write(fd, (json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+        data = memoryview((json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+        while data:
+            written = os.write(fd, data)
+            if written <= 0:
+                raise OSError("capture journal write made no progress")
+            data = data[written:]
     finally:
         os.close(fd)
 
@@ -64,6 +71,8 @@ def error(flow):
 def _capture(flow, stage):
     server_address = flow.server_conn.ip_address
     _append_jsonl(ROUTE_OUTPUT, {
+        "flowID": flow.id,
+        "captureStage": stage,
         "observedAt": _iso_now(),
         "host": flow.request.pretty_host,
         # Strip the query string because it can contain user or session data.
