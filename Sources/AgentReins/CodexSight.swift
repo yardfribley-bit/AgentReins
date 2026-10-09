@@ -19,22 +19,45 @@ final class CodexSight: ObservableObject {
     private var collectionFailures = 0
     private var malformedRows = 0
     private var partialRows = 0
+    private var startupID: UUID?
+    private var realtimeSince: Date?
     private var isInitialPoll = true
     private var isPolling = false
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
-    func start() {
-        guard timer == nil else { return }
+    func start(realtimeOnly: Bool = false) {
+        guard timer == nil, startupID == nil else { return }
+        if realtimeOnly {
+            realtimeSince = Date()
+            let id = UUID()
+            startupID = id
+            let root = URL(fileURLWithPath: ("~/.codex/sessions" as NSString).expandingTildeInPath)
+            queue.async { [weak self] in
+                let offsets = RealtimeLogBaseline.offsets(root: root)
+                DispatchQueue.main.async {
+                    guard let self, self.startupID == id else { return }
+                    self.startupID = nil
+                    self.fileSizes = offsets
+                self.isInitialPoll = false
+                    self.activate(realtimeOnly: true)
+                }
+            }
+            return
+        }
         if fileSizes.isEmpty, let saved = try? evidenceDatabase?.checkpoints(source: "codex") {
             fileSizes = saved
         }
+        activate(realtimeOnly: false)
+    }
+
+    private func activate(realtimeOnly: Bool) {
         poll()
-        timer = Timer.scheduledTimer(withTimeInterval: 10.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: realtimeOnly ? 1.0 : 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
     }
 
-    func stop() { timer?.invalidate(); timer = nil }
+    func stop() { startupID = nil; timer?.invalidate(); timer = nil }
 
     private func poll() {
         guard !isPolling else { return }
@@ -43,9 +66,11 @@ final class CodexSight: ObservableObject {
         let previousSizes = fileSizes
         let database = evidenceDatabase
         let baselineOtherStreams = isInitialPoll
+        let since = realtimeSince
         queue.async { [weak self] in
             let batch = Self.readLiveEvents(root: root, previousSizes: previousSizes,
                                             baselineOtherStreams: baselineOtherStreams)
+            let collectedEvents = batch.events.filter { since == nil || $0.ts >= since! }
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false
@@ -55,7 +80,7 @@ final class CodexSight: ObservableObject {
                     SourceCheckpoint(source: "codex", stream: stream, offset: Int64(offset),
                                      fingerprint: nil, updatedAt: Date())
                 }
-                try database.persistCollected(raw: batch.raw, events: batch.events, checkpoints: checkpoints)
+                try database.persistCollected(raw: batch.raw, events: collectedEvents, checkpoints: checkpoints)
             } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
@@ -65,7 +90,7 @@ final class CodexSight: ObservableObject {
                 if isConnected { self.isInitialPoll = false }
                 if self.connected != isConnected { self.connected = isConnected }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
-                let fresh = batch.events.filter { self.seen.insert($0.id).inserted }
+                let fresh = collectedEvents.filter { self.seen.insert($0.id).inserted }
                 self.collectionFailures += batch.rawFailures
                 self.malformedRows += malformed
                 self.partialRows += partial
@@ -116,7 +141,7 @@ final class CodexSight: ObservableObject {
         var raw: [RawEvidenceRecord] = []
         var rawFailures = 0
         // One latest rollout at startup, then byte-level increments only.
-        let events = files.sorted { $0.1 > $1.1 }.prefix(1).flatMap { item -> [GuardEvent] in
+        let events = files.sorted { $0.1 > $1.1 }.prefix(baselineOtherStreams ? 1 : 16).flatMap { item -> [GuardEvent] in
             let (url, _, size) = item
             let previous = previousSizes[url.path]
             if let record = RawLogCapture.capture(url: url, source: "codex", previousOffset: previous,

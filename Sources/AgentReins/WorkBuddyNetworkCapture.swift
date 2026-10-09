@@ -27,8 +27,9 @@ final class WorkBuddyNetworkCapture: ObservableObject {
             .appendingPathComponent("Library/Application Support/AgentReins/workbuddy-network.jsonl")
     }
 
-    func start() {
+    func start(realtimeOnly: Bool = false) {
         guard timer == nil else { return }
+        if realtimeOnly { offset = ((try? FileManager.default.attributesOfItem(atPath: captureURL.path)[.size]) as? NSNumber)?.uint64Value ?? 0 }
         startProxy()
         poll()
         timer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in

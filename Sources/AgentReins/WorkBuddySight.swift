@@ -20,6 +20,8 @@ final class WorkBuddySight: ObservableObject {
     private var pendingWakeup = false
     private let hookRoot: URL
     private var seen = Set<UUID>()
+    private var startupID: UUID?
+    private var realtimeSince: Date?
     private var lastPoll = Date.distantPast
     private var fileSizes: [String: UInt64] = [:]
     struct ParserState: Codable {
@@ -47,25 +49,47 @@ final class WorkBuddySight: ObservableObject {
     private var partialRows = 0
     private let queue = DispatchQueue(label: "com.agentspec.workbuddysight", qos: .utility)
 
-    func start() {
-        guard timer == nil else { return }
+    func start(realtimeOnly: Bool = false) {
+        guard timer == nil, startupID == nil else { return }
+        if realtimeOnly {
+            realtimeSince = Date()
+            let id = UUID()
+            startupID = id
+            let root = rootURL
+            queue.async { [weak self] in
+                let offsets = RealtimeLogBaseline.offsets(root: root)
+                DispatchQueue.main.async {
+                    guard let self, self.startupID == id else { return }
+                    self.startupID = nil
+                    self.fileSizes = offsets
+                self.parserStates = offsets.mapValues { size in var state = ParserState(); state.offset = size; return state }
+                    self.activate(realtimeOnly: true)
+                }
+            }
+            return
+        }
         if let states = try? evidenceDatabase?.parserStates(source: "workbuddy") {
             parserStates = states.compactMapValues { try? JSONDecoder().decode(ParserState.self, from: $0) }
         }
         if fileSizes.isEmpty, let saved = try? evidenceDatabase?.checkpoints(source: "workbuddy") {
             fileSizes = saved
         }
+        activate(realtimeOnly: false)
+    }
+
+    private func activate(realtimeOnly: Bool) {
         try? FileManager.default.createDirectory(at: hookRoot, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         watch(hookRoot, isInbox: true)
         poll()
         // File/Hook events handle the hot path; scanning only backs up missed notifications.
-        timer = Timer.scheduledTimer(withTimeInterval: 30.0, repeats: true) { [weak self] _ in
+        timer = Timer.scheduledTimer(withTimeInterval: realtimeOnly ? 2.0 : 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
     }
 
     func stop() {
+        startupID = nil
         timer?.invalidate(); timer = nil
         debounce?.cancel(); debounce = nil
         for watcher in watchers.values { watcher.cancel() }
@@ -124,9 +148,10 @@ final class WorkBuddySight: ObservableObject {
         let previousStates = parserStates
         let inbox = hookRoot
         let projects = rootURL
+        let since = realtimeSince
         lastPoll = Date()
         queue.async { [weak self] in
-            let hooks = WorkBuddyHookInbox.read(root: inbox, projects: projects)
+            let hooks = WorkBuddyHookInbox.read(root: inbox, projects: projects).filter { since == nil || $0.event.ts >= since! }
             if !hooks.isEmpty {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.timer != nil else { return }
@@ -137,7 +162,7 @@ final class WorkBuddySight: ObservableObject {
             let batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
                                               previousSizes: previousSizes, previousStates: previousStates,
                                               targets: hinted)
-            let collectedEvents = hooks.map(\.event) + batch.events
+            let collectedEvents = (hooks.map(\.event) + batch.events).filter { since == nil || $0.ts >= since! }
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false

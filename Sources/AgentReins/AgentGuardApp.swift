@@ -4,7 +4,7 @@ import SwiftUI
 final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppNotifier.requestAuthorization()
-        BrowserProtectionInstaller.installBundledAssets()
+        // This realtime build does not install browser extension assets.
         if let url = Bundle.main.url(forResource: "AgentReins", withExtension: "icns"),
            let icon = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = icon
@@ -29,7 +29,7 @@ struct AgentReinsApp: App {
     @StateObject private var store = RuleStore()
     // Open and verify the durable evidence spine before individual collectors
     // create their own SQLite connections.
-    @StateObject private var eventStore = EventStore()
+    @StateObject private var eventStore = EventStore(realtimeOnly: true)
     @StateObject private var fileGuard = FileGuard()
     @StateObject private var processGuard = ProcessGuard()
     @StateObject private var turnJournalStore = TurnJournalStore()
@@ -92,7 +92,7 @@ struct AgentReinsApp: App {
                     agentDiscovery.observe(processes: inventory)
                 }
                 .task {
-                    semanticAnalyzer.startBackgroundWorker(evidenceURL: FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0].appendingPathComponent("AgentGuard/evidence.sqlite3"), policies: alertPolicyStore)
+                    // Realtime branch: no historical analysis worker.
                     fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvents = { events in
@@ -104,7 +104,7 @@ struct AgentReinsApp: App {
                     liveMemoryMonitor.onEvents = { events in
                         eventStore.record(events.map { attributionResolver.resolve($0) })
                     }
-                    liveMemoryMonitor.start()
+                    // Realtime WorkBuddy / Codex scope; liveMemoryMonitor.start() disabled.
                     workBuddySight.onHookSignals = { processGuard.observeHookSignals($0) }
                     workBuddySight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
@@ -114,14 +114,14 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    workBuddySight.start()
+                    workBuddySight.start(realtimeOnly: true)
                     workBuddyNetworkCapture.onEvents = { events in
-                        let correlated = events.map { attributionResolver.resolveWorkBuddyNetworkBody($0) }
+                        let correlated = events.filter { $0.ts >= eventStore.liveSince }.map { attributionResolver.resolveWorkBuddyNetworkBody($0) }
                         let fresh = eventStore.unrecorded(correlated)
                         attributionResolver.observe(fresh)
                         eventStore.record(fresh)
                     }
-                    workBuddyNetworkCapture.start()
+                    workBuddyNetworkCapture.start(realtimeOnly: true)
                     codexSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)
@@ -130,7 +130,7 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    codexSight.start()
+                    codexSight.start(realtimeOnly: true)
                     qoderSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)
@@ -139,7 +139,7 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    qoderSight.start()
+                    // Realtime WorkBuddy / Codex scope; qoderSight.start() disabled.
                     zcodeSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)
@@ -148,7 +148,7 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    zcodeSight.start()
+                    // Realtime WorkBuddy / Codex scope; zcodeSight.start() disabled.
                     claudeSight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
                         let projected = activityProjector.project(fresh)
@@ -157,7 +157,7 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    claudeSight.start()
+                    // Realtime WorkBuddy / Codex scope; claudeSight.start() disabled.
                     cursorSight.onEvents = { events in
                         let fresh = eventStore.unrecorded(events)
                         let projected = activityProjector.project(fresh)
@@ -166,14 +166,14 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    cursorSight.start()
+                    // Realtime WorkBuddy / Codex scope; cursorSight.start() disabled.
                     webAgentSight.onEvents = { events in
                         let fresh = eventStore.unrecorded(events)
                         attributionResolver.observe(fresh)
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh)
                     }
-                    webAgentSight.start()
+                    // Realtime WorkBuddy / Codex scope; webAgentSight.start() disabled.
                     agentDiscovery.start()
                     // Historical memory stores are intentionally on-demand.
                     // A full ~/.claude + ~/.cursor + ~/.codex scan at launch

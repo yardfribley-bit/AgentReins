@@ -6,36 +6,20 @@ struct ContentView: View {
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
-    @EnvironmentObject private var agentDiscovery: AgentDiscoveryManager
-    @StateObject private var liveDashboard = LiveDashboardViewModel()
-
-    private let healthTimer = Timer.publish(every: 10, on: .main, in: .common).autoconnect()
-
-    private var observing: Bool { fileGuard.running || processGuard.running }
+    @StateObject private var realtime = RealtimeWorkspaceState()
+    private let healthTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     var body: some View {
-        TaskWorkspaceView(sessions: liveDashboard.snapshot.sessions, observing: observing, agents: agentDiscovery.agents)
+        RealtimeWorkspaceView(payload: realtime.payload(processes: processGuard.processInventory,
+            health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running,
+            error: eventStore.persistenceError))
         .frame(minWidth: 1100, minHeight: 720)
         .task {
-            refreshLiveDashboard()
-            liveDashboard.publishImmediately()
+            realtime.ingest(eventStore.events)
             if !fileGuard.running { fileGuard.start() }
             if !processGuard.running { processGuard.start() }
         }
-        .onReceive(eventStore.$revision) { _ in refreshEvidence() }
-        .onReceive(processGuard.$processInventory) { liveDashboard.updateProcesses($0) }
-        .onReceive(agentDiscovery.$agents) { liveDashboard.updateAgents($0) }
+        .onReceive(eventStore.$revision) { _ in realtime.ingest(eventStore.events) }
         .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true) }
-    }
-
-    private func refreshLiveDashboard() {
-        refreshEvidence()
-        liveDashboard.updateProcesses(processGuard.processInventory)
-        liveDashboard.updateAgents(agentDiscovery.agents)
-    }
-
-    private func refreshEvidence() {
-        liveDashboard.updateEvidence(sessions: eventStore.sessions, events: eventStore.events,
-            incidents: eventStore.incidents, health: eventStore.collectorHealth)
     }
 }
 

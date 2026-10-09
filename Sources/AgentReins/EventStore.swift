@@ -64,7 +64,7 @@ final class EventStore: ObservableObject {
     private var durableAnalysisTask: Task<Void, Never>?
     private var taskSearchTask: Task<Void, Never>?
 
-    init(fileURL: URL = EventStore.defaultURL()) {
+    init(fileURL: URL = EventStore.defaultURL(), realtimeOnly: Bool = false) {
         self.fileURL = fileURL
         encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
@@ -74,7 +74,7 @@ final class EventStore: ObservableObject {
             ? EvidenceDatabase.defaultURL() : fileURL.appendingPathExtension("sqlite3")
         let openedDatabase = try? EvidenceDatabase.shared(url: databaseURL)
         database = openedDatabase
-        taskSearchWriter = openedDatabase.flatMap { _ in try? TaskSearchIndex(evidenceURL: databaseURL) }
+        taskSearchWriter = realtimeOnly ? nil : openedDatabase.flatMap { _ in try? TaskSearchIndex(evidenceURL: databaseURL) }
         taskSearchReader = taskSearchWriter == nil ? nil : (try? TaskSearchIndex(evidenceURL: databaseURL))
         evidenceBuffer = openedDatabase.map(EvidenceBufferActor.init(database:))
         if openedDatabase == nil {
@@ -82,7 +82,8 @@ final class EventStore: ObservableObject {
         }
         load()
         refreshCollectorHealth(publish: false)
-        if fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL {
+        if realtimeOnly { openedDatabase?.setAuditUploadEnabled(false) }
+        if !realtimeOnly, fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL {
             if let openedDatabase { auditUploader = AuditUploadClient(database: openedDatabase) }
             openedDatabase?.setAuditUploadEnabled(auditUploader != nil)
             startHistorySummaryBackfill(database: openedDatabase)
