@@ -139,10 +139,11 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let browser = try XCTUnwrap(web)
         let title = try await browser.evaluateJavaScript("document.querySelector('.task-head h1').textContent") as? String
         XCTAssertEqual(title, bad)
-        let contextText = try await browser.evaluateJavaScript("document.getElementById('context-content').textContent") as? String
+        _ = try await browser.evaluateJavaScript("document.querySelector('[data-flow-node=context]').dispatchEvent(new MouseEvent('click'))")
+        let contextText = try await browser.evaluateJavaScript("document.getElementById('detail-code').textContent") as? String
         XCTAssertTrue(contextText?.contains(bad) ?? false)
-        let contextVisible = try await browser.evaluateJavaScript("!document.getElementById('context-panel').hidden") as? Bool
-        XCTAssertEqual(contextVisible, true)
+        let graphVisible = try await browser.evaluateJavaScript("!document.getElementById('graph-screen').hidden") as? Bool
+        XCTAssertEqual(graphVisible, true)
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool
         XCTAssertEqual(hacked, false)
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=results]').click()")
