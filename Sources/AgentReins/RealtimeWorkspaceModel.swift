@@ -43,6 +43,7 @@ struct RealtimeTask: Encodable, Identifiable {
     let cards: [RealtimeCard]
     let model: String?
     let reportedComplete: Bool
+    var isPrimaryTask: Bool = true
 }
 struct RealtimeCard: Encodable, Identifiable {
     let id: String, kind: String, title: String, status: String, tag: String
@@ -79,7 +80,8 @@ enum RealtimeWorkspaceProjector {
             return RealtimeTask(id: Data(key.utf8).base64EncodedString(), agent: canonicalAgent(first.agent)!, session: first.sessionId!, turn: turn(first),
                 title: String(title.prefix(300)), startedAt: ordered.first!.ts, lastActivity: ordered.last!.ts,
                 cards: cards(ordered), model: ordered.compactMap(\.model).last,
-                reportedComplete: ordered.contains { $0.kind == "model" && $0.op == "response" && ["completed", "final_answer", "end_turn", "stop_sequence"].contains($0.action.lowercased()) })
+                reportedComplete: ordered.contains { $0.kind == "model" && $0.op == "response" && ["completed", "final_answer", "end_turn", "stop_sequence"].contains($0.action.lowercased()) },
+                isPrimaryTask: ordered.contains { $0.kind == "model" || $0.op == "hook_user_prompt" || $0.kind == "tool" || $0.source == "workbuddy-hook" })
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
     static func cards(_ ordered: [GuardEvent]) -> [RealtimeCard] {
@@ -116,7 +118,7 @@ enum RealtimeWorkspaceProjector {
             } else if event.kind == "activity" || event.kind == "memory" {
                 kind = "process"; title = CollectionRecordPresentation(event, receivedAt: event.ts).title
             } else if event.kind == "model" {
-                kind = "model"; title = event.op == "prompt" ? "Agent → 大模型" : "大模型 → Agent"
+                kind = "model"; title = ["prompt", "network_prompt"].contains(event.op) ? "Agent → 大模型" : event.op == "reasoning_summary" ? "模型返回的思考摘要" : "大模型 → Agent"
             } else if event.kind == "file" {
                 kind = event.path.lowercased().hasSuffix("skill.md") ? "skill" : "files"
                 title = "\(event.op) · \((event.path as NSString).lastPathComponent)"

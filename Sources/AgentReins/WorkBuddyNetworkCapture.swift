@@ -15,6 +15,7 @@ final class WorkBuddyNetworkCapture: ObservableObject {
     private var timer: Timer?
     private var proxy: Process?
     private var offset: UInt64 = 0
+    private var acceptedEvents = 0
     private var pollInFlight = false
     private let queue = DispatchQueue(label: "com.agentspec.workbuddy-network", qos: .utility)
     private let database = try? EvidenceDatabase.shared()
@@ -126,11 +127,12 @@ final class WorkBuddyNetworkCapture: ObservableObject {
                     self.lastUpdate = result.events.map(\.ts).max()
                     self.onEvents?(result.events)
                 }
+                self.acceptedEvents += result.events.count
                 self.database?.enqueueHealth(CollectorHealthRecord(
                     source: "workbuddy-network-body",
                     state: !self.proxyRunning ? .failed : result.malformed > 0 || !self.connected ? .degraded : .healthy,
                     lastSuccess: self.connected ? Date() : nil, lagSeconds: nil,
-                    accepted: result.events.count, malformed: result.malformed, dropped: 0,
+                    accepted: self.acceptedEvents, malformed: result.malformed, dropped: 0,
                     detail: self.detail))
             }
         }

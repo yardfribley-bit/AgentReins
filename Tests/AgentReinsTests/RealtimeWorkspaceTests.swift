@@ -95,6 +95,15 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertEqual(payload.collected.first?.agent, "归属未确认")
         XCTAssertTrue(payload.collected.first?.details.contains("/project/output.txt") ?? false)
     }
+    func testActualNetworkPromptDirectionAndBackgroundFlowClassification() throws {
+        let prompt = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "network_prompt", severity: "info", ts: start, action: "captured_complete", sessionId: "session", turnId: "one", modelPrompt: "hello", source: "agentsight:workbuddy-network-body")
+        let memory = GuardEvent(kind: "network", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "memory_recall", severity: "info", ts: start.addingTimeInterval(1), action: "captured_complete", sessionId: "network-flow", turnId: "flow", source: "agentsight:workbuddy-network-body")
+        let tasks = RealtimeWorkspaceProjector.tasks(events: [prompt, memory], since: start)
+        XCTAssertEqual(tasks.first { $0.session == "network-flow" }?.isPrimaryTask, false)
+        let task = try XCTUnwrap(tasks.first { $0.session == "session" })
+        XCTAssertTrue(task.isPrimaryTask)
+        XCTAssertEqual(task.cards.first?.title, "Agent → 大模型")
+    }
     @MainActor func testProcessInventoryIsVisibleWithoutTaskOrTranscript() throws {
         let state = RealtimeWorkspaceState()
         let root = ProcessSnapshotRecord(pid: "100", ppid: "1", command: "Electron", agent: "workbuddy", birthIdentity: 1, executablePath: "/Applications/WorkBuddy.app/Contents/MacOS/Electron")
