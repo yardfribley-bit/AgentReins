@@ -158,6 +158,51 @@ final class RealtimeWorkspaceTests: XCTestCase {
         state.ingest([large])
         XCTAssertTrue(state.payload(processes: [], health: [], observing: true, error: nil).truncated)
     }
+    @MainActor func testActualWorkBuddyFieldSnapshot() async throws {
+        guard let source = ProcessInfo.processInfo.environment["AGENTREINS_FIELD_CHECKPOINT"],
+              let session = ProcessInfo.processInfo.environment["AGENTREINS_FIELD_SESSION"],
+              let directoryPath = ProcessInfo.processInfo.environment["AGENTREINS_UI_REVIEW_DIR"] else {
+            throw XCTSkip("现场测试需指定独立实际采集快照和会话")
+        }
+        let checkpoint = try XCTUnwrap(RealtimeActiveCheckpoint.load(URL(fileURLWithPath: source)))
+        let records = checkpoint.events
+        let tasks = RealtimeWorkspaceProjector.tasks(events: records, since: .distantPast)
+        let actual = try XCTUnwrap(tasks.first { $0.session == session && !$0.turn.isEmpty })
+        XCTAssertNotNil(actual.originalRequest)
+        XCTAssertEqual(actual.lifecycleStatus, "completed")
+        XCTAssertTrue(actual.cards.contains { $0.kind == "command" && $0.execution?.exitCode == 0 && $0.execution?.stdout?.isEmpty == false })
+        XCTAssertTrue(actual.cards.contains { $0.title == "WebSearch" && $0.phase == "returned" })
+        let candidates = RealtimeArtifactProjector.candidates(events: records, tasks: tasks)
+        let artifacts = RealtimeArtifactProjector.probe(candidates).filter { $0.taskID == actual.id }
+        XCTAssertTrue(artifacts.contains { $0.exists && $0.preview?.isEmpty == false })
+        var payload = RealtimeWorkspacePayload(tasks: [actual], collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: Date(), truncated: false,
+            contexts: RealtimeContextProjector.assemble(records.compactMap(RealtimeContextProjector.parse), events: records))
+        payload.artifacts = artifacts
+        let directory = URL(fileURLWithPath: directoryPath)
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        try encoder.encode(payload).write(to: directory.appendingPathComponent("actual-workbuddy-payload.json"))
+        _ = NSApplication.shared
+        let host = NSHostingView(rootView: RealtimeWorkspaceView(payload: payload))
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1536, height: 1100), styleMask: [.borderless], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false; window.contentView = host; host.frame = window.contentLayoutRect; window.orderBack(nil)
+        defer { window.close() }
+        func find(_ v: NSView) -> WKWebView? { (v as? WKWebView) ?? v.subviews.compactMap { find($0) }.first }
+        var web: WKWebView?
+        for _ in 0..<50 {
+            try await Task.sleep(for: .milliseconds(100)); web = find(host)
+            if let web, (try? await web.evaluateJavaScript("document.querySelector('.task-head h1')?.textContent")) as? String == actual.title { break }
+        }
+        let browser = try XCTUnwrap(web)
+        let renderedTitle = try await browser.evaluateJavaScript("document.querySelector('.task-head h1').textContent") as? String
+        XCTAssertEqual(renderedTitle, actual.title)
+        _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=results]').click()")
+        let completedCount = try await browser.evaluateJavaScript("document.querySelectorAll('[data-status=completed] .board-card').length") as? Int
+        XCTAssertEqual(completedCount, 1)
+        let image = try await browser.takeSnapshot(configuration: nil)
+        let bitmap = try XCTUnwrap(NSBitmapImageRep(data: try XCTUnwrap(image.tiffRepresentation)))
+        try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: directory.appendingPathComponent("actual-workbuddy-board.png"))
+    }
     @MainActor func testProductionWebKitRendersAndEscapesEvidence() async throws {
         let bad = "<img src=x onerror='window.hacked=1'>"
         let evidence = [event("call"), event("result", result: "{\"exit_code\":1}", seconds: 2), GuardEvent(kind: "model", ruleId: "fixture", path: "/project", command: nil, agent: "workbuddy", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "session", turnId: "one", userIntent: bad, modelPrompt: bad)]

@@ -196,6 +196,19 @@ enum RealtimeDetailProjector {
             else if let range = output.range(of: "Output:\n") { stdout = String(output[range.upperBound...]) }
             else if result != nil { stdout = output }
         }
+        // WorkBuddy's native Bash result has a distinct labelled envelope.
+        // Parse only that executor protocol, never arbitrary output containing labels.
+        if body.isEmpty, request?.toolName?.lowercased() == "bash", let output,
+           output.hasPrefix("Command: "),
+           let outStart = output.range(of: "\nStdout: "),
+           let errStart = output.range(of: "\nStderr: ", range: outStart.upperBound..<output.endIndex),
+           let exitStart = output.range(of: "\nExit Code: ", range: errStart.upperBound..<output.endIndex) {
+            let rawOut = String(output[outStart.upperBound..<errStart.lowerBound])
+            let rawErr = String(output[errStart.upperBound..<exitStart.lowerBound])
+            stdout = rawOut == "(empty)" ? "" : rawOut
+            stderr = rawErr == "(empty)" ? "" : rawErr
+            exit = Int(output[exitStart.upperBound...].split(separator: "\n", maxSplits: 1).first.map(String.init) ?? "")
+        }
         let chunks = streams.map { event -> RealtimeOutputChunk in
             let metadata = object(event.command) ?? [:]
             let channel = text(metadata["channel"]) ?? "output"
@@ -211,6 +224,7 @@ enum RealtimeDetailProjector {
         let status: String
         if ["approval_required", "awaiting_approval", "blocked"].contains(action) { status = "waiting" }
         else if ["cancelled", "canceled", "aborted"].contains(action) { status = "cancelled" }
+        else if exit.map({ $0 != 0 }) == true { status = "failed" }
         else if let event, RealtimeWorkspaceProjector.isFailure(event, result: output) { status = "failed" }
         else if complete { status = "returned" }
         else if !starts.isEmpty || !streams.isEmpty || session != nil { status = "running" }

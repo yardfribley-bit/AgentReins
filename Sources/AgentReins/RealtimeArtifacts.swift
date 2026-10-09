@@ -37,7 +37,8 @@ enum RealtimeArtifactProjector {
                 add(event.path, event: event, task: task, basis: "当前任务明确写入/创建记录；文件存在与内容另行核对")
             }
             if event.kind == "tool", event.op == "result", let result = object(event.modelResponse) {
-                for key in ["output_files", "artifacts"] {
+                let keys = ["output_files", "artifacts"] + (event.toolName == "present_files" && result["type"] as? String == "present_files_result" ? ["files"] : [])
+                for key in keys {
                     for value in result[key] as? [Any] ?? [] {
                         if let path = value as? String { add(path, event: event, task: task, basis: "工具实际返回的产物路径") }
                         else if let row = value as? [String: Any], let path = row["path"] as? String { add(path, event: event, task: task, basis: "工具实际返回的产物路径") }

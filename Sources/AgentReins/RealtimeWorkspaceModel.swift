@@ -89,6 +89,20 @@ enum RealtimeWorkspaceProjector {
         func turn(_ e: GuardEvent) -> String {
             if let turn = e.turnId { return turn }
             if e.toolCallId != nil, let matches = callTurns[callKey(e)], matches.count == 1 { return matches.first! }
+            // WorkBuddy Stop omits turn_id, but carries the exact final assistant
+            // message. Bind only to one native turn in this same agent/session;
+            // repeated content in multiple turns is deliberately left unlinked.
+            if e.source == "workbuddy-hook", e.op == "hook_turn_stop",
+               let record = RealtimeDetailProjector.object(e.afterContent),
+               let payload = record["payload"] as? [String: Any],
+               let final = payload["last_assistant_message"] as? String, !final.isEmpty {
+                let matches = Set(fresh.filter { candidate in
+                    candidate.source == "agentsight:workbuddy-local" && candidate.op == "response" &&
+                    candidate.sessionId == e.sessionId && canonicalAgent(candidate.agent) == canonicalAgent(e.agent) &&
+                    candidate.modelResponse == final && candidate.turnId != nil
+                }.compactMap(\.turnId))
+                if matches.count == 1 { return matches.first! }
+            }
             return ""
         }
         let grouped = Dictionary(grouping: fresh) { "\(canonicalAgent($0.agent)!)\u{0}\($0.sessionId!)\u{0}\(turn($0))" }

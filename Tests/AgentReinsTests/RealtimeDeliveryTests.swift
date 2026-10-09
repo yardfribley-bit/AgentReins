@@ -12,6 +12,11 @@ final class RealtimeDeliveryTests: XCTestCase {
         let candidates = RealtimeArtifactProjector.candidates(events: events, tasks: tasks)
         XCTAssertEqual(candidates.map(\.path), ["/tmp/actual.md"])
     }
+    func testPresentFilesNativeResultCreatesVerifiedCandidate() throws {
+        let delivered = GuardEvent(kind: "tool", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "result", severity: "info", ts: Date(), action: "completed", sessionId: "s", turnId: "t", toolCallId: "delivery", modelResponse: #"{"type":"present_files_result","files":["/tmp/report.md"]}"#, toolName: "present_files", source: "agentsight:workbuddy-local")
+        let tasks = RealtimeWorkspaceProjector.tasks(events: [delivered], since: .distantPast)
+        XCTAssertEqual(RealtimeArtifactProjector.candidates(events: [delivered], tasks: tasks).map(\.path), ["/tmp/report.md"])
+    }
     func testArtifactProbePreviewAndDisappearance() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

@@ -56,6 +56,16 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
         XCTAssertNil(execution.processID)
         XCTAssertEqual(execution.command, #"["python3","stream.py"]"#)
     }
+    func testStopExactFinalMessageBindsUniqueNativeTurnAndRejectsAmbiguity() throws {
+        let reply = record("response", kind: "model", action: "completed", call: nil, output: "最终报告已交付", source: "agentsight:workbuddy-local")
+        let body = #"{"payload":{"last_assistant_message":"最终报告已交付"}}"#
+        let stop = GuardEvent(kind: "activity", ruleId: "hook", path: "-", command: nil, agent: "codex", op: "hook_turn_stop", severity: "info", ts: start.addingTimeInterval(2), action: "observed", sessionId: "session", afterContent: body, source: "workbuddy-hook")
+        let unique = RealtimeWorkspaceProjector.tasks(events: [reply, stop], since: start)
+        XCTAssertEqual(unique.count, 1); XCTAssertEqual(unique.first?.lifecycleStatus, "completed")
+        let repeated = record("response", kind: "model", action: "completed", call: nil, output: "最终报告已交付", turn: "other", source: "agentsight:workbuddy-local")
+        let ambiguous = RealtimeWorkspaceProjector.tasks(events: [reply, repeated, stop], since: start)
+        XCTAssertEqual(ambiguous.count, 3); XCTAssertTrue(ambiguous.allSatisfy { !$0.reportedComplete })
+    }
     func testSessionOnlyHookStopDoesNotCompleteOtherTurnOrLane() throws {
         let stop = record("hook_turn_stop", kind: "activity", seconds: 2, call: nil, turn: nil, source: "workbuddy-hook")
         let tasks = RealtimeWorkspaceProjector.tasks(events: [record("call"), stop], since: start)
@@ -111,6 +121,17 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
         XCTAssertEqual(execution.status, "running")
         XCTAssertFalse(execution.outputComplete)
         XCTAssertEqual(try task([call, delta, err]).coverage.first { $0.category == "execution" }?.count, 2)
+    }
+    func testWorkBuddyBashEnvelopeSeparatesOutputAndExitCode() throws {
+        let call = record("call", command: #"Bash({"command":"echo hello"})"#)
+        let end = record("result", action: "completed", seconds: 1, output: "Command: echo hello\nStdout: hello\n\nStderr: failure\nExit Code: 7\nSignal: (none)")
+        let card = try XCTUnwrap(try task([call, end]).cards.first)
+        XCTAssertEqual(card.execution?.command, "echo hello")
+        XCTAssertEqual(card.execution?.stdout, "hello\n")
+        XCTAssertEqual(card.execution?.stderr, "failure")
+        XCTAssertEqual(card.execution?.exitCode, 7)
+        XCTAssertEqual(card.phase, "failed")
+        XCTAssertEqual(try task([call, end]).lifecycleStatus, "running")
     }
     func testCodexNativeTextProtocolKeepsOutputAndExitCode() throws {
         let call = record("call", command: #"{"cmd":"echo hi"}"#)
