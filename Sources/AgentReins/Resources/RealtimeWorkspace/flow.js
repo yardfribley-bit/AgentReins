@@ -3,7 +3,7 @@
 (()=>{
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
  let lastScope=null,known=new Map(),seeded=false,zoomMode='readable',currentScale=.85,currentNode=null,diagramNodes=[],dimensions={width:1000,height:1340},observer;
- const compact={user:'用户输入',perception:'输入材料',model:'大语言模型',context:'上下文 / 记忆',plan:'规划调度',direct:'直接回答？',reply:'回复输出',action:'工具执行',closure:'目标完成？',mcp:'MCP / Skill',api:'API',code:'命令',database:'数据库',files:'文件',external:'外部服务',observation:'可观测层'};
+ const compact={user:'用户输入',perception:'输入材料',model:'大语言模型',context:'上下文 / 记忆',plan:'规划调度',direct:'直接回答？',reply:'回复输出',action:'工具执行',closure:'目标完成？',mcp:'MCP / Skill',api:'网络',code:'命令',database:'数据库',files:'文件',external:'外部服务',observation:'可观测层'};
  function applySize(){const host=document.getElementById('graph'),viewport=document.getElementById('graph-viewport'),spacer=document.getElementById('graph-spacer');if(!host||!viewport||!spacer)return;
   if(innerWidth<=600){host.style.transform='';host.style.width='';host.style.height='';spacer.style.width='';spacer.style.height='';return;}
   const {width,height}=dimensions;if(zoomMode==='fit')currentScale=Math.min(1,(viewport.clientWidth-20)/width,(viewport.clientHeight-16)/height);

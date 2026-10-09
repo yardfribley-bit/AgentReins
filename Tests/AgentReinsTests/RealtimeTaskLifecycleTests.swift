@@ -109,7 +109,7 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
         let execution = try XCTUnwrap(try task([call, result]).cards.first?.execution)
         XCTAssertEqual(execution.executionID, "1234")
         XCTAssertNil(execution.processID)
-        XCTAssertEqual(execution.command, #"["python3","stream.py"]"#)
+        XCTAssertEqual(execution.command, "python3 stream.py")
     }
     func testStopExactFinalMessageBindsUniqueNativeTurnAndRejectsAmbiguity() throws {
         let reply = record("response", kind: "model", action: "completed", call: nil, output: "最终报告已交付", source: "agentsight:workbuddy-local")

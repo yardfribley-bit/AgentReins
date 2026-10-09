@@ -130,7 +130,6 @@ final class EventAttributionResolver: ObservableObject {
             let previous = event.attributionMethod.map { $0 + " + " } ?? ""
             return event.attributed(sessionId: sessionId, turnId: turnId,
                                     toolCallId: tool.toolCallId, toolName: tool.toolName,
-                                    remoteDomain: requestedDomain(in: tool.command),
                                     confidence: .inferred,
                                     method: previous + "single active tool call (late correlation)")
         }
@@ -158,7 +157,6 @@ final class EventAttributionResolver: ObservableObject {
         let resolvedToolCallId = event.kind == "network" ? tool?.toolCallId : best.toolCallId
         return event.attributed(sessionId: best.sessionId, turnId: best.turnId,
                                 toolCallId: resolvedToolCallId, toolName: tool?.toolName,
-                                remoteDomain: tool.flatMap { requestedDomain(in: $0.command) },
                                 confidence: .inferred,
                                 method: reasons.joined(separator: " + "))
     }
@@ -175,12 +173,18 @@ final class EventAttributionResolver: ObservableObject {
             $0.kind == "tool" && $0.op == "call" && $0.toolCallId != nil &&
             abs(event.ts.timeIntervalSince($0.timestamp)) <= toolWindow
         }
-        let byCall = Dictionary(grouping: tools, by: { $0.toolCallId! })
+        // Tool arguments describe intent. They must neither relabel a socket
+        // nor associate an observed different destination with that URL tool.
+        let destinationCompatible = tools.filter { tool in
+            guard let observed = event.remoteDomain, let requested = requestedDomain(in: tool.command) else { return true }
+            return observed.lowercased() == requested.lowercased()
+        }
+        let byCall = Dictionary(grouping: destinationCompatible, by: { $0.toolCallId! })
         if byCall.count > 1 {
             // When several tools start together, a single tool containing an
             // explicit URL is the only defensible candidate for a web socket.
             // Generic MCP and filesystem calls remain ambiguous.
-            let networkTools = tools.filter { requestedDomain(in: $0.command) != nil }
+            let networkTools = destinationCompatible.filter { requestedDomain(in: $0.command) != nil }
             let networkByCall = Dictionary(grouping: networkTools, by: { $0.toolCallId! })
             guard networkByCall.count == 1, let group = networkByCall.values.first else { return nil }
             return group.max(by: { $0.timestamp < $1.timestamp })

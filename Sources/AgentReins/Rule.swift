@@ -136,7 +136,7 @@ struct GuardEvent: Identifiable, Codable, Sendable {
     }
 
     func attributed(sessionId: String, turnId: String, toolCallId: String?, toolName: String? = nil,
-                    remoteDomain: String? = nil,
+                    remoteDomain: String? = nil, replaceRemoteDomain: Bool = false,
                     confidence: EvidenceConfidence, method: String) -> GuardEvent {
         GuardEvent(id: id, kind: kind, ruleId: ruleId, path: path, command: command,
                    agent: agent, op: op, severity: severity, ts: ts, action: action,
@@ -152,7 +152,7 @@ struct GuardEvent: Identifiable, Codable, Sendable {
                    attributionMethod: method, processId: processId,
                    parentProcessId: parentProcessId, localAddress: localAddress,
                    remoteHost: remoteHost, remotePort: remotePort,
-                   remoteDomain: remoteDomain ?? self.remoteDomain,
+                   remoteDomain: replaceRemoteDomain ? remoteDomain : remoteDomain ?? self.remoteDomain,
                    startedAt: startedAt, endedAt: endedAt, durationMS: durationMS,
                    relatedPath: relatedPath)
     }

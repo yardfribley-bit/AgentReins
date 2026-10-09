@@ -295,13 +295,15 @@ final class ProcessGuard: ObservableObject {
         }
         networkSnapshotInFlight = true
         let started = Date()
-        let trigger = pendingNetworkTriggers.isEmpty ? nil : pendingNetworkTriggers.keys.sorted().joined(separator: ",")
+        let hookTrigger = pendingNetworkTriggers.isEmpty ? nil : pendingNetworkTriggers.keys.sorted().joined(separator: ",")
+        let trigger = hookTrigger ?? (targets == nil ? nil : "new_process_attached")
         pendingNetworkTriggers.removeAll()
-        let sampledProcesses = trigger == nil ? (targets ?? observedProcesses) : hookCorrelation.samplingTargets(observedProcesses)
+        let sampledProcesses = hookTrigger == nil ? (targets ?? observedProcesses) : hookCorrelation.samplingTargets(observedProcesses)
         let agentPIDs = sampledProcesses.map(\.pid)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
             let connections = self.networkProvider.snapshot(pids: agentPIDs)
+            let observedAt = Date()
             let validatedProcesses = sampledProcesses.filter {
                 guard let pid = Int32($0.pid), let birth = $0.birthIdentity else { return false }
                 return LibprocProcessActivitySampler.birthIdentity(pid) == birth
@@ -313,7 +315,10 @@ final class ProcessGuard: ObservableObject {
                 return LibprocProcessActivitySampler.birthIdentity(pid) == birth
             }
             let ipcEvents = self.observationCoordinator.observeIPC(processes: ipcProcesses, records: ipcRecords, trigger: trigger)
-            let proxyDestinations = targets == nil && trigger == nil ? self.proxyDestinationProvider.snapshot() : []
+            // A newly attached Git/curl helper may finish before the ten-second
+            // sweep. Its first scoped sample needs the same route and network
+            // projection as a periodic sample.
+            let proxyDestinations = self.proxyDestinationProvider.snapshot()
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.networkSnapshotInFlight = false
@@ -322,10 +327,8 @@ final class ProcessGuard: ObservableObject {
                 if !self.pendingNetworkTriggers.isEmpty { self.captureNetwork() }
                 self.workingCollectionHealth.lastNetworkDurationMS = Date().timeIntervalSince(started) * 1_000
                 self.workingCollectionHealth.lastNetworkSuccess = Date()
-                if targets == nil && trigger == nil {
-                    self.processNetwork(procs: self.latestProcesses, connections: connections,
-                                        proxyDestinations: proxyDestinations)
-                }
+                self.processNetwork(processes: validatedProcesses, connections: connections,
+                                    proxyDestinations: proxyDestinations, observedAt: observedAt)
                 self.persistHealth(source: "network", state: .healthy,
                                    detail: "Socket evidence is sampled and may miss short connections")
                 self.publishHealthIfNeeded()
@@ -414,13 +417,9 @@ final class ProcessGuard: ObservableObject {
         onEvents?(newEvents)
     }
 
-    private func processNetwork(procs: [SnapshotProcess],
+    private func processNetwork(processes: [ProcessSnapshotRecord],
                                 connections: [NetworkConnectionRecord],
-                                proxyDestinations: [ProxyDestinationRecord]) {
-        let byPid = Dictionary(uniqueKeysWithValues: procs.map {
-            ($0.pid, (ppid: $0.ppid, cmd: $0.cmd, agent: $0.agent))
-        })
-        let attributions = attributions(byPid: byPid)
+                                proxyDestinations: [ProxyDestinationRecord], observedAt: Date) {
         for destination in proxyDestinations {
             if let existing = recentProxyDestinations[destination.clientPort],
                existing.timestamp >= destination.timestamp { continue }
@@ -428,17 +427,15 @@ final class ProcessGuard: ObservableObject {
         }
         let cutoff = Date().addingTimeInterval(-300)
         recentProxyDestinations = recentProxyDestinations.filter { $0.value.timestamp >= cutoff }
-        let agentConnections = connections
-            .filter { attributions[$0.pid] != nil && !$0.isListener && $0.state != "CLOSED" }
-            .compactMap(resolveProxyDestination)
         let connectionCutoff = Date().addingTimeInterval(-300)
         seenConnections = seenConnections.filter { $0.value >= connectionCutoff }
-        var networkEvents: [GuardEvent] = []
-        for connection in agentConnections where seenConnections[connection.identity] == nil {
-            seenConnections[connection.identity] = Date()
-            if let agent = attributions[connection.pid] {
-                networkEvents.append(makeNetworkEvent(connection, agent: agent))
-            }
+        let projected = NetworkSocketEvidenceProjector.project(processes: processes,
+            connections: connections, proxyDestinations: Array(recentProxyDestinations.values),
+            observedAt: observedAt, source: networkProvider.sourceID)
+        let networkEvents = projected.filter { event in
+            let identity = event.id.uuidString
+            guard seenConnections[identity] == nil else { return false }
+            seenConnections[identity] = Date(); return true
         }
         guard !networkEvents.isEmpty else { return }
         workingCollectionHealth.acceptedNetworkEvents += networkEvents.count
@@ -514,41 +511,6 @@ final class ProcessGuard: ObservableObject {
                             source: evidenceSource.id, attributionConfidence: .unknown,
                             attributionMethod: "awaiting turn correlation",
                             processId: Int32(pid), parentProcessId: Int32(ppid))
-    }
-
-    private func makeNetworkEvent(_ connection: NetworkConnectionRecord, agent: String) -> GuardEvent {
-        let routeEvidence = connection.route.map { " + exact client-port join via \($0) access log" } ?? ""
-        let domain = connection.route == nil ? nil : connection.remoteHost
-        let destination = NetworkDestinationAssessment.assess(domain: domain, host: connection.remoteHost)
-        return GuardEvent(kind: "network", ruleId: "network_connection", path: "-",
-                   command: nil, agent: agent, op: "connect",
-                   severity: destination.needsAttention ? "medium" : "info",
-                   ts: Date(), action: "observed", source: networkProvider.sourceID,
-                   attributionConfidence: .inferred,
-                   attributionMethod: "lsof socket owner + process-tree agent\(routeEvidence)",
-                   processId: Int32(connection.pid),
-                   localAddress: connection.localAddress,
-                   remoteHost: connection.remoteHost, remotePort: connection.remotePort,
-                   remoteDomain: domain, startedAt: Date())
-    }
-
-    private func resolveProxyDestination(_ connection: NetworkConnectionRecord) -> NetworkConnectionRecord? {
-        guard isLoopback(connection.remoteHost) else { return connection }
-        guard let clientPort = endpointPort(connection.localAddress),
-              let destination = recentProxyDestinations[clientPort] else { return nil }
-        return NetworkConnectionRecord(pid: connection.pid, localAddress: connection.localAddress,
-                                       remoteHost: destination.remoteHost,
-                                       remotePort: destination.remotePort,
-                                       route: destination.proxyName)
-    }
-
-    private func isLoopback(_ host: String) -> Bool {
-        host == "127.0.0.1" || host == "::1" || host == "localhost"
-    }
-
-    private func endpointPort(_ endpoint: String) -> Int? {
-        guard let separator = endpoint.lastIndex(of: ":") else { return nil }
-        return Int(endpoint[endpoint.index(after: separator)...])
     }
 
     private func notify(title: String, body: String) {

@@ -32,6 +32,16 @@ struct RealtimeResourceDetail: Encodable {
     let before: String?, after: String?, diff: String?
     let addresses: [String], basis: String, ipScope: String?, location: String?
     let beforeTruncated: Bool, afterTruncated: Bool, diffTruncated: Bool
+    var evidenceType: String? = nil
+    var observedLocalAddress: String? = nil
+    var observedRemoteHost: String? = nil
+    var observedRemotePort: Int? = nil
+    var socketState: String? = nil
+    var processIdentity: String? = nil
+    var proxySource: String? = nil
+    var proxyObservedAt: Date? = nil
+    var requestedURL: String? = nil
+    var destinationBasis: String? = nil
 }
 
 struct RealtimeLifecycleProjection {
@@ -253,12 +263,22 @@ enum RealtimeDetailProjector {
     }
     static func execution(request: GuardEvent?, result: GuardEvent?, events: [GuardEvent], input: String?, output: String?) -> RealtimeExecutionDetail {
         let args = object(input) ?? [:], body = resultObject(output) ?? [:]
-        let rawCommand = text(args["command"] ?? args["cmd"] ?? args["shell_command"]) ?? (object(input) == nil ? input : nil)
+        let commandValue = args["command"] ?? args["cmd"] ?? args["shell_command"]
+        let rawCommand: String?
+        if let argv = commandValue as? [String] {
+            let shell = ["sh","bash","zsh","fish"].contains(((argv.first ?? "") as NSString).lastPathComponent)
+            if shell, let flag = argv.firstIndex(where: { ["-c","-lc","-ic"].contains($0) }), argv.indices.contains(flag + 1) {
+                rawCommand = argv[flag + 1]
+            } else {
+                rawCommand = argv.map { $0.contains(where: { $0.isWhitespace }) ? "'" + $0.replacingOccurrences(of:"'",with:"'\\''") + "'" : $0 }.joined(separator:" ")
+            }
+        } else { rawCommand = text(commandValue) ?? (object(input) == nil ? input : nil) }
         let command = rawCommand.flatMap { $0.isEmpty ? nil : $0 }
-        let cwd = text(args["cwd"] ?? args["workdir"] ?? args["working_directory"]) ?? request.flatMap { $0.path == "-" || $0.path.isEmpty ? nil : $0.path }
+        let rawCWD = text(args["cwd"] ?? args["workdir"] ?? args["working_directory"]) ?? request.flatMap { $0.path == "-" || $0.path.isEmpty ? nil : $0.path }
+        let cwd = rawCWD.flatMap { $0.hasPrefix("file://") ? URL(string:$0)?.path : $0 }
         let starts = events.filter { ["hook_tool_start", "start", "started", "exec_start", "command_started"].contains($0.op) }
         let streams = events.filter { ["output", "stream", "tool_output", "command_output", "exec_command_output_delta"].contains($0.op) }
-        var stdout = text(body["stdout"]), stderr = text(body["stderr"])
+        var stdout = text(body["stdout"]) ?? text(body["aggregated_output"] ?? body["formatted_output"]), stderr = text(body["stderr"])
         var exit = integer(body["exit_code"] ?? body["exitCode"] ?? body["returncode"])
         var session = text(body["execution_id"] ?? body["session_id"] ?? body["process_session_id"])
             ?? integer(body["execution_id"] ?? body["session_id"] ?? body["process_id"]).map(String.init)
@@ -324,13 +344,26 @@ enum RealtimeDetailProjector {
         }
         let path = text(args["file_path"] ?? args["path"] ?? args["filename"] ?? result["path"]) ?? (event.kind == "file" && event.path != "-" ? event.path : nil)
         let host = url.flatMap { URL(string: $0)?.host } ?? event.remoteDomain
-        let ip = event.remoteHost.flatMap { isIPAddress($0) ? $0 : nil }
-        return RealtimeResourceDetail(path: path, url: url, method: text(args["method"] ?? metadata["method"]),
+        let ip = event.source == "tool-intent" ? nil : event.remoteHost.flatMap { isIPAddress($0) ? $0 : nil }
+        var detail = RealtimeResourceDetail(path: path, url: url, method: text(args["method"] ?? metadata["method"]),
             statusCode: integer(result["status_code"] ?? result["status"] ?? metadata["responseStatus"]), domain: host,
             remoteIP: ip, remotePort: event.remotePort, contentType: text(result["content_type"] ?? metadata["contentType"]),
             before: preview(event.beforeContent), after: preview(event.kind == "file" ? event.afterContent : output), diff: preview(event.fileDiff),
             addresses: ip.map { [$0] } ?? [], basis: event.attributionMethod ?? "资源字段来自当前记录；未以 IP 反推访问路径", ipScope: ip.map(ipScope), location: nil,
             beforeTruncated: truncated(event.beforeContent), afterTruncated: truncated(event.kind == "file" ? event.afterContent : output), diffTruncated: truncated(event.fileDiff))
+        let socket = metadata["socket"] as? [String:Any], proxy = metadata["proxy"] as? [String:Any]
+        let legacyProxy = socket == nil && event.source == "lsof-network" && event.attributionMethod?.contains("client-port") == true
+        detail.evidenceType = event.source == "tool-intent" ? "tool_intent" : socket != nil ? (proxy != nil ? "proxy_route" : "socket") : legacyProxy ? "proxy_route" : url != nil && detail.method != nil ? (event.kind == "tool" ? "tool_report" : "http") : event.source == "lsof-network" ? "socket" : nil
+        detail.observedLocalAddress = text(socket?["localAddress"]) ?? event.localAddress
+        detail.observedRemoteHost = text(socket?["remoteHost"]) ?? (event.source == "lsof-network" && !legacyProxy ? event.remoteHost : nil)
+        detail.observedRemotePort = integer(socket?["remotePort"]) ?? (event.source == "lsof-network" && !legacyProxy ? event.remotePort : nil)
+        detail.socketState = text(socket?["state"])
+        detail.processIdentity = text(metadata["processIdentity"])
+        detail.proxySource = text(proxy?["source"]) ?? (legacyProxy && event.attributionMethod?.contains("V2rayU") == true ? "V2rayU" : nil)
+        detail.proxyObservedAt = (proxy?["observedAt"] as? Double).map(Date.init(timeIntervalSince1970:))
+        detail.requestedURL = text(metadata["requestedURL"])
+        detail.destinationBasis = text(metadata["destinationBasis"] ?? metadata["destinationStatus"])
+        return detail
     }
     static func isIPAddress(_ value: String) -> Bool {
         if value.contains(":"), value.range(of: #"^[0-9a-fA-F:.]+$"#, options: .regularExpression) != nil { return true }

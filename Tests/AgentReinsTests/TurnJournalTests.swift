@@ -1170,7 +1170,7 @@ final class TurnJournalTests: XCTestCase {
         XCTAssertEqual(saved?.command, "agent --token highly-sensitive-token")
     }
 
-    func testLsofParserCapturesOnlyOutboundTCPConnections() {
+    func testLsofParserPreservesListenersAndOutboundTCPConnections() {
         let fixture = """
         p123
         f7
@@ -1184,12 +1184,13 @@ final class TurnJournalTests: XCTestCase {
 
         let connections = LsofNetworkSnapshotProvider.parse(fixture)
 
-        XCTAssertEqual(connections, [
+        XCTAssertEqual(connections.filter { !$0.isListener }, [
             NetworkConnectionRecord(pid: "123", localAddress: "127.0.0.1:51000",
                                     remoteHost: "34.120.10.2", remotePort: 443),
             NetworkConnectionRecord(pid: "456", localAddress: "[fe80::1]:53000",
                                     remoteHost: "2606:4700::1111", remotePort: 443)
         ])
+        XCTAssertEqual(connections.filter(\.isListener).map(\.localAddress), ["*:8080"])
     }
 
     func testNetworkIdentityIgnoresEphemeralLocalPort() {
@@ -1489,7 +1490,7 @@ final class TurnJournalTests: XCTestCase {
     }
 
     @MainActor
-    func testNetworkEvidenceUsesURLFromToolArgumentsWithoutAProxyAdapter() {
+    func testNetworkEvidenceKeepsRequestedURLSeparateFromObservedSocket() {
         let resolver = EventAttributionResolver(window: 45)
         let now = Date()
         resolver.observe([
@@ -1507,7 +1508,7 @@ final class TurnJournalTests: XCTestCase {
         let resolved = resolver.resolve(network)
 
         XCTAssertEqual(resolved.remoteHost, "203.0.113.20")
-        XCTAssertEqual(resolved.remoteDomain, "docs.example.com")
+        XCTAssertNil(resolved.remoteDomain)
     }
 
     @MainActor
@@ -2518,7 +2519,7 @@ final class TurnJournalTests: XCTestCase {
         let resolved = resolver.resolve(socket)
         XCTAssertEqual(resolved.toolCallId, "web-call")
         XCTAssertEqual(resolved.toolName, "web_fetch")
-        XCTAssertEqual(resolved.remoteDomain, "example.com")
+        XCTAssertNil(resolved.remoteDomain)
         XCTAssertEqual(resolved.attributionConfidence, .inferred)
     }
 

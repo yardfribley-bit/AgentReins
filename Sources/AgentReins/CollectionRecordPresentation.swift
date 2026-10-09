@@ -89,10 +89,18 @@ struct CollectionRecordPresentation: Identifiable, Equatable {
             summary = "常驻内存 \(memory)；文件句柄 \(files.count) 个\(names.isEmpty ? "" : "（\(names.joined(separator: "、"))）")。没有读取内存正文或文件全文。"
             fields.append("句柄路径：\(files.prefix(10).compactMap { $0["path"] as? String }.joined(separator: "\n"))")
         } else if e.kind == "network" || e.op.contains("socket") || e.op.contains("ipc") {
-            category = "网络与通信"; title = "网络 / 本地通信记录"
-            if let destination = e.remoteDomain ?? e.remoteHost {
+            category = "网络与通信"
+            if let connections = body?["connections"] as? [[String:Any]], !connections.isEmpty {
+                title = "进程 TCP 连接采样"
+                summary = connections.prefix(4).map { row in
+                    let local = row["local"] as? String ?? "本地端点未提供"
+                    let host = row["remoteHost"] as? String ?? "", port = row["remotePort"] as? Int ?? 0
+                    return "\(local) → \(host):\(port) · \(row["state"] as? String ?? "状态未提供")"
+                }.joined(separator:"\n")
+            } else if let destination = e.remoteDomain ?? e.remoteHost {
+                title = "网络 / 本地通信记录"
                 summary = "目标：\(destination):\(e.remotePort ?? 443)\(metadata?["requestPath"].map { " · \($0)" } ?? "")；\(e.modelPrompt == nil ? "本条未采请求正文" : "请求正文已采")。"
-            } else { summary = "采到进程连接快照；地址和连接列表见详情，不据此推断发送内容。" }
+            } else { title = "网络 / 本地通信记录"; summary = "采到进程连接快照；地址和连接列表见详情，不据此推断发送内容。" }
         } else if let response = e.modelResponse {
             category = "模型响应"; title = "模型返回内容"; summary = short(response)
         } else {

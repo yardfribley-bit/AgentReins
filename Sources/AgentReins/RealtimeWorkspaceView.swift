@@ -235,8 +235,10 @@ final class RealtimeWorkspaceState: ObservableObject {
         let tasks = projectedTasks(force: true)
         let active = tasks.filter { retainForRestart($0) }
         let keys = Set(active.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
-        let linked = Set(active.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } })
+        let networkIDs = Set(values.filter { $0.kind == "network" }.sorted { $0.ts > $1.ts }.prefix(100).map { $0.id.uuidString })
+        let linked = Set(active.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } }).union(networkIDs)
         let events = values.filter { e in
+            if linked.contains(e.id.uuidString) { return true }
             guard let agent = RealtimeWorkspaceProjector.canonicalAgent(e.agent), let session = e.sessionId else { return false }
             return linked.contains(e.id.uuidString) || keys.contains(agent + "\u{0}" + session + "\u{0}" + (e.turnId ?? ""))
         }
@@ -252,8 +254,10 @@ final class RealtimeWorkspaceState: ObservableObject {
         let tasks = projectedTasks()
         let activeTasks = tasks.filter { retainForRestart($0) }
         let activeKeys = Set(activeTasks.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
-        let linkedIDs = Set(activeTasks.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } })
+        let networkIDs = Set(values.filter { $0.kind == "network" }.sorted { $0.ts > $1.ts }.prefix(100).map { $0.id.uuidString })
+        let linkedIDs = Set(activeTasks.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } }).union(networkIDs)
         let active = values.filter { e in
+            if linkedIDs.contains(e.id.uuidString) { return true }
             guard let agent = RealtimeWorkspaceProjector.canonicalAgent(e.agent), let session = e.sessionId else { return false }
             return linkedIDs.contains(e.id.uuidString) || activeKeys.contains(agent + "\u{0}" + session + "\u{0}" + (e.turnId ?? ""))
         }
@@ -309,7 +313,7 @@ final class RealtimeWorkspaceState: ObservableObject {
             })
             let protected = Set(evidence.values.filter { e in
                 !internalReview(e) && Self.eventSize(e) <= byteBudget / 2 &&
-                (["prompt", "hook_user_prompt", "call", "hook_tool_start", "result", "hook_tool_end", "task_complete", "task_completed", "task_failed", "turn_completed", "task_cancelled", "hook_turn_stop"].contains(e.op) ||
+                (e.kind == "network" || ["prompt", "hook_user_prompt", "call", "hook_tool_start", "result", "hook_tool_end", "task_complete", "task_completed", "task_failed", "turn_completed", "task_cancelled", "hook_turn_stop"].contains(e.op) ||
                  (e.op == "response" && e.modelResponse.map { finalMessages.contains((e.sessionId ?? "") + "\u{0}" + $0) } == true))
             }.map(\.id))
             for event in evidence.values.sorted(by: { a, b in
@@ -374,14 +378,19 @@ final class RealtimeWorkspaceState: ObservableObject {
     }
     private func projectedCollected() -> [RealtimeCollectedRecord] {
         guard collectedDirty else { return cachedCollected }
-        cachedCollected = evidence.values.sorted { $0.ts > $1.ts }.prefix(200).map { event in
+        let ordered = evidence.values.sorted { $0.ts > $1.ts }
+        var seen = Set<UUID>()
+        let visible = (Array(ordered.prefix(200)) + Array(ordered.filter { $0.kind == "network" }.prefix(100)))
+            .filter { seen.insert($0.id).inserted }.sorted { $0.ts > $1.ts }
+        cachedCollected = visible.map { event in
                 if let cached = collectedByID[event.id] { return cached }
             let display = CollectionRecordPresentation(event, receivedAt: event.ts)
                 let row = RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent) ?? "归属未确认", source: event.source ?? "来源未知",
                     kind: event.kind, op: event.op, summary: display.summary, preview: String(display.preview.prefix(16000)),
                     hasTaskIdentity: event.sessionId != nil && event.turnId != nil,
                     title: display.title, category: display.category, details: (display.details + ["路径：\(event.path)", "会话：\(event.sessionId ?? "未关联")", "轮次：\(event.turnId ?? "未关联")"]).joined(separator: "\n"), pid: event.processId,
-                    session: event.sessionId, turn: event.turnId, call: event.toolCallId, timestamp: event.ts)
+                    session: event.sessionId, turn: event.turnId, call: event.toolCallId, timestamp: event.ts,
+                    resource: event.kind == "network" ? RealtimeDetailProjector.resource(event:event,input:event.command,output:event.modelResponse,kind:"network") : nil)
                 collectedByID[event.id] = row; return row
             }
         let kept = Set(cachedCollected.map(\.id))

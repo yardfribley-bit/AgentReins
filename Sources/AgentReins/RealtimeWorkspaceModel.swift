@@ -29,6 +29,7 @@ struct RealtimeCollectedRecord: Encodable {
     var turn: String? = nil
     var call: String? = nil
     var timestamp: Date? = nil
+    var resource: RealtimeResourceDetail? = nil
 }
 struct RealtimeProcess: Encodable {
     let id: String, pid: String, parent: String, agent: String, name: String
@@ -197,7 +198,19 @@ enum RealtimeWorkspaceProjector {
             endedAt: event.endedAt, durationMS: event.durationMS, relatedPath: event.relatedPath)
     }
     static func normalizedEvents(_ events: [GuardEvent]) -> [GuardEvent] {
-        let normalized = events.map(normalizeCodexUserContext)
+        let normalized = events.map(normalizeCodexUserContext).map { event -> GuardEvent in
+            guard event.source == "lsof-network", event.kind == "network",
+                  event.attributionMethod?.contains("single active tool call") == true,
+                  let domain = event.remoteDomain, domain != event.remoteHost,
+                  let session = event.sessionId, let turn = event.turnId else { return event }
+            // Old correlation wrote a tool's requested domain over unrelated
+            // sockets. Restore only an observed proxy-route host, or no domain.
+            let actual = event.attributionMethod?.contains("client-port") == true
+                ? event.remoteHost.flatMap { RealtimeDetailProjector.isIPAddress($0) ? nil : $0 } : nil
+            return event.attributed(sessionId:session, turnId:turn, toolCallId:event.toolCallId,
+                remoteDomain:actual, replaceRemoteDomain:true, confidence:event.attributionConfidence ?? .inferred,
+                method:(event.attributionMethod ?? "") + "; requested URL is not the observed socket destination")
+        }
         let humans = normalized.filter { $0.source == "agentsight:workbuddy-local" && $0.op == "prompt" && $0.userIntent != nil && $0.turnId != nil }
         var flowTargets: [String: (String, String)] = [:]
         for event in normalized where event.source == "agentsight:workbuddy-network-body" && event.op == "network_prompt" {
@@ -314,7 +327,7 @@ enum RealtimeWorkspaceProjector {
             let request = events.first { ["call", "hook_tool_start", "start", "started", "exec_start", "command_started"].contains($0.op) }
             let result = events.last { ["result", "hook_tool_end", "hook_tool_finish", "end", "completed", "command_completed"].contains($0.op) }
             let event = result ?? events.last!
-            let rawInput = hookField(request, "tool_input") ?? request?.command ?? request?.modelPrompt
+            let rawInput = hookField(request, "tool_input") ?? request?.command ?? request?.modelPrompt ?? result?.command
             let rawOutput = hookField(result, "tool_response") ?? result?.modelResponse ?? result?.afterContent
             let input = rawInput ?? "输入未采集", body = rawOutput ?? "结果尚未采集"
             let kind = toolKind(name: request?.toolName ?? event.toolName ?? "", input: input)
