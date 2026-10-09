@@ -88,7 +88,8 @@ final class RealtimeWorkspaceState: ObservableObject {
             processes: processes.compactMap { process in
                 guard let agent = RealtimeWorkspaceProjector.canonicalAgent(process.agent) else { return nil }
                 return RealtimeProcess(id: ProcessObservationCoordinator.identity(process), pid: process.pid, parent: process.ppid,
-                    agent: agent, name: CollectionProcessNode(process: process, firstSeen: since, lastSeen: Date(), active: true).role.title)
+                    agent: agent, name: CollectionProcessNode(process: process, firstSeen: since, lastSeen: Date(), active: true).role.title,
+                    executable: process.executablePath ?? "未采集", command: ProcessArgumentRedactor.redact(process.command))
             }, health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
             observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated)
     }

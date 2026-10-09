@@ -4,7 +4,7 @@ import SwiftUI
 final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppNotifier.requestAuthorization()
-        // This realtime build does not install browser extension assets.
+        BrowserProtectionInstaller.installBundledAssets()
         if let url = Bundle.main.url(forResource: "AgentReins", withExtension: "icns"),
            let icon = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = icon
@@ -104,7 +104,7 @@ struct AgentReinsApp: App {
                     liveMemoryMonitor.onEvents = { events in
                         eventStore.record(events.map { attributionResolver.resolve($0) })
                     }
-                    // Realtime WorkBuddy / Codex scope; liveMemoryMonitor.start() disabled.
+                    liveMemoryMonitor.start()
                     workBuddySight.onHookSignals = { processGuard.observeHookSignals($0) }
                     workBuddySight.onEvents = { events in
                         let fresh = attributionResolver.labelNative(eventStore.unrecorded(events))
@@ -173,7 +173,7 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh)
                     }
-                    // Realtime WorkBuddy / Codex scope; webAgentSight.start() disabled.
+                    webAgentSight.start()
                     agentDiscovery.start()
                     // Historical memory stores are intentionally on-demand.
                     // A full ~/.claude + ~/.cursor + ~/.codex scan at launch

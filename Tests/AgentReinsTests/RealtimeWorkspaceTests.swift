@@ -55,6 +55,17 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertFalse(store.taskSearchIndexReady)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.appendingPathExtension("search.sqlite3").path))
     }
+    @MainActor func testProcessInventoryIsVisibleWithoutTaskOrTranscript() throws {
+        let state = RealtimeWorkspaceState()
+        let root = ProcessSnapshotRecord(pid: "100", ppid: "1", command: "Electron", agent: "workbuddy", birthIdentity: 1, executablePath: "/Applications/WorkBuddy.app/Contents/MacOS/Electron")
+        let child = ProcessSnapshotRecord(pid: "101", ppid: "100", command: "node --token secret-value", agent: "workbuddy", birthIdentity: 2, executablePath: "/usr/local/bin/node")
+        let payload = state.payload(processes: [root, child], health: [], observing: true, error: nil)
+        XCTAssertTrue(payload.tasks.isEmpty)
+        XCTAssertEqual(payload.processes.count, 2)
+        XCTAssertEqual(payload.processes.last?.parent, "100")
+        XCTAssertEqual(payload.processes.last?.executable, "/usr/local/bin/node")
+        XCTAssertEqual(payload.processes.last?.command, ProcessArgumentRedactor.redact(child.command))
+    }
     @MainActor func testBoundedLiveStateReportsMissingCoverage() {
         let state = RealtimeWorkspaceState(byteBudget: 1024)
         let large = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "codex", op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: "s", turnId: "t", modelPrompt: String(repeating: "a", count: 3000))

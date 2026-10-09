@@ -18,6 +18,8 @@ struct RealtimeCollectedRecord: Encodable {
 }
 struct RealtimeProcess: Encodable {
     let id: String, pid: String, parent: String, agent: String, name: String
+    var executable: String = ""
+    var command: String = ""
 }
 struct RealtimeHealth: Encodable {
     let source: String, state: String
