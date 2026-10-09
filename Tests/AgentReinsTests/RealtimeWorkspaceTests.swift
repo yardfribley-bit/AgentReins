@@ -11,6 +11,22 @@ final class RealtimeWorkspaceTests: XCTestCase {
             op: op, severity: "info", ts: start.addingTimeInterval(seconds), action: action,
             sessionId: "session", turnId: turn, toolCallId: call, modelResponse: result, toolName: "Bash")
     }
+    func testCodexIncrementalChunkKeepsSessionIdentityAndCompletion() throws {
+        let sid = UUID().uuidString.lowercased()
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("rollout-2026-10-09T00-00-00-" + sid + ".jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let rows = [
+            #"{"type":"response_item","payload":{"id":"message-not-session","type":"message","role":"user","turn_id":"turn","content":[{"type":"input_text","text":"原始任务"}]}}"#,
+            #"{"type":"event_msg","payload":{"type":"task_complete","turn_id":"turn","last_agent_message":"已交付"}}"#
+        ]
+        try rows.joined(separator: "\n").write(to: url, atomically: true, encoding: .utf8)
+        let events = CodexSight.parseSession(url)
+        XCTAssertEqual(Set(events.compactMap(\.sessionId)), [sid])
+        let tasks = RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast)
+        XCTAssertEqual(tasks.count, 1)
+        XCTAssertEqual(tasks.first?.originalRequest, "原始任务")
+        XCTAssertEqual(tasks.first?.reportedComplete, true)
+    }
     func testCodexUserMessageFormatsCaptureOriginalRequest() throws {
         for record in [
             #"{"type":"event_msg","payload":{"type":"user_message","message":"用户原话","turn_id":"turn"}}"#,

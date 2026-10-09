@@ -170,7 +170,8 @@ final class CodexSight: ObservableObject {
 
     private nonisolated static func parseSessionText(_ text: String, url: URL) -> [GuardEvent] {
         let lines = text.split(whereSeparator: \.isNewline)
-        var session = url.deletingPathExtension().lastPathComponent
+        let filename = url.deletingPathExtension().lastPathComponent
+        var session = filename.count >= 36 && UUID(uuidString: String(filename.suffix(36))) != nil ? String(filename.suffix(36)) : filename
         var workspace = "-"
         var model: String?
         var currentTurn: String?
@@ -178,7 +179,7 @@ final class CodexSight: ObservableObject {
         var toolNames: [String: String] = [:]
         var result: [GuardEvent] = []
 
-        if let first = lines.first, let row = dictionary(first), let payload = row["payload"] as? [String: Any] {
+        if let first = lines.first, let row = dictionary(first), row["type"] as? String == "session_meta", let payload = row["payload"] as? [String: Any] {
             session = payload["id"] as? String ?? payload["session_id"] as? String ?? session
             workspace = payload["cwd"] as? String ?? workspace
         }
@@ -245,6 +246,15 @@ final class CodexSight: ObservableObject {
                     timestamp: timestamp, action: "captured", session: session, trace: nil, turn: currentTurn,
                     intent: lastIntent, prompt: nil, response: nil, toolCallId: nil,
                     toolName: "codex.world_state", command: jsonString(summary), model: model))
+                continue
+            }
+            if type == "event_msg", payloadType == "task_complete" {
+                let turn = payload["turn_id"] as? String ?? currentTurn
+                result.append(event(identity: "\(session):\(turn ?? "none"):\(timestampKey):task-complete",
+                    kind: "model", rule: "codex_task_complete", workspace: workspace, op: "response",
+                    timestamp: timestamp, action: "completed", session: session, trace: nil, turn: turn,
+                    intent: nil, prompt: nil, response: payload["last_agent_message"] as? String,
+                    toolCallId: nil, toolName: nil, command: nil, model: model))
                 continue
             }
             if type == "event_msg", payloadType == "task_started" {
@@ -455,7 +465,7 @@ final class CodexSight: ObservableObject {
     }
 
     private nonisolated static func metadataTurn(_ payload: [String: Any]) -> String? {
-        (payload["internal_chat_message_metadata_passthrough"] as? [String: Any])?["turn_id"] as? String
+        (payload["turn_id"] as? String) ?? (payload["internal_chat_message_metadata_passthrough"] as? [String: Any])?["turn_id"] as? String
     }
 
     private nonisolated static func cleanUserIntent(_ value: String) -> String {
