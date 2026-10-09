@@ -2,6 +2,7 @@ import SwiftUI
 
 /// 菜单栏安全应用关闭窗口后继续运行，退出时清理扫描子进程。
 final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
+    static var stopLiveCollectors: (() -> Void)?
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppNotifier.requestAuthorization()
         BrowserProtectionInstaller.installBundledAssets()
@@ -19,6 +20,7 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
+        Self.stopLiveCollectors?()
         MemoryScanManager.cleanupOnTerminate()
     }
 }
@@ -92,6 +94,15 @@ struct AgentReinsApp: App {
                     agentDiscovery.observe(processes: inventory)
                 }
                 .task {
+                    AgentReinsAppDelegate.stopLiveCollectors = {
+                        workBuddyNetworkCapture.stop()
+                        workBuddySight.stop()
+                        codexSight.stop()
+                        liveMemoryMonitor.stop()
+                        processGuard.stop()
+                        fileGuard.stop()
+                        webAgentSight.stop()
+                    }
                     // Realtime branch: no historical analysis worker.
                     fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }

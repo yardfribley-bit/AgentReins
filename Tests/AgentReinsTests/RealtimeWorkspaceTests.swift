@@ -55,6 +55,46 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertFalse(store.taskSearchIndexReady)
         XCTAssertFalse(FileManager.default.fileExists(atPath: file.appendingPathExtension("search.sqlite3").path))
     }
+    func testNativeHookLifecycleWithoutTurnRemainsVisibleAndPairsFinish() throws {
+        func hook(_ op: String, body: String, seconds: Double) -> GuardEvent {
+            GuardEvent(kind: "activity", ruleId: "workbuddy_hook_native", path: "-", command: nil, agent: "workbuddy", op: op, severity: "info", ts: start.addingTimeInterval(seconds), action: "observed", sessionId: "session", toolCallId: "hook-call", toolName: "Bash", afterContent: body, source: "workbuddy-hook")
+        }
+        let records = [hook("hook_tool_start", body: "{\"payload\":{\"tool_input\":{\"command\":\"echo hello\"}}}", seconds: 1), hook("hook_tool_finish", body: "{\"payload\":{\"tool_response\":{\"exit_code\":0,\"stdout\":\"hello\"}}}", seconds: 2)]
+        let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: records, since: start).first)
+        XCTAssertEqual(task.turn, "")
+        let card = try XCTUnwrap(task.cards.first)
+        XCTAssertEqual(card.status, "returned")
+        XCTAssertTrue(card.input.contains("echo hello")); XCTAssertTrue(card.output.contains("hello"))
+        XCTAssertEqual(card.eventIDs.count, 2)
+    }
+    func testMissingHookTurnJoinsOnlyUniqueNativeCallIdentity() throws {
+        let hook = GuardEvent(kind: "activity", ruleId: "workbuddy_hook_native", path: "-", command: nil, agent: "workbuddy", op: "hook_tool_finish", severity: "info", ts: start.addingTimeInterval(2), action: "observed", sessionId: "session", toolCallId: "same", toolName: "Bash", source: "workbuddy-hook")
+        let single = RealtimeWorkspaceProjector.tasks(events: [event("call"), hook], since: start)
+        XCTAssertEqual(single.count, 1); XCTAssertEqual(single.first?.cards.first?.status, "returned")
+        let ambiguous = RealtimeWorkspaceProjector.tasks(events: [event("call"), event("call", turn: "two"), hook], since: start)
+        XCTAssertEqual(ambiguous.count, 3)
+        XCTAssertEqual(ambiguous.filter { !$0.turn.isEmpty }.flatMap(\.cards).filter { $0.status == "running" }.count, 2)
+    }
+    @MainActor func testSystemEvidenceAndVanishedProcessesRemainVisibleWithoutTask() {
+        let state = RealtimeWorkspaceState()
+        state.updateProcesses([ProcessSnapshotRecord(pid: "100", ppid: "1", command: "Electron", agent: "workbuddy", birthIdentity: 1)])
+        state.updateProcesses([])
+        state.ingest([GuardEvent(kind: "activity", ruleId: "process_observation", path: "-", command: nil, agent: "workbuddy", op: "process_ipc_observation", severity: "info", ts: Date(), action: "observed", afterContent: "{\"connections\":[]}", source: "process-observation-lsof-unix", processId: 100)])
+        let payload = state.payload(processes: [], health: [], observing: true, error: nil)
+        XCTAssertTrue(payload.tasks.isEmpty)
+        XCTAssertEqual(payload.collected.first?.pid, 100)
+        XCTAssertFalse(payload.collected.first?.hasTaskIdentity ?? true)
+        XCTAssertEqual(payload.processes.first?.active, false)
+        XCTAssertEqual(payload.collectedCount, 1)
+    }
+    @MainActor func testFileObservationWithoutAgentAttributionIsNotDiscarded() {
+        let state = RealtimeWorkspaceState()
+        state.ingest([GuardEvent(kind: "file", ruleId: "file-observation", path: "/project/output.txt", command: nil, agent: nil, op: "modify", severity: "info", ts: Date(), action: "observed", afterContent: "output", source: "file-observation")])
+        let payload = state.payload(processes: [], health: [], observing: true, error: nil)
+        XCTAssertTrue(payload.tasks.isEmpty)
+        XCTAssertEqual(payload.collected.first?.agent, "归属未确认")
+        XCTAssertTrue(payload.collected.first?.details.contains("/project/output.txt") ?? false)
+    }
     @MainActor func testProcessInventoryIsVisibleWithoutTaskOrTranscript() throws {
         let state = RealtimeWorkspaceState()
         let root = ProcessSnapshotRecord(pid: "100", ppid: "1", command: "Electron", agent: "workbuddy", birthIdentity: 1, executablePath: "/Applications/WorkBuddy.app/Contents/MacOS/Electron")

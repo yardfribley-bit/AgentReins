@@ -15,10 +15,12 @@ struct ContentView: View {
         .frame(minWidth: 1100, minHeight: 720)
         .task {
             realtime.ingest(eventStore.events)
+            realtime.updateProcesses(processGuard.processInventory)
             if !fileGuard.running { fileGuard.start() }
             if !processGuard.running { processGuard.start() }
         }
         .onReceive(eventStore.$revision) { _ in realtime.ingest(eventStore.events) }
+        .onReceive(processGuard.$processInventory) { realtime.updateProcesses($0) }
         .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true) }
     }
 }

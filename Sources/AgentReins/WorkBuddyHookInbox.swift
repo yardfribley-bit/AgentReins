@@ -48,7 +48,7 @@ enum WorkBuddyHookInbox {
             observedAt: date, payload: bytes)
         let event = GuardEvent(id: id, kind: "activity", ruleId: "workbuddy_hook_native", path: transcript?.path ?? "-",
             command: nil, agent: "workbuddy", op: operation, severity: "info", ts: date, action: "observed",
-            sessionId: session, toolCallId: (payload["call_id"] ?? payload["tool_use_id"]) as? String,
+            sessionId: session, turnId: payload["turn_id"] as? String, toolCallId: (payload["call_id"] ?? payload["tool_use_id"]) as? String,
             userIntent: hook == "UserPromptSubmit" ? payload["prompt"] as? String : nil,
             toolName: payload["tool_name"] as? String, model: payload["model"] as? String,
             afterContent: String(data: bytes, encoding: .utf8), source: "workbuddy-hook",

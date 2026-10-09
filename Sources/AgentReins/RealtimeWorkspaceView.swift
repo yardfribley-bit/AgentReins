@@ -56,12 +56,14 @@ final class RealtimeWorkspaceState: ObservableObject {
     private var evidence: [UUID: GuardEvent] = [:]
     private var sizes: [UUID: Int] = [:]
     private var retainedBytes = 0
+    private var registry = CollectionProcessRegistry()
+    func updateProcesses(_ processes: [ProcessSnapshotRecord]) { registry.update(processes, now: Date()); revision += 1 }
     private let byteBudget: Int
     init(byteBudget: Int = 32 * 1024 * 1024) { self.byteBudget = byteBudget }
     private(set) var truncated = false
     let since = Date()
     func ingest(_ events: [GuardEvent]) {
-        for event in events where event.ts >= since && RealtimeWorkspaceProjector.canonicalAgent(event.agent) != nil {
+        for event in events where event.ts >= since {
             let size = [event.modelPrompt, event.modelResponse, event.command, event.beforeContent, event.afterContent, event.fileDiff, event.modelReasoning].compactMap { $0 }.reduce(512) { $0 + $1.utf8.count }
             retainedBytes += size - (sizes[event.id] ?? 0)
             sizes[event.id] = size; evidence[event.id] = event
@@ -77,20 +79,25 @@ final class RealtimeWorkspaceState: ObservableObject {
     }
     func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?) -> RealtimeWorkspacePayload {
         RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.tasks(events: Array(evidence.values), since: since),
-            collected: Dictionary(grouping: evidence.values, by: { $0.source ?? "unknown" }).values.flatMap { values in
-                values.sorted { $0.ts > $1.ts }.prefix(12).map { event in
-                    RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent)!, source: event.source ?? "来源未知",
-                        kind: event.kind, op: event.op, summary: String((event.userIntent ?? event.toolName ?? event.op).prefix(180)),
-                        preview: String((event.modelPrompt ?? event.modelResponse ?? event.afterContent ?? event.command ?? event.path).prefix(2000)),
-                        hasTaskIdentity: event.sessionId != nil && event.turnId != nil)
-                }
+            collected: evidence.values.sorted { $0.ts > $1.ts }.prefix(200).map { event in
+                let display = CollectionRecordPresentation(event, receivedAt: event.ts)
+                return RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent) ?? "归属未确认", source: event.source ?? "来源未知",
+                    kind: event.kind, op: event.op, summary: display.summary, preview: String(display.preview.prefix(16000)),
+                    hasTaskIdentity: event.sessionId != nil && event.turnId != nil,
+                    title: display.title, category: display.category, details: (display.details + ["路径：\(event.path)", "会话：\(event.sessionId ?? "未关联")", "轮次：\(event.turnId ?? "未关联")"]).joined(separator: "\n"), pid: event.processId,
+                    session: event.sessionId, turn: event.turnId, call: event.toolCallId, timestamp: event.ts)
             }, unattributedCount: evidence.values.filter { $0.sessionId == nil || $0.turnId == nil }.count,
-            processes: processes.compactMap { process in
-                guard let agent = RealtimeWorkspaceProjector.canonicalAgent(process.agent) else { return nil }
+            processes: registry.ordered.map { row in
+                let process = row.node.process
+                return RealtimeProcess(id: row.node.id, pid: process.pid, parent: process.ppid,
+                    agent: "WorkBuddy", name: row.node.role.title,
+                    executable: process.executablePath ?? "未采集", command: ProcessArgumentRedactor.redact(process.command), active: row.node.active, depth: row.depth)
+            } + processes.compactMap { process in
+                guard let agent = RealtimeWorkspaceProjector.canonicalAgent(process.agent), agent != "WorkBuddy" || registry.nodes.isEmpty else { return nil }
                 return RealtimeProcess(id: ProcessObservationCoordinator.identity(process), pid: process.pid, parent: process.ppid,
                     agent: agent, name: CollectionProcessNode(process: process, firstSeen: since, lastSeen: Date(), active: true).role.title,
                     executable: process.executablePath ?? "未采集", command: ProcessArgumentRedactor.redact(process.command))
             }, health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
-            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated)
+            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count)
     }
 }

@@ -1,3 +1,4 @@
+import asyncio
 """Opt-in mitmproxy addon for audited WorkBuddy model requests.
 
 Run only for a WorkBuddy process explicitly launched with this local proxy.
@@ -118,3 +119,24 @@ def _capture(flow, stage):
         "remotePort": server_address[1] if server_address else None,
     }
     _append_jsonl(OUTPUT, record)
+
+
+# A proxy belongs to the live collector that launched it. Normal application
+# exit stops it directly; parent loss also covers crashes and SIGTERM.
+_parent_watch = None
+
+async def _watch_capture_parent(parent_pid):
+    from mitmproxy import ctx
+    while os.getppid() == parent_pid:
+        await asyncio.sleep(1)
+    ctx.master.shutdown()
+
+def running():
+    global _parent_watch
+    parent = os.environ.get("AGENTREINS_CAPTURE_PARENT_PID", "")
+    if parent.isdigit() and int(parent) > 1:
+        _parent_watch = asyncio.create_task(_watch_capture_parent(int(parent)))
+
+def done():
+    if _parent_watch is not None:
+        _parent_watch.cancel()

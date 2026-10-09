@@ -57,6 +57,7 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         process.arguments = Self.proxyArguments(addon: addon)
         var environment = ProcessInfo.processInfo.environment
         environment["AGENTREINS_WORKBUDDY_NETWORK_JSONL"] = captureURL.path
+        environment["AGENTREINS_CAPTURE_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
