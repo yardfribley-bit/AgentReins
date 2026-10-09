@@ -103,6 +103,19 @@ enum RealtimeContextProjector {
     }
 
     static func assemble(_ parsed: [RealtimeContextExchange], events: [GuardEvent]) -> [RealtimeContextExchange] {
+        // Native IDs are indexed once. Searching every event for each context
+        // block made routine UI refreshes quadratic in long active sessions.
+        var responses: [String: [GuardEvent]] = [:]
+        var toolResults: [String: [GuardEvent]] = [:]
+        for event in events {
+            guard let agent = RealtimeWorkspaceProjector.canonicalAgent(event.agent) else { continue }
+            if event.kind == "model", ["network_response", "response"].contains(event.op), let trace = event.traceId {
+                responses[agent + "\u{0}" + trace, default: []].append(event)
+            }
+            if ["result", "hook_tool_finish"].contains(event.op), let session = event.sessionId, let call = event.toolCallId {
+                toolResults[agent + "\u{0}" + session + "\u{0}" + call, default: []].append(event)
+            }
+        }
         let requestIDs = Set(events.map { $0.id.uuidString })
         let valid = parsed.filter { requestIDs.contains($0.id) }
         // Local user messages are a fallback, never a second full model round.
@@ -128,7 +141,7 @@ enum RealtimeContextProjector {
                     }
                 }
                 if let trace = exchange.trace {
-                    let matching = events.filter { RealtimeWorkspaceProjector.canonicalAgent($0.agent) == exchange.agent && $0.traceId == trace && $0.ts >= exchange.timestamp && (trace.hasPrefix("workbuddy-http:") || ($0.sessionId == exchange.session && $0.turnId == exchange.turn)) && $0.kind == "model" && ["network_response", "response"].contains($0.op) }
+                    let matching = (responses[exchange.agent + "\u{0}" + trace] ?? []).filter { $0.ts >= exchange.timestamp && (trace.hasPrefix("workbuddy-http:") || ($0.sessionId == exchange.session && $0.turnId == exchange.turn)) && $0.kind == "model" && ["network_response", "response"].contains($0.op) }
                     if let response = matching.max(by: { $0.ts < $1.ts }) {
                         exchange.response = response.modelResponse.map { String($0.prefix(16_000)) }
                         exchange.toolInstructions = response.modelDecision.map { String($0.prefix(16_000)) }
@@ -139,9 +152,7 @@ enum RealtimeContextProjector {
                 }
                 for index in exchange.blocks.indices {
                     guard let call = exchange.blocks[index].callID else { continue }
-                    let matches = events.filter {
-                        RealtimeWorkspaceProjector.canonicalAgent($0.agent) == exchange.agent && $0.sessionId == exchange.session && $0.toolCallId == call && ["result", "hook_tool_finish"].contains($0.op) && $0.ts <= exchange.timestamp
-                    }
+                    let matches = (toolResults[exchange.agent + "\u{0}" + exchange.session + "\u{0}" + call] ?? []).filter { $0.ts <= exchange.timestamp }
                     if Set(matches.compactMap(\.turnId)).count <= 1 { exchange.blocks[index].toolEvidenceIDs = matches.map { $0.id.uuidString } }
                 }
                 output.append(exchange); previous = exchange

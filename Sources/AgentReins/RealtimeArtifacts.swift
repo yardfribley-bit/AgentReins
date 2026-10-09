@@ -2,7 +2,7 @@ import AppKit
 import CryptoKit
 import Foundation
 
-struct RealtimeArtifact: Encodable, Identifiable {
+struct RealtimeArtifact: Encodable, Identifiable, Equatable {
     let id: String, taskID: String, name: String, path: String, kind: String
     let exists: Bool, preview: String?, previewTruncated: Bool, sizeBytes: Int?
     let source: String, eventIDs: [String], basis: String, openable: Bool, status: String
@@ -29,7 +29,9 @@ enum RealtimeArtifactProjector {
             output[identity] = Candidate(id: id, taskID: task, path: normalized, source: event.source ?? "来源未标明", eventIDs: ids ?? [event.id.uuidString], basis: basis)
         }
         let ordered = events.sorted { $0.ts < $1.ts }
+        let eventsByID = Dictionary(uniqueKeysWithValues: ordered.map { ($0.id.uuidString, $0) })
         for event in ordered {
+            guard (event.kind == "file" && ["create", "write", "update", "modify"].contains(event.op)) || (event.kind == "tool" && event.op == "result") else { continue }
             guard let task = taskID(event), !RealtimeWorkspaceProjector.isFailure(event, result: event.modelResponse),
                   !["requested", "planned", "queued", "running", "unverified", "cancelled", "canceled"].contains(event.action.lowercased()) else { continue }
             if event.kind == "file", ["create", "write", "update", "modify"].contains(event.op),
@@ -50,7 +52,8 @@ enum RealtimeArtifactProjector {
         // when the compatibility tool-intent projector cannot parse them.
         for task in tasks {
             for card in task.cards where card.call != nil && card.status == "returned" && card.tag != "执行失败" {
-                let starts = ordered.filter { card.eventIDs.contains($0.id.uuidString) && ["call", "hook_tool_start"].contains($0.op) }
+                guard ["write", "write_file", "create_file"].contains(card.title.lowercased()) else { continue }
+                let starts = card.eventIDs.compactMap { eventsByID[$0] }.filter { ["call", "hook_tool_start"].contains($0.op) }.sorted { $0.ts < $1.ts }
                 guard let start = starts.first, ["write", "write_file", "create_file"].contains((start.toolName ?? "").lowercased()) else { continue }
                 let envelope = object(start.afterContent)?["payload"] as? [String: Any]
                 let input = envelope?["tool_input"] as? [String: Any] ?? object(start.command)

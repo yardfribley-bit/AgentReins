@@ -7,7 +7,7 @@ struct ContentView: View {
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
     @StateObject private var geolocation = IPGeolocationStore()
-    @StateObject private var realtime = RealtimeWorkspaceState(checkpointURL: RealtimeWorkspaceState.checkpointLocation())
+    @StateObject private var realtime = RealtimeWorkspaceState(checkpointURL: RealtimeWorkspaceState.checkpointLocation(), backgroundProjection: true)
     private let healthTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     var body: some View {
         RealtimeWorkspaceView(payload: realtime.payload(processes: processGuard.processInventory,

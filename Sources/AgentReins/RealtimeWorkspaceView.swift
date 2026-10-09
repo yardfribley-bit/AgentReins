@@ -63,20 +63,32 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
         private var sending = false
         private var dirty = false
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; publish(webView) }
+        private let encodingQueue = DispatchQueue(label: "com.agentreins.live-encoding", qos: .utility)
         func publish(_ webView: WKWebView) {
             guard ready else { return }
             guard !sending else { dirty = true; return }
             guard let latest else { return }
-            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-            guard let bytes = try? encoder.encode(latest), let json = String(data: bytes, encoding: .utf8) else { return }
             sending = true
-            // Structured arguments prevent evidence strings from becoming executable JavaScript.
-            Task { @MainActor [weak self, weak webView] in
-                guard let self, let webView else { return }
-                do { _ = try await webView.callAsyncJavaScript("window.agentreinsReceive(JSON.parse(payload))", arguments: ["payload": json], in: nil, contentWorld: .page) }
-                catch { NSLog("Realtime workspace delivery failed: %@", String(describing: error)) }
-                self.sending = false
-                if self.dirty { self.dirty = false; self.publish(webView) }
+            encodingQueue.async { [weak self, weak webView] in
+                let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+                let json = (try? encoder.encode(latest)).flatMap { String(data: $0, encoding: .utf8) }
+                DispatchQueue.main.async {
+                    guard let self, let webView else { return }
+                    Task { @MainActor in
+                        if let json {
+                            // Structured arguments prevent evidence from becoming code.
+                            do { _ = try await webView.callAsyncJavaScript("window.agentreinsReceive(JSON.parse(payload))", arguments: ["payload": json], in: nil, contentWorld: .page) }
+                            catch { NSLog("Realtime workspace delivery failed: %@", String(describing: error)) }
+                        }
+                        self.sending = false
+                        if self.dirty {
+                            self.dirty = false
+                            DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(250)) { [weak self, weak webView] in
+                                if let webView { self?.publish(webView) }
+                            }
+                        }
+                    }
+                }
             }
         }
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
@@ -96,9 +108,44 @@ final class RealtimeWorkspaceState: ObservableObject {
     private var parsingContexts = Set<UUID>()
     private var contextInputs: [UUID: String] = [:]
     private var registry = CollectionProcessRegistry()
-    func updateProcesses(_ processes: [ProcessSnapshotRecord]) { registry.update(processes, now: Date()); revision += 1 }
+    private var lastProcessSnapshot: [ProcessSnapshotRecord]?
+    private let backgroundProjection: Bool
+    private let projectionQueue = DispatchQueue(label: "com.agentreins.live-presentation", qos: .userInitiated)
+    private var projectionInFlight = false
+    private var projectionGeneration = 0
+    private var tasksDirty = true, contextsDirty = true
+    private var cachedTasks: [RealtimeTask] = []
+    private var cachedContexts: [RealtimeContextExchange] = []
+    private var collectedDirty = true
+    private var cachedCollected: [RealtimeCollectedRecord] = []
+    private var collectedByID: [UUID: RealtimeCollectedRecord] = [:]
+    private var projectedProcessInput: [ProcessSnapshotRecord]?
+    private var cachedProcesses: [RealtimeProcess] = []
+    private(set) var taskProjectionBuilds = 0
+    private(set) var contextProjectionBuilds = 0
+    private func projectedTasks(force: Bool = false) -> [RealtimeTask] {
+        if backgroundProjection && !force { scheduleLiveProjection(); return cachedTasks }
+        if tasksDirty {
+            cachedTasks = RealtimeWorkspaceProjector.tasks(events: Array(evidence.values), since: since)
+            tasksDirty = false; taskProjectionBuilds += 1
+        }
+        return cachedTasks
+    }
+    private func projectedContexts() -> [RealtimeContextExchange] {
+        if backgroundProjection { scheduleLiveProjection(); return cachedContexts }
+        if contextsDirty {
+            cachedContexts = RealtimeContextProjector.assemble(Array(parsedContexts.values), events: Array(evidence.values))
+            contextsDirty = false; contextProjectionBuilds += 1
+        }
+        return cachedContexts
+    }
+    func updateProcesses(_ processes: [ProcessSnapshotRecord]) {
+        guard lastProcessSnapshot != processes else { return }
+        lastProcessSnapshot = processes; registry.update(processes, now: Date()); projectedProcessInput = nil; revision += 1
+    }
     private let byteBudget: Int
-    init(byteBudget: Int = 32 * 1024 * 1024, checkpointURL: URL? = nil) {
+    init(byteBudget: Int = 32 * 1024 * 1024, checkpointURL: URL? = nil, backgroundProjection: Bool = false) {
+        self.backgroundProjection = backgroundProjection
         self.byteBudget = byteBudget; self.checkpointURL = checkpointURL
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushCheckpoint() }
@@ -141,7 +188,7 @@ final class RealtimeWorkspaceState: ObservableObject {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AgentGuard/realtime-active-v1.json")
     }
     func markRead(_ taskID: String) {
-        guard RealtimeWorkspaceProjector.tasks(events: Array(evidence.values), since: since).contains(where: { $0.id == taskID }) else { return }
+        guard projectedTasks().contains(where: { $0.id == taskID }) else { return }
         readTaskIDs.insert(taskID); revision += 1; scheduleCheckpoint()
     }
     func refreshArtifacts() {
@@ -151,13 +198,14 @@ final class RealtimeWorkspaceState: ObservableObject {
             let values = RealtimeArtifactProjector.probe(candidates)
             DispatchQueue.main.async {
                 guard let self, self.artifactGeneration == generation else { return }
-                self.artifacts = values; self.revision += 1
+                if self.artifacts != values { self.artifacts = values; self.revision += 1 }
             }
         }
     }
     private func scheduleArtifacts() {
+        if backgroundProjection { scheduleLiveProjection(); return }
         let values = Array(evidence.values)
-        let tasks = RealtimeWorkspaceProjector.tasks(events: values, since: since)
+        let tasks = projectedTasks()
         let candidates = RealtimeArtifactProjector.candidates(events: values, tasks: tasks)
         guard candidates != artifactCandidates else { return }
         artifactCandidates = candidates; refreshArtifacts()
@@ -167,7 +215,7 @@ final class RealtimeWorkspaceState: ObservableObject {
         checkpointWork?.cancel(); checkpointWork = nil
         checkpointQueue.sync {} // Finish any previous atomic save before the shutdown snapshot.
         let values = Array(evidence.values)
-        let tasks = RealtimeWorkspaceProjector.tasks(events: values, since: since)
+        let tasks = projectedTasks(force: true)
         let active = tasks.filter { !["completed", "failed", "cancelled"].contains($0.lifecycleStatus) }
         let keys = Set(active.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
         let linked = Set(active.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID].compactMap { $0 } })
@@ -184,7 +232,7 @@ final class RealtimeWorkspaceState: ObservableObject {
         guard checkpointWork == nil else { return }
         let generation = checkpointGeneration
         let values = Array(evidence.values)
-        let tasks = RealtimeWorkspaceProjector.tasks(events: values, since: since)
+        let tasks = projectedTasks()
         let activeTasks = tasks.filter { !["completed", "failed", "cancelled"].contains($0.lifecycleStatus) }
         let activeKeys = Set(activeTasks.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
         let linkedIDs = Set(activeTasks.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID].compactMap { $0 } })
@@ -225,6 +273,7 @@ final class RealtimeWorkspaceState: ObservableObject {
                old.remotePort == event.remotePort, old.modelDecision == event.modelDecision, old.modelReasoning == event.modelReasoning,
                old.endedAt == event.endedAt, old.startedAt == event.startedAt, old.inputTokens == event.inputTokens, old.outputTokens == event.outputTokens { continue }
             changed = true
+            collectedByID.removeValue(forKey: event.id)
             let size = Self.eventSize(event)
             retainedBytes += size - (sizes[event.id] ?? 0)
             sizes[event.id] = size; evidence[event.id] = event
@@ -242,6 +291,7 @@ final class RealtimeWorkspaceState: ObservableObject {
                 evidence.removeValue(forKey: event.id); truncated = true
             }
         }
+        if changed { tasksDirty = true; contextsDirty = true; collectedDirty = true; projectionGeneration += 1 }
         parsedContexts = parsedContexts.filter { evidence[$0.key] != nil }
         contextInputs = contextInputs.filter { evidence[$0.key] != nil }
         for event in evidence.values where event.kind == "model" && ["prompt", "network_prompt"].contains(event.op) {
@@ -255,24 +305,56 @@ final class RealtimeWorkspaceState: ObservableObject {
                     guard self.evidence[event.id] != nil else { return }
                     self.contextInputs[event.id] = body
                     self.parsedContexts[event.id] = parsed
+                    self.contextsDirty = true; self.projectionGeneration += 1
+                    self.scheduleLiveProjection()
                     self.revision += 1
                 }
             }
         }
-        if changed { scheduleArtifacts(); scheduleCheckpoint() }
-        revision += 1
+        if changed { scheduleArtifacts(); scheduleCheckpoint(); revision += 1 }
     }
-    func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil) -> RealtimeWorkspacePayload {
-        var value = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.tasks(events: Array(evidence.values), since: since),
-            collected: evidence.values.sorted { $0.ts > $1.ts }.prefix(200).map { event in
-                let display = CollectionRecordPresentation(event, receivedAt: event.ts)
-                return RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent) ?? "归属未确认", source: event.source ?? "来源未知",
+    private func scheduleLiveProjection() {
+        guard backgroundProjection, (tasksDirty || contextsDirty), !projectionInFlight else { return }
+        projectionInFlight = true
+        let generation = projectionGeneration, values = Array(evidence.values), since = since
+        let contexts = Array(parsedContexts.values)
+        projectionQueue.async { [weak self] in
+            let tasks = RealtimeWorkspaceProjector.tasks(events: values, since: since)
+            let exchanges = RealtimeContextProjector.assemble(contexts, events: values)
+            let candidates = RealtimeArtifactProjector.candidates(events: values, tasks: tasks)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                self.projectionInFlight = false
+                // Publish coherent snapshots in worker order, then catch up with
+                // newer input. Never starve the UI while evidence keeps arriving.
+                self.cachedTasks = tasks; self.cachedContexts = exchanges
+                self.taskProjectionBuilds += 1; self.contextProjectionBuilds += 1
+                if generation == self.projectionGeneration { self.tasksDirty = false; self.contextsDirty = false }
+                if self.artifactCandidates != candidates { self.artifactCandidates = candidates; self.refreshArtifacts() }
+                self.revision += 1; self.scheduleCheckpoint(); self.scheduleLiveProjection()
+            }
+        }
+    }
+    private func projectedCollected() -> [RealtimeCollectedRecord] {
+        guard collectedDirty else { return cachedCollected }
+        cachedCollected = evidence.values.sorted { $0.ts > $1.ts }.prefix(200).map { event in
+                if let cached = collectedByID[event.id] { return cached }
+            let display = CollectionRecordPresentation(event, receivedAt: event.ts)
+                let row = RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent) ?? "归属未确认", source: event.source ?? "来源未知",
                     kind: event.kind, op: event.op, summary: display.summary, preview: String(display.preview.prefix(16000)),
                     hasTaskIdentity: event.sessionId != nil && event.turnId != nil,
                     title: display.title, category: display.category, details: (display.details + ["路径：\(event.path)", "会话：\(event.sessionId ?? "未关联")", "轮次：\(event.turnId ?? "未关联")"]).joined(separator: "\n"), pid: event.processId,
                     session: event.sessionId, turn: event.turnId, call: event.toolCallId, timestamp: event.ts)
-            }, unattributedCount: evidence.values.filter { $0.sessionId == nil || $0.turnId == nil }.count,
-            processes: registry.ordered.map { row in
+                collectedByID[event.id] = row; return row
+            }
+        let kept = Set(cachedCollected.map(\.id))
+        collectedByID = collectedByID.filter { kept.contains($0.key.uuidString) }
+        collectedDirty = false
+        return cachedCollected
+    }
+    private func projectedProcesses(_ processes: [ProcessSnapshotRecord]) -> [RealtimeProcess] {
+        guard projectedProcessInput != processes else { return cachedProcesses }
+        cachedProcesses = registry.ordered.map { row in
                 let process = row.node.process
                 return RealtimeProcess(id: row.node.id, pid: process.pid, parent: process.ppid,
                     agent: "WorkBuddy", name: row.node.role.title,
@@ -282,8 +364,15 @@ final class RealtimeWorkspaceState: ObservableObject {
                 return RealtimeProcess(id: ProcessObservationCoordinator.identity(process), pid: process.pid, parent: process.ppid,
                     agent: agent, name: CollectionProcessNode(process: process, firstSeen: since, lastSeen: Date(), active: true).role.title,
                     executable: process.executablePath ?? "未采集", command: ProcessArgumentRedactor.redact(process.command))
-            }, health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
-            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: RealtimeContextProjector.assemble(Array(parsedContexts.values), events: Array(evidence.values)))
+            }
+        projectedProcessInput = processes
+        return cachedProcesses
+    }
+    func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil) -> RealtimeWorkspacePayload {
+        var value = RealtimeWorkspacePayload(tasks: projectedTasks(),
+            collected: projectedCollected(), unattributedCount: evidence.values.filter { $0.sessionId == nil || $0.turnId == nil }.count,
+            processes: projectedProcesses(processes), health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
+            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: projectedContexts())
         if let geolocation {
             let addresses = Set(value.tasks.flatMap { $0.cards.flatMap { card in ([card.resource?.remoteIP].compactMap { $0 } + (card.resource?.addresses ?? [])) } }.filter(IPGeolocationStore.isPublicIPAddress))
             value.ipGeolocations = addresses.sorted().map { ip in
