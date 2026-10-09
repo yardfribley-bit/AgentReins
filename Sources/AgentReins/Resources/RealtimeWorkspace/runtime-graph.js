@@ -10,6 +10,15 @@
    return calls.map(c=>({id:c.id||c.call_id,name:c.name||c.function?.name,arguments:c.arguments||c.function?.arguments})).filter(c=>c.id);
   }catch{return [];}
  }
+ function externalServices(task){return arr(task?.cards).flatMap(c=>{
+  const command=String(c.execution?.command||''),match=command.match(/^(?:[A-Za-z_][A-Za-z0-9_]*=[^\s]+\s+)*(?:[^\s]*\/)?git\s+(push|fetch|pull|clone|ls-remote)\b/);
+  const requested=c.source==='tool-intent'&&c.resource?.requestedURL,domain=c.resource?.domain||String(c.execution?.stderr||c.execution?.stdout||'').match(/(?:^|\n)To\s+https?:\/\/([^/\s]+)/)?.[1];
+  if(!match&&!requested)return [];
+  if(!match&&!/^(?:github\.com|api\.github\.com|gitlab\.com|gitee\.com)$/.test(domain||''))return [];
+  const service=/github\.com$/.test(domain||'')?'GitHub':/gitlab\.com$/.test(domain||'')?'GitLab':/gitee\.com$/.test(domain||'')?'Gitee':'Git 远端服务';
+  const action=match?({push:'推送代码',fetch:'读取远端变更',pull:'拉取代码',clone:'克隆仓库','ls-remote':'查询远端分支'})[match[1]]:'工具声明的服务目标';
+  return [{...c,title:service+' · '+action}];
+ });}
  function returned(c){return ['returned','failed'].includes(c?.phase);}
  function build({task:t,contexts=[],processes=[],artifacts=[],exchangeID=null,callID=null}){
   const nodes=[],edges=[],objects=[],calls=nativeCalls(t),exchanges=arr(contexts).slice().sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp));
@@ -106,7 +115,7 @@
   const services=cards.filter(c=>['mcp','skill'].includes(kind(c)));
   const commands=cards.filter(c=>kind(c)==='command'||c.execution);
   const databases=cards.filter(c=>kind(c)==='database'||c.resource?.kind==='database');
-  const external=cards.filter(c=>kind(c)==='external'||c.resource?.kind==='external');
+  const external=externalServices(t).concat(cards.filter(c=>kind(c)==='external'||c.resource?.kind==='external'));
   const verified=cards.filter(c=>['verify','verification'].includes(kind(c)));
   const replyCards=cards.filter(c=>kind(c)==='model'&&c.phase==='returned'&&!c.call);
   const replyText=t?.nativeEndMessage||exchange?.response||replyCards.at(-1)?.output;
@@ -189,6 +198,6 @@
   for(const n of nodes)if(n.key!==hub.key&&!edges.some(e=>e.from===n.key||e.to===n.key))relation('observed-'+n.key,hub.key,n.key,'同轮记录',objects.find(o=>o.key===n.key)?.type,objects.find(o=>o.key===n.key)?.data,false,'记录属于此原生轮次；未取得进一步因果关系');
   return {...g,nodes,edges,objects,currentKey:g.currentKey,relationships:true,shownCallCount:shown.length,hiddenCallCount:hidden.length};
  }
- const api={build,buildArchitecture,buildRelations,nativeCalls,instructionCalls};root.AgentReinsRuntimeGraph=api;
+ const api={build,buildArchitecture,buildRelations,nativeCalls,instructionCalls,externalServices};root.AgentReinsRuntimeGraph=api;
  if(typeof module!=='undefined')module.exports=api;
 })(typeof window==='undefined'?globalThis:window);

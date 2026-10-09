@@ -47,3 +47,8 @@ assert(!cancelled.nodes.some(n=>n.key==='tool-result'));
 const imageInput=graph.build({task:{...task,originalRequest:null,inputAttachments:[{type:'local_image',path:'/tmp/input.png',eventIDs:['image-input-evidence']}]},contexts:[]});
 assert.equal(imageInput.nodes.find(n=>n.key==='user').phase,'returned');
 assert.equal(imageInput.objects.find(o=>o.key==='user').data.attachments[0].path,'/tmp/input.png');
+
+const gitExternal=graph.externalServices({cards:[{id:'call:git',call:'git',source:'agentsight:codex-local-compat',execution:{command:'GIT_TERMINAL_PROMPT=0 git push origin feature',stderr:'To https://github.com/example/repo.git\n * [new branch] feature -> feature'},eventIDs:['git-result']},{id:'call:local',execution:{command:'git status'}}]});
+assert.equal(gitExternal.length,1);assert.equal(gitExternal[0].title,'GitHub · 推送代码');assert.equal(gitExternal[0].id,'call:git');assert.deepEqual(gitExternal[0].eventIDs,['git-result']);
+assert.equal(graph.externalServices({cards:[{execution:{command:'python3 -c "print(\\"git push\\")"'}}]}).length,0);
+console.log('PASS external services: actual Git remote actions and original evidence, local Git operations excluded');
