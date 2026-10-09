@@ -349,7 +349,7 @@ final class WorkBuddySight: ObservableObject {
                 result.append(GuardEvent(id: id, kind: "model", ruleId: "agentsight_model_prompt",
                     path: row["cwd"] as? String ?? "-", command: nil, agent: "workbuddy", op: "prompt",
                     severity: "info", ts: date(row["timestamp"]), action: "sent", sessionId: session,
-                    traceId: provider["traceId"] as? String, turnId: rawId, userIntent: String(readableIntent.prefix(1_000)),
+                    traceId: provider["traceId"] as? String, turnId: rawId, userIntent: readableIntent,
                     modelPrompt: intent, model: provider["model"] as? String,
                     source: "agentsight:workbuddy-local"))
                 continue

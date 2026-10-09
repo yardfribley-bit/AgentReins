@@ -34,6 +34,7 @@ struct IPGeolocation: Codable, Equatable {
 final class IPGeolocationStore: ObservableObject {
     @Published private(set) var records: [String: IPGeolocation] = [:]
     @Published private(set) var pending: Set<String> = []
+    @Published private(set) var failures: [String: String] = [:]
     private let defaultsKey = "agentreins.ip-geolocation-cache.v1"
     private let lifetime: TimeInterval = 30 * 86_400
 
@@ -47,18 +48,24 @@ final class IPGeolocationStore: ObservableObject {
     func resolve(_ hosts: [String]) {
         for host in Set(hosts.map { $0.lowercased() }) where Self.isPublicIPAddress(host) {
             guard records[host] == nil, pending.insert(host).inserted else { continue }
+            failures.removeValue(forKey: host)
             guard let url = URL(string: "https://ipwho.is/\(host)?fields=success,ip,country,region,city,connection") else {
-                pending.remove(host); continue
+                pending.remove(host); failures[host] = "IP 查询地址无效"; continue
             }
             Task {
                 defer { pending.remove(host) }
                 do {
-                    let (data, response) = try await URLSession.shared.data(from: url)
-                    guard (response as? HTTPURLResponse)?.statusCode == 200,
-                          let record = Self.decode(data, fallbackIP: host) else { return }
+                    var request = URLRequest(url: url); request.timeoutInterval = 15
+                    let (data, response) = try await URLSession.shared.data(for: request)
+                    guard (response as? HTTPURLResponse)?.statusCode == 200 else {
+                        failures[host] = "位置服务 HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)"; return
+                    }
+                    guard let record = Self.decode(data, fallbackIP: host) else {
+                        failures[host] = "位置服务未返回有效位置与归属"; return
+                    }
                     records[host] = record
                     persist()
-                } catch { return }
+                } catch { failures[host] = error.localizedDescription }
             }
         }
     }

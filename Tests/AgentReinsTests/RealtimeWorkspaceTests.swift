@@ -184,8 +184,11 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool
         XCTAssertEqual(hacked, false)
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=results]').click()")
-        let failureCount = try await browser.evaluateJavaScript("document.querySelectorAll('[data-status=attention] .work-card').length") as? Int
-        XCTAssertEqual(failureCount, 1)
+        let failureCount = try await browser.evaluateJavaScript("document.querySelectorAll('[data-status=failed] .board-card').length") as? Int
+        XCTAssertEqual(failureCount, 0, "单次工具失败不是整个任务失败")
+        let runningCount = try await browser.evaluateJavaScript("document.querySelectorAll('[data-status=running] .board-card').length") as? Int
+        XCTAssertEqual(runningCount, 1)
+        XCTAssertEqual(payload.tasks.first(where: { $0.originalRequest != nil })?.lifecycleStatus, "running")
         let mock = try await browser.evaluateJavaScript("document.body.textContent.includes('模拟数据') || !!document.getElementById('board-scenario')") as? Bool
         XCTAssertEqual(mock, false)
         if let output = ProcessInfo.processInfo.environment["AGENTREINS_UI_REVIEW_DIR"] {

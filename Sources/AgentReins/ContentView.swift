@@ -6,12 +6,13 @@ struct ContentView: View {
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
-    @StateObject private var realtime = RealtimeWorkspaceState()
+    @StateObject private var geolocation = IPGeolocationStore()
+    @StateObject private var realtime = RealtimeWorkspaceState(checkpointURL: RealtimeWorkspaceState.checkpointLocation())
     private let healthTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     var body: some View {
         RealtimeWorkspaceView(payload: realtime.payload(processes: processGuard.processInventory,
             health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running,
-            error: eventStore.persistenceError))
+            error: eventStore.persistenceError, geolocation: geolocation), onMarkRead: { realtime.markRead($0) }, onRefreshArtifacts: { realtime.refreshArtifacts() }, onResolveIP: { geolocation.resolve([$0]) })
         .frame(minWidth: 1100, minHeight: 720)
         .task {
             realtime.ingest(eventStore.events)
@@ -21,7 +22,7 @@ struct ContentView: View {
         }
         .onReceive(eventStore.$revision) { _ in realtime.ingest(eventStore.events) }
         .onReceive(processGuard.$processInventory) { realtime.updateProcesses($0) }
-        .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true) }
+        .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true); realtime.refreshArtifacts() }
     }
 }
 

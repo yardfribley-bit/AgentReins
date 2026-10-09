@@ -73,6 +73,8 @@ enum WorkBuddyNetworkEvidence {
             "captureStage": record.captureStage ?? "legacy_response",
             "transportError": record.transportError ?? "none",
             "requestPath": record.path,
+            "method": record.method,
+            "responseStatus": record.responseStatus ?? -1,
             "httpVersion": record.httpVersion,
             "contentEncoding": record.contentEncoding ?? "identity",
             "declaredContentLength": record.declaredContentLength ?? -1,
