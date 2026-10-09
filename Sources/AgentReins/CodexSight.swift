@@ -251,6 +251,19 @@ final class CodexSight: ObservableObject {
                 currentTurn = payload["turn_id"] as? String ?? currentTurn
                 continue
             }
+            if (type == "event_msg" && payloadType == "user_message") ||
+               (type == "response_item" && payloadType == "message" && payload["role"] as? String == "user"),
+               let content = (payload["message"] as? String) ?? textContent(payload["content"]),
+               !ChangeSetIndexer.isTranscriptBundle(content) {
+                let turn = metadataTurn(payload) ?? currentTurn
+                lastIntent = cleanUserIntent(content)
+                result.append(event(identity: "\(session):\(turn ?? "none"):\(timestampKey):user-prompt",
+                    kind: "model", rule: "codex_model_prompt", workspace: workspace, op: "prompt",
+                    timestamp: timestamp, action: "sent", session: session, trace: nil, turn: turn,
+                    intent: lastIntent, prompt: String(content.prefix(64_000)), response: nil,
+                    toolCallId: nil, toolName: nil, command: nil, model: model))
+                continue
+            }
             if type == "event_msg", payloadType == "item_completed",
                let item = payload["item"] as? [String: Any], item["type"] as? String == "UserMessage",
                let content = textContent(item["content"]) {

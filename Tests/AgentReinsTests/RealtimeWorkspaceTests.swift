@@ -11,6 +11,27 @@ final class RealtimeWorkspaceTests: XCTestCase {
             op: op, severity: "info", ts: start.addingTimeInterval(seconds), action: action,
             sessionId: "session", turnId: turn, toolCallId: call, modelResponse: result, toolName: "Bash")
     }
+    func testCodexUserMessageFormatsCaptureOriginalRequest() throws {
+        for record in [
+            #"{"type":"event_msg","payload":{"type":"user_message","message":"用户原话","turn_id":"turn"}}"#,
+            #"{"type":"response_item","payload":{"type":"message","role":"user","turn_id":"turn","content":[{"type":"input_text","text":"用户原话"}]}}"#
+        ] {
+            let url = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl")
+            defer { try? FileManager.default.removeItem(at: url) }
+            try (record + "\n").write(to: url, atomically: true, encoding: .utf8)
+            let prompt = try XCTUnwrap(CodexSight.parseSession(url).first { $0.op == "prompt" })
+            XCTAssertEqual(prompt.userIntent, "用户原话")
+        }
+    }
+    func testOriginalRequestIsSeparateFromFallbackTitleAndNotTruncated() throws {
+        let missing = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: [event("call")], since: start).first)
+        XCTAssertNil(missing.originalRequest)
+        let original = String(repeating: "我的原始需求", count: 100)
+        let prompt = GuardEvent(kind: "model", ruleId: "fixture", path: "/project", command: nil, agent: "codex", op: "prompt", severity: "info", ts: start.addingTimeInterval(1), action: "sent", sessionId: "session", turnId: "one", userIntent: original)
+        let captured = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: [prompt], since: start).first)
+        XCTAssertEqual(captured.originalRequest, original)
+        XCTAssertEqual(captured.requestEventID, prompt.id.uuidString)
+    }
     func testParallelAgentsAndTurnsNeverShareToolResults() throws {
         let events = [event("call"), event("result", turn: "two", result: "{\"exit_code\":0}"), event("result", agent: "codex", result: "codex-result")]
         let tasks = RealtimeWorkspaceProjector.tasks(events: events, since: start)

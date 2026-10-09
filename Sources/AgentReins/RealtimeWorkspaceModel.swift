@@ -45,6 +45,9 @@ struct RealtimeTask: Encodable, Identifiable {
     let model: String?
     let reportedComplete: Bool
     var isPrimaryTask: Bool = true
+    var originalRequest: String? = nil
+    var requestSource: String? = nil
+    var requestEventID: String? = nil
 }
 struct RealtimeCard: Encodable, Identifiable {
     let id: String, kind: String, title: String, status: String, tag: String
@@ -76,13 +79,15 @@ enum RealtimeWorkspaceProjector {
         return grouped.map { key, values in
             let ordered = values.sorted { $0.ts == $1.ts ? $0.id.uuidString < $1.id.uuidString : $0.ts < $1.ts }
             let first = ordered[0]
+            let request = ordered.first { ["prompt", "hook_user_prompt", "network_prompt"].contains($0.op) && $0.userIntent?.isEmpty == false }
             let title = ordered.first { ["prompt", "hook_user_prompt"].contains($0.op) && $0.userIntent?.isEmpty == false }?.userIntent
                 ?? ordered.compactMap(\.userIntent).first ?? (turn(first).isEmpty ? "会话活动 · 轮次尚未关联" : "当前轮次 · 用户需求未采集")
             return RealtimeTask(id: Data(key.utf8).base64EncodedString(), agent: canonicalAgent(first.agent)!, session: first.sessionId!, turn: turn(first),
                 title: String(title.prefix(300)), startedAt: ordered.first!.ts, lastActivity: ordered.last!.ts,
                 cards: cards(ordered), model: ordered.compactMap(\.model).last,
                 reportedComplete: ordered.contains { $0.kind == "model" && $0.op == "response" && ["completed", "final_answer", "end_turn", "stop_sequence"].contains($0.action.lowercased()) },
-                isPrimaryTask: ordered.contains { $0.kind == "model" || $0.op == "hook_user_prompt" || $0.kind == "tool" || $0.source == "workbuddy-hook" })
+                isPrimaryTask: ordered.contains { $0.kind == "model" || $0.op == "hook_user_prompt" || $0.kind == "tool" || $0.source == "workbuddy-hook" },
+                originalRequest: request?.userIntent, requestSource: request?.source, requestEventID: request?.id.uuidString)
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
     static func cards(_ ordered: [GuardEvent]) -> [RealtimeCard] {
