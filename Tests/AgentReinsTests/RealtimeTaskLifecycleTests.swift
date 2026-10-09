@@ -13,6 +13,60 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
     private func task(_ events: [GuardEvent]) throws -> RealtimeTask {
         try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: events, since: start).first)
     }
+    func testStopAfterInstallFailureRetainsFailureEvidenceWithoutClaimingGoalComplete() throws {
+        let prompt = record("prompt", kind: "model", call: nil, intent: "安装软件")
+        let call = record("call", seconds: 1, command: #"{"cmd":"sudo -n installer -pkg app.pkg -target /"}"#)
+        let error = record("result", seconds: 2, output: #"{"exit_code":1,"stderr":"sudo: a password is required"}"#)
+        let stop = record("hook_turn_stop", kind: "task", seconds: 3, call: nil, output: "软件尚未安装，需要密码。", source: "workbuddy-hook")
+        let value = try task([prompt, call, error, stop])
+        XCTAssertEqual(value.lifecycleStatus, "stopped")
+        XCTAssertEqual(value.executionState, "stopped")
+        XCTAssertEqual(value.completionEvidence, "unknown")
+        XCTAssertFalse(value.reportedComplete)
+        XCTAssertTrue(value.currentStep.contains("退出码 1"))
+        XCTAssertEqual(value.lastFailureCardID, "call:call")
+        XCTAssertEqual(value.nativeEndMessage, "软件尚未安装，需要密码。")
+        XCTAssertNil(value.stopReason, "Final prose is not a structured reason")
+    }
+    func testStopResolvesMissingReturnsWithoutInventingBackgroundExecution() throws {
+        let submitted = record("hook_tool_start", action: "started", command: "install")
+        let stop = record("hook_turn_stop", kind: "task", seconds: 3, call: nil, source: "workbuddy-hook")
+        let value = try task([submitted, stop])
+        XCTAssertEqual(value.lifecycleStatus, "stopped")
+        XCTAssertEqual(value.unresolvedCallIDs, ["call"])
+        XCTAssertTrue(value.statusBasis.contains("缺最终返回"))
+    }
+    func testNativeRunningExecutorMayContinueAfterAgentStop() throws {
+        let submitted = record("call", command: #"{"cmd":"download"}"#)
+        let running = record("result", seconds: 1, output: #"{"session_id":"runner","status":"running","stdout":"download started"}"#)
+        let stop = record("hook_turn_stop", kind: "task", seconds: 2, call: nil, source: "workbuddy-hook")
+        let value = try task([submitted, running, stop])
+        XCTAssertEqual(value.lifecycleStatus, "running")
+        XCTAssertEqual(value.executionState, "background_running")
+        XCTAssertFalse(value.reportedComplete)
+        let returned = record("result", seconds: 3, output: #"{"exit_code":0,"stdout":"download finished"}"#)
+        XCTAssertEqual(try task([submitted, running, stop, returned]).lifecycleStatus, "stopped")
+    }
+    func testDeliveryMustBeExplicitAndExistenceChecked() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("report.md")
+        try "delivered".write(to: file, atomically: true, encoding: .utf8)
+        let output = String(decoding: try JSONSerialization.data(withJSONObject: ["type":"present_files_result", "files":[file.path]]), as: UTF8.self)
+        let delivery = record("result", seconds: 1, call: "delivery", output: output, name: "present_files")
+        let stop = record("hook_turn_stop", kind: "task", seconds: 2, call: nil, source: "workbuddy-hook")
+        let events = [delivery, stop], initial = try task(events)
+        XCTAssertEqual(initial.lifecycleStatus, "stopped")
+        let artifacts = RealtimeArtifactProjector.probe(RealtimeArtifactProjector.candidates(events: events, tasks: [initial]))
+        let verified = try XCTUnwrap(RealtimeWorkspaceProjector.assessingDelivery([initial], artifacts: artifacts).first)
+        XCTAssertEqual(verified.lifecycleStatus, "completed")
+        XCTAssertEqual(verified.completionEvidence, "verified_delivery")
+        try FileManager.default.removeItem(at: file)
+        let absent = RealtimeArtifactProjector.probe(RealtimeArtifactProjector.candidates(events: events, tasks: [initial]))
+        XCTAssertEqual(RealtimeWorkspaceProjector.assessingDelivery([initial], artifacts: absent).first?.lifecycleStatus, "stopped")
+        XCTAssertEqual(RealtimeWorkspaceProjector.assessingDelivery([initial], artifacts: []).first?.lifecycleStatus, "stopped")
+    }
     func testSingleToolFailureIsNotTaskFailureAndRetryRetainsBothAttempts() throws {
         let first = record("call", action: "requested", command: #"{"cmd":"false"}"#)
         let failure = record("result", action: "completed", seconds: 1, output: #"{"exit_code":1,"stderr":"bad"}"#)
@@ -24,7 +78,7 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
         XCTAssertFalse(projected.reportedComplete)
     }
     func testExplicitTaskTerminalsDoNotRegressWhenLateStartAppears() throws {
-        for (op, action, expected) in [("task_complete", "completed", "completed"), ("task_failed", "failed", "failed"), ("task_cancelled", "cancelled", "cancelled")] {
+        for (op, action, expected) in [("task_complete", "completed", "stopped"), ("task_failed", "failed", "failed"), ("task_cancelled", "cancelled", "cancelled")] {
             let end = record(op, kind: "task", action: action, seconds: 1, call: nil)
             let late = record("start", action: "running", seconds: 3)
             let projected = try task([late, end])
@@ -46,7 +100,8 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
         XCTAssertEqual(try task([response]).lifecycleStatus, "running")
         XCTAssertFalse(try task([response]).reportedComplete)
         let final = record("response", kind: "model", action: "final_answer", seconds: 1, call: nil, output: "已交付")
-        XCTAssertEqual(try task([response, final]).lifecycleStatus, "completed")
+        XCTAssertEqual(try task([response, final]).lifecycleStatus, "stopped")
+        XCTAssertFalse(try task([response, final]).reportedComplete)
     }
     func testExecutorIdentifierIsNotOperatingSystemPID() throws {
         let call = record("start", command: #"{"command":["python3","stream.py"]}"#)
@@ -61,11 +116,22 @@ final class RealtimeTaskLifecycleTests: XCTestCase {
         let body = #"{"payload":{"last_assistant_message":"最终报告已交付"}}"#
         let stop = GuardEvent(kind: "activity", ruleId: "hook", path: "-", command: nil, agent: "codex", op: "hook_turn_stop", severity: "info", ts: start.addingTimeInterval(2), action: "observed", sessionId: "session", afterContent: body, source: "workbuddy-hook")
         let unique = RealtimeWorkspaceProjector.tasks(events: [reply, stop], since: start)
-        XCTAssertEqual(unique.count, 1); XCTAssertEqual(unique.first?.lifecycleStatus, "completed")
+        XCTAssertEqual(unique.count, 1); XCTAssertEqual(unique.first?.lifecycleStatus, "stopped")
+        XCTAssertEqual(unique.first?.nativeEndMessage, "最终报告已交付")
         let repeated = record("response", kind: "model", action: "completed", call: nil, output: "最终报告已交付", turn: "other", source: "agentsight:workbuddy-local")
         let ambiguous = RealtimeWorkspaceProjector.tasks(events: [reply, repeated, stop], since: start)
         XCTAssertEqual(ambiguous.count, 3); XCTAssertTrue(ambiguous.allSatisfy { !$0.reportedComplete })
     }
+    func testSessionOnlyStopAndUserHookDoNotInventAnOngoingTurn() throws {
+        let user = record("hook_user_prompt", kind: "activity", call: nil, intent: "之前的研究任务", turn: nil, source: "workbuddy-hook")
+        let submitted = record("hook_tool_start", seconds: 1, command: "run", turn: nil)
+        let stop = record("hook_turn_stop", kind: "activity", seconds: 2, call: nil, turn: nil, source: "workbuddy-hook")
+        let value = try task([user, submitted, stop])
+        XCTAssertEqual(value.lifecycleStatus, "observed")
+        XCTAssertFalse(value.reportedComplete)
+        XCTAssertTrue(value.currentStep.contains("归属待确认"))
+    }
+
     func testSessionOnlyHookStopDoesNotCompleteOtherTurnOrLane() throws {
         let stop = record("hook_turn_stop", kind: "activity", seconds: 2, call: nil, turn: nil, source: "workbuddy-hook")
         let tasks = RealtimeWorkspaceProjector.tasks(events: [record("call"), stop], since: start)

@@ -64,14 +64,31 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
         private var dirty = false
         func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; publish(webView) }
         private let encodingQueue = DispatchQueue(label: "com.agentreins.live-encoding", qos: .utility)
+        // Explicit development preview only. The browser consumes this same
+        // native projection; it must not keep displaying a fixed test snapshot.
+        private let previewPayloadURL: URL? = {
+            let arguments = ProcessInfo.processInfo.arguments
+            guard let flag = arguments.firstIndex(of: "--realtime-preview-payload"), arguments.indices.contains(flag + 1),
+                  arguments[flag + 1].hasPrefix("/") else { return nil }
+            return URL(fileURLWithPath: arguments[flag + 1])
+        }()
         func publish(_ webView: WKWebView) {
             guard ready else { return }
             guard !sending else { dirty = true; return }
             guard let latest else { return }
             sending = true
+            let previewURL = previewPayloadURL
             encodingQueue.async { [weak self, weak webView] in
                 let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-                let json = (try? encoder.encode(latest)).flatMap { String(data: $0, encoding: .utf8) }
+                let data = try? encoder.encode(latest)
+                if let previewURL, let data {
+                    do {
+                        try FileManager.default.createDirectory(at: previewURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                        try data.write(to: previewURL, options: [.atomic])
+                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: previewURL.path)
+                    } catch { NSLog("Realtime preview export failed: %@", String(describing: error)) }
+                }
+                let json = data.flatMap { String(data: $0, encoding: .utf8) }
                 DispatchQueue.main.async {
                     guard let self, let webView else { return }
                     Task { @MainActor in
@@ -216,9 +233,9 @@ final class RealtimeWorkspaceState: ObservableObject {
         checkpointQueue.sync {} // Finish any previous atomic save before the shutdown snapshot.
         let values = Array(evidence.values)
         let tasks = projectedTasks(force: true)
-        let active = tasks.filter { !["completed", "failed", "cancelled"].contains($0.lifecycleStatus) }
+        let active = tasks.filter { retainForRestart($0) }
         let keys = Set(active.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
-        let linked = Set(active.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID].compactMap { $0 } })
+        let linked = Set(active.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } })
         let events = values.filter { e in
             guard let agent = RealtimeWorkspaceProjector.canonicalAgent(e.agent), let session = e.sessionId else { return false }
             return linked.contains(e.id.uuidString) || keys.contains(agent + "\u{0}" + session + "\u{0}" + (e.turnId ?? ""))
@@ -233,9 +250,9 @@ final class RealtimeWorkspaceState: ObservableObject {
         let generation = checkpointGeneration
         let values = Array(evidence.values)
         let tasks = projectedTasks()
-        let activeTasks = tasks.filter { !["completed", "failed", "cancelled"].contains($0.lifecycleStatus) }
+        let activeTasks = tasks.filter { retainForRestart($0) }
         let activeKeys = Set(activeTasks.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
-        let linkedIDs = Set(activeTasks.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID].compactMap { $0 } })
+        let linkedIDs = Set(activeTasks.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } })
         let active = values.filter { e in
             guard let agent = RealtimeWorkspaceProjector.canonicalAgent(e.agent), let session = e.sessionId else { return false }
             return linkedIDs.contains(e.id.uuidString) || activeKeys.contains(agent + "\u{0}" + session + "\u{0}" + (e.turnId ?? ""))
@@ -263,6 +280,10 @@ final class RealtimeWorkspaceState: ObservableObject {
     func ingest(_ events: [GuardEvent]) {
         var changed = false
         for event in events where event.ts >= runtimeStartedAt || restoredIDs.contains(event.id) {
+            // Startup EventStore replay can contain the old database projection
+            // of this same source ID. It must not overwrite a newer repaired
+            // live checkpoint. Fresh source observations still update normally.
+            if restoredIDs.contains(event.id), event.ts < runtimeStartedAt, evidence[event.id] != nil { continue }
             if let old = evidence[event.id], old.ts == event.ts, old.action == event.action, old.userIntent == event.userIntent,
                old.modelResponse == event.modelResponse, old.modelPrompt == event.modelPrompt, old.command == event.command,
                old.afterContent == event.afterContent, old.fileDiff == event.fileDiff, old.beforeContent == event.beforeContent,
@@ -281,8 +302,18 @@ final class RealtimeWorkspaceState: ObservableObject {
         // Preserve small original-request records and currently active call
         // boundaries ahead of bulky model/output previews under pressure.
         if evidence.count > 6000 || retainedBytes > byteBudget {
-            let protected = Set(evidence.values.filter { ["prompt", "hook_user_prompt", "call", "hook_tool_start", "result", "hook_tool_end", "task_complete", "task_completed", "task_failed", "turn_completed", "task_cancelled", "hook_turn_stop"].contains($0.op) && Self.eventSize($0) <= byteBudget / 2 }.map(\.id))
+            func internalReview(_ e: GuardEvent) -> Bool { e.model == "codex-auto-review" || e.toolName == "codex.internal_review_context" }
+            let finalMessages = Set(evidence.values.filter { $0.op == "hook_turn_stop" }.compactMap { e -> String? in
+                guard let final = (RealtimeDetailProjector.object(e.afterContent)?["payload"] as? [String: Any])?["last_assistant_message"] as? String else { return nil }
+                return (e.sessionId ?? "") + "\u{0}" + final
+            })
+            let protected = Set(evidence.values.filter { e in
+                !internalReview(e) && Self.eventSize(e) <= byteBudget / 2 &&
+                (["prompt", "hook_user_prompt", "call", "hook_tool_start", "result", "hook_tool_end", "task_complete", "task_completed", "task_failed", "turn_completed", "task_cancelled", "hook_turn_stop"].contains(e.op) ||
+                 (e.op == "response" && e.modelResponse.map { finalMessages.contains((e.sessionId ?? "") + "\u{0}" + $0) } == true))
+            }.map(\.id))
             for event in evidence.values.sorted(by: { a, b in
+                if internalReview(a) != internalReview(b) { return internalReview(a) }
                 if protected.contains(a.id) != protected.contains(b.id) { return !protected.contains(a.id) }
                 return a.ts < b.ts
             }) {
@@ -294,7 +325,7 @@ final class RealtimeWorkspaceState: ObservableObject {
         if changed { tasksDirty = true; contextsDirty = true; collectedDirty = true; projectionGeneration += 1 }
         parsedContexts = parsedContexts.filter { evidence[$0.key] != nil }
         contextInputs = contextInputs.filter { evidence[$0.key] != nil }
-        for event in evidence.values where event.kind == "model" && ["prompt", "network_prompt"].contains(event.op) {
+        for event in evidence.values where event.kind == "model" && event.model != "codex-auto-review" && ["prompt", "network_prompt"].contains(event.op) {
             guard let body = event.modelPrompt, contextInputs[event.id] != body, !parsingContexts.contains(event.id) else { continue }
             parsingContexts.insert(event.id)
             contextQueue.async { [weak self] in
@@ -312,6 +343,12 @@ final class RealtimeWorkspaceState: ObservableObject {
             }
         }
         if changed { scheduleArtifacts(); scheduleCheckpoint(); revision += 1 }
+    }
+    private func retainForRestart(_ task: RealtimeTask) -> Bool {
+        // Internal approval reviews are not unread user tasks. Their original
+        // collector evidence remains in the evidence store and current live view.
+        guard task.model != "codex-auto-review", !task.cards.contains(where: { $0.title == "codex.internal_review_context" }) else { return false }
+        return !["completed", "failed", "cancelled", "stopped"].contains(task.lifecycleStatus) || !readTaskIDs.contains(task.id)
     }
     private func scheduleLiveProjection() {
         guard backgroundProjection, (tasksDirty || contextsDirty), !projectionInFlight else { return }
@@ -369,7 +406,7 @@ final class RealtimeWorkspaceState: ObservableObject {
         return cachedProcesses
     }
     func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil) -> RealtimeWorkspacePayload {
-        var value = RealtimeWorkspacePayload(tasks: projectedTasks(),
+        var value = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.assessingDelivery(projectedTasks(), artifacts: artifacts),
             collected: projectedCollected(), unattributedCount: evidence.values.filter { $0.sessionId == nil || $0.turnId == nil }.count,
             processes: projectedProcesses(processes), health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
             observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: projectedContexts())

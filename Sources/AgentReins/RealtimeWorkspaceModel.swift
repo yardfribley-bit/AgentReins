@@ -42,12 +42,26 @@ struct RealtimeHealth: Encodable {
     let accepted: Int
     let detail: String?
 }
+struct RealtimeInputAttachment: Encodable {
+    let type: String
+    let path: String?
+    let source: String
+    let eventIDs: [String]
+}
+struct RealtimeUserInput: Encodable {
+    let id: String
+    let content: String?
+    let timestamp: Date
+    let source: String
+    let eventIDs: [String]
+    let basis: String
+}
 struct RealtimeTask: Encodable, Identifiable {
     let id: String, agent: String, session: String, turn: String, title: String
     let startedAt: Date, lastActivity: Date
     let cards: [RealtimeCard]
     let model: String?
-    let reportedComplete: Bool
+    var reportedComplete: Bool
     var isPrimaryTask: Bool = true
     var originalRequest: String? = nil
     var requestSource: String? = nil
@@ -58,6 +72,22 @@ struct RealtimeTask: Encodable, Identifiable {
     var statusBasis: String = "尚无状态证据"
     var coverage: [RealtimeCoverage] = []
     var lifecycle: RealtimeTaskLifecycle? = nil
+    var inputAttachments: [RealtimeInputAttachment] = []
+    var executionState: String = "observed"
+    var completionEvidence: String = "unknown"
+    var statusChangedAt: Date? = nil
+    var nativeEndAt: Date? = nil
+    var nativeTerminalEventID: String? = nil
+    var nativeEndOp: String? = nil
+    var nativeEndAction: String? = nil
+    var nativeEndSource: String? = nil
+    var nativeEndMessage: String? = nil
+    var nativeEndMessageTruncated: Bool = false
+    var stopReason: String? = nil
+    var lastFailureCardID: String? = nil
+    var unresolvedCallIDs: [String] = []
+    var userInputs: [RealtimeUserInput] = []
+    var latestUserInput: RealtimeUserInput? = nil
 }
 struct RealtimeCard: Encodable, Identifiable {
     let id: String, kind: String, title: String, status: String, tag: String
@@ -73,14 +103,120 @@ struct RealtimeCard: Encodable, Identifiable {
 }
 
 enum RealtimeWorkspaceProjector {
+    /// Retain both source IDs while displaying an unambiguous native/transport
+    /// echo once. Repeated sends, different turns and ambiguous matches stay separate.
+    static func userInputs(_ events: [GuardEvent]) -> [RealtimeUserInput] {
+        let humans = events.filter { ["prompt", "hook_user_prompt"].contains($0.op) && ($0.userIntent != nil || $0.ruleId == "codex_model_prompt") }
+            .sorted { $0.ts == $1.ts ? $0.id.uuidString < $1.id.uuidString : $0.ts < $1.ts }
+        func format(_ e: GuardEvent) -> String { RealtimeDetailProjector.object(e.command)?["input_record_kind"] as? String ?? "" }
+        var paired = Set<UUID>(), pairs: [UUID: GuardEvent] = [:]
+        for native in humans where format(native) == "native_user_message" {
+            let matches = humans.filter { e in
+                format(e) == "transport_user_message" && e.sessionId == native.sessionId && e.turnId == native.turnId && e.source == native.source &&
+                e.userIntent == native.userIntent && (e.userIntent != nil || e.modelPrompt == native.modelPrompt) &&
+                native.ts.timeIntervalSince(e.ts) >= 0 && native.ts.timeIntervalSince(e.ts) <= 1 && !paired.contains(e.id)
+            }
+            guard matches.count == 1, let transport = matches.first else { continue }
+            let echoes = humans.filter { format($0) == "native_user_message" && $0.sessionId == transport.sessionId && $0.turnId == transport.turnId && $0.userIntent == transport.userIntent && $0.ts.timeIntervalSince(transport.ts) >= 0 && $0.ts.timeIntervalSince(transport.ts) <= 1 }
+            guard echoes.count == 1 else { continue }
+            paired.insert(transport.id); pairs[native.id] = transport
+        }
+        return humans.filter { !paired.contains($0.id) }.map { e in
+            let echo = pairs[e.id]
+            return RealtimeUserInput(id: e.id.uuidString, content: e.userIntent, timestamp: echo?.ts ?? e.ts,
+                source: e.source ?? "unknown", eventIDs: [e.id.uuidString] + (echo.map { [$0.id.uuidString] } ?? []),
+                basis: echo == nil ? "原始用户输入记录" : "同轮原生 UserMessage 与唯一即时、同文传输记录合并显示；两条原始证据保留")
+        }.sorted { $0.timestamp < $1.timestamp }
+    }
+    /// Confirm explicit delivery and actual files independently of Agent Stop.
+    /// File existence does not certify the business contents.
+    static func assessingDelivery(_ tasks: [RealtimeTask], artifacts: [RealtimeArtifact]) -> [RealtimeTask] {
+        tasks.map { task in
+            guard task.lifecycleStatus == "stopped" else { return task }
+            let deliveries = task.cards.filter { $0.title == "present_files" && $0.phase == "returned" }
+            let paths = deliveries.flatMap { card -> [String] in
+                guard let body = RealtimeDetailProjector.object(card.output), body["type"] as? String == "present_files_result" else { return [] }
+                guard let rows = body["files"] as? [Any], !rows.isEmpty else { return [] }
+                let paths = rows.compactMap { row -> String? in
+                    let path = row as? String ?? (row as? [String: Any])?["path"] as? String
+                    return path.flatMap { $0.hasPrefix("/") ? URL(fileURLWithPath: $0).standardizedFileURL.path : nil }
+                }
+                return paths.count == rows.count ? paths : [""]
+            }
+            guard !paths.isEmpty, paths.allSatisfy({ path in artifacts.contains { $0.taskID == task.id && $0.path == path && $0.exists } }) else { return task }
+            var result = task
+            result.lifecycleStatus = "completed"; result.reportedComplete = true
+            result.completionEvidence = "verified_delivery"
+            result.currentStep = "Agent 已结束；明确交付文件已存在，内容验证另行核对"
+            result.statusBasis += " 同轮 present_files 明确交付且路径已实测存在；不代表内容已通过业务验收。"
+            result.lifecycle = RealtimeTaskLifecycle(currentStageID: "artifact", phase: "completed", stages: task.lifecycle?.stages ?? [])
+            return result
+        }
+    }
     static func canonicalAgent(_ value: String?) -> String? {
         guard let value = value?.lowercased() else { return nil }
         if value.contains("workbuddy") { return "WorkBuddy" }
         if value.contains("codex") { return "Codex" }
         return nil
     }
+    // Repair the presentation of an already-active live checkpoint captured by
+    // the older role=user parser. Keep evidence bytes/IDs; do not read or mutate
+    // history. Explicit user.* source metadata continues to identify human text.
+    private static func normalizeCodexUserContext(_ event: GuardEvent) -> GuardEvent {
+        guard (["agentsight:codex-local-compat", "agentsight:workbuddy-local"].contains(event.source ?? "") && event.op == "prompt") ||
+            (event.source == "agentsight:workbuddy-network-body" && event.op == "network_prompt") else { return event }
+        let body = event.modelPrompt ?? event.userIntent ?? ""
+        let workBuddy = event.source == "agentsight:workbuddy-local"
+        let network = event.op == "network_prompt"
+        let kinds = RealtimeDetailProjector.object(event.command)?["content_item_kinds"] as? [String] ?? []
+        let runtime = workBuddy ? WorkBuddySight.cleanUserIntent(body) == nil : event.model == "codex-auto-review" || CodexSight.isRuntimeUserContext(body, sourceKinds: kinds)
+        var intent = network ? WorkBuddyNetworkEvidence.userIntent(in: RealtimeDetailProjector.object(body)) : runtime ? nil : event.userIntent
+        let cleanedBody = workBuddy ? WorkBuddySight.cleanUserIntent(body) ?? "" : CodexSight.cleanUserIntent(body)
+        // Older active image messages retained the app's <image> wrapper as
+        // userIntent. Repair only that presentation; never invent image text.
+        if !runtime, cleanedBody != body,
+           event.userIntent == body || event.userIntent?.contains("<image") == true {
+            intent = cleanedBody.isEmpty ? nil : cleanedBody
+        }
+        guard runtime || intent != event.userIntent else { return event }
+        return GuardEvent(id: event.id, kind: runtime ? "context" : event.kind,
+            ruleId: runtime ? (workBuddy ? "workbuddy_recovered_context" : "codex_runtime_user_context") : event.ruleId,
+            path: event.path, command: event.command, agent: event.agent,
+            op: runtime ? (workBuddy ? "recovered_context" : "runtime_user_context") : event.op,
+            severity: event.severity, ts: event.ts, action: runtime ? "captured" : event.action, sessionId: event.sessionId,
+            traceId: event.traceId, turnId: event.turnId, toolCallId: event.toolCallId, userIntent: intent,
+            modelDecision: event.modelDecision, modelReasoning: event.modelReasoning, modelPrompt: event.modelPrompt,
+            modelResponse: event.modelResponse, toolName: runtime ? (workBuddy ? "workbuddy.compacted_context" : "codex.runtime_context") : event.toolName, model: event.model,
+            inputTokens: event.inputTokens, outputTokens: event.outputTokens, cachedTokens: event.cachedTokens,
+            reasoningTokens: event.reasoningTokens, costUSD: event.costUSD, beforeContent: event.beforeContent,
+            afterContent: event.afterContent, fileDiff: event.fileDiff, codeFindings: event.codeFindings,
+            source: event.source, attributionConfidence: event.attributionConfidence,
+            attributionMethod: event.attributionMethod, processId: event.processId,
+            parentProcessId: event.parentProcessId, localAddress: event.localAddress, remoteHost: event.remoteHost,
+            remotePort: event.remotePort, remoteDomain: event.remoteDomain, startedAt: event.startedAt,
+            endedAt: event.endedAt, durationMS: event.durationMS, relatedPath: event.relatedPath)
+    }
+    static func normalizedEvents(_ events: [GuardEvent]) -> [GuardEvent] {
+        let normalized = events.map(normalizeCodexUserContext)
+        let humans = normalized.filter { $0.source == "agentsight:workbuddy-local" && $0.op == "prompt" && $0.userIntent != nil && $0.turnId != nil }
+        var flowTargets: [String: (String, String)] = [:]
+        for event in normalized where event.source == "agentsight:workbuddy-network-body" && event.op == "network_prompt" {
+            guard let intent = event.userIntent, let trace = event.traceId else { continue }
+            let matches = humans.filter { $0.userIntent == intent && $0.ts <= event.ts.addingTimeInterval(1) }
+            let identities = Set(matches.map { ($0.sessionId ?? "") + "\u{0}" + ($0.turnId ?? "") })
+            if identities.count == 1, let match = matches.first, let session = match.sessionId, let turn = match.turnId {
+                flowTargets[trace] = (session, turn)
+            }
+        }
+        return normalized.map { event in
+            guard event.source == "agentsight:workbuddy-network-body", let trace = event.traceId,
+                  let target = flowTargets[trace], event.sessionId != target.0 || event.turnId != target.1 else { return event }
+            return event.attributed(sessionId: target.0, turnId: target.1, toolCallId: event.toolCallId,
+                confidence: .inferred, method: "unique exact human input in the bounded live records; native turn and HTTPS flow retained")
+        }
+    }
     static func tasks(events: [GuardEvent], since: Date) -> [RealtimeTask] {
-        let fresh = events.filter { $0.ts >= since && canonicalAgent($0.agent) != nil && $0.sessionId != nil }
+        let fresh = normalizedEvents(events.filter { $0.ts >= since && canonicalAgent($0.agent) != nil && $0.sessionId != nil })
         // Only native call identity can bridge a missing turn. Session-only evidence
         // remains in its own lane; never assign it to the latest task by time.
         func callKey(_ e: GuardEvent) -> String { "\(canonicalAgent(e.agent)!)\u{0}\(e.sessionId!)\u{0}\(e.toolCallId ?? "")" }
@@ -89,6 +225,16 @@ enum RealtimeWorkspaceProjector {
         func turn(_ e: GuardEvent) -> String {
             if let turn = e.turnId { return turn }
             if e.toolCallId != nil, let matches = callTurns[callKey(e)], matches.count == 1 { return matches.first! }
+            // Hook input is authoritative human text but WorkBuddy omits the
+            // turn ID. Join only a unique identical native input, not proximity.
+            if e.source == "workbuddy-hook", e.op == "hook_user_prompt", let intent = e.userIntent, !intent.isEmpty {
+                let matches = Set(fresh.filter { candidate in
+                    candidate.source == "agentsight:workbuddy-local" && candidate.op == "prompt" &&
+                    candidate.sessionId == e.sessionId && canonicalAgent(candidate.agent) == canonicalAgent(e.agent) &&
+                    candidate.userIntent == intent && candidate.turnId != nil
+                }.compactMap(\.turnId))
+                if matches.count == 1 { return matches.first! }
+            }
             // WorkBuddy Stop omits turn_id, but carries the exact final assistant
             // message. Bind only to one native turn in this same agent/session;
             // repeated content in multiple turns is deliberately left unlinked.
@@ -109,23 +255,58 @@ enum RealtimeWorkspaceProjector {
         return grouped.map { key, values in
             let ordered = values.sorted { $0.ts == $1.ts ? $0.id.uuidString < $1.id.uuidString : $0.ts < $1.ts }
             let first = ordered[0]
-            let request = ordered.first { ["prompt", "hook_user_prompt"].contains($0.op) && $0.userIntent?.isEmpty == false }
+            let request = ordered.first { $0.op == "hook_user_prompt" && $0.userIntent?.isEmpty == false }
+                ?? ordered.first { $0.op == "prompt" && $0.userIntent?.isEmpty == false }
                 ?? ordered.first { $0.op == "network_prompt" && $0.userIntent?.isEmpty == false }
-            let title = request?.userIntent ?? (turn(first).isEmpty ? "会话活动 · 轮次尚未关联" : "当前轮次 · 用户需求未采集")
+            let attachmentRecords = ordered.filter { $0.op == "attachment" && $0.ruleId == "codex_attachment" }
+            let resources = attachmentRecords.flatMap { event -> [RealtimeInputAttachment] in
+                let body = RealtimeDetailProjector.object(event.command)
+                return (body?["resources"] as? [[String: String]] ?? []).map {
+                    RealtimeInputAttachment(type: $0["type"] ?? "unknown", path: $0["path"], source: event.source ?? "unknown", eventIDs: [event.id.uuidString])
+                }
+            }
+            let legacyResources = ordered.flatMap { event -> [RealtimeInputAttachment] in
+                guard event.source == "agentsight:codex-local-compat", event.op == "prompt", let raw = event.modelPrompt else { return [] }
+                let kinds = RealtimeDetailProjector.object(event.command)?["content_item_kinds"] as? [String] ?? []
+                return CodexSight.appInputAttachments(raw, sourceKinds: kinds).map {
+                    RealtimeInputAttachment(type: $0["type"] ?? "unknown", path: $0["path"], source: event.source ?? "unknown", eventIDs: [event.id.uuidString])
+                }
+            }
+            var seenAttachments = Set<String>()
+            let explicitAttachments = resources.isEmpty ? attachmentRecords.flatMap { event -> [RealtimeInputAttachment] in
+                let body = RealtimeDetailProjector.object(event.command)
+                return (body?["types"] as? [String] ?? []).map {
+                    RealtimeInputAttachment(type: $0, path: nil, source: event.source ?? "unknown", eventIDs: [event.id.uuidString])
+                }
+            }.filter { seenAttachments.insert($0.type).inserted } : resources.filter { seenAttachments.insert($0.path ?? $0.type).inserted }
+            var attachmentKeys = Set<String>()
+            let attachments = (explicitAttachments + legacyResources).filter { attachmentKeys.insert($0.path ?? $0.type).inserted }
+            let title = request?.userIntent ?? (!attachments.isEmpty ? "用户附件输入 · 未附带文字" : turn(first).isEmpty ? "会话活动 · 轮次尚未关联" : "当前轮次 · 用户需求未采集")
             let projectedCards = cards(ordered)
-            let state = RealtimeLifecycleProjector.project(events: ordered, cards: projectedCards, hasRequest: request != nil, hasTurn: !turn(first).isEmpty)
+            let inputs = userInputs(ordered)
+            let state = RealtimeLifecycleProjector.project(events: ordered, cards: projectedCards, hasRequest: request != nil || !attachments.isEmpty, hasTurn: !turn(first).isEmpty)
             return RealtimeTask(id: Data(key.utf8).base64EncodedString(), agent: canonicalAgent(first.agent)!, session: first.sessionId!, turn: turn(first),
                 title: String(title.prefix(300)), startedAt: ordered.first!.ts, lastActivity: ordered.last!.ts,
                 cards: projectedCards, model: ordered.compactMap(\.model).last,
                 reportedComplete: state.status == "completed",
-                isPrimaryTask: ordered.contains { $0.kind == "model" || $0.op == "hook_user_prompt" || $0.kind == "tool" || $0.source == "workbuddy-hook" },
+                isPrimaryTask: !ordered.contains { $0.model == "codex-auto-review" || $0.toolName == "codex.internal_review_context" } && ordered.contains { ($0.op == "attachment" && $0.ruleId == "codex_attachment") || $0.kind == "model" || $0.op == "hook_user_prompt" || ($0.kind == "tool" && !turn($0).isEmpty) },
                 originalRequest: request?.userIntent, requestSource: request?.source, requestEventID: request?.id.uuidString,
                 lifecycleStatus: state.status, currentStep: state.currentStep, currentCardID: state.currentCardID, statusBasis: state.basis,
-                coverage: state.coverage, lifecycle: state.lifecycle)
+                coverage: state.coverage, lifecycle: state.lifecycle, inputAttachments: attachments,
+                executionState: state.executionState, completionEvidence: state.completionEvidence,
+                statusChangedAt: state.statusChangedAt, nativeEndAt: state.nativeEndAt, nativeTerminalEventID: state.nativeTerminalEventID,
+                nativeEndOp: state.nativeEndOp, nativeEndAction: state.nativeEndAction, nativeEndSource: state.nativeEndSource,
+                nativeEndMessage: state.nativeEndMessage, nativeEndMessageTruncated: state.nativeEndMessageTruncated,
+                stopReason: state.stopReason, lastFailureCardID: state.lastFailureCardID, unresolvedCallIDs: state.unresolvedCallIDs,
+                userInputs: inputs, latestUserInput: inputs.last)
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
     static func cards(_ records: [GuardEvent]) -> [RealtimeCard] {
-        let ordered = records.sorted { $0.ts == $1.ts ? $0.id.uuidString < $1.id.uuidString : $0.ts < $1.ts }
+        let normalized: [GuardEvent] = normalizedEvents(records)
+        let ordered: [GuardEvent] = normalized.sorted { lhs, rhs in
+            if lhs.ts == rhs.ts { return lhs.id.uuidString < rhs.id.uuidString }
+            return lhs.ts < rhs.ts
+        }
         var output: [RealtimeCard] = []
         // A call ID only pairs within the already isolated Agent/session/turn.
         let grouped = Dictionary(grouping: ordered.filter(isToolLifecycle)) { $0.toolCallId! }
@@ -157,6 +338,7 @@ enum RealtimeWorkspaceProjector {
                 inputTruncated: RealtimeDetailProjector.truncated(rawInput), outputTruncated: RealtimeDetailProjector.truncated(visibleOutput), phase: phase))
         }
         for event in ordered where !isToolLifecycle(event) {
+            if ["prompt", "hook_user_prompt"].contains(event.op), event.userIntent != nil { continue }
             guard ["model", "file", "network", "cmd", "tool", "activity", "memory", "context", "task"].contains(event.kind) else { continue }
             let kind: String, title: String
             if ["prompt", "hook_user_prompt"].contains(event.op), event.userIntent?.isEmpty == false {
@@ -166,7 +348,9 @@ enum RealtimeWorkspaceProjector {
                 title = event.toolName ?? "上下文材料"
             } else if event.kind == "task" || event.op.hasPrefix("task_") || event.op == "hook_turn_stop" {
                 kind = "task"; title = "任务状态记录"
-            } else if event.kind == "activity" || event.kind == "memory" {
+            } else if event.kind == "memory" {
+                kind = "memory"; title = CollectionRecordPresentation(event, receivedAt: event.ts).title
+            } else if event.kind == "activity" {
                 kind = "process"; title = CollectionRecordPresentation(event, receivedAt: event.ts).title
             } else if event.kind == "model" {
                 kind = "model"; title = ["prompt", "network_prompt"].contains(event.op) ? "Agent → 大模型" : event.op == "reasoning_summary" ? "模型返回的思考摘要" : "大模型 → Agent"
@@ -176,8 +360,16 @@ enum RealtimeWorkspaceProjector {
             } else if event.kind == "network" {
                 kind = "web"; title = "连接 · \(event.remoteDomain ?? event.remoteHost ?? "目标未知")"
             } else { kind = event.kind == "cmd" ? "command" : "tool"; title = event.toolName ?? event.op }
-            let rawInput = kind == "user" ? event.userIntent : event.modelPrompt ?? event.command ?? event.beforeContent ?? (event.path == "-" ? nil : event.path)
-            let rawBody = kind == "user" ? event.userIntent : event.modelResponse ?? event.fileDiff ?? event.afterContent ?? event.modelReasoning ?? event.command
+            let rawInput: String?
+            let rawBody: String?
+            if kind == "user" {
+                rawInput = event.userIntent; rawBody = event.userIntent
+            } else {
+                let inputBody = event.modelPrompt ?? event.command ?? event.beforeContent
+                rawInput = inputBody ?? (event.path == "-" ? nil : event.path)
+                let responseBody = event.modelResponse ?? event.fileDiff ?? event.afterContent
+                rawBody = responseBody ?? event.modelReasoning ?? event.command
+            }
             let body = rawBody ?? "正文未采集"
             let failed = isFailure(event, result: event.modelResponse)
             let waiting = ["approval_required", "awaiting_approval", "blocked"].contains(event.action.lowercased()) || ["approval_required", "awaiting_approval"].contains(event.op)
@@ -210,6 +402,10 @@ enum RealtimeWorkspaceProjector {
                 output: "", source: last.source ?? "来源未标明", basis: "当前轮次最近的 HTTPS 模型记录为请求；不推断服务端内部进度",
                 confidence: last.attributionConfidence?.rawValue ?? "unknown", call: last.traceId, pid: last.processId, timestamp: last.ts, eventIDs: [last.id.uuidString],
                 detailType: "model", inputTruncated: RealtimeDetailProjector.truncated(last.modelPrompt), phase: "running"))
+        }
+        for input in userInputs(ordered) where input.content != nil {
+            let content = input.content ?? ""
+            output.append(RealtimeCard(id: input.id, kind: "user", title: "用户输入", status: "returned", tag: "用户原话已记录", summary: String(content.prefix(220)), input: String(content.prefix(16000)), output: String(content.prefix(16000)), source: input.source, basis: input.basis, confidence: input.eventIDs.count > 1 ? "inferred" : "explicit", call: nil, pid: nil, timestamp: input.timestamp, eventIDs: input.eventIDs, detailType: "user", inputTruncated: RealtimeDetailProjector.truncated(content), outputTruncated: RealtimeDetailProjector.truncated(content)))
         }
         return output.sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp < $1.timestamp }
     }

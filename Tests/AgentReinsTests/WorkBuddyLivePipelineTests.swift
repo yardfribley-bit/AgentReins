@@ -3,6 +3,42 @@ import XCTest
 @testable import AgentReins
 
 final class WorkBuddyLivePipelineTests: XCTestCase {
+    func testHTTPSDemandSkipsQueriesInsideCompactionAndKeepsCurrentHumanInput() {
+        let old = "<cb_summary><user_query>旧采集测试</user_query></cb_summary>"
+        let body: [String: Any] = ["messages": [["role":"user", "content": [["type":"text", "text": old + "\n<user_query>安装青简</user_query>"]]]]]
+        XCTAssertEqual(WorkBuddyNetworkEvidence.userIntent(in: body), "安装青简")
+        XCTAssertNil(WorkBuddyNetworkEvidence.userIntent(in: ["messages": [["role":"user", "content": old]]]))
+    }
+
+    func testCompactedUserRoleIsContextAndCannotBecomeCurrentDemand() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("session.jsonl")
+        let summary = "<cb_summary>Earlier user: <user_query>旧需求</user_query></cb_summary>"
+        let rows: [[String: Any]] = [
+            ["id": "old", "sessionId": "s", "type": "message", "role": "user", "timestamp": 1000, "content": [["text": "之前任务"]]],
+            ["id": "new", "sessionId": "s", "type": "message", "role": "user", "timestamp": 1001, "content": [["text": summary]]],
+            ["id": "call", "sessionId": "s", "type": "function_call", "timestamp": 1002, "callId": "install", "name": "Bash", "arguments": "{}"],
+            ["id": "result", "sessionId": "s", "type": "function_call_result", "timestamp": 1003, "callId": "install", "output": [["text": "a password is required"]]]
+        ]
+        var data = Data()
+        for row in rows { data.append(try JSONSerialization.data(withJSONObject: row)); data.append(0x0a) }
+        try data.write(to: file)
+        let events = WorkBuddySight.parseSession(file, fullHistory: true)
+        let context = try XCTUnwrap(events.first { $0.op == "recovered_context" })
+        XCTAssertEqual(context.modelPrompt, summary)
+        XCTAssertNil(context.userIntent)
+        XCTAssertEqual(context.turnId, "new")
+        let call = try XCTUnwrap(events.first { $0.op == "call" })
+        XCTAssertNil(call.userIntent, "Old demand must not leak after compaction")
+        XCTAssertEqual(call.turnId, "new")
+        XCTAssertEqual(events.first { $0.op == "result" }?.modelResponse, "a password is required")
+        XCTAssertNil(WorkBuddySight.cleanUserIntent(summary))
+        XCTAssertEqual(WorkBuddySight.cleanUserIntent(summary + "\n<user_query>当前安装需求</user_query>"), "当前安装需求")
+        XCTAssertNil(WorkBuddySight.cleanUserIntent("<system-reminder>environment only</system-reminder>"))
+    }
+
     func testReasoningFallsBackWhenContentIsEmpty() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

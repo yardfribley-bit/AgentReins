@@ -42,6 +42,26 @@ final class RealtimeDeliveryTests: XCTestCase {
         let value = try XCTUnwrap(RealtimeArtifactProjector.probe(candidates).first)
         XCTAssertTrue(value.previewTruncated); XCTAssertEqual(value.preview?.count, 65_536); XCTAssertFalse(value.openable)
     }
+    @MainActor func testUnreadStoppedAndFailedTasksSurviveRestartUntilRead() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        for (op, action, status) in [("task_complete", "completed", "stopped"), ("task_failed", "failed", "failed"), ("task_cancelled", "cancelled", "cancelled")] {
+            let file = root.appendingPathComponent(op + ".json")
+            let state = RealtimeWorkspaceState(checkpointURL: file)
+            let prompt = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "codex", op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: "s", turnId: "t", userIntent: "原始需求")
+            let end = GuardEvent(kind: "task", ruleId: "fixture", path: "-", command: nil, agent: "codex", op: op, severity: "info", ts: Date(), action: action, sessionId: "s", turnId: "t")
+            state.ingest([prompt, end]); state.flushCheckpoint()
+            let checkpoint = try XCTUnwrap(RealtimeActiveCheckpoint.load(file))
+            let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: checkpoint.events, since: .distantPast).first)
+            XCTAssertEqual(task.lifecycleStatus, status)
+            XCTAssertEqual(task.originalRequest, "原始需求")
+            XCTAssertEqual(task.nativeTerminalEventID, end.id.uuidString)
+            state.markRead(task.id); state.flushCheckpoint()
+            XCTAssertTrue(try XCTUnwrap(RealtimeActiveCheckpoint.load(file)).events.isEmpty)
+        }
+    }
+
     func testCheckpointIsVersionedAndDoesNotReadHistoryDatabase() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         defer { try? FileManager.default.removeItem(at: root) }

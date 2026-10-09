@@ -13,7 +13,7 @@ struct ContentView: View {
         RealtimeWorkspaceView(payload: realtime.payload(processes: processGuard.processInventory,
             health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running,
             error: eventStore.persistenceError, geolocation: geolocation), onMarkRead: { realtime.markRead($0) }, onRefreshArtifacts: { realtime.refreshArtifacts() }, onResolveIP: { geolocation.resolve([$0]) })
-        .frame(minWidth: 1100, minHeight: 720)
+        .frame(minWidth: 900, minHeight: 600)
         .task {
             realtime.ingest(eventStore.events)
             realtime.updateProcesses(processGuard.processInventory)

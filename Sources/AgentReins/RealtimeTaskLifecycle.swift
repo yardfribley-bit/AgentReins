@@ -37,6 +37,11 @@ struct RealtimeResourceDetail: Encodable {
 struct RealtimeLifecycleProjection {
     let status: String, currentStep: String, currentCardID: String?, basis: String
     let coverage: [RealtimeCoverage], lifecycle: RealtimeTaskLifecycle
+    let executionState: String, completionEvidence: String
+    let statusChangedAt: Date?, nativeEndAt: Date?, nativeTerminalEventID: String?
+    let nativeEndOp: String?, nativeEndAction: String?, nativeEndSource: String?
+    let nativeEndMessage: String?, nativeEndMessageTruncated: Bool, stopReason: String?
+    let lastFailureCardID: String?, unresolvedCallIDs: [String]
 }
 
 enum RealtimeLifecycleProjector {
@@ -50,17 +55,71 @@ enum RealtimeLifecycleProjector {
         let terminal = ordered.last { terminalStatus($0, hasTurn: hasTurn) != nil }
         let active = cards.filter { ["running", "pending", "waiting"].contains($0.phase) }.last
         let confirmation = cards.last { $0.phase == "waiting" }
-        let last = cards.last { $0.kind != "process" } ?? cards.last
-        let selected = terminal.flatMap { event in cards.first { $0.eventIDs.contains(event.id.uuidString) } } ?? confirmation ?? active ?? last
-        let status: String, step: String, basis: String
+        let last = cards.last { !["process", "task"].contains($0.kind) } ?? cards.last
+        let latestFailure = cards.last { $0.phase == "failed" }
+        let lastCall = cards.last { $0.id.hasPrefix("call:") }
+        let unresolvedCalls = cards.filter { $0.call != nil && ["running", "pending", "waiting"].contains($0.phase) }
+        let endBody = terminal.flatMap { nativeEndPayload($0) }
+        let endMessage = terminal.flatMap { event in
+            (endBody?["last_assistant_message"] as? String) ?? event.modelResponse
+        }
+        let reason = endBody.flatMap { body in
+            ["stop_reason", "reason", "failure_reason", "error"].compactMap { body[$0] as? String }.first
+        }
+        // A submitted call or PreToolUse without its result is not proof that
+        // it is still running after Agent Stop. A native running executor ID
+        // or an explicit background list can supply that distinct fact.
+        let backgroundDenied = (endBody?["background_tasks"] as? [Any])?.isEmpty == true
+        let backgroundListed = (endBody?["background_tasks"] as? [Any])?.isEmpty == false
+        let background = cards.last { card in
+            guard card.execution?.status == "running", card.execution?.executionID != nil else { return false }
+            guard let terminal else { return true }
+            return card.timestamp > terminal.ts || !backgroundDenied
+        }
+        let status: String, step: String, executionState: String, completionEvidence: String
+        var basis: String
+        let selected: RealtimeCard?
         if let terminal, let value = terminalStatus(terminal, hasTurn: hasTurn) {
-            status = value
-            step = value == "completed" ? "Agent 已结束本轮任务" : value == "failed" ? "任务失败" : "任务已取消"
-            basis = "原生任务终态：\(terminal.op) / \(terminal.action)；记录 \(terminal.id.uuidString)。结束不代表产物已验证或用户认可。"
+            let fact = "原生轮次终态：\(terminal.op) / \(terminal.action)；记录 \(terminal.id.uuidString)。"
+            if value == "failed" || value == "cancelled" {
+                status = value; executionState = value; completionEvidence = "unknown"
+                step = value == "failed" ? "原生任务已失败" : "原生任务已取消"
+                basis = fact + (reason.map { " 原生原因：" + $0 } ?? " 未采到结构化终止原因；不推断超时、卡死或人为取消。")
+                selected = cards.first { $0.eventIDs.contains(terminal.id.uuidString) } ?? latestFailure ?? last
+            } else if value == "completed" {
+                status = "completed"; executionState = "stopped"; completionEvidence = "native_goal_success"
+                step = "原生目标成功证据已记录"
+                basis = fact + " 来源提供显式目标验证/成功事实；普通模型答复或 Stop 不具备该语义。"
+                selected = cards.first { $0.eventIDs.contains(terminal.id.uuidString) } ?? last
+            } else if background != nil || backgroundListed {
+                status = "running"; executionState = "background_running"; completionEvidence = "unknown"
+                step = background.map { "Agent 已停止；后台执行尚未收到结束记录：" + $0.title } ?? "Agent 已停止；原生记录仍有后台任务"
+                basis = fact + " 后台执行与 Agent 轮次分开核对；尚无目标达成证据。"
+                selected = background ?? last
+            } else {
+                status = "stopped"; executionState = "stopped"; completionEvidence = "unknown"
+                if let latestFailure, latestFailure.id == lastCall?.id {
+                    let exit = latestFailure.execution?.exitCode.map { "（退出码 \($0)）" } ?? ""
+                    step = "Agent 已停止；最近失败步骤：\(latestFailure.title)\(exit)"
+                    selected = latestFailure
+                } else if let last = lastCall ?? last, last.kind != "user" {
+                    step = "Agent 已停止；最后记录：\(last.title)；目标达成未确认"
+                    selected = last
+                } else {
+                    step = "Agent 已停止；目标达成未确认"; selected = cards.last
+                }
+                basis = fact + " 已停止不等于用户目标已完成。" + (reason.map { " 原生原因：" + $0 } ?? " 未采到结构化停止原因；查看最后答复与执行详情。")
+                if !unresolvedCalls.isEmpty { basis += " \(unresolvedCalls.count) 个调用尚缺最终返回，不能据此继续宣称正在执行。" }
+            }
+        } else if !hasTurn, ordered.contains(where: { $0.op == "hook_turn_stop" }) {
+            status = "observed"; executionState = "unknown"; completionEvidence = "unknown"; selected = last
+            step = "会话记录到停止，轮次归属待确认"
+            basis = "Stop缺少轮次身份，不能将会话中的其他调用继续显示为本任务进行中，也不能猜测它结束了哪条需求。"
         } else if let confirmation {
-            status = "awaiting_confirmation"; step = "等待你确认：\(confirmation.title)"; basis = confirmation.basis
+            status = "awaiting_confirmation"; executionState = "waiting"; completionEvidence = "unknown"
+            step = "等待你确认：\(confirmation.title)"; basis = confirmation.basis; selected = confirmation
         } else if let active {
-            status = "running"
+            status = "running"; executionState = "running"; completionEvidence = "unknown"; selected = active
             if active.kind == "model" { step = "等待模型返回" }
             else if active.phase == "pending" { step = "已记录工具计划：\(active.title)" }
             else if active.execution?.status == "requested" { step = "调用已提交，等待执行记录：\(active.title)" }
@@ -68,13 +127,15 @@ enum RealtimeLifecycleProjector {
             basis = active.basis
         } else if let last {
             status = hasRequest || ordered.contains(where: { $0.kind == "model" || $0.kind == "tool" }) ? "running" : "observed"
+            executionState = status; completionEvidence = "unknown"; selected = last
             step = last.phase == "failed" ? "步骤失败，等待 Agent 后续处理：\(last.title)" : last.kind == "model" ? "模型已返回，等待 Agent 后续步骤" : "已收到：\(last.title)；等待后续记录"
             basis = "最近步骤记录：\(last.eventIDs.joined(separator: ", "))；尚无原生任务结束记录。"
         } else {
-            status = hasRequest ? "running" : "observed"; step = hasRequest ? "需求已收到，等待后续步骤" : "已采到会话活动，任务起点尚未采集"
+            status = hasRequest ? "running" : "observed"; executionState = status; completionEvidence = "unknown"; selected = nil
+            step = hasRequest ? "需求已收到，等待后续步骤" : "已采到会话活动，任务起点尚未采集"
             basis = hasRequest ? "已收到原始用户消息；尚无执行记录。" : "独立活动不能证明任务正在执行。"
         }
-        let currentStage = terminal != nil ? (status == "completed" ? "artifact" : "failure") : confirmation != nil ? "failure" : selected.map(stageID) ?? (hasRequest ? "user" : "environment")
+        let currentStage = status == "completed" ? "artifact" : ["failed", "cancelled"].contains(status) ? "failure" : confirmation != nil ? "failure" : selected.map(stageID) ?? (hasRequest ? "user" : "environment")
         let stages = stageNames.map { id, title -> RealtimeLifecycleStage in
             let relevant = cards.filter { stageID($0) == id }
             let latest = relevant.last
@@ -93,13 +154,15 @@ enum RealtimeLifecycleProjector {
             RealtimeCoverage(category: category, status: matching.isEmpty ? "missing" : complete ? "captured" : "partial",
                 count: matching.count, detail: detail, eventIDs: matching.map { $0.id.uuidString })
         }
-        let request = ordered.filter { ["prompt", "hook_user_prompt", "network_prompt"].contains($0.op) && $0.userIntent?.isEmpty == false }
+        let textRequests = ordered.filter { ["prompt", "hook_user_prompt", "network_prompt"].contains($0.op) && $0.userIntent?.isEmpty == false }
+        let attachmentRequests = ordered.filter { $0.op == "attachment" && $0.ruleId == "codex_attachment" }
+        let request = textRequests + attachmentRequests
         let contexts = ordered.filter { $0.kind == "context" || $0.op == "network_prompt" }
         let model = ordered.filter { $0.kind == "model" && ["response", "network_response", "reasoning_summary"].contains($0.op) }
         let tool = ordered.filter { $0.toolCallId != nil && ($0.kind == "tool" || $0.op.hasPrefix("hook_tool")) }
         let outputs = ordered.filter { ["output", "stream", "tool_output", "command_output", "exec_command_output_delta"].contains($0.op) }
         let coverageItems = [
-            coverage("user", request, detail: request.isEmpty ? "用户原始需求未采集；不以其他事件继承的 userIntent 补写" : "原始用户消息已记录"),
+            coverage("user", request, detail: request.isEmpty ? "用户原始需求未采集；不以其他事件继承的 userIntent 补写" : textRequests.isEmpty ? "用户附件输入已采集；本次未附带文字需求" : "原始用户消息已记录"),
             coverage("context", contexts, complete: contexts.contains { $0.op == "network_prompt" && !$0.action.contains("partial") }, detail: "完整模型请求与本地上下文片段分别表达"),
             coverage("model", model, complete: !model.contains { $0.action.contains("partial") }, detail: "模型返回与原生任务结束分别核对"),
             coverage("tool", tool, detail: "模型指令、执行开始、输出和返回分别记录"),
@@ -108,7 +171,17 @@ enum RealtimeLifecycleProjector {
             coverage("network", ordered.filter { $0.kind == "network" || $0.remoteHost != nil || $0.remoteDomain != nil }, detail: "连接/IP 与资源 URL、正文是不同覆盖层"),
             coverage("result", terminal.map { [$0] } ?? [], detail: "原生任务结束；交付物存在性与验证另行核对")]
         return RealtimeLifecycleProjection(status: status, currentStep: step, currentCardID: selected?.id, basis: basis,
-            coverage: coverageItems, lifecycle: RealtimeTaskLifecycle(currentStageID: currentStage, phase: status, stages: stages))
+            coverage: coverageItems, lifecycle: RealtimeTaskLifecycle(currentStageID: currentStage, phase: status, stages: stages),
+            executionState: executionState, completionEvidence: completionEvidence,
+            statusChangedAt: terminal?.ts ?? selected?.timestamp ?? ordered.first?.ts,
+            nativeEndAt: terminal?.endedAt ?? terminal?.ts, nativeTerminalEventID: terminal?.id.uuidString,
+            nativeEndOp: terminal?.op, nativeEndAction: terminal?.action, nativeEndSource: terminal?.source,
+            nativeEndMessage: RealtimeDetailProjector.preview(endMessage), nativeEndMessageTruncated: RealtimeDetailProjector.truncated(endMessage),
+            stopReason: reason, lastFailureCardID: latestFailure?.id, unresolvedCallIDs: unresolvedCalls.compactMap(\.call))
+    }
+    private static func nativeEndPayload(_ event: GuardEvent) -> [String: Any]? {
+        let root = RealtimeDetailProjector.object(event.afterContent) ?? RealtimeDetailProjector.object(event.command)
+        return root?["payload"] as? [String: Any] ?? root
     }
     static func terminalStatus(_ event: GuardEvent, hasTurn: Bool) -> String? {
         let op = event.op.lowercased(), action = event.action.lowercased()
@@ -116,14 +189,19 @@ enum RealtimeLifecycleProjector {
         if explicitTask {
             if ["failed", "failure", "error"].contains(action) || op.hasSuffix("failed") { return "failed" }
             if ["cancelled", "canceled", "aborted", "interrupted"].contains(action) || ["task_cancelled", "turn_aborted", "task_canceled"].contains(op) { return "cancelled" }
-            if ["completed", "complete", "ended"].contains(action) || ["task_complete", "task_completed", "turn_completed"].contains(op) { return "completed" }
+            // Native task_complete/turn_completed denote the Agent's turn end,
+            // not a semantic verdict about the user's goal.
+            if ["completed", "complete", "ended"].contains(action) || ["task_complete", "task_completed", "turn_completed"].contains(op) { return "stopped" }
         }
-        if event.kind == "model", op == "response", ["final_answer", "end_turn", "stop_sequence"].contains(action) { return "completed" }
+        if ["goal_verified", "task_verified", "task_success"].contains(op),
+           ["verified", "success", "succeeded"].contains(action) { return "completed" }
+        if event.kind == "model", op == "response", ["final_answer", "end_turn", "stop_sequence"].contains(action) { return "stopped" }
         // Hook Stop without a turn has no authority over any task in its session.
-        if hasTurn, op == "hook_turn_stop" { return "completed" }
+        if hasTurn, op == "hook_turn_stop" { return "stopped" }
         return nil
     }
     static func stageID(_ card: RealtimeCard) -> String {
+        if card.title == "codex.attachment" { return "user" }
         if card.phase == "waiting" || card.phase == "cancelled" { return "failure" }
         switch card.kind {
         case "user": return "user"

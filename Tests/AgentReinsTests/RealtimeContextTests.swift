@@ -8,6 +8,41 @@ final class RealtimeContextTests: XCTestCase {
         let body = try JSONSerialization.data(withJSONObject: ["messages": messages, "tools": [["type":"function", "function":["name":"read_file"]]]], options: .sortedKeys)
         return GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: agent, op: "network_prompt", severity: "info", ts: start.addingTimeInterval(seconds), action: "captured_complete", sessionId: "session", traceId: trace, turnId: turn, userIntent: messages.last(where: { $0["role"] as? String == "user" })?["content"] as? String, modelPrompt: String(decoding: body, as: UTF8.self), source: "agentsight:workbuddy-network-body")
     }
+    func testLargeCompactedUserBlockKeepsCurrentInputVisibleInTruncatedPreview() throws {
+        let current = "https://example.test/app 安装这个软件"
+        let body: [String: Any] = ["messages": [["role":"user", "content":"<cb_summary>" + String(repeating: "old context ", count: 3000) + "</cb_summary>\n<user_query>" + current + "</user_query>"]]]
+        let json = String(decoding: try JSONSerialization.data(withJSONObject: body), as: UTF8.self)
+        let event = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "network_prompt", severity: "info", ts: Date(), action: "captured_complete", sessionId: "s", turnId: "t", userIntent: current, modelPrompt: json)
+        let exchange = try XCTUnwrap(RealtimeContextProjector.parse(event))
+        XCTAssertTrue(exchange.truncated)
+        XCTAssertEqual(exchange.coverage, "完整请求正文已采集")
+        XCTAssertTrue(exchange.blocks.first?.containsCurrentInput == true)
+        XCTAssertTrue(exchange.blocks.first?.content.contains(current) == true)
+        XCTAssertLessThanOrEqual(exchange.blocks.first?.content.count ?? 0, 16000)
+    }
+
+    func testActiveCheckpointRuntimePromptDoesNotBecomeModelRequest() throws {
+        let body = "<environment_context>runtime only</environment_context>"
+        let old = GuardEvent(kind: "model", ruleId: "codex_model_prompt", path: "-", command: nil, agent: "codex", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "s", turnId: "t", userIntent: body, modelPrompt: body, source: "agentsight:codex-local-compat")
+        XCTAssertNil(RealtimeContextProjector.parse(old))
+        let actual = GuardEvent(kind: "model", ruleId: "codex_model_prompt", path: "-", command: "{\"content_item_kinds\":[\"user.text\"]}", agent: "codex", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "s", turnId: "t", userIntent: body, modelPrompt: body, source: "agentsight:codex-local-compat")
+        XCTAssertNotNil(RealtimeContextProjector.parse(actual))
+    }
+    func testImageInputIsCapturedWithoutInventingDemandText() throws {
+        let attachment = GuardEvent(kind: "context", ruleId: "codex_attachment", path: "-", command: "{\"types\":[\"local_image\"],\"resources\":[{\"type\":\"local_image\",\"path\":\"/tmp/original-image.png\"}]}", agent: "codex", op: "attachment", severity: "info", ts: start, action: "captured", sessionId: "s", turnId: "t", toolName: "codex.attachment", source: "agentsight:codex-local-compat")
+        let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: [attachment], since: .distantPast).first)
+        XCTAssertNil(task.originalRequest)
+        XCTAssertEqual(task.inputAttachments.first?.path, "/tmp/original-image.png")
+        XCTAssertEqual(task.coverage.first { $0.category == "user" }?.status, "captured")
+        XCTAssertEqual(task.lifecycle?.stages.first { $0.id == "user" }?.cardIDs.count, 1)
+    }
+    func testAlreadyActiveImageWrapperIsNotPresentedAsHumanDemand() throws {
+        let wrapper = "# Files mentioned by the user:\n\n## My request:\n<image path=\"/tmp/input.png\"></image>"
+        let old = GuardEvent(kind: "model", ruleId: "codex_model_prompt", path: "-", command: nil, agent: "codex", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "s", turnId: "t", userIntent: "<image path=\"/tmp/input.png\"></image>", modelPrompt: wrapper, source: "agentsight:codex-local-compat")
+        let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: [old], since: .distantPast).first)
+        XCTAssertNil(task.originalRequest)
+        XCTAssertEqual(RealtimeContextProjector.parse(old)?.blocks.first?.content, wrapper, "Raw captured message stays available as local context")
+    }
     func testContextCompositionPreservesRolesAndToolDefinitions() throws {
         let event = try request([["role":"system", "content":"rules"], ["role":"user", "content":"hello"], ["role":"assistant", "tool_calls":[["id":"call", "function":["name":"read_file", "arguments":"{}"]]]], ["role":"tool", "tool_call_id":"call", "content":"file text"]])
         let context = try XCTUnwrap(RealtimeContextProjector.parse(event))

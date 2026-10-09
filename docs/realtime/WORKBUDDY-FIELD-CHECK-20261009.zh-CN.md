@@ -8,7 +8,7 @@
 
 - 原话：本地 prompt 和 UserPromptSubmit Hook 都有真实文本。
 - 模型：已采完整 HTTPS 请求与对应返回，并与原生轮次关联；本地记录另有思考摘要和后续回复。不以本地片段称完整上下文。
-- 执行：两次 WebSearch、三次 Bash、一项 present_files 调用及其返回（6 个本地 call/result）；Hook 另有开始／结束与进程关联记录。
+- 执行：两次 WebSearch、两次 Bash、一项 Write、一项 present_files 调用及其返回（6 个本地 call/result）；Hook 另有开始／结束与进程关联记录。
 - Bash：实际通过 gh api 拉取仓库元信息、Release、提交与 README。原生返回含 Command、Stdout、Stderr、Exit Code，现场发现并修正分栏解析。
 - 文件：报告 `/Users/jatsmith/WorkBuddy/2026-10-07-14-17-32/rea-research-report.md` 实际存在，9,766 字节；原生 present_files 返回该路径。已修正产物提取并核对预览。
 - 结束：收到 Stop Hook，其没有 turn_id，但有 last_assistant_message。仅当同 Agent／会话内原生最终回复正文唯一匹配时关联轮次；多轮相同内容保持未关联。已修正完成看板。

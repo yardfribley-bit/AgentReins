@@ -1,22 +1,34 @@
-'use strict';
-/* The graph renders only evidence-backed nodes supplied by the task projection. */
+ 'use strict';
+/* Layout follows the approved prototype. Motion is a new confirmed evidence event. */
 (()=>{
-const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-const cut=(s,n)=>esc(Array.from(String(s??'')).slice(0,n).join(''));
-let lastScope=null,known=new Map(),seeded=false;
-function render({scope,nodes=[],edges=[],selectedKey,currentKey,paused,onSelect}){
- if(scope!==lastScope){lastScope=scope;known=new Map();seeded=false;}
- const changed=nodes.filter(n=>known.get(n.key)!==n.revision);
- const pulse=seeded&&!paused?changed.at(-1):null;
- const pulseEdge=pulse?edges.findLast(e=>e.to===pulse.key||e.from===pulse.key):null;
- nodes.forEach(n=>known.set(n.key,n.revision));seeded=true;
- const host=document.getElementById('graph');
- host.innerHTML=`<svg viewBox="0 0 900 600" role="group" aria-label="实时任务节点与数据传递"><defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto-start-reverse"><path d="M0 0 L10 5 L0 10 z" fill="#b0a7cd"/></marker></defs>${edges.map(e=>`<g class="flow-edge ${selectedKey===e.key?'selected':''}" data-flow-edge="${esc(e.key)}" data-edge="${esc(e.key)}" role="button" tabindex="0" aria-label="${esc(e.label)}"><path class="edge-hit" d="${e.path}"/><path class="edge ${e.independent?'independent':''}" d="${e.path}" ${e.independent?'':'marker-end="url(#flow-arrow)"'}/><rect class="flow-label-hit" x="${e.x-5}" y="${e.y-13}" width="${Math.min(170,Array.from(e.label).length*9+12)}" height="19" rx="4"/><text class="edge-label" x="${e.x}" y="${e.y}">${cut(e.label,18)}</text></g>`).join('')}${pulseEdge?`<circle class="packet" r="4"><animateMotion dur="1.1s" repeatCount="1" fill="remove" path="${pulseEdge.path}"/></circle>`:''}${nodes.map(n=>`<g class="svg-node ${n.center?'center':''} ${selectedKey===n.key?'selected':''} ${currentKey===n.key?'current':''}" data-flow-node="${esc(n.key)}" role="button" tabindex="0" aria-label="${esc(n.title+'，'+n.subtitle)}" transform="translate(${n.x},${n.y})"><rect width="166" height="77" rx="9"/><text class="node-tag" x="13" y="20">${cut(n.tag,15)}</text><text class="node-name" x="13" y="43">${cut(n.title,13)}</text><text class="node-sub" x="13" y="63">${cut(n.subtitle,15)}</text></g>`).join('')}</svg>`;
- for(const el of host.querySelectorAll('[data-flow-node],[data-flow-edge]')){
-  const key=el.dataset.flowNode||el.dataset.flowEdge;
-  const choose=()=>onSelect(key);
-  el.onclick=choose;el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();choose();}};
+ const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ let lastScope=null,known=new Map(),seeded=false,zoomMode='readable',currentScale=.85,currentNode=null,diagramNodes=[],dimensions={width:1000,height:1340},observer;
+ const compact={user:'用户输入',perception:'输入材料',model:'大语言模型',context:'上下文 / 记忆',plan:'规划调度',direct:'直接回答？',reply:'回复输出',action:'工具执行',closure:'目标完成？',mcp:'MCP / Skill',api:'API',code:'命令',database:'数据库',files:'文件',external:'外部服务',observation:'可观测层'};
+ function applySize(){const host=document.getElementById('graph'),viewport=document.getElementById('graph-viewport'),spacer=document.getElementById('graph-spacer');if(!host||!viewport||!spacer)return;
+  if(innerWidth<=600){host.style.transform='';host.style.width='';host.style.height='';spacer.style.width='';spacer.style.height='';return;}
+  const {width,height}=dimensions;if(zoomMode==='fit')currentScale=Math.min(1,(viewport.clientWidth-20)/width,(viewport.clientHeight-16)/height);
+  currentScale=Math.max(.12,Math.min(2,currentScale));host.style.width=width+'px';host.style.height=height+'px';host.style.transform=`scale(${currentScale})`;host.style.setProperty('--graph-scale',currentScale);
+  host.classList.toggle('overview',zoomMode==='fit'||currentScale<.65);spacer.style.width=width*currentScale+'px';spacer.style.height=height*currentScale+'px';
+  const output=document.getElementById('graph-scale');if(output)output.textContent=Math.round(currentScale*100)+'%';document.querySelector('[data-zoom=fit]')?.setAttribute('aria-pressed',String(zoomMode==='fit'));document.querySelector('[data-zoom=readable]')?.setAttribute('aria-pressed',String(zoomMode==='readable'));updateNav();
  }
-}
-window.AgentReinsFlow={render};
+ function zoom(action){const wasOverview=zoomMode==='fit';zoomMode=action==='fit'?'fit':action==='readable'?'readable':'manual';if(action==='readable')currentScale=.85;if(action==='in')currentScale*=1.2;if(action==='out')currentScale/=1.2;if(action==='actual')currentScale=1;document.body.classList.toggle('overview-mode',zoomMode==='fit');if(wasOverview!==(zoomMode==='fit'))window.dispatchEvent(new CustomEvent('agentreins-layout'));applySize();focus(currentNode);}
+ function focus(key){const viewport=document.getElementById('graph-viewport'),n=diagramNodes.find(n=>n.key===key);if(!viewport||!n||innerWidth<=600)return;viewport.scrollTo({left:Math.max(0,(n.x+n.w/2)*currentScale-viewport.clientWidth/2),top:Math.max(0,(n.y+n.h/2)*currentScale-viewport.clientHeight/2)});updateNav();}
+ function updateNav(){const viewport=document.getElementById('graph-viewport'),rect=document.getElementById('graph-nav-window');if(!viewport||!rect)return;rect.setAttribute('x',Math.max(0,viewport.scrollLeft/currentScale));rect.setAttribute('y',Math.max(0,viewport.scrollTop/currentScale));rect.setAttribute('width',Math.min(dimensions.width,viewport.clientWidth/currentScale));rect.setAttribute('height',Math.min(dimensions.height,viewport.clientHeight/currentScale));}
+ addEventListener('resize',applySize);
+
+ function render({scope,nodes=[],edges=[],selectedKey,currentKey,paused,onSelect,width=1000,height=1340,animate=false}){
+  if(scope!==lastScope){lastScope=scope;known=new Map();seeded=false;}
+  const changed=edges.filter(e=>!e.independent&&known.get(e.key)!==e.revision&&e.revision&&e.revision!=='[]');
+  const pulse=animate&&seeded&&!paused?changed.at(-1):null;
+  edges.forEach(e=>known.set(e.key,e.revision));seeded=true;
+  const firstView=diagramNodes.length===0;diagramNodes=nodes;currentNode=currentKey||nodes.find(n=>n.key==='model')?.key||nodes[0]?.key;dimensions={width,height};const host=document.getElementById('graph');host.style.aspectRatio=`${width}/${height}`;
+  host.innerHTML=`<svg viewBox="0 0 ${width} ${height}" preserveAspectRatio="none" role="group" aria-label="架构路径与已采到的数据传递"><defs><marker id="flow-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="5" markerHeight="5" orient="auto"><path d="M0 0L10 5L0 10z" fill="#aab2b8"/></marker></defs>${edges.map(e=>`<g class="flow-edge ${selectedKey===e.key?'selected':''}" data-flow-edge="${esc(e.key)}" data-edge="${esc(e.key)}" role="button" tabindex="0" aria-label="${esc(e.label||e.from+' → '+e.to)}"><path class="ar-edge ${e.independent?'structural':''} ${selectedKey===e.key?'active':''}" d="${e.path}"/><path class="ar-edge-hit" d="${e.path}"/></g>`).join('')}${pulse?`<circle class="ar-packet" r="5"><animate attributeName="opacity" values="1;1;0" keyTimes="0;0.99;1" dur="1.4s" fill="freeze"/><animateMotion dur="1.4s" repeatCount="1" fill="remove" path="${pulse.path}"/></circle>`:''}</svg><div class="architecture-nodes">${nodes.map(n=>`<button class="ar-node ${esc(n.tone)} ${esc(n.shape)} ${n.phase==='missing'?'unknown':''} ${n.phase==='failed'?'failed':''} ${n.phase==='stopped'?'stopped':''} ${n.phase==='returned'?'done':''} ${selectedKey===n.key||selectedKey===n.alias?'selected':''} ${currentKey===n.key?'current':''}" data-flow-node="${esc(n.key)}" style="left:${n.x/width*100}%;top:${n.y/height*100}%;width:${n.w/width*100}%;height:${n.h/height*100}%" aria-label="${esc(n.title+'，'+n.tag+'，'+n.subtitle)}"><span class="ar-status-dot"></span><span class="ar-node-tag">${esc(n.tag)}</span><strong><span class="full-title">${esc(n.title)}</span><span class="overview-title">${esc(compact[n.key]||n.title)}</span></strong><span class="overview-state">${esc(n.key==='closure'?n.subtitle:n.key==='user'&&n.phase==='returned'?'已采到':({missing:'未采到',running:'进行中',pending:'待执行',returned:'已返回',failed:'失败',stopped:'已停止',partial:'片段',recorded:'已记录'})[n.phase]||n.phase)}</span>${n.subtitle?`<span class="ar-node-note">${esc(n.subtitle)}</span>`:''}${n.inner?.length?`<div class="ar-inner">${n.inner.map(([a,b])=>`<span><b>${esc(a)}</b><small>${esc(b)}</small></span>`).join('')}</div>`:''}</button>`).join('')}</div><div class="architecture-labels">${edges.filter(e=>e.label).map(e=>`<button class="ar-edge-text ${selectedKey===e.key?'selected':''}" data-flow-edge="${esc(e.key)}" data-edge="${esc(e.key)}" style="left:${e.x/width*100}%;top:${e.y/height*100}%">${esc(e.label)}</button>`).join('')}</div><div class="architecture-mobile">${nodes.map(n=>`<button data-mobile-node="${esc(n.key)}" class="${selectedKey===n.key?'selected':''}"><strong><span class="full-title">${esc(n.title)}</span><span class="overview-title">${esc(compact[n.key]||n.title)}</span></strong><small>${esc(n.tag+' · '+n.subtitle)}</small></button>`).join('')}</div>`;
+  const nav=document.getElementById('graph-nav');if(nav){nav.innerHTML=`<small>全图导航</small><svg viewBox="0 0 ${width} ${height}" role="group" aria-label="点击模块定位画布">${nodes.map(n=>`<rect data-nav-node="${esc(n.key)}" role="button" aria-label="定位 ${esc(n.title)}" x="${n.x}" y="${n.y}" width="${n.w}" height="${n.h}" rx="7" fill="${n.key===currentNode?'#7763c7':n.phase==='failed'?'#cb7d70':n.phase==='missing'?'#e4e1d9':'#b7cbbb'}"/>`).join('')}<rect id="graph-nav-window" fill="none" stroke="#6954b9" stroke-width="5" pointer-events="none"/></svg>`;nav.querySelectorAll('[data-nav-node]').forEach(el=>el.onclick=()=>focus(el.dataset.navNode));}
+  const viewport=document.getElementById('graph-viewport');if(viewport)viewport.onscroll=updateNav;
+  applySize();if(firstView&&zoomMode!=='fit')focus(currentNode);if(!observer&&window.ResizeObserver){observer=new ResizeObserver(applySize);observer.observe(document.getElementById('graph-viewport'));}
+  for(const el of host.querySelectorAll('[data-flow-node],[data-flow-edge],[data-mobile-node]')){
+   const key=el.dataset.flowNode||el.dataset.flowEdge||el.dataset.mobileNode;el.onclick=()=>onSelect(key);el.onkeydown=e=>{if(e.key==='Enter'||e.key===' '){e.preventDefault();onSelect(key);}};
+  }
+ }
+ window.AgentReinsFlow={render,zoom,focus:()=>focus(currentNode),isOverview:()=>zoomMode==='fit'};
 })();

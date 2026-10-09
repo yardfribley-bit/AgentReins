@@ -7,6 +7,7 @@ struct RealtimeContextBlock: Encodable {
     let callID: String?
     var change = "baseline"
     var toolEvidenceIDs: [String] = []
+    var containsCurrentInput = false
 }
 struct RealtimeContextExchange: Encodable {
     let id: String, agent: String, session: String, turn: String, source: String, coverage: String
@@ -36,6 +37,10 @@ enum RealtimeContextProjector {
         guard event.kind == "model", ["prompt", "network_prompt"].contains(event.op),
               let body = event.modelPrompt, let agent = RealtimeWorkspaceProjector.canonicalAgent(event.agent),
               let session = event.sessionId else { return nil }
+        if event.source == "agentsight:codex-local-compat", event.op == "prompt" {
+            let kinds = RealtimeDetailProjector.object(event.command)?["content_item_kinds"] as? [String] ?? []
+            if CodexSight.isRuntimeUserContext(body, sourceKinds: kinds) { return nil }
+        }
         let isTransport = event.op == "network_prompt"
         let labels = ["system":"系统说明", "developer":"开发者说明", "user":"用户消息", "assistant":"助手消息 / 工具指令", "tool":"工具返回", "tools":"可用工具定义", "instructions":"请求级指令", "unknown":"未识别内容"]
         var entries: [(String, Any, String?)] = []
@@ -71,9 +76,16 @@ enum RealtimeContextProjector {
             guard blocks.count < 500, remaining > 0 else { continue }
             var text = readable(value)
             if text.isEmpty { text = canonical }
-            let preview = String(text.prefix(min(16_000, remaining))); remaining -= preview.count
+            let limit = min(16_000, remaining)
+            let hasCurrentInput = role == "user" && event.userIntent.map { !$0.isEmpty && text.contains($0) } == true
+            let preview: String
+            if hasCurrentInput, text.count > limit, limit > 200 {
+                let half = (limit - 100) / 2
+                preview = String(text.prefix(half)) + "\n\n… 中间内容省略；完整正文保留在原始采集证据中 …\n\n" + String(text.suffix(half))
+            } else { preview = String(text.prefix(limit)) }
+            remaining -= preview.count
             blocks.append(RealtimeContextBlock(id: "\(event.id):\(index)", role: role, label: labels[role] ?? role,
-                content: preview, fingerprint: hash, characters: text.count, callID: call))
+                content: preview, fingerprint: hash, characters: text.count, callID: call, containsCurrentInput: hasCurrentInput))
         }
         let coverage = !isTransport ? "仅本地消息片段，不代表完整模型请求" : !structured ? "请求正文结构未识别或超过8 MiB解析预算" : event.action == "captured_complete" ? "完整请求正文已采集" : "已采请求正文，完整性待核对"
         return RealtimeContextExchange(id: event.id.uuidString, agent: agent, session: session, turn: event.turnId ?? "", source: event.source ?? "来源未知", coverage: coverage,
@@ -102,7 +114,9 @@ enum RealtimeContextProjector {
         return parts.isEmpty ? json(row) : parts.joined(separator: "\n\n")
     }
 
-    static func assemble(_ parsed: [RealtimeContextExchange], events: [GuardEvent]) -> [RealtimeContextExchange] {
+    static func assemble(_ parsed: [RealtimeContextExchange], events rawEvents: [GuardEvent]) -> [RealtimeContextExchange] {
+        let events = RealtimeWorkspaceProjector.normalizedEvents(rawEvents)
+        let byID = Dictionary(events.map { ($0.id.uuidString, $0) }, uniquingKeysWith: { _, last in last })
         // Native IDs are indexed once. Searching every event for each context
         // block made routine UI refreshes quadratic in long active sessions.
         var responses: [String: [GuardEvent]] = [:]
@@ -117,7 +131,11 @@ enum RealtimeContextProjector {
             }
         }
         let requestIDs = Set(events.map { $0.id.uuidString })
-        let valid = parsed.filter { requestIDs.contains($0.id) }
+        let valid = parsed.compactMap { exchange -> RealtimeContextExchange? in
+            guard requestIDs.contains(exchange.id), let event = byID[exchange.id], event.op != "recovered_context" else { return nil }
+            if event.turnId != exchange.turn { return parse(event) }
+            return exchange
+        }
         // Local user messages are a fallback, never a second full model round.
         let transportTurns = Set(valid.filter { $0.trace?.hasPrefix("workbuddy-http:") == true }.map { "\($0.agent)\u{0}\($0.session)\u{0}\($0.turn)" })
         let selected = valid.filter { $0.trace?.hasPrefix("workbuddy-http:") == true || !transportTurns.contains("\($0.agent)\u{0}\($0.session)\u{0}\($0.turn)") }

@@ -25,7 +25,8 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let tasks = RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast)
         XCTAssertEqual(tasks.count, 1)
         XCTAssertEqual(tasks.first?.originalRequest, "原始任务")
-        XCTAssertEqual(tasks.first?.reportedComplete, true)
+        XCTAssertEqual(tasks.first?.reportedComplete, false)
+        XCTAssertEqual(tasks.first?.lifecycleStatus, "stopped")
     }
     func testCodexUserMessageFormatsCaptureOriginalRequest() throws {
         for record in [
@@ -158,6 +159,41 @@ final class RealtimeWorkspaceTests: XCTestCase {
         state.ingest([large])
         XCTAssertTrue(state.payload(processes: [], health: [], observing: true, error: nil).truncated)
     }
+    @MainActor func testOlderDatabaseReplayDoesNotUndoRestoredLiveAttribution() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("live-repair-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at:url) }
+        let id = UUID(), time = Date().addingTimeInterval(-60)
+        let repaired = GuardEvent(id:id, kind:"model", ruleId:"codex_model_prompt", path:"-", command:nil, agent:"codex", op:"prompt", severity:"info", ts:time, action:"sent", sessionId:"s", turnId:"correct", userIntent:"真实原话", source:"agentsight:codex-local-compat")
+        try RealtimeActiveCheckpoint(version:1, savedAt:Date(), events:[repaired], readTaskIDs:[]).save(url)
+        let state = RealtimeWorkspaceState(checkpointURL:url)
+        let stale = GuardEvent(id:id, kind:"model", ruleId:"codex_model_prompt", path:"-", command:nil, agent:"codex", op:"prompt", severity:"info", ts:time, action:"sent", sessionId:"s", turnId:"wrong", userIntent:"旧的错误需求", source:"agentsight:codex-local-compat")
+        state.ingest([stale])
+        let task = try XCTUnwrap(state.payload(processes:[],health:[],observing:true,error:nil).tasks.first)
+        XCTAssertEqual(task.turn,"correct");XCTAssertEqual(task.originalRequest,"真实原话")
+    }
+    @MainActor func testInternalReviewDoesNotOccupyUnreadUserRestartBudget() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("review-restart-\(UUID()).json")
+        defer { try? FileManager.default.removeItem(at:url) }
+        let now = Date().addingTimeInterval(60)
+        let human = GuardEvent(kind:"model",ruleId:"fixture",path:"-",command:nil,agent:"codex",op:"prompt",severity:"info",ts:now,action:"sent",sessionId:"human",turnId:"t",userIntent:"真实需求",source:"agentsight:codex-local-compat")
+        let review = GuardEvent(kind:"model",ruleId:"fixture",path:"-",command:nil,agent:"codex",op:"prompt",severity:"info",ts:now,action:"sent",sessionId:"internal",turnId:"r",userIntent:"评审指令",model:"codex-auto-review",source:"agentsight:codex-local-compat")
+        let state = RealtimeWorkspaceState(checkpointURL:url);state.ingest([human,review]);state.flushCheckpoint()
+        let checkpoint = try XCTUnwrap(RealtimeActiveCheckpoint.load(url))
+        XCTAssertTrue(checkpoint.events.contains { $0.id == human.id });XCTAssertFalse(checkpoint.events.contains { $0.id == review.id })
+        XCTAssertTrue(state.payload(processes:[],health:[],observing:true,error:nil).collected.contains { $0.id == review.id.uuidString })
+    }
+    @MainActor func testMemoryPressureKeepsStopAndItsExactNativeReplyAheadOfInternalReviews() throws {
+        let now = Date().addingTimeInterval(60)
+        let prompt = GuardEvent(kind:"model",ruleId:"fixture",path:"-",command:nil,agent:"workbuddy",op:"prompt",severity:"info",ts:now,action:"sent",sessionId:"s",turnId:"t",userIntent:"安装软件",source:"agentsight:workbuddy-local")
+        let reply = GuardEvent(kind:"model",ruleId:"fixture",path:"-",command:nil,agent:"workbuddy",op:"response",severity:"info",ts:now.addingTimeInterval(1),action:"received",sessionId:"s",turnId:"t",modelResponse:"安装尚未完成",source:"agentsight:workbuddy-local")
+        let stop = GuardEvent(kind:"task",ruleId:"fixture",path:"-",command:nil,agent:"workbuddy",op:"hook_turn_stop",severity:"info",ts:now.addingTimeInterval(2),action:"stopped",sessionId:"s",afterContent:"{\"payload\":{\"last_assistant_message\":\"安装尚未完成\",\"background_tasks\":[]}}",source:"workbuddy-hook")
+        let review = GuardEvent(kind:"model",ruleId:"fixture",path:"-",command:nil,agent:"codex",op:"prompt",severity:"info",ts:now.addingTimeInterval(3),action:"sent",sessionId:"internal",turnId:"review",userIntent:String(repeating:"x",count:4000),modelPrompt:String(repeating:"x",count:4000),model:"codex-auto-review",source:"agentsight:codex-local-compat")
+        let state = RealtimeWorkspaceState(byteBudget:4096);state.ingest([prompt,reply,stop,review])
+        let payload = state.payload(processes:[],health:[],observing:true,error:nil)
+        let task = try XCTUnwrap(payload.tasks.first { $0.turn == "t" })
+        XCTAssertEqual(task.lifecycleStatus,"stopped");XCTAssertEqual(task.nativeEndMessage,"安装尚未完成")
+        XCTAssertFalse(payload.tasks.contains { $0.session == "internal" });XCTAssertTrue(payload.truncated)
+    }
     @MainActor func testActualWorkBuddyFieldSnapshot() async throws {
         guard let source = ProcessInfo.processInfo.environment["AGENTREINS_FIELD_CHECKPOINT"],
               let session = ProcessInfo.processInfo.environment["AGENTREINS_FIELD_SESSION"],
@@ -169,13 +205,13 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let tasks = RealtimeWorkspaceProjector.tasks(events: records, since: .distantPast)
         let actual = try XCTUnwrap(tasks.first { $0.session == session && !$0.turn.isEmpty })
         XCTAssertNotNil(actual.originalRequest)
-        XCTAssertEqual(actual.lifecycleStatus, "completed")
+        XCTAssertEqual(actual.lifecycleStatus, "stopped")
         XCTAssertTrue(actual.cards.contains { $0.kind == "command" && $0.execution?.exitCode == 0 && $0.execution?.stdout?.isEmpty == false })
         XCTAssertTrue(actual.cards.contains { $0.title == "WebSearch" && $0.phase == "returned" })
         let candidates = RealtimeArtifactProjector.candidates(events: records, tasks: tasks)
         let artifacts = RealtimeArtifactProjector.probe(candidates).filter { $0.taskID == actual.id }
         XCTAssertTrue(artifacts.contains { $0.exists && $0.preview?.isEmpty == false })
-        var payload = RealtimeWorkspacePayload(tasks: [actual], collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: Date(), truncated: false,
+        var payload = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.assessingDelivery([actual], artifacts: artifacts), collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: Date(), truncated: false,
             contexts: RealtimeContextProjector.assemble(records.compactMap(RealtimeContextProjector.parse), events: records))
         payload.artifacts = artifacts
         let directory = URL(fileURLWithPath: directoryPath)

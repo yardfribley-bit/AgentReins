@@ -168,8 +168,7 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         } else {
             return ([], start, payload.count >= 64 * 1024 * 1024 ? 1 : 0, true, nil)
         }
-        let decoder = JSONDecoder()
-        decoder.dateDecodingStrategy = .iso8601
+        let decoder = WorkBuddyNetworkEvidence.captureDecoder()
         var events: [GuardEvent] = [], malformed = 0
         for line in safeData.split(separator: 0x0A) {
             guard let record = try? decoder.decode(WorkBuddyNetworkCaptureRecord.self, from: Data(line)) else {

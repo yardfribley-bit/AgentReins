@@ -22,8 +22,13 @@ final class CodexSight: ObservableObject {
         var session: String
         var workspace = "-"
         var model: String?
+        var internalRole: String?
         var currentTurn: String?
         var lastIntent: String?
+        // Optional fields keep older live cursor checkpoints decodable. Retain
+        // only inputs already observed by this realtime stream, never history.
+        var intentsByTurn: [String: String]?
+        var knownTurns: Set<String>?
         var calls: [String: [CallBinding]] = [:]
         var fingerprint: String?
         var observedSize: UInt64 = 0
@@ -365,20 +370,40 @@ final class CodexSight: ObservableObject {
         var session = state.session
         var workspace = state.workspace
         var model = state.model
+        var internalRole = state.internalRole
         var currentTurn = state.currentTurn
-        var lastIntent = state.lastIntent
+        var lastIntent = state.lastIntent.flatMap { isRuntimeUserContext($0) ? nil : $0 }
+        var intentsByTurn = state.intentsByTurn ?? [:]
+        var knownTurns = state.knownTurns ?? Set(state.calls.values.flatMap { $0.compactMap(\.turn) })
+        if let currentTurn {
+            knownTurns.insert(currentTurn)
+            if let lastIntent { intentsByTurn[currentTurn] = lastIntent }
+        }
         var calls = state.calls
         var result: [GuardEvent] = []
         defer {
             state.session = session; state.workspace = workspace; state.model = model
+            state.internalRole = internalRole
             state.currentTurn = currentTurn; state.lastIntent = lastIntent; state.calls = calls
+            state.intentsByTurn = intentsByTurn; state.knownTurns = knownTurns
         }
         func adoptTurn(_ turn: String?) {
-            guard let turn, !turn.isEmpty, turn != currentTurn else { return }
+            guard let turn, !turn.isEmpty else { return }
+            knownTurns.insert(turn)
+            guard turn != currentTurn else { return }
             currentTurn = turn
-            lastIntent = nil
+            lastIntent = intentsByTurn[turn]
         }
-        func intent(for turn: String?) -> String? { turn == currentTurn ? lastIntent : nil }
+        func observeInputTurn(_ turn: String?) {
+            guard let turn else { return }
+            // A delayed duplicate UserMessage for an older known turn must not
+            // change the active turn used by following unlabelled tool records.
+            if currentTurn == nil || !knownTurns.contains(turn) { adoptTurn(turn) }
+        }
+        func intent(for turn: String?) -> String? {
+            guard let turn else { return currentTurn == nil ? lastIntent : nil }
+            return intentsByTurn[turn]
+        }
 
         for line in lines {
             guard let row = dictionary(line), let payload = row["payload"] as? [String: Any] else { continue }
@@ -388,8 +413,12 @@ final class CodexSight: ObservableObject {
             let timestampKey = row["timestamp"] as? String ?? deterministicUUID(String(line)).uuidString
             if type == "session_meta" {
                 let recordedSession = payload["id"] as? String ?? payload["session_id"] as? String ?? session
-                if recordedSession != session { currentTurn = nil; lastIntent = nil; calls = [:] }
+                if recordedSession != session {
+                    currentTurn = nil; lastIntent = nil; calls = [:]; intentsByTurn = [:]; knownTurns = []
+                }
                 session = recordedSession
+                let subagent = (payload["source"] as? [String: Any])?["subagent"] as? [String: Any]
+                internalRole = subagent?["other"] as? String
                 workspace = payload["cwd"] as? String ?? workspace
             }
 
@@ -532,52 +561,84 @@ final class CodexSight: ObservableObject {
                     processID: int32(payload["pid"]), durationMS: durationMS(payload["duration"])))
                 continue
             }
-            if (type == "event_msg" && payloadType == "user_message") ||
-               (type == "response_item" && payloadType == "message" && payload["role"] as? String == "user"),
-               let content = (payload["message"] as? String) ?? textContent(payload["content"]),
-               !ChangeSetIndexer.isTranscriptBundle(content) {
+            // A rollout records the same human input as transport role=user
+            // and as a native UserMessage. Runtime injections can also use
+            // role=user; source metadata is stronger evidence than text shape.
+            let nativeUserItem = type == "event_msg" && payloadType == "item_completed"
+                && (payload["item"] as? [String: Any])?["type"] as? String == "UserMessage"
+                ? payload["item"] as? [String: Any] : nil
+            let isUserRecord = (type == "response_item" && payloadType == "message" && payload["role"] as? String == "user")
+                || (type == "event_msg" && payloadType == "user_message") || nativeUserItem != nil
+            if isUserRecord {
+                let parts = payload["content"] as? [[String: Any]] ?? nativeUserItem?["content"] as? [[String: Any]] ?? []
+                let content = (payload["message"] as? String) ?? textContent(parts) ?? ""
                 let turn = metadataTurn(payload) ?? currentTurn
-                adoptTurn(turn)
-                lastIntent = cleanUserIntent(content)
-                result.append(event(identity: "\(session):\(turn ?? "none"):\(timestampKey):user-prompt",
-                    kind: "model", rule: "codex_model_prompt", workspace: workspace, op: "prompt",
-                    timestamp: timestamp, action: "sent", session: session, trace: nil, turn: turn,
-                    intent: lastIntent, prompt: String(content.prefix(64_000)), response: nil,
-                    toolCallId: nil, toolName: nil, command: nil, model: model))
-                continue
-            }
-            if type == "event_msg", payloadType == "item_completed",
-               let item = payload["item"] as? [String: Any], item["type"] as? String == "UserMessage",
-               let content = textContent(item["content"]) {
-                let turn = metadataTurn(payload) ?? currentTurn
-                adoptTurn(turn)
-                if ChangeSetIndexer.isTranscriptBundle(content) {
-                    let metadata = transcriptBundleMetadata(content)
-                    result.append(event(identity: "\(session):\(turn ?? "none"):\(item["id"] as? String ?? timestampKey):transcript-bundle",
+                let metadata = payload["internal_chat_message_metadata_passthrough"] as? [String: Any]
+                let sourceKinds = metadata?["content_item_kinds"] as? [String] ?? []
+                let identity = nativeUserItem?["id"] as? String ?? payload["id"] as? String ?? timestampKey
+                let isKnownHumanEcho = nativeUserItem != nil && turn.flatMap { intentsByTurn[$0] } == nonEmpty(cleanUserIntent(content))
+                let sourceClaimsHuman = sourceKinds.contains { $0.hasPrefix("user.") } || isKnownHumanEcho
+                if !sourceClaimsHuman && ChangeSetIndexer.isTranscriptBundle(content) {
+                    result.append(event(identity: "\(session):\(turn ?? "none"):\(identity):transcript-bundle",
                         kind: "context", rule: "codex_recovered_transcript_bundle", workspace: workspace,
                         op: "recovered_transcript", timestamp: timestamp, action: "captured",
                         session: session, trace: nil, turn: turn, intent: nil, prompt: nil,
                         response: nil, toolCallId: nil, toolName: "codex.compacted_history",
-                        command: jsonString(metadata), model: model))
+                        command: jsonString(transcriptBundleMetadata(content)), model: model))
                     continue
                 }
-                lastIntent = cleanUserIntent(content)
-                result.append(event(identity: "\(session):\(turn ?? "none"):\(item["id"] as? String ?? timestampKey):prompt", kind: "model",
-                    rule: "codex_model_prompt", workspace: workspace, op: "prompt", timestamp: timestamp,
-                    action: "sent", session: session, trace: nil, turn: turn, intent: intent(for: turn),
-                    prompt: String(content.prefix(64_000)), response: nil, toolCallId: nil,
-                    toolName: nil, command: nil, model: model))
-                let attachments = (item["content"] as? [[String: Any]] ?? []).filter {
-                    ($0["type"] as? String) != "text" && ($0["type"] as? String) != "input_text"
+                if internalRole == "guardian" || model == "codex-auto-review" || (!isKnownHumanEcho && isRuntimeUserContext(content, sourceKinds: sourceKinds)) {
+                    observeInputTurn(turn)
+                    result.append(event(identity: "\(session):\(turn ?? "none"):\(identity):runtime-user-context",
+                        kind: "context", rule: "codex_runtime_user_context", workspace: workspace,
+                        op: "runtime_user_context", timestamp: timestamp, action: "captured",
+                        session: session, trace: nil, turn: turn, intent: nil,
+                        prompt: String(content.prefix(internalRole == "guardian" || model == "codex-auto-review" ? 2048 : 128_000)), response: nil,
+                        toolCallId: nil, toolName: internalRole == "guardian" ? "codex.internal_review_context" : "codex.runtime_context", command: jsonString(sourceKinds), model: model))
+                    continue
                 }
-                if !attachments.isEmpty {
+                observeInputTurn(turn)
+                let effectiveSourceKinds = sourceKinds.isEmpty && isKnownHumanEcho ? ["user.text"] : sourceKinds
+                let humanText = cleanUserIntent(content)
+                let capturedIntent = nonEmpty(humanText)
+                // Image-only input is still a captured user message. Keep its
+                // attachments without inventing a textual request or retaining
+                // the previous turn's intent.
+                if let turn {
+                    if let capturedIntent { intentsByTurn[turn] = capturedIntent }
+                    else { intentsByTurn.removeValue(forKey: turn) }
+                }
+                if turn == currentTurn { lastIntent = capturedIntent }
+                result.append(event(identity: "\(session):\(turn ?? "none"):\(identity):user-prompt",
+                    kind: "model", rule: "codex_model_prompt", workspace: workspace, op: "prompt",
+                    timestamp: timestamp, action: "sent", session: session, trace: nil, turn: turn,
+                    intent: capturedIntent, prompt: String(content.prefix(64_000)), response: nil,
+                    toolCallId: nil, toolName: nil,
+                    command: jsonString(["content_item_kinds": effectiveSourceKinds,
+                        "input_record_kind": nativeUserItem != nil ? "native_user_message" : type == "response_item" ? "transport_user_message" : "legacy_user_message",
+                        "message_id": identity,
+                        "client_message_id": nativeUserItem?["client_id"] as? String ?? ""]), model: model))
+                let attachments = parts.filter {
+                    !["text", "input_text"].contains($0["type"] as? String ?? "")
+                }
+                let envelopeResources = appInputAttachments(content, sourceKinds: effectiveSourceKinds)
+                if !attachments.isEmpty || !envelopeResources.isEmpty {
                     let kinds = attachments.compactMap { $0["type"] as? String }
-                    result.append(event(identity: "\(session):\(turn ?? "none"):\(timestampKey):attachments",
+                    // Do not duplicate embedded image base64 into the projection.
+                    // Raw evidence retains the original transport bytes.
+                    let nativeResources = attachments.compactMap { item -> [String: String]? in
+                        guard let path = item["path"] as? String else { return nil }
+                        return ["type": item["type"] as? String ?? "unknown", "path": path]
+                    }
+                    var seenPaths = Set<String>()
+                    let resources = (nativeResources + envelopeResources).filter { seenPaths.insert($0["path"] ?? "").inserted }
+                    let capturedKinds = Array(Set(kinds + resources.compactMap { $0["type"] })).sorted()
+                    result.append(event(identity: "\(session):\(turn ?? "none"):\(identity):attachments",
                         kind: "context", rule: "codex_attachment", workspace: workspace, op: "attachment",
                         timestamp: timestamp, action: "captured", session: session, trace: nil, turn: turn,
-                        intent: lastIntent, prompt: nil, response: nil, toolCallId: nil,
-                        toolName: "codex.attachment", command: jsonString(["count": attachments.count, "types": kinds]),
-                        model: model))
+                        intent: capturedIntent, prompt: nil, response: nil, toolCallId: nil,
+                        toolName: "codex.attachment", command: jsonString(["count": max(attachments.count, resources.count),
+                            "types": capturedKinds, "resources": resources]), model: model))
                 }
                 continue
             }
@@ -756,12 +817,61 @@ final class CodexSight: ObservableObject {
         (payload["turn_id"] as? String) ?? (payload["internal_chat_message_metadata_passthrough"] as? [String: Any])?["turn_id"] as? String
     }
 
-    private nonisolated static func cleanUserIntent(_ value: String) -> String {
-        if let range = value.range(of: #"(?s)## My request:\s*(.*)$"#, options: .regularExpression) {
-            return String(value[range]).replacingOccurrences(of: #"(?s)^## My request:\s*"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
+    nonisolated static func isRuntimeUserContext(_ value: String, sourceKinds: [String] = []) -> Bool {
+        // Current Codex metadata labels real user.text/user.image explicitly.
+        // A human may legitimately quote an environment wrapper in their text.
+        if sourceKinds.contains(where: { $0.hasPrefix("user.") }) { return false }
+        if !sourceKinds.isEmpty,
+           sourceKinds.allSatisfy({ $0.hasPrefix("environments.") || $0.hasPrefix("environment.") || $0.hasPrefix("additional_content.") }) { return true }
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Only a whole runtime envelope is context. Trailing human text, or the
+        // app's explicit request delimiter, is not discarded by this fallback.
+        let remainder = removingLeadingRuntimeEnvelopes(text)
+        return remainder != text && remainder.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    private nonisolated static func removingLeadingRuntimeEnvelopes(_ value: String) -> String {
+        var remainder = value
+        while let tag = ["environment_context", "in-app-browser-context", "external_codex_apps_open_page"].first(where: {
+            remainder.hasPrefix("<" + $0 + ">") || remainder.hasPrefix("<" + $0 + " ")
+        }), let closing = remainder.range(of: "</" + tag + ">") {
+            remainder = String(remainder[closing.upperBound...]).trimmingCharacters(in: .whitespacesAndNewlines)
         }
-        return value.trimmingCharacters(in: .whitespacesAndNewlines)
+        return remainder
+    }
+
+    nonisolated static func cleanUserIntent(_ value: String) -> String {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let envelope = text.hasPrefix("# Files mentioned by the user:") || text.hasPrefix("## My request:")
+            || text.hasPrefix("<in-app-browser-context") || text.hasPrefix("<environment_context")
+        guard envelope, let marker = text.range(of: #"(?m)^## My request:[ \t]*\r?$"#, options: .regularExpression) else { return text }
+        let request = String(text[marker.upperBound...])
+        // The app sends image brackets as input_text around the actual image.
+        // They are transport markup, not a request typed by the human.
+        return request.replacingOccurrences(of: #"(?s)<image(?:\s[^>]*)?>.*?</image>"#, with: "", options: .regularExpression)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Local attachment paths already present in the app's captured input
+    /// envelope. A filename mentioned in an ordinary request is not an input.
+    nonisolated static func appInputAttachments(_ value: String, sourceKinds: [String] = []) -> [[String: String]] {
+        let text = value.trimmingCharacters(in: .whitespacesAndNewlines)
+        let appEnvelope = text.hasPrefix("# Files mentioned by the user:")
+            || text.hasPrefix("<in-app-browser-context") || text.hasPrefix("## My request:")
+        let imageInput = sourceKinds.contains("user.image")
+            || (text.hasPrefix("# Files mentioned by the user:") && text.contains("Image attachment: true"))
+        guard appEnvelope, imageInput,
+              let marker = text.range(of: #"(?m)^## My request:[ \t]*\r?$"#, options: .regularExpression),
+              let expression = try? NSRegularExpression(pattern: #"<image\b[^>]*\bpath=["']([^"']+)["'][^>]*>"#) else { return [] }
+        let request = String(text[marker.upperBound...])
+        let range = NSRange(request.startIndex..<request.endIndex, in: request)
+        var paths = Set<String>()
+        return expression.matches(in: request, range: range).compactMap { match in
+            guard let pathRange = Range(match.range(at: 1), in: request) else { return nil }
+            let path = String(request[pathRange])
+            guard path.hasPrefix("/"), paths.insert(path).inserted else { return nil }
+            return ["type": "local_image", "path": path]
+        }
     }
 
     private nonisolated static func transcriptBundleMetadata(_ value: String) -> [String: Any] {

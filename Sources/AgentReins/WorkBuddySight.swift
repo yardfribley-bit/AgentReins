@@ -343,12 +343,14 @@ final class WorkBuddySight: ObservableObject {
             let type = row["type"] as? String ?? ""
             if type == "message", row["role"] as? String == "user", let intent = textContent(row["content"]) {
                 let readableIntent = cleanUserIntent(intent)
-                lastIntent[session] = String(readableIntent.prefix(1_000))
+                lastIntent[session] = readableIntent.map { String($0.prefix(1_000)) }
                 currentTurn[session] = rawId
                 let provider = row["providerData"] as? [String: Any] ?? [:]
-                result.append(GuardEvent(id: id, kind: "model", ruleId: "agentsight_model_prompt",
-                    path: row["cwd"] as? String ?? "-", command: nil, agent: "workbuddy", op: "prompt",
-                    severity: "info", ts: date(row["timestamp"]), action: "sent", sessionId: session,
+                result.append(GuardEvent(id: id, kind: readableIntent == nil ? "context" : "model",
+                    ruleId: readableIntent == nil ? "workbuddy_recovered_context" : "agentsight_model_prompt",
+                    path: row["cwd"] as? String ?? "-", command: nil, agent: "workbuddy",
+                    op: readableIntent == nil ? "recovered_context" : "prompt",
+                    severity: "info", ts: date(row["timestamp"]), action: readableIntent == nil ? "captured" : "sent", sessionId: session,
                     traceId: provider["traceId"] as? String, turnId: rawId, userIntent: readableIntent,
                     modelPrompt: intent, model: provider["model"] as? String,
                     source: "agentsight:workbuddy-local"))
@@ -496,16 +498,12 @@ final class WorkBuddySight: ObservableObject {
     }
 
     /// WorkBuddy 会把系统注入块和用户原话放在同一 message 中；摘要只取用户真正输入，原文仍保存在 modelPrompt。
-    private nonisolated static func cleanUserIntent(_ text: String) -> String {
-        // WorkBuddy wraps the literal user request inside <user_query>; extract it
-        // before removing the surrounding injected system context.
-        if let match = text.range(of: #"(?s)<user_query>(.*?)</user_query>"#, options: .regularExpression) {
-            let block = String(text[match])
-            return block.replacingOccurrences(of: #"(?s)</?user_query>"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
+    nonisolated static func cleanUserIntent(_ text: String) -> String? {
         var value = text
         let blockPatterns = [
+            // Compaction includes old <user_query> examples. They are context,
+            // never the human's current instruction.
+            #"(?s)<cb_summary[^>]*>.*?</cb_summary>"#,
             #"(?s)<system-reminder[^>]*>.*?</system-reminder>"#,
             #"(?s)<product_identity>.*?</product_identity>"#,
             #"(?s)<tone_and_style>.*?</tone_and_style>"#,
@@ -516,8 +514,13 @@ final class WorkBuddySight: ObservableObject {
         for pattern in blockPatterns {
             value = value.replacingOccurrences(of: pattern, with: "", options: .regularExpression)
         }
+        if let match = value.range(of: #"(?s)<user_query>(.*?)</user_query>"#, options: .regularExpression) {
+            let block = String(value[match])
+            return block.replacingOccurrences(of: #"(?s)</?user_query>"#, with: "", options: .regularExpression)
+                .trimmingCharacters(in: .whitespacesAndNewlines).nilIfEmpty
+        }
         let cleaned = value.trimmingCharacters(in: .whitespacesAndNewlines)
-        return cleaned.isEmpty ? "The user request could not be separated from injected context" : cleaned
+        return cleaned.nilIfEmpty
     }
 
     private nonisolated static func deterministicUUID(_ value: String) -> UUID {

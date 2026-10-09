@@ -51,6 +51,20 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
 }
 
 enum WorkBuddyNetworkEvidence {
+    static func captureDecoder() -> JSONDecoder {
+        let decoder = JSONDecoder()
+        let fraction = ISO8601DateFormatter(); fraction.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let whole = ISO8601DateFormatter(); whole.formatOptions = [.withInternetDateTime]
+        decoder.dateDecodingStrategy = .custom { decoder in
+            let text = try decoder.singleValueContainer().decode(String.self)
+            guard let date = fraction.date(from: text) ?? whole.date(from: text) else {
+                throw DecodingError.dataCorrupted(.init(codingPath: decoder.codingPath, debugDescription: "Invalid capture timestamp"))
+            }
+            return date
+        }
+        return decoder
+    }
+
     static func project(_ record: WorkBuddyNetworkCaptureRecord) -> [GuardEvent] {
         guard record.host.lowercased() == "copilot.tencent.com",
               ["/v1/chat/completions", "/v2/chat/completions", "/v3/chat/completions",
@@ -146,7 +160,7 @@ enum WorkBuddyNetworkEvidence {
         return events
     }
 
-    private static func userIntent(in object: [String: Any]?) -> String? {
+    static func userIntent(in object: [String: Any]?) -> String? {
         guard let messages = object?["messages"] as? [[String: Any]],
               let user = messages.last(where: { $0["role"] as? String == "user" }) else { return nil }
         let text: String
@@ -154,11 +168,7 @@ enum WorkBuddyNetworkEvidence {
         else if let parts = user["content"] as? [[String: Any]] {
             text = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
         } else { return nil }
-        if let range = text.range(of: #"(?s)<user_query>(.*?)</user_query>"#, options: .regularExpression) {
-            return String(text[range]).replacingOccurrences(of: #"(?s)</?user_query>"#, with: "", options: .regularExpression)
-                .trimmingCharacters(in: .whitespacesAndNewlines)
-        }
-        return text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return WorkBuddySight.cleanUserIntent(text)
     }
 
     private struct ParsedResponse {

@@ -19,6 +19,10 @@ final class EventAttributionResolver: ObservableObject {
     }
 
     private var contexts: [Context] = []
+    private var activeWorkBuddyPrompts: [String: Context] = [:]
+    private var workBuddyReplies: [String: String] = [:]
+    private var pendingWorkBuddyStops: [String: Set<String>] = [:]
+    private var workBuddyFlows: [String: Context] = [:]
     private let window: TimeInterval
 
     init(window: TimeInterval = 45) {
@@ -45,38 +49,68 @@ final class EventAttributionResolver: ObservableObject {
 
     func observe(_ events: [GuardEvent], now: Date = Date()) {
         for event in events {
+            if event.op == "hook_turn_stop", event.turnId == nil, let session = event.sessionId,
+               let root = RealtimeDetailProjector.object(event.afterContent), let body = root["payload"] as? [String: Any],
+               let final = body["last_assistant_message"] as? String {
+                if final.count <= 16_000 { pendingWorkBuddyStops[session, default: []].insert(final) }
+                let matches = workBuddyReplies.filter { $0.key.hasPrefix(session + "\u{0}") && $0.value == final }
+                if matches.count == 1, let key = matches.first?.key { activeWorkBuddyPrompts.removeValue(forKey: key); workBuddyReplies.removeValue(forKey: key) }
+            }
             guard let sessionId = event.sessionId, let turnId = event.turnId else { continue }
-            contexts.append(Context(sessionId: sessionId, turnId: turnId,
+            let context = Context(sessionId: sessionId, turnId: turnId,
                                     toolCallId: event.toolCallId, toolName: event.toolName,
                                     kind: event.kind, op: event.op, command: event.command,
                                     userIntent: event.userIntent,
                                     agent: event.agent?.lowercased(),
-                                    workspace: normalizedWorkspace(event.path), timestamp: event.ts))
+                                    workspace: normalizedWorkspace(event.path), timestamp: event.ts)
+            contexts.append(context)
+            if context.agent == "workbuddy" {
+                let key = sessionId + "\u{0}" + turnId
+                if event.kind == "model", event.op == "prompt", event.source != "agentsight:workbuddy-network-body", event.userIntent?.isEmpty == false { activeWorkBuddyPrompts[key] = context }
+                if event.kind == "model", event.op == "response", let text = event.modelResponse {
+                    workBuddyReplies[key] = text
+                    if pendingWorkBuddyStops[sessionId]?.contains(text) == true {
+                        let matches = workBuddyReplies.filter { $0.key.hasPrefix(sessionId + "\u{0}") && $0.value == text }
+                        if matches.count == 1 { activeWorkBuddyPrompts.removeValue(forKey: key); workBuddyReplies.removeValue(forKey: key); pendingWorkBuddyStops[sessionId]?.remove(text) }
+                    }
+                }
+                if ["task_complete", "task_failed", "task_cancelled", "turn_completed", "hook_turn_stop"].contains(event.op) { activeWorkBuddyPrompts.removeValue(forKey: key); workBuddyReplies.removeValue(forKey: key) }
+            }
         }
         contexts.removeAll { now.timeIntervalSince($0.timestamp) > max(window * 4, 180) }
         if contexts.count > 500 { contexts.removeFirst(contexts.count - 500) }
+        if pendingWorkBuddyStops.count > 256 { pendingWorkBuddyStops.removeValue(forKey: pendingWorkBuddyStops.keys.sorted().first!) }
+        for key in pendingWorkBuddyStops.keys where (pendingWorkBuddyStops[key]?.count ?? 0) > 8 { pendingWorkBuddyStops[key] = Set(pendingWorkBuddyStops[key]!.sorted().suffix(8)) }
+        if activeWorkBuddyPrompts.count > 256 {
+            for item in activeWorkBuddyPrompts.sorted(by: { $0.value.timestamp < $1.value.timestamp }).prefix(activeWorkBuddyPrompts.count - 256) {
+                activeWorkBuddyPrompts.removeValue(forKey: item.key); workBuddyReplies.removeValue(forKey: item.key)
+            }
+        }
+        if workBuddyFlows.count > 1024 {
+            for item in workBuddyFlows.sorted(by: { $0.value.timestamp < $1.value.timestamp }).prefix(workBuddyFlows.count - 1024) { workBuddyFlows.removeValue(forKey: item.key) }
+        }
     }
 
     /// Joins a captured WorkBuddy HTTPS body only when its user text identifies
-    /// exactly one recent native prompt. Parallel or missing matches stay in a
+    /// exactly one active native prompt for the full turn lifetime. Parallel or missing matches stay in a
     /// separate network evidence session instead of being guessed into a turn.
     func resolveWorkBuddyNetworkBody(_ event: GuardEvent) -> GuardEvent {
-        guard event.source == "agentsight:workbuddy-network-body",
-              let intent = normalizedIntent(event.userIntent), !intent.isEmpty else { return event }
-        let matching = contexts.filter { context in
-            guard context.agent == "workbuddy", context.kind == "model", context.op == "prompt",
-                  abs(event.ts.timeIntervalSince(context.timestamp)) <= window,
-                  let candidate = normalizedIntent(context.userIntent) else { return false }
-            return candidate == intent ||
-                (candidate.count == 1_000 && intent.hasPrefix(candidate))
+        guard event.source == "agentsight:workbuddy-network-body" else { return event }
+        if event.op != "network_prompt", let trace = event.traceId, let match = workBuddyFlows[trace] {
+            return event.attributed(sessionId: match.sessionId, turnId: match.turnId,
+                toolCallId: event.toolCallId, confidence: .inferred, method: "same HTTPS flow as an already-attributed request")
+        }
+        guard let intent = normalizedIntent(event.userIntent), !intent.isEmpty else { return event }
+        let matching = activeWorkBuddyPrompts.values.filter { context in
+            guard context.timestamp <= event.ts.addingTimeInterval(1), let candidate = normalizedIntent(context.userIntent) else { return false }
+            return candidate == intent || (candidate.count == 1_000 && intent.hasPrefix(candidate))
         }
         let turns = Dictionary(grouping: matching) { "\($0.sessionId):\($0.turnId)" }
-        guard turns.count == 1, let match = turns.values.first?.max(by: { $0.timestamp < $1.timestamp }) else {
-            return event
-        }
+        guard turns.count == 1, let match = turns.values.first?.first else { return event }
+        if let trace = event.traceId { workBuddyFlows[trace] = match }
         return event.attributed(sessionId: match.sessionId, turnId: match.turnId,
-                                toolCallId: event.toolCallId, confidence: .inferred,
-                                method: "unique WorkBuddy user text + bounded \(Int(window))s time window")
+            toolCallId: event.toolCallId, confidence: .inferred,
+            method: "unique exact WorkBuddy user text in an active native turn; no 45s cutoff")
     }
 
     func resolve(_ event: GuardEvent) -> GuardEvent {

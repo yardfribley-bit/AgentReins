@@ -163,6 +163,35 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
                        "Matching text and time cannot confirm a native network-to-turn identity")
     }
 
+    @MainActor func testLongNativeTurnRetainsNetworkIdentityAndLateResponseUsesFlow() throws {
+        let resolver = EventAttributionResolver(window: 45), start = Date()
+        let prompt = GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp", command: nil, agent: "workbuddy", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "native", turnId: "turn", userIntent: "安装软件", source: "agentsight:workbuddy-local")
+        resolver.observe([prompt], now: start)
+        resolver.observe([], now: start.addingTimeInterval(900))
+        let request = GuardEvent(kind: "model", ruleId: "network", path: "-", command: nil, agent: "workbuddy", op: "network_prompt", severity: "info", ts: start.addingTimeInterval(900), action: "captured_complete", sessionId: "network-flow", traceId: "workbuddy-http:flow", turnId: "flow", userIntent: "安装软件", source: "agentsight:workbuddy-network-body")
+        XCTAssertEqual(resolver.resolveWorkBuddyNetworkBody(request).turnId, "turn")
+        let end = GuardEvent(kind: "task", ruleId: "end", path: "-", command: nil, agent: "workbuddy", op: "task_complete", severity: "info", ts: start.addingTimeInterval(910), action: "completed", sessionId: "native", turnId: "turn")
+        resolver.observe([end], now: start.addingTimeInterval(910))
+        let response = GuardEvent(kind: "model", ruleId: "network", path: "-", command: nil, agent: "workbuddy", op: "network_response", severity: "info", ts: start.addingTimeInterval(920), action: "received_complete", sessionId: "network-flow", traceId: "workbuddy-http:flow", turnId: "flow", source: "agentsight:workbuddy-network-body")
+        XCTAssertEqual(resolver.resolveWorkBuddyNetworkBody(response).turnId, "turn")
+        XCTAssertEqual(resolver.resolveWorkBuddyNetworkBody(request).turnId, "flow", "Stopped prompt must not claim a new request")
+    }
+
+    @MainActor func testSameTextParallelNativeTurnsRemainUnattributed() {
+        let resolver = EventAttributionResolver(), date = Date()
+        let inputs = ["one", "two"].map { turn in GuardEvent(kind: "model", ruleId: "prompt", path: "/tmp", command: nil, agent: "workbuddy", op: "prompt", severity: "info", ts: date, action: "sent", sessionId: "native", turnId: turn, userIntent: "hello", source: "agentsight:workbuddy-local") }
+        resolver.observe(inputs, now: date)
+        let request = GuardEvent(kind: "model", ruleId: "network", path: "-", command: nil, agent: "workbuddy", op: "network_prompt", severity: "info", ts: date, action: "captured_complete", sessionId: "network", traceId: "flow", turnId: "flow", userIntent: "hello", source: "agentsight:workbuddy-network-body")
+        XCTAssertEqual(resolver.resolveWorkBuddyNetworkBody(request).turnId, "flow")
+    }
+
+    func testFractionalProxyTimestampDecodesWithoutDiscardingRawRecord() throws {
+        struct Timestamp: Decodable { let observedAt: Date }
+        let bytes = Data(#"{"observedAt":"2026-10-09T12:35:49.304805Z"}"#.utf8)
+        let timestamp = try WorkBuddyNetworkEvidence.captureDecoder().decode(Timestamp.self, from: bytes)
+        XCTAssertEqual(timestamp.observedAt.timeIntervalSince1970, 1791549349.304, accuracy: 0.001)
+    }
+
     func testReaderWaitsForCompleteJSONLine() throws {
         let url = FileManager.default.temporaryDirectory
             .appendingPathComponent("workbuddy-network-\(UUID().uuidString).jsonl")

@@ -1,0 +1,18 @@
+const fs=require('fs'),assert=require('node:assert/strict');const {chromium}=require(process.env.AGENTREINS_PLAYWRIGHT||'playwright');
+(async()=>{const output=process.env.AGENTREINS_LIVE_QA_DIR||'/private/tmp/agentreins-live-acceptance';fs.mkdirSync(output,{recursive:true,mode:0o700});
+const payload=JSON.parse(fs.readFileSync('/private/tmp/agentreins-live-preview/payload.json','utf8'));
+assert.equal(payload.observing,true);assert.equal(payload.truncated,false);assert(!payload.persistenceError);
+assert(!payload.tasks.some(t=>t.isPrimaryTask&&t.model==='codex-auto-review'));
+const install=payload.tasks.find(t=>t.turn==='b1e18ff8-d028-4b83-bb37-fd55b4643f7a');assert(install);assert.equal(install.lifecycleStatus,'stopped');assert.equal(install.cards.filter(c=>c.id.startsWith('call:')).length,20);assert.equal(payload.contexts.filter(c=>c.turn===install.turn).length,13);assert(install.nativeEndMessage.includes('a password is required'));
+const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
+await page.goto('http://127.0.0.1:18955/');await page.locator('#tasks .task-item').first().waitFor({timeout:20000});
+await page.locator('#agent-filter').selectOption('Codex');await page.locator('#tasks [data-task]').filter({hasText:'你现在这种'}).click();
+await page.locator('[data-zoom=fit]').click();await page.locator('[data-flow-node=user]').click();
+assert((await page.locator('#detail-code').textContent()).includes('你现在这种'));assert(!(await page.locator('#heading').textContent()).includes('codex-auto-review'));assert.equal(await page.locator('[data-flow-node]').count(),16);
+await page.screenshot({path:output+'/current-overview.png',fullPage:true});
+await page.locator('[data-graph-mode=spider]').click();assert(await page.locator('[data-flow-node^="card:"]').count()>0);assert(!await page.locator('[data-flow-node=database]').count());await page.screenshot({path:output+'/current-spider.png',fullPage:true});
+await page.locator('#agent-filter').selectOption('WorkBuddy');await page.locator('#tasks [data-task]').filter({hasText:'https://github.com/qingjian-team/qingjian'}).click();await page.locator('[data-graph-mode=architecture]').click();await page.locator('[data-flow-node=closure]').click();
+assert((await page.locator('#detail-code').textContent()).includes('a password is required'));assert((await page.locator('#task-state').textContent()).includes('停止'));
+await page.screenshot({path:output+'/actual-install-status.png',fullPage:true});
+const before=await page.locator('#footer-state').textContent();await page.waitForFunction(previous=>document.getElementById('footer-state').textContent!==previous,before,{timeout:15000});assert.deepEqual(errors,[]);
+console.log(JSON.stringify({passed:true,currentNativeFeed:true,latestHumanInputVisible:true,internalReviewNotPrimary:true,stoppedInstallationPreserved:true,modelRequests:13,nativeCalls:20,viewportOverview:true,distinctSpider:true,liveUpdates:true,truncated:false}));await browser.close();})().catch(e=>{console.error(e);process.exit(1)});

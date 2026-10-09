@@ -127,6 +127,161 @@ final class CodexRealtimeIncrementalTests: XCTestCase {
         XCTAssertEqual(events.first { $0.op == "prompt" }?.turnId, "fresh")
     }
 
+    func testRuntimeUserContextNeverBecomesDemandOrOverwritesHumanInput() throws {
+        var source = try stream()
+        try source.append(row("event_msg", ["type": "task_started", "turn_id": "one"]))
+        try source.append(row("response_item", ["type": "message", "role": "user", "content": [["type": "input_text", "text": "<environment_context>runtime</environment_context>"]]], second: 1))
+        try source.append(row("response_item", ["type": "message", "role": "user", "content": [["type": "input_text", "text": "真正的用户需求"]]], second: 2))
+        try source.append(row("response_item", ["type": "message", "role": "user", "content": [["type": "input_text", "text": "<in-app-browser-context source=\"ambient\">state</in-app-browser-context>"]]], second: 3))
+        try source.append(row("response_item", ["type": "function_call", "call_id": "tool", "name": "Read", "arguments": "{}"], second: 4))
+        let events = source.poll()
+        XCTAssertEqual(events.filter { $0.op == "prompt" }.map(\.userIntent), ["真正的用户需求"])
+        XCTAssertEqual(events.filter { $0.op == "runtime_user_context" }.count, 2)
+        XCTAssertEqual(events.first { $0.toolCallId == "tool" }?.userIntent, "真正的用户需求")
+        let tasks = RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast)
+        XCTAssertEqual(tasks.first?.originalRequest, "真正的用户需求")
+    }
+
+    func testSourceMetadataSeparatesRuntimeInjectionFromLiteralHumanWrapper() throws {
+        var source = try stream()
+        try source.append(row("event_msg", ["type": "task_started", "turn_id": "one"]))
+        let injected = "<environment_context>\n## My request:\n运行时字段不是人的需求\n</environment_context>"
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "one", "content_item_kinds": ["environments.environment_context"]],
+            "content": [["type": "input_text", "text": injected]]], second: 1))
+        let human = "<environment_context>这是用户明确输入的引用文本</environment_context>"
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "one", "content_item_kinds": ["user.text"]],
+            "content": [["type": "input_text", "text": human]]], second: 2))
+        try source.append(row("event_msg", ["type": "item_completed", "turn_id": "one",
+            "item": ["type": "UserMessage", "id": "human-native", "content": [["type": "text", "text": human]]]], second: 3))
+        try source.append(row("response_item", ["type": "function_call", "call_id": "tool", "name": "Read", "arguments": "{}"], second: 4))
+        let events = source.poll()
+        XCTAssertEqual(events.filter { $0.op == "runtime_user_context" }.count, 1)
+        XCTAssertEqual(events.filter { $0.op == "prompt" }.map(\.userIntent), [human, human])
+        XCTAssertEqual(events.first { $0.toolCallId == "tool" }?.userIntent, human)
+        XCTAssertEqual(RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast).first?.originalRequest, human)
+    }
+
+    func testHumanTranscriptExampleRemainsDemandWhileRecoveredTranscriptDoesNotRewindTurn() throws {
+        var source = try stream(); try begin(&source); _ = source.poll()
+        try source.append(row("event_msg", ["type": "task_started", "turn_id": "two"], second: 3))
+        let human = "请分析这段聊天样例：\n[0] user: 样例问题\n[1] assistant: 样例回答"
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "two", "content_item_kinds": ["user.text"]],
+            "content": [["type": "input_text", "text": human]]], second: 4))
+        try source.append(row("event_msg", ["type": "item_completed", "turn_id": "two",
+            "item": ["type": "UserMessage", "id": "human-example", "content": [["type": "text", "text": human]]]], second: 5))
+        try source.append(row("event_msg", ["type": "item_completed", "turn_id": "one",
+            "item": ["type": "UserMessage", "id": "recovered", "content": [["type": "text", "text": "[0] user: 旧需求\n[1] assistant: 旧回答"]]]], second: 6))
+        try source.append(row("response_item", ["type": "function_call", "call_id": "current", "name": "Read", "arguments": "{}"], second: 7))
+        let events = source.poll()
+        XCTAssertEqual(events.filter { $0.op == "prompt" }.map(\.userIntent), [human, human])
+        XCTAssertEqual(events.filter { $0.op == "recovered_transcript" }.count, 1)
+        XCTAssertEqual(events.first { $0.op == "recovered_transcript" }?.turnId, "one")
+        XCTAssertEqual(events.first { $0.toolCallId == "current" }?.turnId, "two")
+        XCTAssertEqual(events.first { $0.toolCallId == "current" }?.userIntent, human)
+        XCTAssertEqual(source.states.values.first?.currentTurn, "two")
+    }
+
+    func testImageOnlyTransportAndNativeMessageCaptureAttachmentsWithoutInventingDemand() throws {
+        var source = try stream(); try begin(&source); _ = source.poll()
+        try source.append(row("event_msg", ["type": "task_started", "turn_id": "image-turn"], second: 3))
+        let wrapper = "# Files mentioned by the user:\n\n## screenshot.png: /tmp/screenshot.png\nImage attachment: true\n\n## My request:\n\n"
+        let transport = wrapper + "<image name=[Image #1] path=\"/tmp/screenshot.png\">\n</image>"
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "image-turn", "content_item_kinds": ["user.text", "user.image"]],
+            "content": [["type": "input_text", "text": transport], ["type": "input_image", "image_url": "data:image/png;base64,fixture"]]], second: 4))
+        try source.append(row("event_msg", ["type": "item_completed", "turn_id": "image-turn",
+            "item": ["type": "UserMessage", "id": "image-message", "content": [["type": "text", "text": wrapper], ["type": "local_image", "path": "/tmp/screenshot.png"]]]], second: 5))
+        try source.append(row("response_item", ["type": "function_call", "call_id": "image-tool", "name": "Read", "arguments": "{}"], second: 6))
+        let events = source.poll()
+        XCTAssertEqual(events.filter { $0.op == "prompt" }.count, 2)
+        XCTAssertTrue(events.filter { $0.op == "prompt" }.allSatisfy { $0.userIntent == nil })
+        XCTAssertEqual(events.filter { $0.op == "attachment" }.count, 2)
+        let capturedPaths = events.filter { $0.op == "attachment" }.flatMap { event -> [String] in
+            let body = RealtimeDetailProjector.object(event.command)
+            return (body?["resources"] as? [[String: String]] ?? []).compactMap { $0["path"] }
+        }
+        XCTAssertEqual(capturedPaths, ["/tmp/screenshot.png", "/tmp/screenshot.png"])
+        let imageTask = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast).first)
+        XCTAssertEqual(imageTask.inputAttachments.first?.path, "/tmp/screenshot.png")
+        XCTAssertFalse(events.filter { $0.op == "attachment" }.contains { $0.command?.contains("base64") == true })
+        XCTAssertNil(events.first { $0.toolCallId == "image-tool" }?.userIntent, "The previous text demand must not leak into this input")
+        XCTAssertNil(RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast).first?.originalRequest)
+        XCTAssertTrue(events.first { $0.op == "prompt" }?.modelPrompt?.contains("<image") == true, "Captured transport body remains unchanged")
+    }
+
+    func testAppEnvelopeExtractsHumanTextAndPreservesCompleteCapturedBody() throws {
+        var source = try stream()
+        let body = "<in-app-browser-context source=\"ambient\">URL</in-app-browser-context>\n\n## My request:\n请照这张图做原型\n<image path=\"/tmp/example.png\"></image>"
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "one", "content_item_kinds": ["user.text", "user.image"]],
+            "content": [["type": "input_text", "text": body]]]))
+        let request = try XCTUnwrap(source.poll().first { $0.op == "prompt" })
+        XCTAssertEqual(request.userIntent, "请照这张图做原型")
+        XCTAssertEqual(request.modelPrompt, body)
+    }
+
+    func testPlainHumanTextContainingRequestHeadingIsNotRewritten() throws {
+        var source = try stream()
+        let human = "请解释这个 Markdown 示例：\n## My request:\n示例正文"
+        try source.append(row("event_msg", ["type": "user_message", "turn_id": "one", "message": human]))
+        XCTAssertEqual(source.poll().first?.userIntent, human)
+    }
+
+    func testCapturedImageEnvelopeExposesPathWithoutBase64OrInventedText() throws {
+        var source = try stream()
+        let body = "# Files mentioned by the user:\n\n## chart.png: /tmp/chart.png\nImage attachment: true\n\n## My request:\n<image path=\"/tmp/chart.png\"></image>"
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "image", "content_item_kinds": ["user.image"]],
+            "content": [["type": "input_text", "text": body]]]))
+        let events = source.poll()
+        let attachment = try XCTUnwrap(events.first { $0.op == "attachment" })
+        let resources = RealtimeDetailProjector.object(attachment.command)?["resources"] as? [[String: String]]
+        XCTAssertEqual(resources?.first?["path"], "/tmp/chart.png")
+        XCTAssertNil(events.first { $0.op == "prompt" }?.userIntent)
+        XCTAssertEqual(events.first { $0.op == "prompt" }?.modelPrompt, body)
+        XCTAssertTrue(CodexSight.appInputAttachments("请读取 /tmp/chart.png，示例 <image path=\"/tmp/chart.png\"></image>", sourceKinds: ["user.text"]).isEmpty)
+        XCTAssertTrue(CodexSight.appInputAttachments("## My request:\n解释 <image path=\"/tmp/chart.png\"></image>", sourceKinds: ["user.text"]).isEmpty)
+    }
+
+    func testDelayedOldNativeUserEchoDoesNotRewindActiveTurnOrCurrentDemand() throws {
+        var source = try stream(); try begin(&source); _ = source.poll()
+        try source.append(row("event_msg", ["type": "task_started", "turn_id": "two"], second: 3))
+        try source.append(row("response_item", ["type": "message", "role": "user",
+            "internal_chat_message_metadata_passthrough": ["turn_id": "two", "content_item_kinds": ["user.text"]],
+            "content": [["type": "input_text", "text": "原始需求 B"]]], second: 4))
+        try source.append(row("event_msg", ["type": "item_completed", "turn_id": "one",
+            "item": ["type": "UserMessage", "id": "late-old-message", "content": [["type": "text", "text": "原始需求 A"]]]], second: 5))
+        try source.append(row("response_item", ["type": "function_call", "call_id": "current-call", "name": "Read", "arguments": "{}"], second: 6))
+        let events = source.poll()
+        XCTAssertEqual(events.first { $0.toolCallId == "current-call" }?.turnId, "two")
+        XCTAssertEqual(events.first { $0.toolCallId == "current-call" }?.userIntent, "原始需求 B")
+        XCTAssertEqual(events.first { $0.userIntent == "原始需求 A" }?.turnId, "one")
+        XCTAssertEqual(source.states.values.first?.currentTurn, "two")
+    }
+
+    func testActiveCheckpointRuntimePromptIsShownAsContextAndDoesNotStealRequest() throws {
+        let timestamp = Date(timeIntervalSince1970: 1_000)
+        let environment = "<environment_context>runtime fields</environment_context>"
+        let incorrect = GuardEvent(kind: "model", ruleId: "codex_model_prompt", path: "/tmp",
+            command: nil, agent: "codex", op: "prompt", severity: "info", ts: timestamp, action: "sent",
+            sessionId: "s", turnId: "t", userIntent: environment, modelPrompt: environment,
+            source: "agentsight:codex-local-compat")
+        let human = GuardEvent(kind: "model", ruleId: "codex_model_prompt", path: "/tmp",
+            command: nil, agent: "codex", op: "prompt", severity: "info", ts: timestamp.addingTimeInterval(1), action: "sent",
+            sessionId: "s", turnId: "t", userIntent: "真正需求", modelPrompt: "真正需求",
+            source: "agentsight:codex-local-compat")
+        let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events: [incorrect, human], since: .distantPast).first)
+        XCTAssertEqual(task.originalRequest, "真正需求")
+        XCTAssertEqual(task.requestEventID, human.id.uuidString)
+        XCTAssertEqual(task.cards.filter { $0.kind == "user" }.count, 1)
+        let context = try XCTUnwrap(task.cards.first { $0.kind == "context" })
+        XCTAssertEqual(context.input, environment)
+        XCTAssertEqual(context.eventIDs, [incorrect.id.uuidString])
+    }
+
     func testNewTurnClearsIntentWhileLateUniqueCallOutputKeepsItsOwnTurn() throws {
         var source = try stream()
         try begin(&source)
@@ -266,5 +421,88 @@ final class CodexRealtimeIncrementalTests: XCTestCase {
         XCTAssertTrue(result.modelResponse?.contains("visible") == true)
         XCTAssertTrue(result.modelResponse?.contains("exit_code") == true)
         XCTAssertEqual(result.turnId, "one")
+    }
+
+    func testTypedPageContextIsNotDemandAndSteeringInputsStayVisible() throws {
+        var source = try stream()
+        try source.append(row("event_msg", ["type":"task_started", "turn_id":"one"]))
+        try source.append(row("response_item", ["type":"message", "role":"user", "id":"page",
+            "internal_chat_message_metadata_passthrough":["turn_id":"one", "content_item_kinds":["additional_content.codex_apps_open_page"]],
+            "content":[["type":"input_text", "text":"<external_codex_apps_open_page>{\"page_id\":null}</external_codex_apps_open_page>"]]], second:1))
+        for (second, content) in [(2, "继续完成"), (10, "<in-app-browser-context>ambient</in-app-browser-context>\n\n## My request:\ncodex 的用户输入 一直采集失败"), (20, "codex 的用户输入 一直采集失败")] {
+            try source.append(row("response_item", ["type":"message", "role":"user", "id":"transport-\(second)",
+                "internal_chat_message_metadata_passthrough":["turn_id":"one", "content_item_kinds":["user.text"]],
+                "content":[["type":"input_text", "text":content]]], second:second))
+            try source.append(row("event_msg", ["type":"item_completed", "turn_id":"one", "item":["type":"UserMessage", "id":"native-\(second)", "content":[["type":"text", "text":content]]]], second:second))
+        }
+        let events = source.poll()
+        let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events:events, since:.distantPast).first)
+        XCTAssertEqual(task.originalRequest, "继续完成")
+        XCTAssertEqual(task.latestUserInput?.content, "codex 的用户输入 一直采集失败")
+        XCTAssertEqual(task.userInputs.compactMap(\.content), ["继续完成", "codex 的用户输入 一直采集失败", "codex 的用户输入 一直采集失败"])
+        XCTAssertTrue(task.userInputs.allSatisfy { $0.eventIDs.count == 2 })
+        XCTAssertEqual(task.cards.filter { $0.kind == "user" }.count, 3)
+        XCTAssertEqual(events.filter { $0.op == "runtime_user_context" }.count, 1)
+        XCTAssertFalse(task.userInputs.contains { $0.content?.contains("external_codex") == true })
+    }
+
+    func testAmbiguousEchoAndDifferentTurnNeverCollapseDistinctInputs() throws {
+        var source = try stream()
+        for (format, id, turn) in [("transport", "a", "one"), ("native", "b", "one"), ("native", "c", "one"), ("native", "d", "two")] {
+            if format == "transport" {
+                try source.append(row("response_item", ["type":"message", "role":"user", "id":id, "internal_chat_message_metadata_passthrough":["turn_id":turn, "content_item_kinds":["user.text"]], "content":[["type":"input_text", "text":"重复输入"]]]))
+            } else {
+                try source.append(row("event_msg", ["type":"item_completed", "turn_id":turn, "item":["type":"UserMessage", "id":id, "content":[["type":"text", "text":"重复输入"]]]]))
+            }
+        }
+        let inputs = RealtimeWorkspaceProjector.userInputs(source.poll())
+        XCTAssertEqual(inputs.count, 4)
+        XCTAssertTrue(inputs.allSatisfy { $0.eventIDs.count == 1 })
+    }
+
+    func testInternalReviewSessionIsObservationNotHumanTask() throws {
+        var source = try stream()
+        try source.append(row("session_meta", ["id":"review-session", "source":["subagent":["other":"guardian"]]]))
+        try source.append(row("event_msg", ["type":"task_started", "turn_id":"review"]))
+        try source.append(row("response_item", ["type":"message", "role":"user", "internal_chat_message_metadata_passthrough":["turn_id":"review", "content_item_kinds":["user.text"]], "content":[["type":"input_text", "text":"自动审批器的评审指令"]]]))
+        try source.append(row("response_item", ["type":"function_call", "call_id":"review-call", "name":"Read", "arguments":"{}"], second:1))
+        let events = source.poll()
+        XCTAssertTrue(events.contains { $0.toolName == "codex.internal_review_context" })
+        XCTAssertFalse(events.contains { $0.op == "prompt" })
+        let task = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events:events, since:.distantPast).first)
+        XCTAssertFalse(task.isPrimaryTask)
+        XCTAssertNil(task.originalRequest)
+        XCTAssertTrue(task.cards.contains { $0.call == "review-call" }, "Keep the underlying technical evidence")
+        let legacy = GuardEvent(kind:"model", ruleId:"codex_model_prompt", path:"-", command:nil, agent:"codex", op:"prompt", severity:"info", ts:Date(), action:"sent", sessionId:"old-review", turnId:"old", userIntent:"自动评审", modelPrompt:"自动评审", model:"codex-auto-review", source:"agentsight:codex-local-compat")
+        let repaired = try XCTUnwrap(RealtimeWorkspaceProjector.tasks(events:[legacy], since:.distantPast).first)
+        XCTAssertNil(repaired.originalRequest); XCTAssertFalse(repaired.isPrimaryTask)
+    }
+
+    func testActualActiveCodexInputSourceAndCheckpointAgree() throws {
+        guard let directory = ProcessInfo.processInfo.environment["AGENTREINS_CODEX_INPUT_FIELD_DIR"] else { throw XCTSkip("需指定本轮真实 Codex 原始切片") }
+        let root = URL(fileURLWithPath:directory)
+        let events = CodexSight.parseSession(root.appendingPathComponent("current-turn.jsonl"), fullHistory:true)
+        let tasks = RealtimeWorkspaceProjector.tasks(events:events, since:.distantPast)
+        let earlier = try XCTUnwrap(tasks.first { $0.turn == "01a120d3-559e-7143-bfb8-5548bb348706" })
+        XCTAssertEqual(earlier.originalRequest, "继续完成")
+        XCTAssertEqual(earlier.userInputs.compactMap(\.content), ["继续完成", "codex 的用户输入 一直采集失败"])
+        XCTAssertTrue(earlier.userInputs.allSatisfy { $0.eventIDs.count == 2 })
+        let latest = try XCTUnwrap(tasks.first { $0.turn == "01a12119-af3b-79a3-ab43-c251bd1a5423" })
+        XCTAssertEqual(latest.originalRequest, "修复 这个问题")
+        XCTAssertEqual(latest.userInputs.count, 1)
+        XCTAssertEqual(latest.latestUserInput?.content, "修复 这个问题")
+        XCTAssertEqual(latest.userInputs.first?.eventIDs.count, 2)
+        XCTAssertFalse(tasks.contains { $0.originalRequest?.contains("external_codex_apps") == true })
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let payload = RealtimeWorkspacePayload(tasks:[latest,earlier], collected:[], unattributedCount:0, processes:[], health:[], observing:false, persistenceError:nil, publishedAt:Date(), truncated:false, contexts:RealtimeContextProjector.assemble(events.compactMap(RealtimeContextProjector.parse), events:events))
+        try encoder.encode(payload).write(to:root.appendingPathComponent("actual-codex-input-payload.json"))
+        if let path = ProcessInfo.processInfo.environment["AGENTREINS_CODEX_REPAIR_CHECKPOINT"] {
+            let old = try XCTUnwrap(RealtimeActiveCheckpoint.load(URL(fileURLWithPath:path)))
+            let promptIDs = Set(old.events.filter { $0.source == "agentsight:codex-local-compat" && $0.op == "prompt" }.map(\.id))
+            var repaired = Dictionary(old.events.map { ($0.id,$0) }, uniquingKeysWith:{ _,new in new })
+            // Repair only already-observed user/context records; don't import tool history.
+            for event in events where promptIDs.contains(event.id) { repaired[event.id] = event }
+            try RealtimeActiveCheckpoint(version:old.version, savedAt:Date(), events:Array(repaired.values), readTaskIDs:old.readTaskIDs).save(root.appendingPathComponent("repaired-active-checkpoint.json"))
+        }
     }
 }

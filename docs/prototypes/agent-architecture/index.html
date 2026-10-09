@@ -1,0 +1,2662 @@
+<!doctype html>
+<html lang="en" data-visualize-standalone>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src 'unsafe-inline' blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'">
+<title>Agentreins Architecture Prototype</title>
+<style>:root{color-scheme:light dark;background:light-dark(rgb(255 255 255), rgb(24 24 24))}html,body{margin:0}body{box-sizing:border-box;padding:1rem;background:inherit}iframe{display:block;width:100%;height:calc(100vh - 2rem);margin:0 auto;border:0}</style>
+</head>
+<body>
+<iframe id="codex-visualization" sandbox="allow-scripts" referrerpolicy="no-referrer" title="Agentreins Architecture Prototype" data-srcdoc="&lt;!doctype html&gt;
+&lt;html lang=&quot;en&quot; data-visualize-standalone&gt;
+&lt;head&gt;
+&lt;meta charset=&quot;utf-8&quot;&gt;
+&lt;meta name=&quot;viewport&quot; content=&quot;width=device-width, initial-scale=1&quot;&gt;
+&lt;meta name=&quot;referrer&quot; content=&quot;no-referrer&quot;&gt;
+&lt;meta http-equiv=&quot;Content-Security-Policy&quot; content=&quot;default-src &#x27;none&#x27;; script-src &#x27;unsafe-inline&#x27; &#x27;unsafe-eval&#x27; &#x27;wasm-unsafe-eval&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; style-src &#x27;unsafe-inline&#x27; blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; img-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; font-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; media-src blob: data: https://cdnjs.cloudflare.com https://cdn.jsdelivr.net https://esm.sh https://fonts.bunny.net https://fonts.googleapis.com https://fonts.gstatic.com https://unpkg.com; worker-src blob:; connect-src blob: data:; frame-src &#x27;none&#x27;; object-src &#x27;none&#x27;; base-uri &#x27;none&#x27;; form-action &#x27;none&#x27;&quot;&gt;
+&lt;title&gt;Agentreins Architecture Prototype&lt;/title&gt;
+&lt;style&gt;:root {
+  color-scheme: light dark;
+  background-color: var(
+    --background,
+    var(--color-background-primary, light-dark(rgb(255 255 255), rgb(24 24 24)))
+  ) !important;
+
+  /* Agent-facing contract; keep in sync with SKILL.md. */
+  --background: var(
+    --color-background-primary,
+    light-dark(rgb(255 255 255), rgb(24 24 24))
+  );
+  --foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --card: color-mix(in oklab, var(--foreground) 5%, var(--background));
+  --card-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --popover: var(
+    --color-background-secondary,
+    light-dark(rgb(255 255 255), rgb(45 45 45))
+  );
+  --popover-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --primary: var(
+    --color-text-info,
+    light-dark(rgb(51 156 255), rgb(131 195 255))
+  );
+  --primary-foreground: var(
+    --color-text-inverse,
+    light-dark(rgb(255 255 255), rgb(13 13 13))
+  );
+  --secondary: var(
+    --color-background-secondary,
+    light-dark(rgb(255 255 255 / 96%), rgb(54 54 54 / 96%))
+  );
+  --secondary-foreground: var(
+    --color-text-primary,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --muted: color-mix(in srgb, var(--foreground) 10%, transparent);
+  --muted-foreground: var(
+    --color-text-secondary,
+    light-dark(rgb(26 28 31 / 49.4%), rgb(255 255 255 / 49.8%))
+  );
+  --accent: var(
+    --color-background-info,
+    light-dark(rgb(229 242 255), rgb(13 39 63))
+  );
+  --accent-foreground: var(
+    --color-text-info,
+    light-dark(rgb(51 156 255), rgb(131 195 255))
+  );
+  --destructive: var(
+    --color-text-warning,
+    light-dark(rgb(226 85 7), rgb(255 133 73))
+  );
+  --border: var(
+    --color-border-secondary,
+    light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%))
+  );
+  --input: var(
+    --color-border-primary,
+    light-dark(
+      rgb(26 28 31 / 11.8%),
+      color-mix(in oklab, rgb(0 0 0) 10%, transparent)
+    )
+  );
+  --ring: var(
+    --color-ring-primary,
+    light-dark(rgb(51 156 255), rgb(131 195 255 / 76%))
+  );
+  --font-size-base: var(--font-text-md-size, 16px);
+  --blue: light-dark(rgb(51 156 255), rgb(51 156 255));
+  --orange: light-dark(rgb(226 85 7), rgb(251 106 34));
+  --green: light-dark(rgb(0 162 64), rgb(64 201 119));
+  --red: light-dark(rgb(224 46 42), rgb(255 103 100));
+  --purple: light-dark(rgb(146 79 247), rgb(173 123 249));
+  --yellow: light-dark(rgb(255 195 0), rgb(255 210 64));
+  --viz-series-1: var(--primary);
+  --viz-series-2: light-dark(rgb(243 136 59), rgb(245 154 86));
+  --viz-series-3: light-dark(rgb(93 201 119), rgb(116 213 139));
+  --viz-series-4: light-dark(rgb(235 119 177), rgb(240 143 192));
+  --viz-series-5: light-dark(rgb(155 121 236), rgb(170 145 239));
+  --viz-series-6: light-dark(rgb(58 185 177), rgb(90 203 194));
+
+  /* Internal implementation variables; not part of the agent contract. */
+  --font-sans:
+    -apple-system-body, ui-sans-serif, -apple-system, system-ui, &quot;Segoe UI&quot;,
+    Helvetica, &quot;Apple Color Emoji&quot;, Arial, sans-serif, &quot;Segoe UI Emoji&quot;,
+    &quot;Segoe UI Symbol&quot;;
+  --font-mono:
+    ui-monospace, SFMono-Regular, &quot;SF Mono&quot;, Menlo, Consolas, &quot;Liberation Mono&quot;,
+    monospace;
+  --font-size-normal: max(11px, var(--font-size-base));
+  --font-size-tooltip: calc(var(--font-size-base) - 1px);
+  --font-size-small: max(11px, calc(var(--font-size-base) - 2px));
+  --font-size-h1: calc(var(--font-size-normal) * 1.7142857143);
+  --font-size-h2: calc(var(--font-size-normal) * 1.4285714286);
+  --font-size-h3: calc(var(--font-size-normal) * 1.2857142857);
+  --font-weight-normal: 400;
+  --font-weight-medium: 500;
+  --icon-size: 16px;
+  --line-height-normal: calc(var(--font-size-normal) * 1.5);
+  --line-height-tooltip: calc(var(--font-size-tooltip) * 1.4285714286);
+  --line-height-small: calc(var(--font-size-small) + 4px);
+  --corner-shape: round;
+  --radius: var(--border-radius-lg, 8px);
+  --radius-sm: calc(var(--radius) * 0.5);
+  --radius-md: calc(var(--radius) * 0.75);
+  --radius-lg: var(--radius);
+  --radius-2xl: calc(var(--radius) * 2);
+  --radius-full: 9999px;
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 8%);
+  --checkmark-image: url(&quot;data:image/svg+xml,%3Csvg xmlns=&#x27;http://www.w3.org/2000/svg&#x27; viewBox=&#x27;0 0 17 17&#x27;%3E%3Cpath d=&#x27;M12.8961 3.64101C13.1297 3.41418 13.4984 3.37523 13.7779 3.56581C14.0571 3.75635 14.1554 4.11331 14.0299 4.41347L13.9615 4.53847L7.71151 13.7045C7.59411 13.8767 7.4063 13.9877 7.19881 14.0072C6.99136 14.0267 6.78564 13.9533 6.63826 13.806L2.88826 10.056L2.79842 9.9457C2.6192 9.67407 2.64927 9.30496 2.88826 9.06581C3.12738 8.82669 3.49647 8.79676 3.76815 8.97597L3.8785 9.06581L7.03084 12.2182L12.8053 3.74941L12.8961 3.64101Z&#x27;/%3E%3C/svg%3E&quot;);
+
+  /* Legacy aliases; not part of the current agent contract. */
+  --viz-bg: transparent;
+  --viz-panel: var(--card);
+  --viz-border: var(--border);
+  --viz-text: var(--foreground);
+  --viz-muted: var(--muted-foreground);
+  --viz-accent: var(--primary);
+  --viz-accent-text: var(--primary-foreground);
+  --viz-accent-bg: var(--accent);
+  --viz-font-size: var(--font-size-base);
+  --viz-warning: var(--destructive);
+}
+
+:root[data-theme=&quot;light&quot;] {
+  color-scheme: light;
+}
+
+:root[data-theme=&quot;dark&quot;] {
+  color-scheme: dark;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html &gt; body {
+  /* Preserve MCP aliases for older inline renderers without creating :root cycles. */
+  --color-background-primary: var(
+    --background,
+    light-dark(rgb(255 255 255), rgb(24 24 24))
+  );
+  --color-text-primary: var(
+    --foreground,
+    light-dark(rgb(26 28 31), rgb(255 255 255))
+  );
+  --color-border-secondary: var(
+    --border,
+    light-dark(rgb(26 28 31 / 8%), rgb(255 255 255 / 8.2%))
+  );
+
+  margin: 0;
+  padding: var(--visualize-paint-gutter, 0px);
+  color: var(--foreground);
+  background: transparent !important;
+  font-family: var(--font-sans) !important;
+  -webkit-font-smoothing: antialiased;
+  font-size: var(--font-size-base);
+  line-height: calc(var(--font-size-base) * 1.625);
+  font-weight: var(--font-weight-normal);
+}
+
+.cursor-interaction {
+  cursor: var(--cursor-interaction, pointer);
+}
+
+a {
+  color: color-mix(in srgb, var(--viz-accent) 80%, var(--viz-text) 20%);
+  cursor: var(--cursor-interaction, pointer);
+  text-decoration: none;
+  text-underline-offset: 2px;
+  font-weight: inherit;
+}
+
+a:is(:hover, :focus-visible) {
+  text-decoration-line: underline;
+  text-decoration-style: dashed;
+  text-decoration-thickness: 0.5px;
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+p {
+  margin-block: 0;
+}
+p,
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+li,
+.table {
+  font-family: var(--font-sans);
+}
+
+h1 {
+  font-size: calc(var(--font-size-base) * 1.5);
+  line-height: 1.3333333333;
+}
+
+h2 {
+  font-size: calc(var(--font-size-base) * 1.25);
+  line-height: 1.4;
+}
+h3 {
+  font-size: calc(var(--font-size-base) * 1.125);
+  line-height: 1.5555555556;
+}
+h4 {
+  font-size: var(--font-size-base);
+  line-height: 1.5;
+}
+h5,
+h6 {
+  font-size: var(--font-size-base);
+  line-height: calc(var(--font-size-base) * 1.625);
+}
+
+h1,
+h2,
+h3,
+h4,
+h5,
+h6,
+b,
+strong,
+th {
+  font-weight: 600;
+}
+
+code:not(pre code) {
+  display: inline;
+  padding: 1px 6px;
+  border-radius: var(--radius-sm);
+  corner-shape: var(--corner-shape);
+  background: var(--muted);
+  font-family: var(--font-mono);
+  font-size: 0.92em;
+  overflow-wrap: anywhere;
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+  word-break: break-word;
+}
+pre,
+pre code {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  line-height: 20px;
+}
+
+.table-responsive {
+  width: 100%;
+  overflow-x: auto;
+  scrollbar-width: thin;
+}
+
+.table {
+  width: 100%;
+  color: var(--foreground);
+  font: inherit;
+  text-align: start;
+  border-collapse: separate;
+  border-spacing: 0;
+  font-size: calc(var(--font-size-base) * 0.875);
+  line-height: calc(var(--font-size-base) * 1.625);
+  font-family: var(--font-sans);
+}
+
+.table :is(th, td) {
+  padding-block: 10px;
+  padding-inline: 0 24px;
+  overflow-wrap: anywhere;
+  border-bottom: 1px solid var(--border);
+  text-align: start;
+  vertical-align: top;
+  border-bottom-color: color-mix(in srgb, var(--foreground) 5%, transparent);
+}
+.table :is(th, td):not(:last-child) {
+  padding-inline-end: calc(var(--font-size-base) * 1.5);
+}
+
+.table-responsive &gt; .table :is(th, td) {
+  overflow-wrap: break-word;
+}
+
+.table :is(th, td):last-child {
+  padding-inline-end: 0;
+}
+
+.table :is(caption, thead th) {
+  font-weight: 600;
+}
+
+.table thead :is(th, td) {
+  border-bottom-color: var(--border-strong, var(--input));
+  padding-block: calc(var(--font-size-base) / 2);
+  line-height: var(--font-size-base);
+}
+
+.table tbody tr:last-child :is(th, td) {
+  border-bottom: 0;
+}
+.table tbody :is(th, td) {
+  padding-block: calc(var(--font-size-base) * 0.625);
+}
+
+.table.table-sm :is(th, td) {
+  padding-block: 8px;
+}
+
+.table.table-sm :is(th, td):not(:last-child) {
+  padding-inline-end: 16px;
+}
+
+.table :is(.text-end, [align=&quot;right&quot;]) {
+  text-align: end;
+  font-variant-numeric: tabular-nums;
+}
+
+.table :is(.text-center, [align=&quot;center&quot;]) {
+  text-align: center;
+}
+
+.table .text-nowrap {
+  white-space: nowrap;
+}
+
+#widget {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  width: 100%;
+  padding: 0;
+  background: transparent !important;
+}
+
+.card {
+  min-width: 0;
+  padding: 12px;
+  overflow: hidden;
+  overflow-wrap: break-word;
+  border-radius: var(--radius-2xl);
+  corner-shape: var(--corner-shape);
+  color: var(--card-foreground);
+  background: var(--card);
+}
+
+.widget {
+  min-width: 0;
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-lg);
+  corner-shape: var(--corner-shape);
+  box-shadow: 0 0 0 0.5px var(--border-strong, var(--border));
+  color: var(--foreground);
+  background: var(--background);
+}
+
+#widget &gt; :not(.card, .widget, .progress) {
+  width: 100% !important;
+  max-width: none !important;
+  margin: 0 !important;
+  padding: 0 !important;
+  border: 0 !important;
+  border-radius: 0 !important;
+  background: transparent !important;
+  box-shadow: none !important;
+}
+
+.tooltip {
+  position: fixed;
+  z-index: 50;
+  top: 0;
+  left: 0;
+  width: max-content;
+  max-width: min(
+    20rem,
+    var(--tooltip-available-width, calc(100vw - 10px)),
+    calc(100vw - 10px)
+  );
+  max-height: min(
+    var(--tooltip-available-height, calc(100vh - 10px)),
+    calc(100vh - 10px)
+  );
+  border: 1px solid var(--border);
+  corner-shape: var(--corner-shape);
+  overflow-wrap: break-word;
+  white-space: normal;
+  pointer-events: none;
+  user-select: none;
+  font-family: var(--font-sans);
+  padding: 5px 12px;
+  border-color: color-mix(
+    in oklab,
+    light-dark(var(--primary-foreground), var(--foreground)) 5%,
+    transparent
+  );
+  border-radius: var(--radius-2xl);
+  color: light-dark(var(--primary-foreground), var(--foreground));
+  background: light-dark(var(--foreground), var(--popover));
+  box-shadow: 0 8px 18px rgb(15 23 42 / 20%);
+  letter-spacing: -0.15px;
+  font-size: calc(var(--font-size-base) * 14 / 16);
+  font-size: round(nearest, calc(var(--font-size-base) * 14 / 16), 1px);
+  font-weight: 600;
+  line-height: 18px;
+  text-align: center;
+}
+
+.viz-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(max(180px, 24%), 1fr));
+  gap: 10px;
+}
+
+.viz-stat {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.viz-stat-value {
+  font-size: var(--font-size-h2);
+  font-weight: var(--font-weight-medium);
+  line-height: 1.25;
+}
+
+.viz-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+}
+
+hr {
+  width: 100%;
+  height: 1px;
+  margin-block: 6px;
+  border: 0;
+  background: var(--border);
+}
+
+.nav {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 4px;
+}
+
+.progress {
+  display: flex;
+  height: 8px;
+  margin-block: calc((var(--line-height-normal, 1.5em) - 8px) / 2);
+  overflow: hidden;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+}
+
+.progress-bar:only-child {
+  border-radius: var(--radius-full);
+}
+
+.progress-bar {
+  height: 100%;
+  flex-shrink: 0;
+  border: 0;
+  background: var(--viz-series-1);
+}
+
+.viz-badge {
+  display: inline-flex;
+  align-items: center;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  color: color-mix(in srgb, var(--foreground) 40%, var(--muted-foreground));
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  font-family: var(--font-sans);
+  font-size: calc(var(--font-size-base) * 14 / 16);
+  font-size: round(nearest, calc(var(--font-size-base) * 14 / 16), 1px);
+  font-weight: var(--font-weight-normal);
+  line-height: 1;
+}
+
+small,
+.text-small {
+  font-size: var(--font-size-small);
+  line-height: var(--line-height-small);
+}
+
+.text-muted {
+  color: var(--muted-foreground);
+}
+
+.tabular-nums {
+  font-variant-numeric: tabular-nums;
+}
+
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.viz-controls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.viz-controls &gt; .form-label {
+  display: grid;
+  min-width: min(100%, 260px);
+  flex: 1 1 280px;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: baseline;
+  gap: 2px 12px;
+  margin-bottom: 0;
+}
+
+.viz-controls &gt; .form-label &gt; :is(.form-control, .form-range, .form-select) {
+  grid-column: 1 / -1;
+}
+
+.btn,
+.nav-link,
+.form-check-input,
+.form-control,
+.form-range,
+.form-select {
+  font: inherit;
+}
+
+/* Match inline alignment without overriding a containing flex or grid layout. */
+.btn,
+.nav-link,
+.form-control,
+.form-select,
+.form-range,
+.form-check {
+  vertical-align: middle;
+}
+
+.btn,
+.nav-link {
+  appearance: button;
+  display: inline-flex;
+  inline-size: fit-content;
+  max-inline-size: 100%;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
+  margin: 0;
+  padding: 0 8px;
+  -webkit-app-region: no-drag;
+  border: 1px solid var(--input);
+  corner-shape: var(--corner-shape);
+  cursor: var(--cursor-interaction, pointer);
+  text-align: center;
+  text-decoration: none;
+  white-space: nowrap;
+  user-select: none;
+  -webkit-font-smoothing: inherit;
+  font-family: var(--font-sans);
+  height: fit-content;
+  min-height: calc(12px + 2 * var(--control-spacing, 12px));
+  padding-inline: var(--control-spacing, 12px);
+  border-color: transparent;
+  border-radius: var(--radius-full);
+  color: var(--foreground);
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  font-size: calc(var(--font-size-base) * 14 / 16);
+  font-size: round(nearest, calc(var(--font-size-base) * 14 / 16), 1px);
+  font-weight: var(--font-weight-normal);
+  line-height: 18px;
+}
+
+.btn {
+  border-color: var(--border);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+}
+
+.btn:is(.btn-block, .viz-tile) {
+  inline-size: 100%;
+}
+
+.btn.viz-tile {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+a.btn {
+  cursor: var(--cursor-interaction, pointer);
+  text-decoration: none;
+}
+
+.btn:not(:disabled):hover {
+  background: light-dark(
+    color-mix(in srgb, var(--foreground) 5.5%, transparent),
+    color-mix(in srgb, var(--foreground) 8%, transparent)
+  );
+}
+
+.nav-link:not(:disabled):not([aria-disabled=&quot;true&quot;]):hover {
+  background: color-mix(in srgb, var(--foreground) 10%, transparent);
+}
+
+.btn-primary {
+  border-color: var(--border);
+  color: var(--primary-foreground);
+  background: var(--foreground);
+  background-clip: border-box;
+}
+
+.btn-primary .text-muted {
+  color: color-mix(in srgb, var(--primary-foreground) 50%, transparent);
+}
+
+.btn-primary:not(:disabled):hover {
+  background: color-mix(in srgb, var(--foreground) 80%, transparent);
+  background-clip: border-box;
+}
+
+.btn-ghost {
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.btn-ghost:not(:disabled):hover {
+  color: var(--muted-foreground);
+  background: light-dark(
+    color-mix(in srgb, var(--foreground) 5.5%, transparent),
+    color-mix(in srgb, var(--foreground) 8%, transparent)
+  );
+}
+
+.nav-pills .nav-link {
+  min-width: 0;
+  border-color: transparent;
+  color: var(--muted-foreground);
+  background: transparent;
+}
+
+.nav-justified .nav-link {
+  flex: 1 1 0;
+  overflow-wrap: anywhere;
+  white-space: normal;
+}
+
+.nav-pills .nav-link.active {
+  color: var(--foreground);
+  background: var(--muted);
+}
+
+/* Shared preview chrome; product styles stay inside each variant. */
+.viz-dotted-background {
+  background-image: radial-gradient(
+    circle,
+    color-mix(in srgb, var(--foreground) 14%, transparent) 0.8px,
+    transparent 0.8px
+  );
+  background-position: center;
+  background-size: 16px 16px;
+}
+
+.viz-carousel {
+  position: relative;
+  min-width: 0;
+}
+
+.viz-carousel:has(&gt; .viz-carousel-controls) {
+  min-height: calc(60px + var(--viz-carousel-picker-height, 0px));
+  padding-bottom: 60px;
+}
+
+.viz-carousel &gt; [data-variant][hidden] {
+  display: none !important;
+}
+
+.viz-carousel &gt; [data-variant] {
+  isolation: isolate;
+}
+
+.viz-carousel-controls {
+  --viz-carousel-hover: light-dark(
+    color-mix(in srgb, var(--foreground) 5.4%, transparent),
+    color-mix(in srgb, var(--foreground) 7.8%, transparent)
+  );
+  position: absolute;
+  z-index: 2;
+  bottom: 8px;
+  left: 50%;
+  display: flex;
+  width: max-content;
+  /* Leave room for the host&#x27;s design-controls launcher at the trailing edge. */
+  max-width: calc(100% - 96px);
+  align-items: center;
+  gap: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  border-radius: 16px;
+  color: var(--foreground);
+  background: var(--background);
+  font-family: var(--font-sans);
+  /* Match the settings dropdown chrome independently of the content font size. */
+  font-size: 13px;
+  font-weight: var(--font-weight-normal);
+  line-height: 18px;
+  transform: translateX(-50%);
+  user-select: none;
+}
+
+/* Keep authored mockup button styles out of the shared carousel chrome. */
+.viz-carousel-controls button,
+.viz-carousel-picker &gt; summary {
+  display: flex !important;
+  height: auto !important;
+  min-height: 30px;
+  align-items: center !important;
+  justify-content: center !important;
+  gap: 4px;
+  padding: 0 6px !important;
+  -webkit-app-region: no-drag;
+  border: 0 !important;
+  border-radius: 14px !important;
+  color: inherit !important;
+  background: transparent !important;
+  font: inherit !important;
+  -webkit-tap-highlight-color: transparent;
+}
+
+.viz-carousel-controls &gt; button,
+.viz-carousel-picker &gt; summary {
+  position: relative;
+  isolation: isolate;
+}
+
+.viz-carousel-controls &gt; button {
+  --icon-size: 16px;
+  width: 30px !important;
+  padding: 0 !important;
+}
+
+.viz-carousel-picker &gt; summary {
+  padding-inline: 12px !important;
+}
+
+.viz-carousel-controls .viz-carousel-caret {
+  width: 14px;
+  height: 14px;
+  flex: none;
+  margin: 0;
+  color: inherit;
+  transform: rotate(180deg);
+}
+
+.viz-carousel-controls &gt; button &gt; svg,
+.viz-carousel-controls .viz-carousel-caret,
+.viz-carousel-count {
+  opacity: 0.5;
+}
+
+.viz-carousel-controls &gt; button::before,
+.viz-carousel-picker &gt; summary::before {
+  position: absolute;
+  z-index: -1;
+  inset: 3px;
+  border-radius: 12px;
+  content: &quot;&quot;;
+  pointer-events: none;
+}
+
+.viz-carousel-controls &gt; button:hover::before,
+.viz-carousel-picker &gt; summary:hover::before {
+  background: var(--viz-carousel-hover);
+}
+
+.viz-carousel-controls &gt; button,
+.viz-carousel-controls [data-lucide],
+.viz-carousel-controls .lucide {
+  flex-shrink: 0;
+}
+
+.viz-carousel-picker {
+  min-width: 0;
+}
+
+.viz-carousel-picker &gt; summary {
+  min-width: 0;
+  list-style: none;
+}
+
+.viz-carousel-picker &gt; summary::-webkit-details-marker {
+  display: none;
+}
+
+.viz-carousel-count {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.viz-carousel-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.viz-carousel-options {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 4px);
+  left: 0;
+  display: flex;
+  max-height: 240px;
+  flex-direction: column;
+  gap: 2px;
+  overflow: auto;
+  padding: 4px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  background: var(--background);
+  box-shadow: 0 4px 12px light-dark(rgb(0 0 0 / 6%), rgb(0 0 0 / 25%));
+}
+
+.viz-carousel-options &gt; button {
+  border-radius: max(0px, calc(var(--radius-lg) - 5px)) !important;
+  width: 100% !important;
+  min-height: 28px;
+  justify-content: flex-start !important;
+  padding: 4px 8px !important;
+  font-size: var(--font-size-small) !important;
+  text-align: start;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
+.viz-carousel-options &gt; [aria-current=&quot;true&quot;],
+.viz-carousel-options &gt; button:hover {
+  background: var(--viz-carousel-hover) !important;
+}
+
+.btn:disabled,
+.nav-link:disabled,
+.nav-link[aria-disabled=&quot;true&quot;] {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
+[data-lucide] {
+  stroke-width: 1.6;
+}
+
+.form-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--foreground);
+}
+
+.form-control {
+  display: block;
+  width: 100%;
+  padding: 0 8px;
+  outline: none;
+  border: 1px solid var(--input);
+  corner-shape: var(--corner-shape);
+  color: var(--foreground);
+  font-family: var(--font-sans);
+  height: calc(12px + 2 * var(--control-spacing, 12px));
+  min-height: calc(12px + 2 * var(--control-spacing, 12px));
+  padding-inline: calc(4px + var(--control-spacing, 12px) / 2);
+  border-color: var(--input);
+  border-radius: var(--radius-md);
+  background: color-mix(in srgb, var(--popover) 96%, transparent);
+  font-size: calc(var(--font-size-base) * 14 / 16);
+  font-size: round(nearest, calc(var(--font-size-base) * 14 / 16), 1px);
+  font-weight: var(--font-weight-normal);
+  line-height: 1.4285714286;
+}
+.form-control:is(
+  [type=&quot;file&quot;],
+  [type=&quot;date&quot;],
+  [type=&quot;datetime-local&quot;],
+  [type=&quot;month&quot;],
+  [type=&quot;week&quot;],
+  [type=&quot;color&quot;]
+) {
+  height: calc(12px + 2 * var(--control-spacing, 12px));
+  min-height: calc(12px + 2 * var(--control-spacing, 12px));
+  line-height: 18px;
+}
+.form-control:is(
+  [type=&quot;date&quot;],
+  [type=&quot;datetime-local&quot;],
+  [type=&quot;month&quot;],
+  [type=&quot;week&quot;]
+) {
+  padding-inline: var(--control-spacing, 12px);
+}
+
+.form-control::placeholder {
+  color: var(--muted-foreground);
+}
+
+.form-control[type=&quot;file&quot;] {
+  overflow: hidden;
+  cursor: var(--cursor-interaction, pointer);
+  padding: 0;
+}
+
+.form-control[type=&quot;file&quot;]::file-selector-button {
+  padding: 0 8px;
+  border: 0;
+  border-right: 1px solid var(--input);
+  color: var(--secondary-foreground);
+  background: var(--secondary);
+  cursor: inherit;
+  font: inherit;
+  min-height: calc(10px + 2 * var(--control-spacing, 12px));
+  padding-inline: var(--control-spacing, 12px);
+  margin-inline-end: var(--control-spacing, 12px);
+}
+
+.form-control[type=&quot;file&quot;]:not(:disabled):hover::file-selector-button {
+  background: color-mix(in srgb, var(--foreground) 6%, var(--secondary));
+}
+
+.form-control-color[type=&quot;color&quot;] {
+  width: 40px;
+  height: calc(12px + 2 * var(--control-spacing, 12px));
+  padding: 3px;
+  cursor: var(--cursor-interaction, pointer);
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch-wrapper {
+  padding: 0;
+}
+
+.form-control-color[type=&quot;color&quot;]::-webkit-color-swatch {
+  border: 0;
+  border-radius: calc(var(--radius-lg) - 4px);
+  corner-shape: var(--corner-shape);
+}
+
+textarea.form-control {
+  height: auto;
+  resize: vertical;
+  min-height: 96px;
+  padding: 8px 10px;
+}
+
+.form-control:focus-visible {
+  border-color: var(--ring);
+  box-shadow: none;
+}
+.form-control:disabled {
+  color: var(--muted-foreground);
+  background: color-mix(in srgb, var(--foreground) 5%, transparent);
+  opacity: 1;
+}
+.form-control[aria-invalid=&quot;true&quot;] {
+  border-color: var(--red);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--red) 20%, transparent);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+  cursor: not-allowed;
+}
+
+.form-select {
+  appearance: none;
+  display: block;
+  width: 100%;
+  height: fit-content;
+  min-height: calc(12px + 2 * var(--control-spacing, 12px));
+  margin: 0;
+  /* The secondary icon role is 14px at compact density and 16px at web density. */
+  --icon-size: calc(10px + var(--control-spacing, 12px) / 2);
+  /* Settings dropdowns retain a 12px inset and a 4px text-to-chevron gap. */
+  padding: 0 calc(16px + var(--icon-size)) 0 12px;
+  outline: none;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  corner-shape: var(--corner-shape);
+  color: var(--foreground);
+  background-color: var(--secondary);
+  background-image:
+    linear-gradient(
+      45deg,
+      transparent calc(50% - 0.6px),
+      var(--muted-foreground) calc(50% - 0.6px) calc(50% + 0.6px),
+      transparent calc(50% + 0.6px)
+    ),
+    linear-gradient(
+      135deg,
+      transparent calc(50% - 0.6px),
+      var(--muted-foreground) calc(50% - 0.6px) calc(50% + 0.6px),
+      transparent calc(50% + 0.6px)
+    );
+  background-position:
+    calc(100% - 12px - var(--icon-size) / 2) 50%,
+    calc(100% - 12px - var(--icon-size) * 0.18) 50%;
+  background-repeat: no-repeat;
+  background-size: calc(var(--icon-size) * 0.32) calc(var(--icon-size) * 0.32);
+  cursor: var(--cursor-interaction, default);
+  font-size: calc(var(--font-size-base) * 14 / 16);
+  font-size: round(nearest, calc(var(--font-size-base) * 14 / 16), 1px);
+  font-weight: var(--font-weight-normal);
+  line-height: 18px;
+}
+
+.form-select:not(:disabled):hover {
+  background-color: light-dark(
+    color-mix(in srgb, var(--foreground) 5.5%, transparent),
+    color-mix(in srgb, var(--foreground) 8%, transparent)
+  );
+}
+
+.form-select:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+}
+.form-select:disabled {
+  opacity: 0.4;
+}
+
+.form-check {
+  display: flex;
+  min-height: calc(12px + 2 * var(--control-spacing, 12px));
+  align-items: center;
+  gap: 6px;
+}
+
+.form-check-input {
+  appearance: none;
+  width: 14px;
+  height: 14px;
+  flex: 0 0 auto;
+  margin: 0;
+  border: 1px solid var(--input);
+  color: var(--primary-foreground);
+  background-color: transparent;
+  cursor: var(--cursor-interaction, default);
+  transition:
+    background-color 150ms,
+    border-color 150ms,
+    box-shadow 150ms;
+}
+
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+  corner-shape: round;
+  box-shadow: var(--shadow-sm);
+  position: relative;
+  width: calc(10px + var(--control-spacing, 12px) / 2);
+  height: calc(10px + var(--control-spacing, 12px) / 2);
+  border-color: var(--border-strong, var(--input));
+  border-radius: calc(var(--radius-sm) / 2);
+  background-color: transparent;
+  color: var(--foreground);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input:not(:disabled):not(:checked):hover {
+  background-color: var(--card);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:is(:checked, :indeterminate) {
+  border-color: var(--border-strong, var(--input));
+  background-color: color-mix(in srgb, var(--popover) 96%, transparent);
+}
+
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:checked::before {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: var(--primary-foreground);
+  content: &quot;&quot;;
+  mask: var(--checkmark-image) center / 12px 12px no-repeat;
+  background-color: var(--foreground);
+}
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;checkbox&quot;]:indeterminate::before {
+  position: absolute;
+  inset: 0;
+  display: block;
+  width: 65%;
+  height: 6.65%;
+  margin: auto;
+  border-radius: var(--radius-full);
+  background: var(--foreground);
+  mask: none;
+  content: &quot;&quot;;
+}
+
+.form-check-input[type=&quot;radio&quot;] {
+  border-radius: var(--radius-full);
+  width: 16px;
+  height: 16px;
+  border: 0;
+  box-shadow: inset 0 0 0 1px var(--input);
+}
+
+.form-check-input[type=&quot;radio&quot;]:checked {
+  border: 0;
+  background: radial-gradient(
+    circle,
+    var(--primary-foreground) 0 3px,
+    var(--foreground) 3px
+  );
+  box-shadow: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+.form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;]:focus-visible {
+  border-color: var(--ring);
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled {
+  cursor: not-allowed;
+  pointer-events: none;
+}
+
+.form-check:not(.form-switch) .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+}
+.form-check:not(.form-switch) .form-check-input[type=&quot;radio&quot;]:disabled,
+.form-check:not(.form-switch)
+  .form-check-input[type=&quot;radio&quot;]:disabled
+  + .form-check-label {
+  opacity: 0.5;
+}
+
+.form-switch .form-check-input:disabled,
+.form-switch .form-check-input:disabled + .form-check-label {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+.form-check-label {
+  color: var(--foreground);
+  cursor: var(--cursor-interaction, default);
+}
+
+.form-switch .form-check-input {
+  position: relative;
+  width: 32px;
+  height: 20px;
+  border: 0;
+  border-radius: var(--radius-full);
+  background: var(--muted);
+  box-shadow: none;
+  transition: background-color 200ms cubic-bezier(0, 0, 0.2, 1);
+}
+
+.form-switch .form-check-input::before {
+  position: absolute;
+  top: 50%;
+  left: 0;
+  width: 16px;
+  height: 16px;
+  box-sizing: border-box;
+  border: 1px solid light-dark(var(--primary-foreground), var(--foreground));
+  border-radius: var(--radius-full);
+  box-shadow: var(--shadow-sm);
+  content: &quot;&quot;;
+  transform: translate(2px, -50%);
+  transition: transform 200ms cubic-bezier(0, 0, 0.2, 1);
+  border-color: #fff;
+  background: #fff;
+}
+
+.form-switch .form-check-input:checked {
+  background: var(--blue);
+}
+
+.form-switch .form-check-input:checked::before {
+  transform: translate(14px, -50%);
+}
+
+.form-switch .form-check-input:focus-visible {
+  box-shadow: 0 0 0 2px var(--ring);
+  outline: none;
+}
+
+.form-range {
+  appearance: none;
+  display: block;
+  width: 100%;
+  flex: 1;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  accent-color: var(--primary);
+  height: calc(12px + 2 * var(--control-spacing, 12px));
+  min-height: calc(12px + 2 * var(--control-spacing, 12px));
+  outline: none;
+  border-radius: var(--radius-full);
+  color: var(--foreground);
+  background: transparent;
+}
+
+.form-range::-webkit-slider-runnable-track {
+  background: var(--form-range-track, var(--border));
+  height: 2px;
+  border-radius: var(--radius-full);
+}
+
+.form-range::-webkit-slider-thumb {
+  appearance: none;
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  margin-top: -9px;
+  border-color: transparent;
+  background: currentColor;
+  box-shadow: var(--shadow-sm);
+}
+
+/* Outline the native track and thumb, preserving the larger input hit area. */
+.form-range:focus-visible::-webkit-slider-runnable-track {
+  outline: 2px auto Highlight;
+  outline-color: -webkit-focus-ring-color;
+}
+
+.form-range::-moz-range-track {
+  background: var(--form-range-track, var(--border));
+  height: 2px;
+  border-radius: var(--radius-full);
+}
+
+.form-range::-moz-range-thumb {
+  width: 20px;
+  height: 20px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-full);
+  border-color: transparent;
+  background: currentColor;
+  box-shadow: var(--shadow-sm);
+}
+
+.form-range:focus-visible::-moz-range-thumb {
+  outline: 2px solid Highlight;
+  outline-offset: 2px;
+}
+
+.form-range:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.btn:not(.btn-primary, .viz-tile):is(
+  [aria-pressed=&quot;true&quot;],
+  [aria-selected=&quot;true&quot;],
+  .is-selected
+) {
+  border-color: transparent;
+  color: var(--primary-foreground);
+  background: var(--blue);
+}
+
+.btn.viz-tile:is([aria-pressed=&quot;true&quot;], [aria-selected=&quot;true&quot;], .is-selected) {
+  border-color: var(--primary);
+  box-shadow: inset 0 0 0 1px var(--primary);
+}
+
+.btn:focus-visible,
+.nav-link:focus-visible {
+  outline-offset: 2px;
+  outline: none;
+  box-shadow: 0 0 0 2px var(--ring);
+}
+
+.viz-carousel-controls :is(button, summary):focus-visible {
+  outline: 2px solid var(--ring) !important;
+  outline-offset: 2px !important;
+}
+
+/* Web recipes are the default, including on renderers without inline style queries. */
+@supports (border-radius: if(style(--corner-shape: round): 1px; else: 2px)) {
+  /* Match the host&#x27;s proportional text-sm scale at every text preference. */
+  .tooltip,
+  .viz-badge,
+  .btn,
+  .nav-link,
+  .form-control,
+  .form-select {
+    font-size: if(
+      style(--corner-shape: round): round(
+          nearest,
+          calc(var(--font-size-base) * 14 / 16),
+          1px
+        );
+        else: round(nearest, calc(var(--font-size-base) * 13 / 14), 1px)
+    );
+  }
+
+  .btn,
+  .nav-link,
+  .form-select {
+    border-radius: if(
+      style(--corner-shape: round): var(--radius-full); else: var(--radius-lg)
+    );
+  }
+
+  .form-check:not(.form-switch) .form-check-input[type=&quot;checkbox&quot;] {
+    border-radius: if(
+      style(--corner-shape: round): calc(var(--radius-sm) / 2);
+        else: calc(var(--radius-lg) * 0.4)
+    );
+  }
+
+  .tooltip {
+    font-weight: if(
+      style(--corner-shape: round): 600; else: var(--font-weight-normal)
+    );
+  }
+}
+
+@media (pointer: coarse) {
+  .viz-carousel:has(&gt; .viz-carousel-controls) {
+    min-height: calc(76px + var(--viz-carousel-picker-height, 0px));
+    padding-bottom: 76px;
+  }
+
+  .btn,
+  .nav-link,
+  .viz-carousel-controls button,
+  .viz-carousel-picker &gt; summary,
+  .form-control,
+  .form-select {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Keep small-screen WebKit from zooming when a text field receives focus. */
+  .form-control,
+  .form-select {
+    font-size: max(16px, calc(var(--font-size-base) * 14 / 16));
+    font-size: max(
+      16px,
+      round(nearest, calc(var(--font-size-base) * 14 / 16), 1px)
+    );
+  }
+  .form-control:is(
+    [type=&quot;file&quot;],
+    [type=&quot;date&quot;],
+    [type=&quot;datetime-local&quot;],
+    [type=&quot;month&quot;],
+    [type=&quot;week&quot;],
+    [type=&quot;time&quot;],
+    [type=&quot;color&quot;]
+  ) {
+    height: 44px;
+    min-height: 44px;
+    font-size: max(16px, calc(var(--font-size-base) * 14 / 16));
+    font-size: max(
+      16px,
+      round(nearest, calc(var(--font-size-base) * 14 / 16), 1px)
+    );
+  }
+
+  .form-control[type=&quot;file&quot;]::file-selector-button {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .form-control-color[type=&quot;color&quot;] {
+    width: 44px;
+    height: 44px;
+  }
+
+  .form-control:is(
+    [type=&quot;date&quot;],
+    [type=&quot;datetime-local&quot;],
+    [type=&quot;month&quot;],
+    [type=&quot;time&quot;],
+    [type=&quot;week&quot;]
+  ) {
+    min-width: 0;
+    max-width: 100%;
+    padding-block: 8px;
+  }
+
+  .form-check {
+    min-height: 44px;
+    padding-inline: 15px;
+  }
+
+  .form-check-input {
+    position: relative;
+  }
+
+  .form-check-input::after {
+    position: absolute;
+    top: 50%;
+    left: 50%;
+    width: 44px;
+    height: 44px;
+    content: &quot;&quot;;
+    transform: translate(-50%, -50%);
+  }
+
+  .form-check-label {
+    display: inline-flex;
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+  }
+
+  .form-range {
+    height: 44px;
+    touch-action: pan-y;
+  }
+}
+
+svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+}
+
+#widget &gt; svg {
+  width: 100%;
+}
+
+/* Model-authored chart rules can otherwise stretch icons after these styles load. */
+svg.lucide {
+  display: block;
+  width: var(--icon-size) !important;
+  height: var(--icon-size) !important;
+  flex: none;
+  margin: 0 !important;
+  stroke-width: 1.6;
+}
+
+.text-warning,
+.text-destructive {
+  color: var(--destructive);
+}
+
+html&gt;body{padding:0}&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;script type=&quot;application/json&quot; id=&quot;codex-visualization-widget-state&quot;&gt;__CODEX_VISUALIZATION_WIDGET_STATE__&lt;/script&gt;
+&lt;script&gt;(() =&gt; {
+  const root = document.documentElement;
+  const mediaQuery = globalThis.matchMedia(&quot;(prefers-color-scheme: dark)&quot;);
+  const apply = Reflect.apply;
+  const isArray = Array.isArray;
+  const hasOwn = Object.hasOwn;
+  const parentWindow = globalThis.parent;
+  const stringify = JSON.stringify;
+  const parse = JSON.parse;
+  const encode = TextEncoder.prototype.encode.bind(new TextEncoder());
+  const initialStateElement = document.getElementById(
+    &quot;codex-visualization-widget-state&quot;,
+  );
+  const initialGlobals = parse(initialStateElement?.textContent ?? &quot;{}&quot;);
+  initialStateElement?.remove();
+  /** @type {Record&lt;string, unknown&gt; | null} */
+  let state = initialGlobals.widgetState ?? null;
+  const statePersistence = initialGlobals.statePersistence ?? &quot;none&quot;;
+  let nextStateRequestId = 0;
+  /** @type {Map&lt;number, { resolve: () =&gt; void; reject: (error: Error) =&gt; void; timeout: ReturnType&lt;typeof globalThis.setTimeout&gt;; serializedState: string }&gt;} */
+  const pendingStateWrites = new Map();
+  const persistenceError = () =&gt;
+    Object.assign(
+      new Error(&quot;The host could not persist the widget state update&quot;),
+      {
+        code: -32000,
+        data: { code: &quot;widget_state_persistence_failed&quot;, retryable: false },
+      },
+    );
+  /**
+   * @param {object} prototype
+   * @param {string} property
+   */
+  const getPrototypeGetter = (prototype, property) =&gt; {
+    // oxlint-disable-next-line typescript/unbound-method -- invoked through captured Reflect.apply
+    const getter = Object.getOwnPropertyDescriptor(prototype, property)?.get;
+    if (getter == null) {
+      throw new Error(`Missing ${property} getter`);
+    }
+    return getter;
+  };
+  const getMessageData = getPrototypeGetter(MessageEvent.prototype, &quot;data&quot;);
+  const getMessagePorts = getPrototypeGetter(MessageEvent.prototype, &quot;ports&quot;);
+  const getMessageSource = getPrototypeGetter(MessageEvent.prototype, &quot;source&quot;);
+  // oxlint-disable-next-line typescript/unbound-method -- captured before the untrusted fragment runs
+  const addHostMessageListener = MessagePort.prototype.addEventListener;
+  // oxlint-disable-next-line typescript/unbound-method -- captured before the untrusted fragment runs
+  const postHostMessage = MessagePort.prototype.postMessage;
+  // oxlint-disable-next-line typescript/unbound-method -- captured before the untrusted fragment runs
+  const startHostPort = MessagePort.prototype.start;
+  // oxlint-disable-next-line typescript/unbound-method -- captured before the untrusted fragment runs
+  const stopMessagePropagation = Event.prototype.stopImmediatePropagation;
+  /** @type {MessagePort | null} */
+  let hostPort = null;
+  const postToHost = (type, payload) =&gt; {
+    if (hostPort != null) {
+      apply(postHostMessage, hostPort, [{ type, ...payload }]);
+    }
+  };
+  const openExternal = ({ href }) =&gt; {
+    if (globalThis.navigator.userActivation?.isActive === true) {
+      postToHost(&quot;open-external&quot;, { href });
+    }
+  };
+  const sendFollowUpMessage = ({ context, prompt, title }) =&gt; {
+    if (globalThis.navigator.userActivation?.isActive === true) {
+      postToHost(&quot;follow-up&quot;, { context, prompt, title });
+    }
+    return Promise.resolve();
+  };
+  /**
+   * @param {Record&lt;string, unknown&gt; | ((previous: Record&lt;string, unknown&gt; | null) =&gt; Record&lt;string, unknown&gt;)} next
+   * @returns {Promise&lt;void&gt;}
+   */
+  const setWidgetState = async (next) =&gt; {
+    const nextState = typeof next === &quot;function&quot; ? next(state) : next;
+    if (
+      nextState == null ||
+      typeof nextState !== &quot;object&quot; ||
+      isArray(nextState)
+    ) {
+      throw new TypeError(&quot;Widget state must be a JSON object&quot;);
+    }
+    const inputState = stringify(
+      nextState,
+      (_key, /** @type {unknown} */ value) =&gt; {
+        if (
+          typeof value === &quot;undefined&quot; ||
+          typeof value === &quot;function&quot; ||
+          typeof value === &quot;symbol&quot; ||
+          (typeof value === &quot;number&quot; &amp;&amp; !Number.isFinite(value))
+        ) {
+          throw new TypeError(&quot;Widget state must be a JSON object&quot;);
+        }
+        return value;
+      },
+    );
+    const parsedState = parse(inputState);
+    if (
+      parsedState == null ||
+      typeof parsedState !== &quot;object&quot; ||
+      isArray(parsedState)
+    ) {
+      throw new TypeError(&quot;Widget state must be a JSON object&quot;);
+    }
+    const storedState = {
+      modelContent: null,
+      privateContent: null,
+      ...parsedState,
+    };
+    const serializedState = stringify(storedState);
+    if (encode(serializedState).length &gt; 16 * 1024) {
+      throw new TypeError(
+        &quot;Widget state must be a JSON object of at most 16 KiB&quot;,
+      );
+    }
+    if (
+      hasOwn(storedState, &quot;imageIds&quot;) &amp;&amp;
+      (!isArray(storedState.imageIds) ||
+        storedState.imageIds.some(
+          (/** @type {unknown} */ id) =&gt; typeof id !== &quot;string&quot;,
+        ))
+    ) {
+      throw new TypeError(&quot;Widget state imageIds must be an array of strings&quot;);
+    }
+    if (storedState.imageIds?.length &gt; 0) {
+      throw Object.assign(
+        new TypeError(&quot;Visualization state does not support image attachments&quot;),
+        { code: -32602, data: { code: &quot;images_unsupported&quot; } },
+      );
+    }
+    state = storedState;
+    globalThis.openai.widgetState = state;
+    globalThis.dispatchEvent(
+      new CustomEvent(&quot;openai:set_globals&quot;, {
+        detail: { globals: { widgetState: state } },
+      }),
+    );
+    if (statePersistence === &quot;none&quot;) {
+      throw persistenceError();
+    }
+    const id = ++nextStateRequestId;
+    return new Promise((resolve, reject) =&gt; {
+      const timeout = globalThis.setTimeout(() =&gt; {
+        pendingStateWrites.delete(id);
+        reject(persistenceError());
+      }, 30_000);
+      pendingStateWrites.set(id, { resolve, reject, timeout, serializedState });
+      postToHost(&quot;widget-state-write&quot;, { id, state: serializedState });
+    });
+  };
+  const syncTheme = () =&gt; {
+    const theme = mediaQuery.matches ? &quot;dark&quot; : &quot;light&quot;;
+    root.dataset.theme = theme;
+    globalThis.openai = {
+      ...globalThis.openai,
+      openExternal,
+      sendFollowUpMessage,
+      setWidgetState,
+      theme,
+      visualizationStyleVariables: {},
+      visualizationTheme: theme,
+      widgetState: state,
+      statePersistence,
+      stateModelContext: &quot;none&quot;,
+    };
+    globalThis.dispatchEvent(
+      new CustomEvent(&quot;openai:set_globals&quot;, {
+        detail: { globals: globalThis.openai },
+      }),
+    );
+  };
+  const sendHeight = () =&gt; {
+    postToHost(&quot;height&quot;, {
+      height: Math.ceil(
+        Math.max(
+          document.body.scrollHeight,
+          document.body.getBoundingClientRect().height,
+        ),
+      ),
+    });
+  };
+
+  globalThis.addEventListener(
+    &quot;message&quot;,
+    (event) =&gt; {
+      const data = apply(getMessageData, event, []);
+      const ports = apply(getMessagePorts, event, []);
+      const source = apply(getMessageSource, event, []);
+      if (
+        hostPort != null ||
+        source !== parentWindow ||
+        typeof data !== &quot;object&quot; ||
+        data?.type !== &quot;codex-visualization-initialize&quot; ||
+        !isArray(ports) ||
+        ports.length !== 1
+      ) {
+        return;
+      }
+      apply(stopMessagePropagation, event, []);
+      const nextHostPort = ports[0];
+      try {
+        apply(addHostMessageListener, nextHostPort, [
+          &quot;message&quot;,
+          (event) =&gt; {
+            const data = apply(getMessageData, event, []);
+            if (typeof data === &quot;object&quot; &amp;&amp; data?.type === &quot;measure&quot;) {
+              sendHeight();
+            } else if (
+              typeof data === &quot;object&quot; &amp;&amp;
+              data?.type === &quot;widget-state-result&quot;
+            ) {
+              /** @type {unknown} */
+              const id = data.id;
+              if (typeof id !== &quot;number&quot;) {
+                return;
+              }
+              const pending = pendingStateWrites.get(id);
+              if (pending != null) {
+                pendingStateWrites.delete(id);
+                globalThis.clearTimeout(pending.timeout);
+                if (data.ok === true) {
+                  pending.resolve();
+                } else {
+                  pending.reject(persistenceError());
+                }
+              }
+            }
+          },
+        ]);
+        apply(startHostPort, nextHostPort, []);
+      } catch {
+        return;
+      }
+      hostPort = nextHostPort;
+      for (const [id, { serializedState }] of pendingStateWrites) {
+        postToHost(&quot;widget-state-write&quot;, { id, state: serializedState });
+      }
+      sendHeight();
+    },
+    { capture: true },
+  );
+  document.currentScript?.remove();
+  mediaQuery.addEventListener(&quot;change&quot;, syncTheme);
+  globalThis.addEventListener(&quot;click&quot;, (event) =&gt; {
+    if (event.defaultPrevented) {
+      return;
+    }
+    let element = null;
+    if (event.target instanceof globalThis.Element) {
+      element = event.target;
+    } else if (event.target instanceof globalThis.Node) {
+      element = event.target.parentElement;
+    }
+    const link = element?.closest(&quot;a[href]&quot;);
+    const href = link?.getAttribute(&quot;href&quot;);
+    if (href == null) {
+      return;
+    }
+    if (href.startsWith(&quot;#&quot;)) {
+      let id;
+      try {
+        id = decodeURIComponent(href.slice(1));
+      } catch {
+        return;
+      }
+      const target = id.length === 0 ? root : document.getElementById(id);
+      if (
+        target == null ||
+        globalThis.navigator.userActivation?.isActive !== true
+      ) {
+        return;
+      }
+      event.preventDefault();
+      postToHost(&quot;scroll-to&quot;, {
+        top: target.getBoundingClientRect().top + globalThis.scrollY,
+      });
+      return;
+    }
+    event.preventDefault();
+    openExternal({ href });
+  });
+  new ResizeObserver(sendHeight).observe(document.body);
+  syncTheme();
+})();
+&lt;/script&gt;
+&lt;div id=&quot;agentreins-architecture-prototype&quot; aria-label=&quot;AgentReins 生命周期架构交互原型&quot;&gt;
+&lt;style&gt;
+#agentreins-architecture-prototype{--ar-bg:#faf9f6;--ar-panel:#fff;--ar-line:#e6e2db;--ar-ink:#30333a;--ar-muted:#85817b;--ar-purple:#6d56c4;--ar-blue:#5c83c4;--ar-teal:#609994;--ar-green:#69955f;--ar-orange:#c28d44;--ar-red:#bc6e60;--ar-yellow:#bda358;font:14px/1.6 -apple-system,BlinkMacSystemFont,&quot;PingFang SC&quot;,sans-serif;color:var(--ar-ink);background:var(--ar-bg);border-radius:12px;overflow:hidden}
+#agentreins-architecture-prototype *{box-sizing:border-box}#agentreins-architecture-prototype button,#agentreins-architecture-prototype select{font:inherit;color:inherit;cursor:pointer}#agentreins-architecture-prototype button{background:none;border:0}#agentreins-architecture-prototype button:focus-visible,#agentreins-architecture-prototype select:focus-visible{outline:2px solid var(--ar-purple);outline-offset:3px}#agentreins-architecture-prototype [hidden]{display:none!important}
+#agentreins-architecture-prototype .ar-shell{display:grid;grid-template-columns:158px minmax(0,1fr)}#agentreins-architecture-prototype .ar-sidebar{padding:24px 13px;background:#f4f2ed;border-right:1px solid var(--ar-line)}#agentreins-architecture-prototype .ar-brand{font-size:19px;font-weight:600;margin-bottom:32px;letter-spacing:-.5px}#agentreins-architecture-prototype .ar-brand span{display:inline-flex;align-items:center;justify-content:center;width:25px;height:25px;background:var(--ar-purple);color:white;border-radius:7px;margin-right:7px;font-size:17px}#agentreins-architecture-prototype .ar-nav{display:grid;gap:7px}#agentreins-architecture-prototype .ar-nav button{text-align:left;padding:10px;border-radius:7px;font-size:12px}#agentreins-architecture-prototype .ar-nav .active{background:#eee9fb;color:var(--ar-purple)}#agentreins-architecture-prototype .ar-list-label{color:var(--ar-muted);font-size:11px;margin:34px 0 12px}#agentreins-architecture-prototype .ar-task{background:white;border:1px solid var(--ar-line);border-radius:8px;padding:12px;font-size:12px;margin-bottom:9px}#agentreins-architecture-prototype .ar-task small{display:block;color:var(--ar-muted);margin-top:8px;font-size:11px}#agentreins-architecture-prototype .ar-source{font-size:11px;color:var(--ar-muted);margin-top:45px}
+#agentreins-architecture-prototype .ar-top{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:14px 22px;border-bottom:1px solid var(--ar-line);font-size:11px;color:var(--ar-muted)}#agentreins-architecture-prototype .ar-prototype{background:#f8eedb;color:#997236;padding:4px 9px;border-radius:5px}#agentreins-architecture-prototype .ar-title{padding:22px 22px 15px}#agentreins-architecture-prototype h1{font-size:24px;margin:8px 0 12px;line-height:1.4;font-weight:600}#agentreins-architecture-prototype .ar-request{font-size:12px;color:#6a6b70;margin:0 0 13px;white-space:pre-wrap}#agentreins-architecture-prototype .ar-status-line{display:flex;gap:11px;align-items:center;flex-wrap:wrap;font-size:12px}#agentreins-architecture-prototype .ar-status{background:#eee9fb;color:var(--ar-purple);padding:3px 8px;border-radius:5px}#agentreins-architecture-prototype .ar-toolbar{display:flex;align-items:center;gap:14px;justify-content:space-between;padding:12px 16px;border-bottom:1px solid var(--ar-line);flex-wrap:wrap}#agentreins-architecture-prototype .ar-modes{display:flex;background:#eeece6;border-radius:7px;padding:3px}#agentreins-architecture-prototype .ar-modes button{font-size:12px;padding:7px 11px;border-radius:5px}#agentreins-architecture-prototype .ar-modes button[aria-pressed=true]{background:white;box-shadow:0 1px 3px #0000000c;color:var(--ar-purple)}#agentreins-architecture-prototype .ar-demo-controls{display:flex;gap:7px;flex-wrap:wrap}#agentreins-architecture-prototype select{background:#fff;border:1px solid var(--ar-line);border-radius:5px;padding:5px 7px;font-size:11px}#agentreins-architecture-prototype .ar-next{border:1px solid var(--ar-line);background:white;border-radius:5px;padding:5px 9px;font-size:11px}
+#agentreins-architecture-prototype .ar-stage{display:grid;grid-template-columns:minmax(0,1fr) 300px;align-items:start;gap:0;margin:0 22px 22px;background:var(--ar-panel);border:1px solid var(--ar-line);border-radius:9px;overflow:hidden}#agentreins-architecture-prototype .ar-stage&gt;section{min-width:0}#agentreins-architecture-prototype .ar-diagram{min-width:0;position:relative;width:100%;aspect-ratio:1000/1340;background:#fdfcf9;min-height:790px}#agentreins-architecture-prototype .ar-diagram svg{position:absolute;inset:0;width:100%;height:100%;overflow:visible}#agentreins-architecture-prototype .ar-node{position:absolute;display:block;text-align:left;padding:11px 13px 11px 18px;background:var(--node-bg,#fff);border:1px solid var(--node-line,#dcdfe2);border-radius:9px;box-shadow:0 2px 3px #30333a03;border-left:7px solid var(--node-color,#89979e);transition:left .35s,top .35s,width .35s,background .2s;z-index:2;overflow:hidden}#agentreins-architecture-prototype .ar-node:hover,#agentreins-architecture-prototype .ar-node.selected{outline:2px solid var(--ar-purple);outline-offset:2px}#agentreins-architecture-prototype .ar-node .ar-node-tag{display:block;font-size:11px;color:var(--node-color,#7f898c);margin-bottom:5px}#agentreins-architecture-prototype .ar-node strong{display:block;font-size:15px;line-height:1.5;font-weight:600}#agentreins-architecture-prototype .ar-node .ar-node-note{display:block;font-size:11px;color:#737780;line-height:1.7;margin-top:5px;overflow-wrap:anywhere}#agentreins-architecture-prototype .ar-node .ar-status-dot{width:6px;height:6px;border-radius:50%;background:#9ca2a8;float:right;margin-top:4px}#agentreins-architecture-prototype .ar-node.current{box-shadow:0 0 0 3px #6d56c422}#agentreins-architecture-prototype .ar-node.current .ar-status-dot{background:var(--ar-purple)}#agentreins-architecture-prototype .ar-node.done .ar-status-dot{background:var(--ar-green)}#agentreins-architecture-prototype .ar-node.failed{--node-color:var(--ar-red);--node-bg:#fff1ec;--node-line:#ebd0c6}#agentreins-architecture-prototype .ar-node.failed .ar-status-dot{background:var(--ar-red)}#agentreins-architecture-prototype .ar-inner{display:grid;gap:6px;margin-top:9px}#agentreins-architecture-prototype .ar-inner span{display:block;background:#ffffff8a;border-radius:5px;padding:7px 8px;font-size:11px;color:#666f76}#agentreins-architecture-prototype .ar-inner b{display:block;color:var(--ar-ink);font-size:11px;font-weight:500}#agentreins-architecture-prototype .ar-node.blue{--node-color:var(--ar-blue);--node-bg:#edf3fb;--node-line:#c5d6eb}#agentreins-architecture-prototype .ar-node.teal{--node-color:var(--ar-teal);--node-bg:#edf6f4;--node-line:#c6ded9}#agentreins-architecture-prototype .ar-node.purple{--node-color:#9677b6;--node-bg:#f4eff9;--node-line:#dfd2e9}#agentreins-architecture-prototype .ar-node.green{--node-color:var(--ar-green);--node-bg:#f0f6eb;--node-line:#cadbc3}#agentreins-architecture-prototype .ar-node.orange{--node-color:var(--ar-orange);--node-bg:#fbf3e5;--node-line:#e6d5b6}#agentreins-architecture-prototype .ar-node.red{--node-color:var(--ar-red);--node-bg:#fff1ec;--node-line:#ebd0c6}#agentreins-architecture-prototype .ar-node.unknown{--node-color:#999d9f;--node-bg:#f3f3f0;--node-line:#dfdfd9;color:#838686}
+#agentreins-architecture-prototype .ar-node.diamond{background:transparent;border:none;border-left:none;box-shadow:none;text-align:center;display:flex;align-items:center;justify-content:center;flex-direction:column;padding:10px}#agentreins-architecture-prototype .ar-node.diamond:before{content:&#x27;&#x27;;position:absolute;inset:0;background:#fbf4d9;clip-path:polygon(50% 0,100% 50%,50% 100%,0 50%);z-index:-1}#agentreins-architecture-prototype .ar-node.diamond strong{font-size:13px}#agentreins-architecture-prototype .ar-node.diamond .ar-node-note{font-size:11px;margin-top:2px}#agentreins-architecture-prototype .ar-node.diamond .ar-node-tag,#agentreins-architecture-prototype .ar-node.diamond .ar-status-dot{display:none}#agentreins-architecture-prototype .ar-node.resource{border-left-width:0;text-align:center;padding:10px 3px;box-shadow:none;background:#f8f9f5;border-color:#e2e5dc}#agentreins-architecture-prototype .ar-node.resource strong{font-size:12px}#agentreins-architecture-prototype .ar-node.resource .ar-node-tag{margin:0;font-size:11px}#agentreins-architecture-prototype .ar-node.resource .ar-node-note,#agentreins-architecture-prototype .ar-node.resource .ar-status-dot{display:none}#agentreins-architecture-prototype .ar-node.observe{border-left:0;border-top:6px solid var(--ar-orange);text-align:center}#agentreins-architecture-prototype .ar-node.observe strong{font-size:15px}#agentreins-architecture-prototype .ar-node.observe .ar-node-tag{margin-bottom:1px}
+#agentreins-architecture-prototype .ar-edge{fill:none;stroke:#aab2b8;stroke-width:1.5;marker-end:url(#ar-arrow)}#agentreins-architecture-prototype .ar-edge.active{stroke:#7a68bc;stroke-width:2.3;marker-end:url(#ar-active-arrow)}#agentreins-architecture-prototype .ar-edge.structural{stroke:#c8cbc8;stroke-dasharray:4 5}#agentreins-architecture-prototype .ar-edge-label{fill:#82898c;font-size:var(--edge-font,17px)}#agentreins-architecture-prototype .ar-edge-text{position:absolute;z-index:3;padding:0 3px;background:#fdfcf9;color:#82898c;font-size:11px;line-height:1.6;white-space:nowrap;transform:translateY(-100%)}#agentreins-architecture-prototype .ar-edge-hit{fill:none;stroke:transparent;stroke-width:20;cursor:pointer}#agentreins-architecture-prototype .ar-packet{fill:#bc675b}#agentreins-architecture-prototype .ar-legend{font-size:11px;color:var(--ar-muted);padding:10px 15px;border-top:1px solid var(--ar-line);display:flex;gap:15px;flex-wrap:wrap}#agentreins-architecture-prototype .ar-detail{border-left:1px solid var(--ar-line);padding:20px 18px;min-height:100%;background:white}#agentreins-architecture-prototype .ar-kicker{font-size:10px;color:var(--ar-muted);letter-spacing:.6px}#agentreins-architecture-prototype .ar-detail h2{font-size:19px;margin:7px 0 10px;font-weight:600;line-height:1.6}#agentreins-architecture-prototype .ar-detail .ar-description{color:#71767c;font-size:12px;margin:0 0 17px}#agentreins-architecture-prototype .ar-detail h3{font-size:12px;margin:22px 0 9px;font-weight:600}#agentreins-architecture-prototype .ar-detail pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#f7f6f2;border:1px solid var(--ar-line);border-radius:6px;padding:12px;font:11px/1.9 ui-monospace,SFMono-Regular,monospace;max-height:340px;overflow:auto;margin:0}#agentreins-architecture-prototype .ar-detail dl{display:grid;grid-template-columns:65px minmax(0,1fr);gap:9px 10px;font-size:11px;margin:0}#agentreins-architecture-prototype .ar-detail dt{color:var(--ar-muted)}#agentreins-architecture-prototype .ar-detail dd{margin:0;overflow-wrap:anywhere}#agentreins-architecture-prototype .ar-hint{padding:11px 12px;background:#fbf3e5;color:#987135;border-radius:6px;font-size:11px;line-height:1.8;margin-top:17px}#agentreins-architecture-prototype .ar-mini-tabs{display:flex;gap:14px;margin:14px 0 9px;font-size:11px}#agentreins-architecture-prototype .ar-mini-tabs button{padding:4px 0;border-bottom:2px solid transparent}#agentreins-architecture-prototype .ar-mini-tabs .active{color:var(--ar-purple);border-color:var(--ar-purple)}#agentreins-architecture-prototype .ar-terminal{background:#282c33;color:#e1e6e9;padding:12px;border-radius:7px;font:11px/2 ui-monospace,monospace;white-space:pre-wrap;overflow-wrap:anywhere}#agentreins-architecture-prototype .ar-terminal .ar-err{color:#edb0a3}#agentreins-architecture-prototype .ar-footer{display:flex;justify-content:space-between;gap:12px;padding:0 22px 18px;font-size:10px;color:var(--ar-muted)}#agentreins-architecture-prototype .ar-mobile{display:none}
+@media(min-width:1450px){#agentreins-architecture-prototype .ar-stage{grid-template-columns:minmax(0,1fr) 370px}#agentreins-architecture-prototype .ar-node strong{font-size:18px}#agentreins-architecture-prototype .ar-node .ar-node-note{font-size:12px}#agentreins-architecture-prototype .ar-detail pre,#agentreins-architecture-prototype .ar-detail dl{font-size:12px}}
+@media(max-width:1250px){#agentreins-architecture-prototype .ar-shell{grid-template-columns:130px minmax(0,1fr)}#agentreins-architecture-prototype .ar-sidebar{padding:18px 10px}#agentreins-architecture-prototype .ar-brand{font-size:16px}#agentreins-architecture-prototype .ar-stage{grid-template-columns:minmax(0,1fr)}#agentreins-architecture-prototype .ar-detail{border-left:0;border-top:1px solid var(--ar-line)}#agentreins-architecture-prototype .ar-diagram{min-height:1500px}#agentreins-architecture-prototype .ar-detail dl{grid-template-columns:85px 1fr}#agentreins-architecture-prototype .ar-inner small{display:none}#agentreins-architecture-prototype .ar-node strong{font-size:13px}#agentreins-architecture-prototype .ar-node{padding:10px 9px 10px 12px}}
+@media(max-width:600px){#agentreins-architecture-prototype .ar-shell{grid-template-columns:1fr}#agentreins-architecture-prototype .ar-sidebar{display:none}#agentreins-architecture-prototype .ar-stage{margin:0 10px 10px}#agentreins-architecture-prototype .ar-title{padding:16px}#agentreins-architecture-prototype h1{font-size:20px}#agentreins-architecture-prototype .ar-top{padding:10px 16px}#agentreins-architecture-prototype .ar-diagram{display:none}#agentreins-architecture-prototype .ar-mobile{display:grid;padding:12px;gap:8px}#agentreins-architecture-prototype .ar-mobile button{padding:10px;text-align:left;border:1px solid var(--ar-line);border-radius:6px;background:#f8f7f3}#agentreins-architecture-prototype .ar-top&gt;span:first-child{display:none}#agentreins-architecture-prototype .ar-footer{flex-direction:column;padding:12px}}
+@media(prefers-reduced-motion:reduce){#agentreins-architecture-prototype .ar-node{transition:none}#agentreins-architecture-prototype .ar-packet{display:none}}
+&lt;/style&gt;
+&lt;div class=&quot;ar-shell&quot;&gt;&lt;aside class=&quot;ar-sidebar&quot;&gt;&lt;div class=&quot;ar-brand&quot;&gt;&lt;span&gt;A&lt;/span&gt;AgentReins&lt;/div&gt;&lt;div class=&quot;ar-nav&quot;&gt;&lt;button class=&quot;active&quot;&gt;◉ 任务过程&lt;/button&gt;&lt;button&gt;⌁ 采集现场&lt;/button&gt;&lt;button&gt;▦ 结果看板&lt;/button&gt;&lt;/div&gt;&lt;div class=&quot;ar-list-label&quot;&gt;当前任务 · 示例&lt;/div&gt;&lt;div class=&quot;ar-task&quot;&gt;生成本周销售分析报告&lt;small&gt;WorkBuddy · &lt;span data-task-status&gt;执行中&lt;/span&gt;&lt;/small&gt;&lt;/div&gt;&lt;div class=&quot;ar-task&quot;&gt;补充 API 的错误处理&lt;small&gt;Codex · 失败，查看原因&lt;/small&gt;&lt;/div&gt;&lt;div class=&quot;ar-source&quot;&gt;实时任务独立运行&lt;br&gt;进程 · 文件 · 网络&lt;br&gt;模型 · 工具 · Skill · MCP&lt;/div&gt;&lt;/aside&gt;&lt;main&gt;&lt;div class=&quot;ar-top&quot;&gt;&lt;span&gt;工作台 / 任务过程&lt;/span&gt;&lt;span class=&quot;ar-prototype&quot;&gt;交互原型 · 示例数据&lt;/span&gt;&lt;/div&gt;&lt;div class=&quot;ar-title&quot;&gt;&lt;div class=&quot;ar-kicker&quot;&gt;WORKBUDDY · 当前轮次&lt;/div&gt;&lt;h1&gt;生成本周销售分析报告&lt;/h1&gt;&lt;p class=&quot;ar-request&quot;&gt;&lt;b&gt;我的原话：&lt;/b&gt;读取本周销售数据，生成分析报告，核对总额后交给我。&lt;/p&gt;&lt;div class=&quot;ar-status-line&quot;&gt;&lt;span class=&quot;ar-status&quot; data-status&gt;进行中&lt;/span&gt;&lt;span data-current&gt;正在执行命令 · 已读取 1,240 条数据&lt;/span&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ar-stage&quot;&gt;&lt;section&gt;&lt;div class=&quot;ar-toolbar&quot;&gt;&lt;div class=&quot;ar-modes&quot; role=&quot;group&quot; aria-label=&quot;选择展示方式&quot;&gt;&lt;button data-mode=&quot;architecture&quot; aria-pressed=&quot;true&quot;&gt;架构流程&lt;/button&gt;&lt;button data-mode=&quot;spider&quot; aria-pressed=&quot;false&quot;&gt;蜘蛛关系&lt;/button&gt;&lt;/div&gt;&lt;div class=&quot;ar-demo-controls&quot;&gt;&lt;select data-scene aria-label=&quot;原型任务状态&quot;&gt;&lt;option value=&quot;running&quot;&gt;示例：命令执行中&lt;/option&gt;&lt;option value=&quot;failed&quot;&gt;示例：执行失败&lt;/option&gt;&lt;option value=&quot;completed&quot;&gt;示例：已完成未读&lt;/option&gt;&lt;option value=&quot;missing&quot;&gt;示例：需求未采到&lt;/option&gt;&lt;/select&gt;&lt;button class=&quot;ar-next&quot; data-next&gt;演示下一条事件 →&lt;/button&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ar-diagram&quot; data-diagram&gt;&lt;svg viewBox=&quot;0 0 1000 1340&quot; preserveAspectRatio=&quot;none&quot; role=&quot;img&quot; aria-label=&quot;输入、感知、大模型、规划、记忆、执行与观测的生命周期回路&quot;&gt;&lt;defs&gt;&lt;marker id=&quot;ar-arrow&quot; viewBox=&quot;0 0 10 10&quot; refX=&quot;9&quot; refY=&quot;5&quot; markerWidth=&quot;5&quot; markerHeight=&quot;5&quot; orient=&quot;auto-start-reverse&quot;&gt;&lt;path d=&quot;M0 0L10 5L0 10z&quot; fill=&quot;#aab2b8&quot;/&gt;&lt;/marker&gt;&lt;marker id=&quot;ar-active-arrow&quot; viewBox=&quot;0 0 10 10&quot; refX=&quot;9&quot; refY=&quot;5&quot; markerWidth=&quot;5&quot; markerHeight=&quot;5&quot; orient=&quot;auto-start-reverse&quot;&gt;&lt;path d=&quot;M0 0L10 5L0 10z&quot; fill=&quot;#7a68bc&quot;/&gt;&lt;/marker&gt;&lt;/defs&gt;&lt;g data-edges&gt;&lt;/g&gt;&lt;g data-packet&gt;&lt;/g&gt;&lt;/svg&gt;&lt;div data-edge-labels&gt;&lt;/div&gt;&lt;div data-nodes&gt;&lt;/div&gt;&lt;/div&gt;&lt;div class=&quot;ar-mobile&quot; data-mobile&gt;&lt;/div&gt;&lt;div class=&quot;ar-legend&quot;&gt;&lt;span&gt;实线：已配对的数据路径&lt;/span&gt;&lt;span&gt;虚线：架构路径 / 关系未配对&lt;/span&gt;&lt;span&gt;灰色：本轮未采到&lt;/span&gt;&lt;/div&gt;&lt;/section&gt;&lt;aside class=&quot;ar-detail&quot; data-detail aria-live=&quot;polite&quot;&gt;&lt;/aside&gt;&lt;/div&gt;&lt;div class=&quot;ar-footer&quot;&gt;&lt;span&gt;相同任务、相同证据 · 两种视图共用详情&lt;/span&gt;&lt;span&gt;点击模块、资源或连线查看详情&lt;/span&gt;&lt;/div&gt;&lt;/main&gt;&lt;/div&gt;
+&lt;script&gt;
+(()=&gt;{
+ const root=document.getElementById(&#x27;agentreins-architecture-prototype&#x27;);if(!root)return;
+ const $=s=&gt;root.querySelector(s),esc=s=&gt;String(s??&#x27;&#x27;).replace(/[&amp;&lt;&gt;&quot;&#x27;]/g,c=&gt;({&#x27;&amp;&#x27;:&#x27;&amp;amp;&#x27;,&#x27;&lt;&#x27;:&#x27;&amp;lt;&#x27;,&#x27;&gt;&#x27;:&#x27;&amp;gt;&#x27;,&#x27;&quot;&#x27;:&#x27;&amp;quot;&#x27;,&quot;&#x27;&quot;:&#x27;&amp;#39;&#x27;}[c]));
+ const saved=window.openai?.widgetState?.modelContent||{};let mode=saved.mode===&#x27;spider&#x27;?&#x27;spider&#x27;:&#x27;architecture&#x27;,scene=[&#x27;running&#x27;,&#x27;failed&#x27;,&#x27;completed&#x27;,&#x27;missing&#x27;].includes(saved.scene)?saved.scene:&#x27;running&#x27;,selected=saved.selected||&#x27;action&#x27;,outputEvents=2,terminalTab=&#x27;output&#x27;;
+ const definitions=[
+ {id:&#x27;input&#x27;,x:345,y:30,w:280,h:104,cls:&#x27;&#x27;,title:&#x27;用户原始输入&#x27;,tag:&#x27;任务起点&#x27;,note:&#x27;本周销售数据 → 分析报告&#x27;,detail:&#x27;原始需求&#x27;,description:&#x27;这里直接展示用户发出的文字和附件。不会用任务标题或模型回复替代。&#x27;,fields:[[&#x27;来源&#x27;,&#x27;用户输入消息&#x27;],[&#x27;Agent&#x27;,&#x27;WorkBuddy&#x27;],[&#x27;轮次&#x27;,&#x27;当前轮次 · 示例&#x27;]],input:&#x27;读取本周销售数据，生成分析报告，核对总额后交给我。&#x27;},
+ {id:&#x27;perception&#x27;,x:345,y:180,w:280,h:120,cls:&#x27;&#x27;,title:&#x27;感知 / 输入内容&#x27;,tag:&#x27;输入&#x27;,note:&#x27;文字 · 附件 · 运行环境&#x27;,detail:&#x27;这次任务拿到了什么&#x27;,description:&#x27;区分用户原文、附件、运行环境和读取到的材料。&#x27;,fields:[[&#x27;需求&#x27;,&#x27;用户消息已记录&#x27;],[&#x27;材料&#x27;,&#x27;sales-week.csv&#x27;],[&#x27;环境&#x27;,&#x27;工作目录与运行环境已记录&#x27;]],input:&#x27;用户文字：读取本周销售数据…\n输入文件：data/sales-week.csv\n工作目录：/workspace/sales&#x27;},
+ {id:&#x27;model&#x27;,x:345,y:395,w:280,h:160,cls:&#x27;blue&#x27;,title:&#x27;推理引擎 / 大语言模型&#x27;,tag:&#x27;推理 · 第 3 次模型往返&#x27;,note:&#x27;实际响应和工具指令&#x27;,inner:[[&#x27;本次模型返回&#x27;,&#x27;先核对日期，再生成报告&#x27;],[&#x27;下发指令&#x27;,&#x27;exec_command · read_file&#x27;]],detail:&#x27;Agent 与大模型怎样交流&#x27;,description:&#x27;按每次请求展示完整可得上下文、模型实际返回和工具指令。思考摘要仅展示来源实际提供的部分。&#x27;,fields:[[&#x27;请求&#x27;,&#x27;第 3 次 · trace:req-003&#x27;],[&#x27;覆盖&#x27;,&#x27;示例模型请求已采集&#x27;],[&#x27;返回&#x27;,&#x27;响应与原生 trace 配对&#x27;]],input:&#x27;system：工作约束\nuser：读取本周销售数据…\ntool：CSV 表头与前五行\ntools：exec_command、read_file&#x27;,output:&#x27;先核对日期范围和数据总额，再输出报告。\n工具指令：exec_command(command=&quot;python scripts/build_report.py&quot;)&#x27;},
+ {id:&#x27;memory&#x27;,x:735,y:240,w:245,h:283,cls:&#x27;teal&#x27;,title:&#x27;上下文与记忆&#x27;,tag:&#x27;记忆 / 上下文&#x27;,inner:[[&#x27;短期：本次请求上下文&#x27;,&#x27;用户原话 · 已读材料 · 工具返回&#x27;],[&#x27;长期记忆访问&#x27;,&#x27;本轮尚未采到&#x27;]],detail:&#x27;本轮送给模型的上下文&#x27;,description:&#x27;上半部分是本次请求实际携带的内容；下半部分只展示真实记忆访问，未采到时保持灰色。&#x27;,fields:[[&#x27;本次请求&#x27;,&#x27;14 个内容块 · 示例&#x27;],[&#x27;用户内容&#x27;,&#x27;1 条原始输入&#x27;],[&#x27;工具回流&#x27;,&#x27;2 条匹配调用 ID 的返回&#x27;],[&#x27;长期记忆&#x27;,&#x27;本轮未观察到访问&#x27;]],input:&#x27;用户原文\n运行环境与规则\n可用工具定义\n已读取的数据样例\n工具返回 call_id: read-002&#x27;,hint:&#x27;上下文里带有旧消息，不等于重新执行旧任务。未采到记忆访问时不宣称使用了长期记忆。&#x27;},
+ {id:&#x27;plan&#x27;,x:90,y:625,w:245,h:180,cls:&#x27;purple&#x27;,title:&#x27;规划与调度&#x27;,tag:&#x27;规划&#x27;,inner:[[&#x27;1 · 核对输入&#x27;,&#x27;日期范围、列名与空值&#x27;],[&#x27;2 · 生成报告&#x27;,&#x27;运行脚本并保留日志&#x27;],[&#x27;3 · 验证交付&#x27;,&#x27;核对总额和文件内容&#x27;]],detail:&#x27;实际计划和当前步骤&#x27;,description:&#x27;原型示例展示明确记录的任务计划；实际产品里没有计划记录时会显示未采到，不补写模板。&#x27;,fields:[[&#x27;当前步骤&#x27;,&#x27;2 / 3 · 生成报告&#x27;],[&#x27;执行&#x27;,&#x27;计划与工具返回分别记录&#x27;]],input:&#x27;1. 读取与核对数据\n2. 执行生成脚本\n3. 验证总额和报告\n4. 交付报告&#x27;},
+ {id:&#x27;direct&#x27;,x:382,y:603,w:205,h:135,cls:&#x27;diamond&#x27;,title:&#x27;能否直接回答？&#x27;,note:&#x27;本轮进入工具执行&#x27;,detail:&#x27;下一步选择依据&#x27;,description:&#x27;展示模型实际下发的指令或最终回答，不能从一句泛化描述推测分支。&#x27;,fields:[[&#x27;当前分支&#x27;,&#x27;工具调用&#x27;],[&#x27;依据&#x27;,&#x27;模型响应含 exec_command 指令&#x27;]],output:&#x27;tool_call id: exec-003\nname: exec_command\narguments: {&quot;command&quot;:&quot;python scripts/build_report.py&quot;}&#x27;},
+ {id:&#x27;reply&#x27;,x:755,y:630,w:210,h:92,cls:&#x27;&#x27;,title:&#x27;回复 / 输出&#x27;,tag:&#x27;模型输出&#x27;,note:&#x27;最终回答与任务结束分开&#x27;,detail:&#x27;模型输出&#x27;,description:&#x27;普通回复不等于任务已完成，最终交付还需要核对验证和产物。&#x27;,output:&#x27;当前还在执行工具，尚未生成最终回复。&#x27;},
+ {id:&#x27;action&#x27;,x:345,y:837,w:280,h:175,cls:&#x27;green&#x27;,title:&#x27;工具执行 / 行动层&#x27;,tag:&#x27;执行 · exec_command&#x27;,note:&#x27;python scripts/build_report.py&#x27;,inner:[[&#x27;当前执行&#x27;,&#x27;数据已读入，正在生成报告&#x27;]],detail:&#x27;命令的整个执行过程&#x27;,description:&#x27;输入、开始、stdout / stderr 增量、结束、退出码在同一个调用内展示。&#x27;,fields:[[&#x27;工具&#x27;,&#x27;exec_command&#x27;],[&#x27;调用&#x27;,&#x27;exec-003&#x27;],[&#x27;目录&#x27;,&#x27;/workspace/sales&#x27;],[&#x27;进程&#x27;,&#x27;PID 4821 · 示例&#x27;],[&#x27;状态&#x27;,&#x27;执行中&#x27;]],input:&#x27;python scripts/build_report.py --input data/sales-week.csv --out reports/weekly-sales.md&#x27;},
+ {id:&#x27;goal&#x27;,x:764,y:840,w:200,h:145,cls:&#x27;diamond&#x27;,title:&#x27;目标完成？&#x27;,note:&#x27;等待验证与交付&#x27;,detail:&#x27;任务是否真的完成&#x27;,description:&#x27;把工具执行完、Agent 发出结束信号、产物存在和业务验证分别列出。&#x27;,fields:[[&#x27;工具执行&#x27;,&#x27;仍在运行&#x27;],[&#x27;业务验证&#x27;,&#x27;尚未执行&#x27;],[&#x27;原生产物&#x27;,&#x27;尚未生成&#x27;],[&#x27;Agent 状态&#x27;,&#x27;进行中&#x27;]],hint:&#x27;退出码为 0 不等于业务正确；Agent 结束也不等于用户验收通过。&#x27;},
+ {id:&#x27;mcp&#x27;,x:143,y:1090,w:118,h:70,cls:&#x27;resource&#x27;,title:&#x27;MCP / Skill&#x27;,tag:&#x27;服务与能力&#x27;,detail:&#x27;MCP 与 Skill&#x27;,description:&#x27;展示服务、能力名称、参数和执行结果；可用工具定义不会计作调用。&#x27;,fields:[[&#x27;调用&#x27;,&#x27;本轮无 MCP 调用&#x27;],[&#x27;Skill&#x27;,&#x27;本轮未采到使用&#x27;]],hint:&#x27;这个资源入口保留在架构图里；没有记录时明确显示无本轮调用。&#x27;},
+ {id:&#x27;api&#x27;,x:282,y:1090,w:118,h:70,cls:&#x27;resource&#x27;,title:&#x27;API 调用&#x27;,tag:&#x27;请求与响应&#x27;,detail:&#x27;访问的外网资源&#x27;,description:&#x27;先看域名与 URL、方法和响应，再看连接 IP、地理归属及其来源。&#x27;,fields:[[&#x27;资源&#x27;,&#x27;https://example.com/data/week&#x27;],[&#x27;请求&#x27;,&#x27;GET · 200&#x27;],[&#x27;IP&#x27;,&#x27;示例连接地址&#x27;],[&#x27;归属&#x27;,&#x27;主动查询后显示来源与时间&#x27;]],input:&#x27;GET /data/week\nHost: example.com&#x27;,output:&#x27;content-type: application/json\nresponse body: {&quot;week&quot;:&quot;2026-W41&quot;,&quot;rows&quot;:1240}&#x27;,hint:&#x27;此原型地址为示例。系统连接 IP、搜索结果链接与真实 HTTP 访问分别核对。&#x27;},
+ {id:&#x27;code&#x27;,x:421,y:1090,w:118,h:70,cls:&#x27;resource&#x27;,title:&#x27;代码 / 命令&#x27;,tag:&#x27;完整执行&#x27;,detail:&#x27;代码和命令执行&#x27;,description:&#x27;点击后直接查看当前命令、工作目录、输出流与退出状态。&#x27;,fields:[[&#x27;调用&#x27;,&#x27;exec-003&#x27;],[&#x27;命令&#x27;,&#x27;python scripts/build_report.py&#x27;]]},
+ {id:&#x27;database&#x27;,x:560,y:1090,w:118,h:70,cls:&#x27;resource unknown&#x27;,title:&#x27;数据库&#x27;,tag:&#x27;未采到访问&#x27;,detail:&#x27;数据库查询&#x27;,description:&#x27;保留架构入口；只在真实查询被采到时显示语句、服务与返回。&#x27;,hint:&#x27;本轮没有数据库访问证据。&#x27;},
+ {id:&#x27;files&#x27;,x:699,y:1090,w:118,h:70,cls:&#x27;resource&#x27;,title:&#x27;文件系统&#x27;,tag:&#x27;读写与变化&#x27;,detail:&#x27;本轮文件与内容变化&#x27;,description:&#x27;区分读取、修改意图、真正写入和已存在的交付物。&#x27;,fields:[[&#x27;已读取&#x27;,&#x27;data/sales-week.csv&#x27;],[&#x27;将写入&#x27;,&#x27;reports/weekly-sales.md&#x27;],[&#x27;变更范围&#x27;,&#x27;仅当前轮次&#x27;]],input:&#x27;read_file: data/sales-week.csv&#x27;,output:&#x27;列名：date, region, revenue\n记录数：1,240&#x27;},
+ {id:&#x27;external&#x27;,x:838,y:1090,w:118,h:70,cls:&#x27;resource unknown&#x27;,title:&#x27;外部服务&#x27;,tag:&#x27;未采到调用&#x27;,detail:&#x27;外部服务调用&#x27;,description:&#x27;展示真实服务、资源、参数和返回，单纯文本提到网站不算访问。&#x27;,hint:&#x27;本轮没有 GitHub 或其他外部服务调用证据。&#x27;},
+ {id:&#x27;observe&#x27;,x:145,y:1240,w:812,h:88,cls:&#x27;orange observe&#x27;,title:&#x27;可观测层&#x27;,tag:&#x27;观测&#x27;,note:&#x27;调用关联 · 进程 · 文件 · 网络 · 终端输出 · 延迟与用量&#x27;,detail:&#x27;采了哪些数据，哪些还没采到&#x27;,description:&#x27;采集源健康、原始证据和任务归属在这里能核对，关联不明的观察单独保留。&#x27;,fields:[[&#x27;用户输入&#x27;,&#x27;已采&#x27;],[&#x27;模型请求 / 返回&#x27;,&#x27;已配对&#x27;],[&#x27;工具开始 / 输出&#x27;,&#x27;已采&#x27;],[&#x27;文件与网络&#x27;,&#x27;部分覆盖&#x27;],[&#x27;长期记忆 / 数据库&#x27;,&#x27;本轮未观察到&#x27;]],hint:&#x27;动态图不能替代采集完整性。这里明确显示来源、覆盖与缺口。&#x27;}
+ ];
+ const edges=[
+ {id:&#x27;input-perception&#x27;,from:&#x27;input&#x27;,to:&#x27;perception&#x27;,path:&#x27;M485 134L485 180&#x27;,label:&#x27;输入&#x27;,x:502,y:161,confirmed:true},
+ {id:&#x27;perception-model&#x27;,from:&#x27;perception&#x27;,to:&#x27;model&#x27;,path:&#x27;M485 300L485 395&#x27;,label:&#x27;材料与上下文&#x27;,x:502,y:350,confirmed:true},
+ {id:&#x27;context-model&#x27;,from:&#x27;memory&#x27;,to:&#x27;model&#x27;,path:&#x27;M735 370C682 370 700 438 625 438&#x27;,label:&#x27;实际请求&#x27;,x:643,y:391,confirmed:true},
+ {id:&#x27;model-context&#x27;,from:&#x27;model&#x27;,to:&#x27;memory&#x27;,path:&#x27;M625 505C686 505 675 481 735 481&#x27;,label:&#x27;上下文更新&#x27;,x:653,y:528,confirmed:true},
+ {id:&#x27;model-direct&#x27;,from:&#x27;model&#x27;,to:&#x27;direct&#x27;,path:&#x27;M485 555L485 603&#x27;,label:&#x27;&#x27;,x:0,y:0,confirmed:true},
+ {id:&#x27;direct-reply&#x27;,from:&#x27;direct&#x27;,to:&#x27;reply&#x27;,path:&#x27;M587 670L755 670&#x27;,label:&#x27;是&#x27;,x:657,y:654,confirmed:false},
+ {id:&#x27;direct-plan&#x27;,from:&#x27;direct&#x27;,to:&#x27;plan&#x27;,path:&#x27;M382 670L335 670&#x27;,label:&#x27;否&#x27;,x:348,y:654,confirmed:true},
+ {id:&#x27;plan-action&#x27;,from:&#x27;plan&#x27;,to:&#x27;action&#x27;,path:&#x27;M213 805C213 885 296 913 345 913&#x27;,label:&#x27;调度&#x27;,x:275,y:865,confirmed:true},
+ {id:&#x27;direct-action&#x27;,from:&#x27;direct&#x27;,to:&#x27;action&#x27;,path:&#x27;M485 738L485 837&#x27;,label:&#x27;下发指令&#x27;,x:502,y:790,confirmed:true},
+ {id:&#x27;result-model&#x27;,from:&#x27;action&#x27;,to:&#x27;model&#x27;,path:&#x27;M625 927C706 927 695 471 625 471&#x27;,label:&#x27;结果返回模型&#x27;,x:650,y:751,confirmed:true},
+ {id:&#x27;action-goal&#x27;,from:&#x27;action&#x27;,to:&#x27;goal&#x27;,path:&#x27;M625 939L764 939&#x27;,label:&#x27;结果&#x27;,x:683,y:922,confirmed:false},
+ {id:&#x27;goal-model&#x27;,from:&#x27;goal&#x27;,to:&#x27;model&#x27;,path:&#x27;M864 840C864 740 705 658 625 534&#x27;,label:&#x27;继续&#x27;,x:722,y:788,confirmed:false},
+ {id:&#x27;goal-reply&#x27;,from:&#x27;goal&#x27;,to:&#x27;reply&#x27;,path:&#x27;M864 840L864 722&#x27;,label:&#x27;交付&#x27;,x:905,y:780,confirmed:false},
+ ...[&#x27;mcp&#x27;,&#x27;api&#x27;,&#x27;code&#x27;,&#x27;database&#x27;,&#x27;files&#x27;,&#x27;external&#x27;].map((id,i)=&gt;({id:&#x27;resource-&#x27;+id,from:&#x27;action&#x27;,to:id,path:`M485 1012C485 1050 ${202+i*139} 1037 ${202+i*139} 1090`,label:&#x27;&#x27;,confirmed:[&#x27;code&#x27;,&#x27;files&#x27;].includes(id)})),
+ {id:&#x27;observability&#x27;,from:&#x27;observe&#x27;,to:&#x27;action&#x27;,path:&#x27;M145 1284C116 1284 130 1040 345 990&#x27;,label:&#x27;观测&#x27;,x:152,y:1198,confirmed:false}
+ ];
+ const byID=new Map(definitions.map(n=&gt;[n.id,n]));let edgeMap=new Map(edges.map(e=&gt;[e.id,e]));if(!byID.has(selected)&amp;&amp;!edgeMap.has(selected))selected=&#x27;action&#x27;;
+ const fieldsHTML=rows=&gt;`&lt;dl&gt;${(rows||[]).map(([k,v])=&gt;`&lt;dt&gt;${esc(k)}&lt;/dt&gt;&lt;dd&gt;${esc(v)}&lt;/dd&gt;`).join(&#x27;&#x27;)}&lt;/dl&gt;`;
+ function save(){window.openai?.setWidgetState?.({modelContent:{mode,scene,selected},privateContent:{outputEvents}})?.catch(()=&gt;{});}
+ function nodeState(n){if(scene===&#x27;failed&#x27;&amp;&amp;n.id===&#x27;action&#x27;)return &#x27;failed&#x27;;if(scene===&#x27;running&#x27;&amp;&amp;n.id===&#x27;action&#x27;)return &#x27;current&#x27;;if(scene===&#x27;completed&#x27;&amp;&amp;[&#x27;goal&#x27;,&#x27;reply&#x27;,&#x27;files&#x27;].includes(n.id))return &#x27;done&#x27;;return [&#x27;input&#x27;,&#x27;perception&#x27;,&#x27;model&#x27;,&#x27;memory&#x27;,&#x27;plan&#x27;].includes(n.id)&amp;&amp;scene!==&#x27;missing&#x27;?&#x27;done&#x27;:&#x27;&#x27;;}
+ function render(){
+  root.querySelectorAll(&#x27;[data-mode]&#x27;).forEach(b=&gt;b.setAttribute(&#x27;aria-pressed&#x27;,String(b.dataset.mode===mode)));$(&#x27;[data-scene]&#x27;).value=scene;
+  $(&#x27;[data-status]&#x27;).textContent={running:&#x27;进行中&#x27;,failed:&#x27;执行失败&#x27;,completed:&#x27;已完成未读&#x27;,missing:&#x27;输入缺口&#x27;}[scene];$(&#x27;[data-task-status]&#x27;).textContent=$(&#x27;[data-status]&#x27;).textContent;
+  $(&#x27;[data-current]&#x27;).textContent={running:`正在执行命令 · 已收到 ${outputEvents} 条输出`,failed:&#x27;生成报告失败 · 数据列 revenue 缺失 · 点击执行模块查看&#x27;,completed:&#x27;报告已生成 · 总额核对通过 · 产物未读&#x27;,missing:&#x27;工具活动已采到，但用户原始输入缺失&#x27;}[scene];
+  const spider=mode===&#x27;spider&#x27;;$(&#x27;[data-diagram]&#x27;).style.aspectRatio=spider?&#x27;1000/1110&#x27;:&#x27;1000/1340&#x27;;$(&#x27;[data-diagram] svg&#x27;).setAttribute(&#x27;viewBox&#x27;,spider?&#x27;0 0 1000 1110&#x27;:&#x27;0 0 1000 1340&#x27;);
+  const locations=spider?{model:[385,400,245,170],input:[373,30,250,110],perception:[38,65,230,120],memory:[735,85,245,280],plan:[35,335,240,180],direct:[705,415,240,110],reply:[735,825,245,105],action:[705,595,255,175],goal:[385,675,245,135],observe:[260,985,720,90],mcp:[280,860,105,68],api:[395,860,105,68],code:[510,860,105,68],database:[625,860,105,68],files:[140,810,125,80],external:[25,810,105,80]}:null;
+  const drawn=definitions.map(n=&gt;{const pos=locations?.[n.id];return {...n,x:pos?.[0]??n.x,y:pos?.[1]??n.y,w:pos?.[2]??n.w,h:pos?.[3]??n.h};});const nodesMap=new Map(drawn.map(n=&gt;[n.id,n]));const totalH=spider?1110:1340;
+  $(&#x27;[data-nodes]&#x27;).innerHTML=drawn.map(n=&gt;{const missing=scene===&#x27;missing&#x27;&amp;&amp;n.id===&#x27;input&#x27;;return `&lt;button class=&quot;ar-node ${n.cls} ${missing?&#x27;unknown&#x27;:&#x27;&#x27;} ${nodeState(n)} ${selected===n.id?&#x27;selected&#x27;:&#x27;&#x27;}&quot; data-node=&quot;${n.id}&quot; style=&quot;left:${n.x/10}%;top:${n.y/totalH*100}%;width:${n.w/10}%;height:${n.h/totalH*100}%&quot; aria-label=&quot;${esc(n.title)}&quot;&gt;&lt;span class=&quot;ar-status-dot&quot;&gt;&lt;/span&gt;&lt;span class=&quot;ar-node-tag&quot;&gt;${esc(n.tag||&#x27;判断&#x27;)}&lt;/span&gt;&lt;strong&gt;${esc(missing?&#x27;原始输入缺失&#x27;:n.title)}&lt;/strong&gt;${n.note?`&lt;span class=&quot;ar-node-note&quot;&gt;${esc(missing?&#x27;点击核对采集缺口&#x27;:n.id===&#x27;action&#x27;&amp;&amp;scene===&#x27;failed&#x27;?&#x27;退出码 1 · 缺少 revenue 列&#x27;:n.id===&#x27;action&#x27;&amp;&amp;scene===&#x27;completed&#x27;?&#x27;退出码 0 · 来源标记输出结束&#x27;:n.id===&#x27;goal&#x27;&amp;&amp;scene===&#x27;completed&#x27;?&#x27;已验证 · 已生成产物&#x27;:n.id===&#x27;reply&#x27;&amp;&amp;scene===&#x27;completed&#x27;?&#x27;报告已交付 · 点击预览&#x27;:n.note)}&lt;/span&gt;`:&#x27;&#x27;}${n.inner?`&lt;div class=&quot;ar-inner&quot;&gt;${n.inner.map(([a,b])=&gt;`&lt;span&gt;&lt;b&gt;${esc(a)}&lt;/b&gt;&lt;small&gt;${esc(b)}&lt;/small&gt;&lt;/span&gt;`).join(&#x27;&#x27;)}&lt;/div&gt;`:&#x27;&#x27;}&lt;/button&gt;`;}).join(&#x27;&#x27;);
+  $(&#x27;[data-mobile]&#x27;).innerHTML=definitions.filter(n=&gt;!n.cls.includes(&#x27;resource&#x27;)).map(n=&gt;`&lt;button data-node=&quot;${n.id}&quot;&gt;${esc(n.title)}&lt;/button&gt;`).join(&#x27;&#x27;);
+  const renderedEdges=edges.map(e=&gt;{if(!spider)return e;const a=nodesMap.get(e.from),b=nodesMap.get(e.to),ax=a.x+a.w/2,ay=a.y+a.h/2,bx=b.x+b.w/2,by=b.y+b.h/2;const dx=bx-ax,dy=by-ay;const factor=Math.min((a.w/2)/Math.abs(dx||.001),(a.h/2)/Math.abs(dy||.001)),factorB=Math.min((b.w/2)/Math.abs(dx||.001),(b.h/2)/Math.abs(dy||.001));const sx=ax+dx*factor,sy=ay+dy*factor,tx=bx-dx*factorB,ty=by-dy*factorB;return {...e,path:`M${sx} ${sy}L${tx} ${ty}`,x:(sx+tx)/2+8,y:(sy+ty)/2-8};});edgeMap=new Map(renderedEdges.map(e=&gt;[e.id,e]));
+  $(&#x27;[data-edges]&#x27;).innerHTML=renderedEdges.map(e=&gt;`&lt;g data-edge=&quot;${e.id}&quot; aria-label=&quot;${esc(e.label||e.id)}&quot;&gt;&lt;path class=&quot;ar-edge ${e.confirmed?&#x27;&#x27;:&#x27;structural&#x27;} ${selected===e.id?&#x27;active&#x27;:&#x27;&#x27;}&quot; d=&quot;${e.path}&quot;/&gt;&lt;path class=&quot;ar-edge-hit&quot; d=&quot;${e.path}&quot;/&gt;&lt;/g&gt;`).join(&#x27;&#x27;);$(&#x27;[data-edge-labels]&#x27;).innerHTML=renderedEdges.filter(e=&gt;e.label).map(e=&gt;`&lt;button class=&quot;ar-edge-text&quot; data-edge=&quot;${e.id}&quot; style=&quot;left:${(e.x||0)/10}%;top:${(e.y||0)/totalH*100}%&quot;&gt;${esc(e.label)}&lt;/button&gt;`).join(&#x27;&#x27;);renderDetail();
+ }
+ function renderDetail(){
+  if(edgeMap.has(selected)){const e=edgeMap.get(selected);$(&#x27;[data-detail]&#x27;).innerHTML=`&lt;div class=&quot;ar-kicker&quot;&gt;数据传递 / 架构路径&lt;/div&gt;&lt;h2&gt;${esc(byID.get(e.from).title)} → ${esc(byID.get(e.to).title)}&lt;/h2&gt;&lt;p class=&quot;ar-description&quot;&gt;${e.confirmed?&#x27;示例中已按调用 ID / trace 配对，可核对两端实际内容。&#x27;:&#x27;架构上存在这条路径；当前示例没有对应的已配对事件。&#x27;}&lt;/p&gt;${fieldsHTML([[&#x27;来源节点&#x27;,byID.get(e.from).title],[&#x27;目标节点&#x27;,byID.get(e.to).title],[&#x27;依据&#x27;,e.confirmed?&#x27;示例：同一轮次与原生调用 ID&#x27;:&#x27;尚未取得对应采集证据&#x27;]])}&lt;h3&gt;发送内容&lt;/h3&gt;&lt;pre&gt;${esc(e.id===&#x27;result-model&#x27;?&#x27;call_id: exec-003\nstdout: 已读入 1,240 条记录\n完整性：执行中，尚未结束&#x27;:byID.get(e.from).output||byID.get(e.from).input||&#x27;仅展示架构路径，不补写未采内容&#x27;)}&lt;/pre&gt;&lt;h3&gt;目标端内容&lt;/h3&gt;&lt;pre&gt;${esc(e.id===&#x27;result-model&#x27;?&#x27;role: tool\ncall_id: exec-003\ncontent: 已读入 1,240 条记录&#x27;:byID.get(e.to).input||&#x27;点击对应模块查看参数和返回&#x27;)}&lt;/pre&gt;`;return;}
+  const n=byID.get(selected)||byID.get(&#x27;action&#x27;);let body=`&lt;div class=&quot;ar-kicker&quot;&gt;${esc(n.tag||&#x27;判断节点&#x27;)} / 本轮详情&lt;/div&gt;&lt;h2&gt;${esc(n.detail||n.title)}&lt;/h2&gt;&lt;p class=&quot;ar-description&quot;&gt;${esc(n.description||&#x27;当前任务的实际输入和执行记录。&#x27;)}&lt;/p&gt;`;
+  if(n.id===&#x27;input&#x27;&amp;&amp;scene===&#x27;missing&#x27;){body+=&#x27;&lt;div class=&quot;ar-hint&quot;&gt;本轮用户原文没有采到。后续工具活动继续保留，但不能把环境信息、模型回复或别的任务当作原始需求。&lt;/div&gt;&#x27;;}
+  else if(n.id===&#x27;action&#x27;||n.id===&#x27;code&#x27;){
+   body+=fieldsHTML([[&#x27;工具&#x27;,&#x27;exec_command&#x27;],[&#x27;调用 ID&#x27;,&#x27;exec-003&#x27;],[&#x27;工作目录&#x27;,&#x27;/workspace/sales&#x27;],[&#x27;状态&#x27;,scene===&#x27;completed&#x27;?&#x27;执行已结束&#x27;:scene===&#x27;failed&#x27;?&#x27;失败 · 退出码 1&#x27;:&#x27;执行中&#x27;]])+`&lt;h3&gt;实际命令&lt;/h3&gt;&lt;pre&gt;${esc(byID.get(&#x27;action&#x27;).input)}&lt;/pre&gt;&lt;div class=&quot;ar-mini-tabs&quot;&gt;&lt;button data-terminal-tab=&quot;output&quot; class=&quot;${terminalTab===&#x27;output&#x27;?&#x27;active&#x27;:&#x27;&#x27;}&quot;&gt;输出时间线&lt;/button&gt;&lt;button data-terminal-tab=&quot;input&quot; class=&quot;${terminalTab===&#x27;input&#x27;?&#x27;active&#x27;:&#x27;&#x27;}&quot;&gt;调用参数&lt;/button&gt;&lt;/div&gt;&lt;div class=&quot;ar-terminal&quot;&gt;10:42:08 stdout 读取 data/sales-week.csv\n10:42:09 stdout 已读入 1,240 条记录${outputEvents&gt;2?&#x27;\n10:42:10 stdout 正在汇总区域销售额&#x27;:&#x27;&#x27;}${scene===&#x27;failed&#x27;?&#x27;\n10:42:10 stderr KeyError: revenue\n10:42:10 stderr 缺少必需的数据列，未生成报告\n\nexit_code: 1&#x27;:scene===&#x27;completed&#x27;?&#x27;\n10:42:11 stdout 总额核对通过\n10:42:12 stdout 已写入 weekly-sales.md\n\nexit_code: 0&#x27;:&#x27;\n\n进程运行中 · 尚未收到退出码&#x27;}&lt;/div&gt;&lt;h3&gt;这次调用的完整生命周期&lt;/h3&gt;${fieldsHTML([[&#x27;已采到&#x27;,&#x27;调用参数 → 开始 → 输出增量&#x27;],[&#x27;下一步&#x27;,scene===&#x27;failed&#x27;?&#x27;退出码 1 → 失败原因 → 返回模型修正&#x27;:scene===&#x27;completed&#x27;?&#x27;退出码 → 工具结果 → 返回模型&#x27;:&#x27;继续接收输出，等待实际退出事件&#x27;]])}`;
+  }
+  else if((n.id===&#x27;goal&#x27;||n.id===&#x27;reply&#x27;||n.id===&#x27;files&#x27;)&amp;&amp;scene===&#x27;completed&#x27;){body+=fieldsHTML([[&#x27;Agent&#x27;,&#x27;原生任务结束信号已收到&#x27;],[&#x27;验证&#x27;,&#x27;原始总额与报告总额相等&#x27;],[&#x27;交付物&#x27;,&#x27;reports/weekly-sales.md&#x27;],[&#x27;状态&#x27;,&#x27;文件存在已确认 · 未读&#x27;]])+&#x27;&lt;h3&gt;交付物预览&lt;/h3&gt;&lt;pre&gt;# 本周销售分析报告\n\n数据范围：本周\n记录数：1,240\n总额核对：通过\n\n区域分析与趋势说明…&lt;/pre&gt;&lt;div class=&quot;ar-hint&quot;&gt;已完成和已验证分别展示；未读只表示用户尚未查看，不能代表用户已认可结果。&lt;/div&gt;&#x27;;}
+  else{body+=fieldsHTML(n.fields);if(n.input)body+=`&lt;h3&gt;实际输入 / 请求内容&lt;/h3&gt;&lt;pre&gt;${esc(n.input)}&lt;/pre&gt;`;if(n.output)body+=`&lt;h3&gt;实际返回&lt;/h3&gt;&lt;pre&gt;${esc(n.output)}&lt;/pre&gt;`;if(n.hint)body+=`&lt;div class=&quot;ar-hint&quot;&gt;${esc(n.hint)}&lt;/div&gt;`;}
+  body+=&#x27;&lt;h3&gt;来源与关联&lt;/h3&gt;&#x27;+fieldsHTML([[&#x27;数据性质&#x27;,&#x27;交互原型示例，不代表本机已采集&#x27;],[&#x27;任务身份&#x27;,&#x27;WorkBuddy / 示例会话 / 当前轮次&#x27;]]);$(&#x27;[data-detail]&#x27;).innerHTML=body;if((n.id===&#x27;action&#x27;||n.id===&#x27;code&#x27;)&amp;&amp;terminalTab===&#x27;input&#x27;)$(&#x27;.ar-terminal&#x27;).textContent=JSON.stringify({command:byID.get(&#x27;action&#x27;).input,cwd:&#x27;/workspace/sales&#x27;},null,2);
+ }
+ root.addEventListener(&#x27;click&#x27;,e=&gt;{const el=e.target.closest(&#x27;[data-node],[data-edge],[data-mode],[data-next],[data-terminal-tab]&#x27;);if(!el||!root.contains(el))return;if(el.dataset.terminalTab){terminalTab=el.dataset.terminalTab;renderDetail();}else if(el.dataset.mode){mode=el.dataset.mode;render();save();}else if(el.dataset.node||el.dataset.edge){selected=el.dataset.node||el.dataset.edge;render();save();}else if(el.hasAttribute(&#x27;data-next&#x27;)){outputEvents++;selected=&#x27;action&#x27;;render();const edge=edgeMap.get(&#x27;result-model&#x27;);if(edge){$(&#x27;[data-packet]&#x27;).innerHTML=`&lt;circle class=&quot;ar-packet&quot; r=&quot;5&quot;&gt;&lt;animateMotion dur=&quot;1.4s&quot; repeatCount=&quot;1&quot; fill=&quot;remove&quot; path=&quot;${edge.path}&quot;/&gt;&lt;/circle&gt;`;}save();}});
+ $(&#x27;[data-scene]&#x27;).addEventListener(&#x27;change&#x27;,e=&gt;{scene=e.target.value;selected=scene===&#x27;completed&#x27;?&#x27;goal&#x27;:scene===&#x27;missing&#x27;?&#x27;input&#x27;:&#x27;action&#x27;;render();save();});
+ window.addEventListener(&#x27;openai:set_globals&#x27;,e=&gt;{const state=e.detail?.globals?.widgetState?.modelContent;if(!state)return;if([&#x27;architecture&#x27;,&#x27;spider&#x27;].includes(state.mode))mode=state.mode;if([&#x27;running&#x27;,&#x27;failed&#x27;,&#x27;completed&#x27;,&#x27;missing&#x27;].includes(state.scene))scene=state.scene;if(byID.has(state.selected)||edgeMap.has(state.selected))selected=state.selected;render();});
+ const resize=new ResizeObserver(()=&gt;{const w=$(&#x27;[data-diagram]&#x27;).clientWidth;if(w)$(&#x27;[data-diagram]&#x27;).style.setProperty(&#x27;--edge-font&#x27;,Math.max(17,12000/w)+&#x27;px&#x27;);});resize.observe($(&#x27;[data-diagram]&#x27;));
+ render();
+})();
+&lt;/script&gt;
+&lt;/div&gt;
+
+&lt;script src=&quot;https://unpkg.com/@floating-ui/core@1.7.3/dist/floating-ui.core.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script src=&quot;https://unpkg.com/@floating-ui/dom@1.7.4/dist/floating-ui.dom.umd.min.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  if (window.FloatingUIDOM == null) {
+    return;
+  }
+  const { autoUpdate, computePosition, flip, offset, shift, size } =
+    window.FloatingUIDOM;
+  const tooltipPlacements = new Set([&quot;top&quot;, &quot;right&quot;, &quot;bottom&quot;, &quot;left&quot;]);
+  const tooltipId = `codex-visualization-tooltip-${
+    window.crypto?.randomUUID?.() ?? Date.now().toString(36)
+  }`;
+  const tooltipGap = 5;
+  const hoverDelay = 700;
+  const skipDelay = 300;
+  let activeTrigger = null;
+  let pendingTrigger = null;
+  let tooltip = null;
+  let openTimeout = null;
+  let autoUpdateCleanup = null;
+  let positionRequest = 0;
+  let skipDelayUntil = 0;
+  let lastPointerWasTouch = false;
+  let pinnedByTouch = false;
+
+  const getTrigger = (event) =&gt; {
+    for (const target of event.composedPath()) {
+      if (target?.nodeType === Node.ELEMENT_NODE) {
+        const trigger = target.closest(&quot;[data-tooltip]&quot;);
+        if (trigger) return trigger;
+      }
+    }
+    return null;
+  };
+  const containsTarget = (trigger, target) =&gt;
+    target?.nodeType != null &amp;&amp; trigger.contains(target);
+  const getContent = (trigger) =&gt;
+    trigger.getAttribute(&quot;data-tooltip&quot;)?.trim() ?? &quot;&quot;;
+  const getPlacement = (trigger) =&gt; {
+    const placement = trigger.getAttribute(&quot;data-tooltip-placement&quot;);
+    return tooltipPlacements.has(placement) ? placement : &quot;top&quot;;
+  };
+  const getTooltip = () =&gt; {
+    if (tooltip == null) {
+      tooltip = document.createElement(&quot;div&quot;);
+      tooltip.id = tooltipId;
+      tooltip.className = &quot;tooltip&quot;;
+      tooltip.setAttribute(&quot;role&quot;, &quot;tooltip&quot;);
+    }
+    return tooltip;
+  };
+  const setDescribedBy = (trigger, described) =&gt; {
+    const ids = new Set(
+      (trigger.getAttribute(&quot;aria-describedby&quot;) ?? &quot;&quot;)
+        .split(/\s+/)
+        .filter(Boolean),
+    );
+    if (described) {
+      ids.add(tooltipId);
+    } else {
+      ids.delete(tooltipId);
+    }
+    if (ids.size === 0) {
+      trigger.removeAttribute(&quot;aria-describedby&quot;);
+    } else {
+      trigger.setAttribute(&quot;aria-describedby&quot;, [...ids].join(&quot; &quot;));
+    }
+  };
+  const clearOpenTimeout = () =&gt; {
+    if (openTimeout != null) {
+      window.clearTimeout(openTimeout);
+      openTimeout = null;
+    }
+    pendingTrigger = null;
+  };
+  const closeTooltip = (activateSkipDelay = true) =&gt; {
+    clearOpenTimeout();
+    pinnedByTouch = false;
+    positionRequest += 1;
+    autoUpdateCleanup?.();
+    autoUpdateCleanup = null;
+    if (activeTrigger == null) {
+      return;
+    }
+    setDescribedBy(activeTrigger, false);
+    activeTrigger = null;
+    tooltip?.remove();
+    if (activateSkipDelay) {
+      skipDelayUntil = Date.now() + skipDelay;
+    }
+  };
+  const updatePosition = (trigger, floating) =&gt; {
+    const request = ++positionRequest;
+    void computePosition(trigger, floating, {
+      middleware: [
+        offset(tooltipGap),
+        flip({ padding: tooltipGap }),
+        shift({ padding: tooltipGap }),
+        size({
+          padding: tooltipGap,
+          apply({ availableHeight, availableWidth, elements }) {
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-width&quot;,
+              `${Math.max(0, availableWidth)}px`,
+            );
+            elements.floating.style.setProperty(
+              &quot;--tooltip-available-height&quot;,
+              `${Math.max(0, availableHeight)}px`,
+            );
+          },
+        }),
+      ],
+      placement: getPlacement(trigger),
+      strategy: &quot;fixed&quot;,
+    })
+      .then(({ x, y }) =&gt; {
+        if (activeTrigger !== trigger || request !== positionRequest) {
+          return;
+        }
+        const scale = window.devicePixelRatio || 1;
+        floating.style.transform = `translate(${Math.round(x * scale) / scale}px, ${Math.round(y * scale) / scale}px)`;
+        floating.style.visibility = &quot;visible&quot;;
+      })
+      .catch(() =&gt; {
+        if (activeTrigger === trigger &amp;&amp; request === positionRequest) {
+          closeTooltip(false);
+        }
+      });
+  };
+  const openTooltip = (trigger) =&gt; {
+    const content = getContent(trigger);
+    if (!trigger.isConnected || content.length === 0) {
+      return;
+    }
+    clearOpenTimeout();
+    if (activeTrigger === trigger) {
+      return;
+    }
+    closeTooltip();
+    const floating = getTooltip();
+    floating.textContent = content;
+    floating.style.visibility = &quot;hidden&quot;;
+    floating.style.transform = &quot;translate(0, 0)&quot;;
+    document.body.appendChild(floating);
+    activeTrigger = trigger;
+    setDescribedBy(trigger, true);
+    autoUpdateCleanup = autoUpdate(trigger, floating, () =&gt; {
+      updatePosition(trigger, floating);
+    });
+  };
+  const requestOpen = (trigger, immediate = false) =&gt; {
+    if (
+      getContent(trigger).length === 0 ||
+      activeTrigger === trigger ||
+      pendingTrigger === trigger
+    ) {
+      return;
+    }
+    clearOpenTimeout();
+    pendingTrigger = trigger;
+    const delay =
+      immediate || activeTrigger != null || Date.now() &lt; skipDelayUntil
+        ? 0
+        : hoverDelay;
+    if (delay === 0) {
+      openTooltip(trigger);
+      return;
+    }
+    openTimeout = window.setTimeout(() =&gt; {
+      openTimeout = null;
+      pendingTrigger = null;
+      openTooltip(trigger);
+    }, delay);
+  };
+  const handlePointerOpen = (event) =&gt; {
+    if (event.pointerType === &quot;touch&quot;) {
+      return;
+    }
+    const trigger = getTrigger(event);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    requestOpen(trigger);
+  };
+  const handlePointer = (event) =&gt; {
+    lastPointerWasTouch =
+      event.type === &quot;pointerdown&quot; &amp;&amp; event.pointerType === &quot;touch&quot;;
+  };
+  const handleTouchClick = (event) =&gt; {
+    const isTouch = event.pointerType === &quot;touch&quot; || lastPointerWasTouch;
+    lastPointerWasTouch = false;
+    if (!isTouch || event.detail === 0) {
+      return;
+    }
+    const trigger = getTrigger(event);
+    if (
+      trigger == null ||
+      !trigger.isConnected ||
+      getContent(trigger).length === 0 ||
+      (pinnedByTouch &amp;&amp; activeTrigger === trigger)
+    ) {
+      if (pinnedByTouch) {
+        closeTooltip();
+      }
+      return;
+    }
+    openTooltip(trigger);
+    pinnedByTouch = activeTrigger === trigger;
+    window.setTimeout(() =&gt; {
+      if (activeTrigger === trigger &amp;&amp; !trigger.isConnected) {
+        closeTooltip(false);
+      }
+    }, 0);
+  };
+  const handleLeave = (event) =&gt; {
+    if (pinnedByTouch) {
+      return;
+    }
+    const trigger = getTrigger(event);
+    if (trigger == null || containsTarget(trigger, event.relatedTarget)) {
+      return;
+    }
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handleFocusIn = (event) =&gt; {
+    const trigger = getTrigger(event);
+    if (trigger?.matches(&quot;:focus-visible&quot;)) {
+      requestOpen(trigger, true);
+    }
+  };
+  const handleKeyDown = (event) =&gt; {
+    if (event.key === &quot;Escape&quot;) {
+      closeTooltip();
+    }
+  };
+  const handleContextMenu = (event) =&gt; {
+    lastPointerWasTouch = false;
+    const trigger = getTrigger(event);
+    if (activeTrigger === trigger || pendingTrigger === trigger) {
+      closeTooltip();
+    }
+  };
+  const handlers = {
+    pointerover: handlePointerOpen,
+    pointerdown: handlePointer,
+    pointercancel: handlePointer,
+    click: handleTouchClick,
+    pointerout: handleLeave,
+    focusin: handleFocusIn,
+    focusout: handleLeave,
+    keydown: handleKeyDown,
+    contextmenu: handleContextMenu,
+  };
+  const roots = new Map();
+  const handledEvents = new WeakSet();
+  const handleEvent = (event) =&gt; {
+    if (handledEvents.has(event)) return;
+    handledEvents.add(event);
+    handlers[event.type](event);
+  };
+  const discoverRoots = (node) =&gt; {
+    if (node.shadowRoot) listen(node.shadowRoot);
+    for (const element of node.querySelectorAll(&quot;*&quot;)) {
+      if (element.shadowRoot) listen(element.shadowRoot);
+    }
+  };
+  const listen = (root) =&gt; {
+    if (roots.has(root)) return;
+    for (const type of Object.keys(handlers)) root.addEventListener(type, handleEvent);
+    const observer = new window.MutationObserver((records) =&gt; {
+      for (const { addedNodes } of records) {
+        for (const node of addedNodes) {
+          if (node.nodeType === Node.ELEMENT_NODE) discoverRoots(node);
+        }
+      }
+      for (const [root, cleanup] of roots) {
+        if (root.host &amp;&amp; !root.host.isConnected) {
+          cleanup();
+          roots.delete(root);
+        }
+      }
+      if (activeTrigger &amp;&amp; !activeTrigger.isConnected) closeTooltip(false);
+    });
+    observer.observe(root, { childList: true, subtree: true });
+    roots.set(root, () =&gt; {
+      observer.disconnect();
+      for (const type of Object.keys(handlers)) root.removeEventListener(type, handleEvent);
+    });
+    discoverRoots(root);
+  };
+  const destroy = () =&gt; {
+    closeTooltip(false);
+    lastPointerWasTouch = false;
+    for (const cleanup of roots.values()) cleanup();
+    roots.clear();
+    tooltip = null;
+  };
+
+  // Events between children of one shadow root never reach the document.
+  listen(document);
+  window.addEventListener(&quot;pagehide&quot;, destroy, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-tabs&quot;&gt;
+(() =&gt; {
+  const selector = &#x27;.nav[role=&quot;tablist&quot;] [role=&quot;tab&quot;]&#x27;;
+  const disabled = &#x27;:disabled,[aria-disabled=&quot;true&quot;]&#x27;;
+  const selectTab = (selected) =&gt; {
+    const panelId = selected.getAttribute(&quot;aria-controls&quot;);
+    for (const tab of selected.closest(&#x27;[role=&quot;tablist&quot;]&#x27;).querySelectorAll(&#x27;[role=&quot;tab&quot;]&#x27;)) {
+      const active = tab === selected;
+      tab.classList.toggle(&quot;active&quot;, active);
+      tab.setAttribute(&quot;aria-selected&quot;, String(active));
+      const id = tab.getAttribute(&quot;aria-controls&quot;);
+      const panel = id &amp;&amp; document.getElementById(id);
+      if (panel != null) {
+        panel.hidden = id !== panelId;
+        if (!panel.hidden &amp;&amp; selected.id) {
+          panel.setAttribute(&quot;aria-labelledby&quot;, selected.id);
+        }
+      }
+    }
+  };
+  const interact = (event) =&gt; {
+    const tab = event.target?.closest?.(selector);
+    if (event.defaultPrevented || tab == null || tab.matches(disabled)) {
+      return;
+    }
+    if (event.type === &quot;click&quot;) {
+      selectTab(tab);
+      return;
+    }
+    const tabs = Array.from(
+      tab.closest(&#x27;[role=&quot;tablist&quot;]&#x27;).querySelectorAll(&#x27;[role=&quot;tab&quot;]&#x27;),
+    ).filter((candidate) =&gt; !candidate.matches(disabled));
+    const current = tabs.indexOf(tab);
+    let next;
+    if (event.key === &quot;ArrowRight&quot; || event.key === &quot;ArrowDown&quot;) {
+      next = (current + 1) % tabs.length;
+    } else if (event.key === &quot;ArrowLeft&quot; || event.key === &quot;ArrowUp&quot;) {
+      next = (current + tabs.length - 1) % tabs.length;
+    } else if (event.key === &quot;Home&quot;) {
+      next = 0;
+    } else if (event.key === &quot;End&quot;) {
+      next = tabs.length - 1;
+    } else {
+      return;
+    }
+    event.preventDefault();
+    tabs[next].focus();
+    selectTab(tabs[next]);
+  };
+
+  for (const list of document.querySelectorAll(&#x27;.nav[role=&quot;tablist&quot;]&#x27;)) {
+    const selected =
+      list.querySelector(&#x27;[role=&quot;tab&quot;][aria-selected=&quot;true&quot;]&#x27;) ??
+      list.querySelector(&#x27;[role=&quot;tab&quot;].active&#x27;) ??
+      list.querySelector(&#x27;[role=&quot;tab&quot;]&#x27;);
+    if (selected != null) {
+      selectTab(selected);
+    }
+  }
+  document.addEventListener(&quot;click&quot;, interact);
+  document.addEventListener(&quot;keydown&quot;, interact);
+  window.addEventListener(&quot;pagehide&quot;, () =&gt; {
+    document.removeEventListener(&quot;click&quot;, interact);
+    document.removeEventListener(&quot;keydown&quot;, interact);
+  }, { once: true });
+})();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-carousel&quot;&gt;
+  (() =&gt; {
+    for (const root of document.querySelectorAll(&quot;.viz-carousel&quot;)) {
+      const panels = Array.from(
+        root.querySelectorAll(&quot;:scope &gt; [data-variant]&quot;),
+      );
+      if (panels.length === 0) {
+        continue;
+      }
+      root.setAttribute(&quot;role&quot;, &quot;group&quot;);
+      panels.forEach((panel, index) =&gt; {
+        panel.hidden = index !== 0;
+        panel.setAttribute(&quot;role&quot;, &quot;group&quot;);
+        if (!panel.hasAttribute(&quot;aria-label&quot;)) {
+          panel.setAttribute(&quot;aria-label&quot;, panel.dataset.variant);
+        }
+      });
+      root.dataset.activeVariant = panels[0].dataset.variant;
+      if (panels.length === 1) {
+        continue;
+      }
+
+      const controls = document.createElement(&quot;div&quot;);
+      controls.className = &quot;viz-carousel-controls&quot;;
+      // Portable copy of the settings dropdown&#x27;s legacy glyph; no 14px icon-package preset matches it.
+      // https://github.com/openai/openai/blob/master/codex/codex-apps/webview/src/icons/chevron.svg
+      controls.innerHTML = `
+      &lt;button type=&quot;button&quot; class=&quot;viz-carousel-previous cursor-interaction&quot;&gt;&lt;i data-lucide=&quot;chevron-left&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;/button&gt;
+      &lt;details class=&quot;viz-carousel-picker&quot;&gt;
+        &lt;summary class=&quot;cursor-interaction&quot;&gt;
+          &lt;span class=&quot;viz-carousel-count tabular-nums&quot;&gt;&lt;/span&gt;
+          &lt;span class=&quot;viz-carousel-name&quot;&gt;&lt;/span&gt;
+          &lt;svg class=&quot;viz-carousel-caret&quot; width=&quot;14&quot; height=&quot;14&quot; viewBox=&quot;0 0 20 21&quot; fill=&quot;none&quot; aria-hidden=&quot;true&quot; focusable=&quot;false&quot;&gt;
+            &lt;path d=&quot;M15.2793 7.71101C15.539 7.45131 15.961 7.45131 16.2207 7.71101C16.4804 7.97071 16.4804 8.39272 16.2207 8.65242L10.4707 14.4024C10.211 14.6621 9.78902 14.6621 9.52932 14.4024L3.77932 8.65242L3.69436 8.54792C3.52385 8.28979 3.55205 7.93828 3.77932 7.71101C4.00659 7.48374 4.3581 7.45554 4.61623 7.62605L4.72073 7.71101L10 12.9903L15.2793 7.71101Z&quot; fill=&quot;currentColor&quot; stroke=&quot;currentColor&quot; stroke-width=&quot;0.6&quot; /&gt;
+          &lt;/svg&gt;
+        &lt;/summary&gt;
+        &lt;div class=&quot;viz-carousel-options&quot;&gt;&lt;/div&gt;
+      &lt;/details&gt;
+      &lt;button type=&quot;button&quot; class=&quot;viz-carousel-next cursor-interaction&quot;&gt;&lt;i data-lucide=&quot;chevron-right&quot; aria-hidden=&quot;true&quot;&gt;&lt;/i&gt;&lt;/button&gt;`;
+      const previous = controls.querySelector(&quot;.viz-carousel-previous&quot;);
+      const next = controls.querySelector(&quot;.viz-carousel-next&quot;);
+      const picker = controls.querySelector(&quot;.viz-carousel-picker&quot;);
+      const summary = picker.querySelector(&quot;summary&quot;);
+      const count = controls.querySelector(&quot;.viz-carousel-count&quot;);
+      const name = controls.querySelector(&quot;.viz-carousel-name&quot;);
+      const options = controls.querySelector(&quot;.viz-carousel-options&quot;);
+      const status = document.createElement(&quot;span&quot;);
+      status.className = &quot;sr-only&quot;;
+      status.setAttribute(&quot;role&quot;, &quot;status&quot;);
+      status.setAttribute(&quot;aria-live&quot;, &quot;polite&quot;);
+      status.setAttribute(&quot;aria-atomic&quot;, &quot;true&quot;);
+      previous.setAttribute(
+        &quot;aria-label&quot;,
+        root.dataset.previousLabel ?? &quot;Previous variant&quot;,
+      );
+      next.setAttribute(&quot;aria-label&quot;, root.dataset.nextLabel ?? &quot;Next variant&quot;);
+
+      let active = 0;
+      let mousePointerId = null;
+      let summaryPointerHandled = false;
+      summary.addEventListener(&quot;pointerdown&quot;, (event) =&gt; {
+        summaryPointerHandled =
+          event.pointerType === &quot;mouse&quot; &amp;&amp; event.button === 0 &amp;&amp; !event.ctrlKey;
+        if (!summaryPointerHandled) {
+          return;
+        }
+        event.preventDefault();
+        summary.focus({ preventScroll: true });
+        picker.open = !picker.open;
+        mousePointerId = picker.open ? event.pointerId : null;
+      });
+      summary.addEventListener(&quot;click&quot;, (event) =&gt; {
+        if (summaryPointerHandled &amp;&amp; event.detail &gt; 0) {
+          event.preventDefault();
+        }
+      });
+      const choices = panels.map((panel, index) =&gt; {
+        const choice = document.createElement(&quot;button&quot;);
+        choice.type = &quot;button&quot;;
+        choice.className = &quot;cursor-interaction&quot;;
+        choice.textContent = panel.dataset.variant;
+        choice.addEventListener(&quot;click&quot;, () =&gt; {
+          select(index);
+          summary.focus();
+        });
+        choice.addEventListener(&quot;pointerup&quot;, (event) =&gt; {
+          if (
+            picker.open &amp;&amp;
+            event.pointerType === &quot;mouse&quot; &amp;&amp;
+            event.button === 0 &amp;&amp;
+            event.pointerId === mousePointerId
+          ) {
+            choice.click();
+          }
+        });
+        options.appendChild(choice);
+        return choice;
+      });
+      const select = (index) =&gt; {
+        const changed = active !== index;
+        active = index;
+        panels.forEach((panel, position) =&gt; {
+          panel.hidden = position !== active;
+          choices[position].setAttribute(
+            &quot;aria-current&quot;,
+            String(position === active),
+          );
+        });
+        root.dataset.activeVariant = panels[active].dataset.variant;
+        count.textContent = `${active + 1} / ${panels.length}`;
+        name.textContent = panels[active].dataset.variant;
+        picker.open = false;
+        mousePointerId = null;
+        if (changed) {
+          status.textContent = `${count.textContent}: ${name.textContent}`;
+        }
+      };
+      previous.addEventListener(&quot;click&quot;, () =&gt;
+        select((active + panels.length - 1) % panels.length),
+      );
+      next.addEventListener(&quot;click&quot;, () =&gt;
+        select((active + 1) % panels.length),
+      );
+      picker.addEventListener(&quot;keydown&quot;, (event) =&gt; {
+        if (event.key === &quot;Escape&quot; &amp;&amp; picker.open) {
+          event.preventDefault();
+          picker.open = false;
+          mousePointerId = null;
+          summary.focus();
+          return;
+        }
+        if (event.altKey || event.ctrlKey || event.metaKey) {
+          return;
+        }
+        const index = choices.indexOf(document.activeElement);
+        let nextIndex;
+        if (event.key === &quot;ArrowDown&quot;) {
+          nextIndex = index &lt; 0 ? active : (index + 1) % choices.length;
+        } else if (event.key === &quot;ArrowUp&quot;) {
+          nextIndex = index &lt; 0 ? active : (index + choices.length - 1) % choices.length;
+        } else if (picker.open &amp;&amp; event.key === &quot;Home&quot;) {
+          nextIndex = 0;
+        } else if (picker.open &amp;&amp; event.key === &quot;End&quot;) {
+          nextIndex = choices.length - 1;
+        } else {
+          return;
+        }
+        event.preventDefault();
+        picker.open = true;
+        choices[nextIndex].focus();
+      });
+      picker.addEventListener(&quot;focusout&quot;, (event) =&gt; {
+        if (!picker.contains(event.relatedTarget)) {
+          picker.open = false;
+          mousePointerId = null;
+        }
+      });
+      const dismiss = (event) =&gt; {
+        if (!summary.contains(event.target)) {
+          mousePointerId = null;
+        }
+        if (!picker.contains(event.target)) {
+          picker.open = false;
+        }
+      };
+      const endPointerSelection = () =&gt; {
+        mousePointerId = null;
+      };
+      const sizePicker = () =&gt; {
+        root.style.setProperty(
+          &quot;--viz-carousel-picker-height&quot;,
+          `${picker.open ? options.offsetHeight : 0}px`,
+        );
+      };
+      picker.addEventListener(&quot;toggle&quot;, sizePicker);
+      window.addEventListener(&quot;resize&quot;, sizePicker);
+      document.addEventListener(&quot;pointerdown&quot;, dismiss);
+      document.addEventListener(&quot;pointerup&quot;, endPointerSelection);
+      document.addEventListener(&quot;pointercancel&quot;, endPointerSelection);
+      window.addEventListener(&quot;blur&quot;, endPointerSelection);
+      window.addEventListener(
+        &quot;pagehide&quot;,
+        () =&gt; {
+          document.removeEventListener(&quot;pointerdown&quot;, dismiss);
+          document.removeEventListener(&quot;pointerup&quot;, endPointerSelection);
+          document.removeEventListener(&quot;pointercancel&quot;, endPointerSelection);
+          window.removeEventListener(&quot;blur&quot;, endPointerSelection);
+          window.removeEventListener(&quot;resize&quot;, sizePicker);
+        },
+        { once: true },
+      );
+      root.append(controls, status);
+      select(0);
+    }
+  })();
+&lt;/script&gt;
+&lt;script id=&quot;codex-visualization-lucide&quot; async src=&quot;https://unpkg.com/lucide@1.17.0/dist/umd/lucide.js&quot;&gt;&lt;/script&gt;
+&lt;script&gt;
+(() =&gt; {
+  const initialize = () =&gt; {
+    globalThis.lucide?.createIcons({ attrs: { width: 16, height: 16 } });
+  };
+  if (globalThis.lucide != null) {
+    initialize();
+    return;
+  }
+  document
+    .getElementById(&quot;codex-visualization-lucide&quot;)
+    ?.addEventListener(&quot;load&quot;, initialize, { once: true });
+})();
+&lt;/script&gt;
+
+&lt;/body&gt;
+&lt;/html&gt;
+"></iframe>
+<script>(() => {
+  const frame = document.getElementById("codex-visualization");
+  if (!(frame instanceof HTMLIFrameElement)) {
+    return;
+  }
+  let viewportHeight = globalThis.innerHeight;
+  const storageKey = `codex:visualization-widget-state-v2:${JSON.stringify([
+    globalThis.location.pathname,
+    globalThis.location.search,
+  ])}`;
+  const parseState = (serializedState) => {
+    if (
+      typeof serializedState !== "string" ||
+      new TextEncoder().encode(serializedState).length > 16 * 1024
+    ) {
+      throw new TypeError(
+        "Widget state must be a JSON object of at most 16 KiB",
+      );
+    }
+    /** @type {unknown} */
+    const state = JSON.parse(serializedState);
+    if (
+      state == null ||
+      typeof state !== "object" ||
+      Array.isArray(state) ||
+      ("imageIds" in state &&
+        (!Array.isArray(state.imageIds) || state.imageIds.length > 0))
+    ) {
+      throw new TypeError("Widget state must be a JSON object");
+    }
+    const storedState = { modelContent: null, privateContent: null, ...state };
+    const canonicalState = JSON.stringify(
+      storedState,
+      (_key, /** @type {unknown} */ value) => {
+        if (typeof value === "number" && !Number.isFinite(value)) {
+          throw new TypeError("Widget state must contain finite numbers");
+        }
+        return value;
+      },
+    );
+    if (new TextEncoder().encode(canonicalState).length > 16 * 1024) {
+      throw new TypeError(
+        "Widget state must be a JSON object of at most 16 KiB",
+      );
+    }
+    return storedState;
+  };
+  let storage = null;
+  let state = null;
+  try {
+    const localStorage = globalThis.localStorage;
+    const probeKey = `${storageKey}:probe`;
+    localStorage.setItem(probeKey, "1");
+    localStorage.removeItem(probeKey);
+    storage = localStorage;
+    const savedState = storage.getItem(storageKey);
+    if (savedState != null) {
+      try {
+        state = parseState(savedState);
+      } catch {
+        // Invalid saved state does not disable future writes.
+      }
+    }
+  } catch {
+    storage = null;
+  }
+  const initialGlobals = {
+    widgetState: state,
+    statePersistence: storage == null ? "none" : "local",
+  };
+
+  const channel = new MessageChannel();
+  channel.port1.addEventListener("message", (event) => {
+    const data = event.data;
+    if (typeof data !== "object" || data == null) {
+      return;
+    }
+    if (data.type === "widget-state-write") {
+      if (!Number.isSafeInteger(data.id) || data.id <= 0) {
+        return;
+      }
+      let ok = false;
+      try {
+        if (storage != null) {
+          const state = parseState(data.state);
+          storage.setItem(storageKey, JSON.stringify(state));
+          ok = true;
+        }
+      } catch {
+        // Storage denial, quota limits, and invalid state return a failed receipt.
+      }
+      channel.port1.postMessage({
+        type: "widget-state-result",
+        id: data.id,
+        ok,
+      });
+      return;
+    }
+    if (data.type === "height") {
+      const height = data.height;
+      if (
+        typeof height === "number" &&
+        Number.isFinite(height) &&
+        height >= 0 &&
+        height <= 10_000
+      ) {
+        frame.style.height = Math.ceil(height) + "px";
+      }
+      return;
+    }
+    if (data.type === "scroll-to") {
+      const top = data.top;
+      if (
+        typeof top === "number" &&
+        Number.isFinite(top) &&
+        top >= 0 &&
+        globalThis.navigator.userActivation?.isActive === true
+      ) {
+        globalThis.scrollTo({
+          top: Math.ceil(
+            globalThis.scrollY + frame.getBoundingClientRect().top + top,
+          ),
+        });
+      }
+      return;
+    }
+    if (data.type === "open-external") {
+      const rawHref = data.href;
+      if (typeof rawHref !== "string") {
+        return;
+      }
+      let href;
+      try {
+        const url = new URL(rawHref, document.baseURI);
+        if (url.protocol !== "https:") {
+          return;
+        }
+        href = url.href;
+      } catch {
+        return;
+      }
+      if (globalThis.navigator.userActivation?.isActive === true) {
+        const anchor = document.createElement("a");
+        anchor.href = href;
+        anchor.rel = "noopener noreferrer";
+        anchor.target = "_blank";
+        document.body.appendChild(anchor);
+        anchor.click();
+        anchor.remove();
+      }
+      return;
+    }
+    if (data.type === "follow-up") {
+      const prompt = data.prompt;
+      if (
+        typeof prompt !== "string" ||
+        globalThis.navigator.userActivation?.isActive !== true
+      ) {
+        return;
+      }
+      const title = data.title;
+      globalThis.prompt(typeof title === "string" ? title : prompt, prompt);
+    }
+  });
+  channel.port1.start();
+  const srcdoc = frame.dataset.srcdoc;
+  if (srcdoc == null) {
+    return;
+  }
+  globalThis.addEventListener("resize", () => {
+    const height = Number.parseFloat(frame.style.height);
+    if (!Number.isFinite(height) || height <= viewportHeight) {
+      frame.style.removeProperty("height");
+    }
+    viewportHeight = globalThis.innerHeight;
+    channel.port1.postMessage({ type: "measure" });
+  });
+  frame.addEventListener(
+    "load",
+    () => {
+      frame.contentWindow?.postMessage(
+        { type: "codex-visualization-initialize" },
+        "*",
+        [channel.port2],
+      );
+    },
+    { once: true },
+  );
+  // Match the trusted bootstrap element, not the same text in an authored title.
+  frame.srcdoc = srcdoc.replace(
+    '<script type="application/json" id="codex-visualization-widget-state">__CODEX_VISUALIZATION_WIDGET_STATE__<\/script>',
+    () =>
+      '<script type="application/json" id="codex-visualization-widget-state">' +
+      JSON.stringify(initialGlobals).replaceAll("<", "\\u003c") +
+      "<\/script>",
+  );
+  delete frame.dataset.srcdoc;
+})();
+</script>
+</body>
+</html>
