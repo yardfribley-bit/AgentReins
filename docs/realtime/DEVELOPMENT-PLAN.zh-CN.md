@@ -4,7 +4,7 @@
 
 ## 1. 开发依据与目标
 
-交互基准：[生命周期原型](../prototypes/lifecycle/index.html)，原型版本 `2044f90`；技术依据：[产品技术设计](PRODUCT-TECHNICAL-DESIGN.zh-CN.md)、[全生命周期细化](LIFECYCLE-DETAILED-DESIGN.zh-CN.md)。测试合同：[测试与验收文档](TEST-PLAN.zh-CN.md)。
+交互基准：[生命周期原型](../prototypes/lifecycle/index.html)，原型版本 `2044f90`；技术依据：[产品技术设计](PRODUCT-TECHNICAL-DESIGN.zh-CN.md)、[全生命周期细化](LIFECYCLE-DETAILED-DESIGN.zh-CN.md)。测试合同：[测试与验收文档](TEST-PLAN.zh-CN.md)。本次执行以测试方案v2及其逐项用例、连续验收手册为准；测试/开发不得自行用“不支持”豁免核心需求。
 
 目标是将原型的三视图、任务入口、动态关系图和专用详情接到同一条真实任务证据链。用户能找到原始需求、判断当前进展、核对实际执行、打开产物。原型已有演示不计为生产能力已完成。
 
