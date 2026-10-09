@@ -12,6 +12,7 @@ struct RealtimeWorkspacePayload: Encodable {
     let publishedAt: Date
     let truncated: Bool
     var collectedCount: Int = 0
+    var contexts: [RealtimeContextExchange] = []
 }
 struct RealtimeCollectedRecord: Encodable {
     let id: String, agent: String, source: String, kind: String, op: String, summary: String, preview: String

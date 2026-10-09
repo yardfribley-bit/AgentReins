@@ -124,7 +124,7 @@ final class RealtimeWorkspaceTests: XCTestCase {
     @MainActor func testProductionWebKitRendersAndEscapesEvidence() async throws {
         let bad = "<img src=x onerror='window.hacked=1'>"
         let evidence = [event("call"), event("result", result: "{\"exit_code\":1}", seconds: 2), GuardEvent(kind: "model", ruleId: "fixture", path: "/project", command: nil, agent: "workbuddy", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "session", turnId: "one", userIntent: bad, modelPrompt: bad)]
-        let payload = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.tasks(events: evidence, since: start), collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: start, truncated: false)
+        let payload = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.tasks(events: evidence, since: start), collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: start, truncated: false, contexts: RealtimeContextProjector.assemble(evidence.compactMap(RealtimeContextProjector.parse), events: evidence))
         _ = NSApplication.shared
         let host = NSHostingView(rootView: RealtimeWorkspaceView(payload: payload))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1536, height: 1100), styleMask: [.borderless], backing: .buffered, defer: false)
@@ -139,6 +139,10 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let browser = try XCTUnwrap(web)
         let title = try await browser.evaluateJavaScript("document.querySelector('.task-head h1').textContent") as? String
         XCTAssertEqual(title, bad)
+        let contextText = try await browser.evaluateJavaScript("document.getElementById('context-content').textContent") as? String
+        XCTAssertTrue(contextText?.contains(bad) ?? false)
+        let contextVisible = try await browser.evaluateJavaScript("!document.getElementById('context-panel').hidden") as? Bool
+        XCTAssertEqual(contextVisible, true)
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool
         XCTAssertEqual(hacked, false)
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=results]').click()")

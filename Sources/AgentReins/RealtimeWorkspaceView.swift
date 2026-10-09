@@ -56,6 +56,10 @@ final class RealtimeWorkspaceState: ObservableObject {
     private var evidence: [UUID: GuardEvent] = [:]
     private var sizes: [UUID: Int] = [:]
     private var retainedBytes = 0
+    private let contextQueue = DispatchQueue(label: "com.agentreins.context-presentation", qos: .utility)
+    private var parsedContexts: [UUID: RealtimeContextExchange] = [:]
+    private var parsingContexts = Set<UUID>()
+    private var contextInputs: [UUID: String] = [:]
     private var registry = CollectionProcessRegistry()
     func updateProcesses(_ processes: [ProcessSnapshotRecord]) { registry.update(processes, now: Date()); revision += 1 }
     private let byteBudget: Int
@@ -73,6 +77,23 @@ final class RealtimeWorkspaceState: ObservableObject {
                 guard evidence.count > 6000 || retainedBytes > byteBudget else { break }
                 retainedBytes -= sizes.removeValue(forKey: event.id) ?? 0
                 evidence.removeValue(forKey: event.id); truncated = true
+            }
+        }
+        parsedContexts = parsedContexts.filter { evidence[$0.key] != nil }
+        contextInputs = contextInputs.filter { evidence[$0.key] != nil }
+        for event in evidence.values where event.kind == "model" && ["prompt", "network_prompt"].contains(event.op) {
+            guard let body = event.modelPrompt, contextInputs[event.id] != body, !parsingContexts.contains(event.id) else { continue }
+            parsingContexts.insert(event.id)
+            contextQueue.async { [weak self] in
+                let parsed = RealtimeContextProjector.parse(event)
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.parsingContexts.remove(event.id)
+                    guard self.evidence[event.id] != nil else { return }
+                    self.contextInputs[event.id] = body
+                    self.parsedContexts[event.id] = parsed
+                    self.revision += 1
+                }
             }
         }
         revision += 1
@@ -98,6 +119,6 @@ final class RealtimeWorkspaceState: ObservableObject {
                     agent: agent, name: CollectionProcessNode(process: process, firstSeen: since, lastSeen: Date(), active: true).role.title,
                     executable: process.executablePath ?? "未采集", command: ProcessArgumentRedactor.redact(process.command))
             }, health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
-            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count)
+            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: RealtimeContextProjector.assemble(Array(parsedContexts.values), events: Array(evidence.values)))
     }
 }

@@ -129,6 +129,7 @@ enum WorkBuddyNetworkEvidence {
                 action: record.responseComplete ? "received_complete" : "received_partial",
                 sessionId: session, traceId: "workbuddy-http:\(identity)",
                 turnId: identity, userIntent: intent,
+                modelDecision: isModelRoute ? parsed.toolInstructions : nil,
                 modelReasoning: isModelRoute ? parsed.reasoning : nil,
                 modelResponse: isModelRoute ? parsed.text : String(decoding: responseData, as: UTF8.self),
                 model: isModelRoute ? parsed.model ?? model : nil,
@@ -161,6 +162,7 @@ enum WorkBuddyNetworkEvidence {
     private struct ParsedResponse {
         var text: String?
         var reasoning: String?
+        var toolInstructions: String?
         var model: String?
         var inputTokens: Int?
         var outputTokens: Int?
@@ -177,11 +179,21 @@ enum WorkBuddyNetworkEvidence {
             return try? JSONSerialization.jsonObject(with: bytes) as? [String: Any]
         }
         var output: [String] = [], reasoning: [String] = []
+        var calls: [String: [String: String]] = [:]
         for payload in payloads {
             result.model = payload["model"] as? String ?? result.model
             if let choices = payload["choices"] as? [[String: Any]] {
-                for choice in choices {
+                for (choiceIndex, choice) in choices.enumerated() {
                     let value = choice["delta"] as? [String: Any] ?? choice["message"] as? [String: Any] ?? [:]
+                    for (position, call) in (value["tool_calls"] as? [[String: Any]] ?? []).enumerated() {
+                        let key = "\(int(choice["index"]) ?? choiceIndex):\(int(call["index"]) ?? position)"
+                        var combined = calls[key] ?? [:]
+                        if let id = call["id"] as? String { combined["id"] = id }
+                        let function = call["function"] as? [String: Any] ?? [:]
+                        if let name = function["name"] as? String { combined["name", default: ""] += name }
+                        if let arguments = function["arguments"] as? String { combined["arguments", default: ""] += arguments }
+                        calls[key] = combined
+                    }
                     if let chunk = value["content"] as? String { output.append(chunk) }
                     if let chunk = value["reasoning_content"] as? String ?? value["reasoning"] as? String {
                         reasoning.append(chunk)
@@ -197,6 +209,7 @@ enum WorkBuddyNetworkEvidence {
                 result.reasoningTokens = int(completion?["reasoning_tokens"] ?? usage["completion_thinking_tokens"])
             }
         }
+        if !calls.isEmpty { result.toolInstructions = json(["tool_calls": calls.keys.sorted().compactMap { calls[$0] }]) }
         result.text = output.joined().nilIfBlank
         result.reasoning = reasoning.joined().nilIfBlank
         return result

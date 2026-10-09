@@ -4,6 +4,19 @@ import XCTest
 @testable import AgentReins
 
 final class WorkBuddyNetworkEvidenceTests: XCTestCase {
+    func testStreamingToolInstructionsArePreservedWithoutInventingExecution() throws {
+        let request = Data("{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"read file\"}]}".utf8)
+        let response = Data(("data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-one\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n" + "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"/tmp/a\\\"}\"}}]}}]}\n").utf8)
+        let events = WorkBuddyNetworkEvidence.project(captureRecord(request: request, response: response))
+        let instruction = try XCTUnwrap(events.last?.modelDecision)
+        let decoded = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(instruction.utf8)) as? [String: Any])
+        let call = try XCTUnwrap((decoded["tool_calls"] as? [[String: String]])?.first)
+        XCTAssertEqual(call["name"], "read_file"); XCTAssertEqual(call["id"], "call-one")
+        let arguments = try XCTUnwrap(call["arguments"])
+        let object = try XCTUnwrap(JSONSerialization.jsonObject(with: Data(arguments.utf8)) as? [String: String])
+        XCTAssertEqual(object["path"], "/tmp/a")
+        XCTAssertFalse(events.contains { $0.kind == "tool" })
+    }
     func testDefaultProxyArgumentsAreLoopbackOnlyAndUseBundledAddon() throws {
         let addon = URL(fileURLWithPath: "/Applications/AgentReins.app/Contents/Resources/workbuddy_network_capture.py")
         let arguments = WorkBuddyNetworkCapture.proxyArguments(addon: addon)
