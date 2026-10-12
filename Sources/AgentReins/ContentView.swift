@@ -20,7 +20,7 @@ struct ContentView: View {
             if !fileGuard.running { fileGuard.start() }
             if !processGuard.running { processGuard.start() }
         }
-        .onReceive(eventStore.$revision) { _ in realtime.ingest(eventStore.events) }
+        .onReceive(eventStore.liveEvidence) { realtime.ingest($0) }
         .onReceive(processGuard.$processInventory) { realtime.updateProcesses($0) }
         .onReceive(healthTimer) { _ in eventStore.refreshCollectorHealth(publish: true); realtime.refreshArtifacts() }
     }

@@ -153,11 +153,14 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertEqual(payload.processes.last?.executable, "/usr/local/bin/node")
         XCTAssertEqual(payload.processes.last?.command, ProcessArgumentRedactor.redact(child.command))
     }
-    @MainActor func testBoundedLiveStateReportsMissingCoverage() {
+    @MainActor func testHotCachePressureDoesNotDiscardTaskEvidence() {
         let state = RealtimeWorkspaceState(byteBudget: 1024)
-        let large = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "codex", op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: "s", turnId: "t", modelPrompt: String(repeating: "a", count: 3000))
+        let large = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "codex", op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: "s", turnId: "t", userIntent: "保留原始需求", modelPrompt: String(repeating: "a", count: 3000))
         state.ingest([large])
-        XCTAssertTrue(state.payload(processes: [], health: [], observing: true, error: nil).truncated)
+        let payload = state.payload(processes: [], health: [], observing: true, error: nil)
+        XCTAssertFalse(payload.truncated)
+        XCTAssertEqual(payload.collectedCount, 1)
+        XCTAssertEqual(payload.tasks.first?.requestEventID, large.id.uuidString)
     }
     @MainActor func testOlderDatabaseReplayDoesNotUndoRestoredLiveAttribution() throws {
         let url = FileManager.default.temporaryDirectory.appendingPathComponent("live-repair-\(UUID()).json")
@@ -192,7 +195,8 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let payload = state.payload(processes:[],health:[],observing:true,error:nil)
         let task = try XCTUnwrap(payload.tasks.first { $0.turn == "t" })
         XCTAssertEqual(task.lifecycleStatus,"stopped");XCTAssertEqual(task.nativeEndMessage,"安装尚未完成")
-        XCTAssertFalse(payload.tasks.contains { $0.session == "internal" });XCTAssertTrue(payload.truncated)
+        XCTAssertFalse(payload.truncated)
+        XCTAssertEqual(payload.collectedCount, 4)
     }
     @MainActor func testActualWorkBuddyFieldSnapshot() async throws {
         guard let source = ProcessInfo.processInfo.environment["AGENTREINS_FIELD_CHECKPOINT"],

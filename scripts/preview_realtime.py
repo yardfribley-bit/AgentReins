@@ -2,6 +2,8 @@
 """Read-only localhost preview of the native app's live projection."""
 import argparse
 import gzip
+import hashlib
+from urllib.parse import urlparse, parse_qs
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -20,6 +22,14 @@ def main():
         def do_GET(self):
             route=self.path.split('?',1)[0]
             name=route.lstrip('/') or 'index.html'
+            if route=='/task.json':
+                task_id=parse_qs(urlparse(self.path).query).get('id',[''])[0]
+                if not task_id or len(task_id)>4096:self.send_error(400);return
+                name=hashlib.sha256(task_id.encode()).hexdigest()+'.json'
+                file=args.payload.parent/'tasks'/name
+                try:data=gzip.compress(file.read_bytes(),compresslevel=3)
+                except OSError:self.send_error(404,'Task detail unavailable');return
+                self.respond(data,'application/json; charset=utf-8',compressed=True);return
             if route=='/live-payload.json':
                 file=args.payload
                 mime='application/json; charset=utf-8'

@@ -29,7 +29,7 @@ struct RuleWrapper: Decodable {
 }
 
 /// 监控事件（文件层 / 命令层共用，用于 UI 统一时间线展示）。
-struct GuardEvent: Identifiable, Codable, Sendable {
+struct GuardEvent: Identifiable, Codable, Sendable, Hashable {
     let id: UUID
     let kind: String          // "file" | "cmd"
     let ruleId: String

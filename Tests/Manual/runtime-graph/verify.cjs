@@ -52,3 +52,12 @@ const gitExternal=graph.externalServices({cards:[{id:'call:git',call:'git',sourc
 assert.equal(gitExternal.length,1);assert.equal(gitExternal[0].title,'GitHub · 推送代码');assert.equal(gitExternal[0].id,'call:git');assert.deepEqual(gitExternal[0].eventIDs,['git-result']);
 assert.equal(graph.externalServices({cards:[{execution:{command:'python3 -c "print(\\"git push\\")"'}}]}).length,0);
 console.log('PASS external services: actual Git remote actions and original evidence, local Git operations excluded');
+
+const childTask={...task,originalRequest:null,subagentPath:'/root/checkpoint_audit',parentSession:'parent-session'};
+for(const build of [graph.build,graph.buildArchitecture,graph.buildRelations]){
+ const child=build({task:childTask,contexts:[]});
+ assert.equal(child.objects.find(o=>o.key==='user').data.subagentPath,childTask.subagentPath);
+ assert.equal(child.nodes.find(n=>n.key==='user').phase,'recorded');
+ assert(!child.nodes.find(n=>n.key==='user').title.includes('原始任务'));
+}
+console.log('PASS subagent origin: explicit delegation identity, no fabricated human request, both graph modes');

@@ -1,4 +1,5 @@
 import Foundation
+import Combine
 
 enum EventStoreReadError: LocalizedError {
     case databaseUnavailable
@@ -25,6 +26,7 @@ final class EventStore: ObservableObject {
     /// each derived array separately caused 4-7 full dashboard redraws for one
     /// collector batch.
     @Published private(set) var revision: UInt64 = 0
+    let liveEvidence = PassthroughSubject<[GuardEvent], Never>()
     private(set) var events: [GuardEvent] = []
     private(set) var incidents: [SecurityIncident] = []
     private(set) var sessions: [AgentSessionSnapshot] = []
@@ -54,6 +56,7 @@ final class EventStore: ObservableObject {
     private let historyMaintenanceQueue = DispatchQueue(label: "com.agentspec.eventstore.history-maintenance", qos: .background)
     private let taskSearchMaintenanceQueue = DispatchQueue(label: "com.agentspec.eventstore.task-search-maintenance", qos: .background)
     private let taskSearchReadQueue = DispatchQueue(label: "com.agentspec.eventstore.task-search-read", qos: .userInitiated)
+    private let realtimeOnly: Bool
     private let projectionWorker = EventDerivedProjectionWorker()
     private let maximumEvents = 500
     private var projectionGeneration: UInt64 = 0
@@ -65,7 +68,7 @@ final class EventStore: ObservableObject {
     private var taskSearchTask: Task<Void, Never>?
 
     init(fileURL: URL = EventStore.defaultURL(), realtimeOnly: Bool = false) {
-        self.fileURL = fileURL
+        self.fileURL = fileURL; self.realtimeOnly = realtimeOnly
         encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .iso8601
         decoder = JSONDecoder()
@@ -635,6 +638,7 @@ final class EventStore: ObservableObject {
         var snapshot = incoming.sorted { $0.ts > $1.ts }
         if snapshot.count > maximumEvents { snapshot.removeLast(snapshot.count - maximumEvents) }
         events = snapshot
+        if !evidence.isEmpty { liveEvidence.send(evidence) }
         scheduleDerivedProjection(events: snapshot)
         guard persist else { return }
         if let database, let evidenceBuffer {
@@ -717,6 +721,7 @@ final class EventStore: ObservableObject {
     }
 
     private func scheduleDerivedProjection(events: [GuardEvent]) {
+        guard !realtimeOnly else { return }
         projectionGeneration &+= 1
         let request = EventDerivedProjectionRequest(generation: projectionGeneration, events: events)
         Task { [weak self] in

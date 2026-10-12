@@ -1,7 +1,7 @@
 import CryptoKit
 import Foundation
 
-struct RealtimeContextBlock: Encodable {
+struct RealtimeContextBlock: Equatable, Encodable {
     let id: String, role: String, label: String, content: String, fingerprint: String
     let characters: Int
     let callID: String?
@@ -9,7 +9,7 @@ struct RealtimeContextBlock: Encodable {
     var toolEvidenceIDs: [String] = []
     var containsCurrentInput = false
 }
-struct RealtimeContextExchange: Encodable {
+struct RealtimeContextExchange: Equatable, Encodable {
     let id: String, agent: String, session: String, turn: String, source: String, coverage: String
     let timestamp: Date
     let trace: String?

@@ -4,10 +4,11 @@ PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$PROJECT_DIR"
 export CLANG_MODULE_CACHE_PATH="${CLANG_MODULE_CACHE_PATH:-/private/tmp/agentreins-clang-cache}"
 export SWIFTPM_MODULECACHE_OVERRIDE="${SWIFTPM_MODULECACHE_OVERRIDE:-/private/tmp/agentreins-swift-cache}"
-swift build --disable-sandbox -j 2 --product agentreins_v2
-swift build --disable-sandbox -j 2 --product AgentReinsHook
-swift build --disable-sandbox -j 2 --product AgentReinsNativeHost
-BIN_DIR="$(swift build --disable-sandbox --show-bin-path)"
+BUILD_CONFIGURATION="${AGENTREINS_BUILD_CONFIGURATION:-release}"
+swift build --configuration "$BUILD_CONFIGURATION" --disable-sandbox -j 2 --product agentreins_v2
+swift build --configuration "$BUILD_CONFIGURATION" --disable-sandbox -j 2 --product AgentReinsHook
+swift build --configuration "$BUILD_CONFIGURATION" --disable-sandbox -j 2 --product AgentReinsNativeHost
+BIN_DIR="$(swift build --configuration "$BUILD_CONFIGURATION" --disable-sandbox --show-bin-path)"
 APP_BUNDLE="$PROJECT_DIR/.build/realtime-preview/AgentReins Realtime.app"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
 cp "$BIN_DIR/agentreins_v2" "$APP_BUNDLE/Contents/MacOS/agentreins_v2"

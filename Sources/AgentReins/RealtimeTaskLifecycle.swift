@@ -15,18 +15,18 @@ struct RealtimeTaskLifecycle: Encodable {
     let currentStageID: String, phase: String
     let stages: [RealtimeLifecycleStage]
 }
-struct RealtimeOutputChunk: Encodable {
+struct RealtimeOutputChunk: Equatable, Encodable {
     let channel: String, text: String, timestamp: Date, eventID: String
     let truncated: Bool
 }
-struct RealtimeExecutionDetail: Encodable {
+struct RealtimeExecutionDetail: Equatable, Encodable {
     let command: String?, cwd: String?, stdout: String?, stderr: String?, exitCode: Int?
     let processID: Int32?, executionID: String?, status: String
     let startAt: Date?, endAt: Date?, outputComplete: Bool, basis: String
     let chunks: [RealtimeOutputChunk]
     let commandTruncated: Bool, stdoutTruncated: Bool, stderrTruncated: Bool
 }
-struct RealtimeResourceDetail: Encodable {
+struct RealtimeResourceDetail: Equatable, Encodable {
     let path: String?, url: String?, method: String?, statusCode: Int?, domain: String?
     let remoteIP: String?, remotePort: Int?, contentType: String?
     let before: String?, after: String?, diff: String?

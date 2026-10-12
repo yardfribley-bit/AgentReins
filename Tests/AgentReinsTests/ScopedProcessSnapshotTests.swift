@@ -3,6 +3,13 @@ import XCTest
 @testable import AgentReins
 
 final class ScopedProcessSnapshotTests: XCTestCase {
+    func testNoTargetsIsValidEmptySnapshotNotWholeMachineFallback() {
+        let provider = ResilientProcessSnapshotProvider(agentMarkers: ["no-such-agent-idle-test-7342"])
+        XCTAssertTrue(provider.snapshot().isEmpty)
+        XCTAssertFalse(provider.snapshotFailed)
+        XCTAssertTrue(provider.snapshot().isEmpty)
+    }
+
     func testInvalidationDiscoversNewRootWhileExistingRootIsAlive() throws {
         let first = Process()
         first.executableURL = URL(fileURLWithPath: "/bin/sleep")

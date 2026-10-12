@@ -146,12 +146,12 @@ final class ProcessObservationCoordinator: @unchecked Sendable {
                 let memoryChanged = distance(previous?.residentBytes, sample.residentBytes) >= 4 * 1024 * 1024
                 let cpuChanged = distance(previous?.cpuTimeNanoseconds, sample.cpuTimeNanoseconds) >= 100_000_000
                 let coverageChanged = previous?.resourceStatus != sample.resourceStatus || previous?.fileStatus != sample.fileStatus || previous?.unreadableDescriptors != sample.unreadableDescriptors || previous?.truncated != sample.truncated
-                if trigger != nil || isNew || fileChanged || memoryChanged || cpuChanged || coverageChanged || now.timeIntervalSince(arm.lastPublished) >= 30 {
+                if trigger != nil || isNew || fileChanged || memoryChanged || cpuChanged || coverageChanged  {
                     events.append(event(process, operation: "process_observation", now: now, sample: sample, trigger: trigger))
                     arm.lastSample = sample
                     arm.lastPublished = now
                 }
-            } else if trigger != nil || isNew || now.timeIntervalSince(arm.lastPublished) >= 30 {
+            } else if trigger != nil || isNew || arm.lastPublished == .distantPast {
                 events.append(event(process, operation: "process_observation_unavailable", now: now, sample: nil, trigger: trigger))
                 arm.lastPublished = now
             }

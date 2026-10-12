@@ -51,6 +51,24 @@ final class CodexRealtimeIncrementalTests: XCTestCase {
         try stream.append(row("event_msg", ["type": "user_message", "message": "原始需求 A", "turn_id": "one"], second: 2))
     }
 
+    func testInstallationBaselineSurvivesRestartBeforeFirstAppend() throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let log = root.appendingPathComponent("session.jsonl"), cursor = root.appendingPathComponent("cursor.json")
+        let old = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"pre-install\"}}\n"
+        try Data(old.utf8).write(to: log)
+        let offsets = RealtimeLogBaseline.offsets(root: root)
+        let initial = CodexSight.restoreLiveCursorCheckpoint(root: root, baselineOffsets: offsets, from: nil)
+        try CodexSight.saveLiveCursorCheckpoint(sizes: initial.sizes, states: initial.states, to: cursor)
+        let added = "{\"type\":\"event_msg\",\"payload\":{\"type\":\"user_message\",\"message\":\"new while stopped\"}}\n"
+        try Data((old + added).utf8).write(to: log)
+        let restored = CodexSight.restoreLiveCursorCheckpoint(root: root, baselineOffsets: RealtimeLogBaseline.offsets(root: root), from: cursor)
+        XCTAssertEqual(restored.sizes.values.sorted(), [UInt64(old.utf8.count)])
+        let batch = CodexSight.readLiveEvents(root: root.path, previousSizes: restored.sizes, baselineOtherStreams: false, states: restored.states)
+        XCTAssertEqual(batch.raw.first?.payload, Data(added.utf8))
+    }
+
     func testLiveCursorRestoresIdentityWithoutReadingOldMessagesAgain() throws {
         var source = try stream(); try begin(&source); _ = source.poll()
         let checkpoint = source.root.appendingPathComponent("cursor.json")

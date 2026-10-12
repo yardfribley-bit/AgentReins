@@ -26,6 +26,7 @@ final class WorkBuddySight: ObservableObject {
     private var fileSizes: [String: UInt64] = [:]
     struct ParserState: Codable {
         var offset: UInt64 = 0
+        var fingerprint: String? = nil
         var lastIntent: [String: String] = [:]
         var lastReasoning: [String: String] = [:]
         var currentTurn: [String: String] = [:]
@@ -55,14 +56,41 @@ final class WorkBuddySight: ObservableObject {
             realtimeSince = Date()
             let id = UUID()
             startupID = id
-            let root = rootURL
+            let root = rootURL, database = evidenceDatabase, startedAt = realtimeSince!
             queue.async { [weak self] in
                 let offsets = RealtimeLogBaseline.offsets(root: root)
+                let saved = (try? database?.parserStates(source: "workbuddy-live")) ?? [:]
+                let marker = root.path + "/.agentreins-activation"
+                let since = saved[marker].flatMap { try? JSONDecoder().decode(Date.self, from: $0) } ?? startedAt
+                var states = offsets.mapValues { size in var state = ParserState(); state.offset = size; return state }
+                for (path, size) in offsets {
+                    let identity = Self.fileIdentity(URL(fileURLWithPath: path))
+                    if let data = saved[path], let state = try? JSONDecoder().decode(ParserState.self, from: data),
+                       state.offset <= size, state.fingerprint == identity, identity != nil { states[path] = state }
+                    states[path]?.fingerprint = identity
+                }
+                do {
+                    guard let database else { throw CocoaError(.fileWriteUnknown) }
+                    var durable = try states.map { (source: "workbuddy-live", stream: $0.key, state: try JSONEncoder().encode($0.value)) }
+                    durable.append((source: "workbuddy-live", stream: marker, state: try JSONEncoder().encode(since)))
+                    try database.persistCollected(raw: [], events: [], checkpoints: [], parserStates: durable)
+                } catch {
+                    DispatchQueue.main.async {
+                        guard let self, self.startupID == id else { return }
+                        self.startupID = nil; self.collectionFailures += 1
+                        database?.enqueueHealth(CollectorHealthRecord(source: "workbuddy", state: .failed,
+                            lastSuccess: nil, lagSeconds: nil, accepted: 0, malformed: 1, dropped: 0,
+                            detail: "Live installation boundary could not be saved; collection has not started"))
+                    }
+                    return
+                }
+                let restoredStates = states
                 DispatchQueue.main.async {
                     guard let self, self.startupID == id else { return }
                     self.startupID = nil
-                    self.fileSizes = offsets
-                self.parserStates = offsets.mapValues { size in var state = ParserState(); state.offset = size; return state }
+                    self.realtimeSince = since
+                    self.fileSizes = restoredStates.mapValues(\.offset)
+                    self.parserStates = restoredStates
                     self.activate(realtimeOnly: true)
                 }
             }
@@ -149,34 +177,41 @@ final class WorkBuddySight: ObservableObject {
         let inbox = hookRoot
         let projects = rootURL
         let since = realtimeSince
+        let cursorSource = since == nil ? "workbuddy" : "workbuddy-live"
         lastPoll = Date()
         queue.async { [weak self] in
-            let hooks = WorkBuddyHookInbox.read(root: inbox, projects: projects).filter { since == nil || $0.event.ts >= since! }
-            if !hooks.isEmpty {
+            // Drain every decoded envelope only after durable acknowledgement.
+            // Filtering before acknowledgement stranded pre-start files forever
+            // and repeatedly decoded them at every live wakeup.
+            let hooks = WorkBuddyHookInbox.read(root: inbox, projects: projects)
+            let liveHooks = hooks.filter { since == nil || $0.event.ts >= since! }
+            if !liveHooks.isEmpty {
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.timer != nil else { return }
-                    self.onHookSignals?(hooks.map(\.event))
+                    self.onHookSignals?(liveHooks.map(\.event))
                 }
             }
-            let hinted = Array(Set(targets + hooks.compactMap(\.transcript)))
+            let hinted = Array(Set(targets + liveHooks.compactMap(\.transcript)))
             let batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
                                               previousSizes: previousSizes, previousStates: previousStates,
                                               targets: hinted)
-            let collectedEvents = (hooks.map(\.event) + batch.events).filter { since == nil || $0.ts >= since! }
+            let collectedEvents = (liveHooks.map(\.event) + batch.events).filter { since == nil || $0.ts >= since! }
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
             var rawWriteFailed = false
             do {
                 guard let database else { throw CocoaError(.fileWriteUnknown) }
                 let states = try batch.states.map { path, state in
-                    (source: "workbuddy", stream: path, state: try JSONEncoder().encode(state))
+                    (source: cursorSource, stream: path, state: try JSONEncoder().encode(state))
                 }
                 let checkpoints = batch.states.map { path, state in
-                    SourceCheckpoint(source: "workbuddy", stream: path,
+                    SourceCheckpoint(source: cursorSource, stream: path,
                         offset: Int64(state.offset), fingerprint: nil, updatedAt: Date())
                 }
-                try database.persistCollected(raw: hooks.map(\.raw) + batch.raw, events: collectedEvents,
-                    checkpoints: checkpoints, parserStates: states)
+                if !liveHooks.isEmpty || !batch.raw.isEmpty || !collectedEvents.isEmpty || !checkpoints.isEmpty {
+                    try database.persistCollected(raw: liveHooks.map(\.raw) + batch.raw, events: collectedEvents,
+                        checkpoints: checkpoints, parserStates: states)
+                }
                 // Only acknowledge our own spool after the evidence transaction succeeds.
                 for hook in hooks { try? FileManager.default.removeItem(at: hook.file) }
             } catch { rawWriteFailed = true }
@@ -187,13 +222,13 @@ final class WorkBuddySight: ObservableObject {
                 for path in batch.states.keys { self.watch(URL(fileURLWithPath: path)) }
                 // A hook may arrive just before the transcript is created or appended.
                 // Retry targeted paths; do not wait for the low-frequency scan.
-                if !rawWriteFailed && !hooks.isEmpty {
-                    self.pendingTargets.formUnion(hooks.compactMap(\.transcript))
+                if !rawWriteFailed && !liveHooks.isEmpty {
+                    self.pendingTargets.formUnion(liveHooks.compactMap(\.transcript))
                     DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                        self?.requestCollection(targets: hooks.compactMap(\.transcript))
+                        self?.requestCollection(targets: liveHooks.compactMap(\.transcript))
                     }
                     DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
-                        self?.requestCollection(targets: hooks.compactMap(\.transcript))
+                        self?.requestCollection(targets: liveHooks.compactMap(\.transcript))
                     }
                 }
                 if self.pendingWakeup { self.requestCollection() }
@@ -233,7 +268,11 @@ final class WorkBuddySight: ObservableObject {
         }
     }
 
-    private nonisolated static func readRecentEvents(root: String, changedAfter: Date,
+    private nonisolated static func fileIdentity(_ url: URL) -> String? {
+        (try? url.resourceValues(forKeys: [.fileResourceIdentifierKey]))?.fileResourceIdentifier.map { String(describing: $0) }
+    }
+
+    nonisolated static func readRecentEvents(root: String, changedAfter: Date,
                                                      previousSizes: [String: UInt64], previousStates: [String: ParserState], targets: [URL] = [])
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int, states: [String: ParserState]) {
         let fm = FileManager.default
@@ -260,7 +299,7 @@ final class WorkBuddySight: ObservableObject {
         // Latest conversation seeds startup; subsequent sweeps cover concurrent sessions.
         let selected = files.filter { previousSizes[$0.0.path] != $0.2 }.sorted { $0.1 > $1.1 }.prefix(!targets.isEmpty || !previousStates.isEmpty ? 16 : 1)
         let raw = selected.compactMap { RawLogCapture.capture(url: $0.0, source: "workbuddy",
-            previousOffset: previousSizes[$0.0.path], maximumInitialBytes: 512 * 1_024) }
+            previousOffset: previousSizes[$0.0.path], maximumInitialBytes: UInt64.max) }
         var sizes = Dictionary(uniqueKeysWithValues: selected.map { ($0.0.path, $0.2) })
         for record in raw { sizes[record.stream] = RawLogCapture.safeCheckpoint(for: record) }
         var states: [String: ParserState] = [:]
@@ -270,14 +309,14 @@ final class WorkBuddySight: ObservableObject {
             var state = previousStates[url.path] ?? ParserState()
             if state.offset > size { state = ParserState() }
             let emitFrom = previousStates[url.path] == nil
-                ? (previousSizes[url.path] ?? (size > 512 * 1_024 ? size - 512 * 1_024 : 0)) : state.offset
+                ? (previousSizes[url.path] ?? 0) : state.offset
             if previousStates[url.path] == nil {
-                // One-time upgrade seeding is bounded; never scan an entire old
-                // session just to initialize the live parser. Unknown old turns
-                // remain unknown until a user message supplies their identity.
-                state.offset = emitFrom > 512 * 1_024 ? emitFrom - 512 * 1_024 : 0
+                // Existing transcript bodies belong to SessionLens. Start exactly
+                // at the durable live boundary; never seed from old messages.
+                state.offset = emitFrom
             }
             events += readIncremental(url, state: &state, emitFrom: emitFrom, through: UInt64(captured.offsetEnd))
+            state.fingerprint = fileIdentity(url)
             states[url.path] = state
             sizes[url.path] = state.offset
         }

@@ -20,6 +20,22 @@ final class ProcessObservationCoordinatorTests: XCTestCase {
               birthIdentity: birth, executablePath: "/test/node")
     }
 
+    func testIdleSamplesDoNotCreateHeartbeatEvidence() {
+        let coordinator = ProcessObservationCoordinator(sampler: Sampler(resident: 4096))
+        let now = Date()
+        _ = coordinator.collect(processes: [record()], now: now, includeSamples: false)
+        for second in stride(from: 5, through: 120, by: 5) {
+            XCTAssertTrue(coordinator.collect(processes: [record()], now: now.addingTimeInterval(Double(second))).isEmpty)
+        }
+        XCTAssertEqual(coordinator.collect(processes: [], now: now.addingTimeInterval(121), includeSamples: false).map(\.op), ["process_watch_detached"])
+    }
+    func testOnlySupportedTargetOwnersAreAccepted() {
+        for target in ["codex", "WorkBuddy", "chatgpt"] { XCTAssertTrue(ProcessGuard.isTargetAgent(target)) }
+        XCTAssertEqual(ProcessGuard.targetExecutableOwner("/usr/local/bin/codex --version"), "codex")
+        XCTAssertNil(ProcessGuard.targetExecutableOwner("/bin/zsh -c cat /tmp/codex/file"))
+        XCTAssertNil(ProcessGuard.targetExecutableOwner("python /tmp/workbuddy/script.py"))
+        for other in ["cursor", "chrome", "claude-code", "", "node"] { XCTAssertFalse(ProcessGuard.isTargetAgent(other)) }
+    }
     func testArmLifecycleUsesBirthIdentityAndDoesNotInventTask() throws {
         let coordinator = ProcessObservationCoordinator(sampler: Sampler(resident: 4096))
         let now = Date()

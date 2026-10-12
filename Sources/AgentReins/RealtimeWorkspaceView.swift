@@ -1,3 +1,4 @@
+import CryptoKit
 import SwiftUI
 import WebKit
 
@@ -42,8 +43,13 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, message.frameInfo.request.url?.isFileURL == true,
                   let body = message.body as? [String: Any], let action = body["action"] as? String, let latest else { return }
+            if action == "refreshCollected" {
+                detailRequestGeneration += 1; deliveredCollected = [:]
+                if let view = message.webView { publish(view) }; return
+            }
             if action == "refreshArtifacts" { onRefreshArtifacts?(); return }
             guard let taskID = body["taskID"] as? String, latest.tasks.contains(where: { $0.id == taskID }) else { return }
+            if action == "selectTask" { detailRequestGeneration += 1; deliveredTaskRevision = nil; deliveredDetail = nil; selectedTaskID = taskID; if let view = message.webView { publish(view) }; return }
             if action == "markRead" { onMarkRead?(taskID) }
             else if action == "resolveIP", let ip = body["ip"] as? String,
                     IPGeolocationStore.isPublicIPAddress(ip),
@@ -58,11 +64,20 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 }
             }
         }
+        private var detailRequestGeneration = 0
+        private var deliveredCollected: [String: String] = [:]
+        private var deliveredDetail: RealtimeWorkspaceTransport.TaskDetail?
+        private var deliveredPublication: RealtimeWorkspaceTransport.PublicationKey?
+        private var deliveredGeneration = -1
+        private var deliveredTaskRevision: String?
+        private var selectedTaskID: String?
         var latest: RealtimeWorkspacePayload?
         var ready = false
         private var sending = false
         private var dirty = false
-        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; publish(webView) }
+        private var publishScheduled = false
+        private var lastPublish = Date.distantPast
+        func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) { ready = true; detailRequestGeneration += 1; deliveredCollected = [:]; deliveredTaskRevision = nil; deliveredDetail = nil; publish(webView) }
         private let encodingQueue = DispatchQueue(label: "com.agentreins.live-encoding", qos: .utility)
         // Explicit development preview only. The browser consumes this same
         // native projection; it must not keep displaying a fixed test snapshot.
@@ -72,19 +87,60 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                   arguments[flag + 1].hasPrefix("/") else { return nil }
             return URL(fileURLWithPath: arguments[flag + 1])
         }()
+        // Accessed only on encodingQueue. Old task bodies are exported once per
+        // source revision, so localhost detail reads never scan the evidence DB.
+        private var exportedTasks: [String: String] = [:]
         func publish(_ webView: WKWebView) {
             guard ready else { return }
+            let delay = 1 - Date().timeIntervalSince(lastPublish)
+            if delay > 0 {
+                guard !publishScheduled else { return }
+                publishScheduled = true
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self, weak webView] in
+                    guard let self, let webView else { return }
+                    self.publishScheduled = false; self.publish(webView)
+                }
+                return
+            }
             guard !sending else { dirty = true; return }
             guard let latest else { return }
-            sending = true
-            let previewURL = previewPayloadURL
+            let publication = RealtimeWorkspaceTransport.publicationKey(latest)
+            guard publication != deliveredPublication || detailRequestGeneration != deliveredGeneration else { return }
+            sending = true; lastPublish = Date()
+            let previewURL = previewPayloadURL, selectedID = selectedTaskID
+            let chosenID = RealtimeWorkspaceTransport.selectedID(latest, requested: selectedID)
+            let chosen = latest.tasks.first { $0.id == chosenID }
+            let signature = chosen.map { $0.id + "\u{0}" + $0.projectionRevision }
+            let knownDetail = deliveredDetail
+            let nextDetail = chosen.map { RealtimeWorkspaceTransport.TaskDetail(task: $0, contexts: RealtimeWorkspaceTransport.contexts(latest, task: $0)) }
+            let knownCollected = deliveredCollected
+            let collectedVersions = Dictionary(latest.collected.map { ($0.id, $0.revision) }, uniquingKeysWith: { _, new in new })
+            let requestGeneration = detailRequestGeneration
+            let reuseDetails = signature != nil && signature == deliveredTaskRevision
             encodingQueue.async { [weak self, weak webView] in
                 let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
-                let data = try? encoder.encode(latest)
+                let transport = RealtimeWorkspaceTransport.project(latest, selectedTaskID: selectedID, omitSelectedDetails: reuseDetails, knownCollected: knownCollected, knownDetail: knownDetail)
+                let data = try? encoder.encode(transport)
                 if let previewURL, let data {
                     do {
                         try FileManager.default.createDirectory(at: previewURL.deletingLastPathComponent(), withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-                        try data.write(to: previewURL, options: [.atomic])
+                        let directory = previewURL.deletingLastPathComponent().appendingPathComponent("tasks")
+                        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+                        for task in latest.tasks {
+                            // Task revision already includes parsed-context invalidation.
+                            // Do not serialize every old context just to discover it is unchanged.
+                            let signature = task.projectionRevision
+                            guard self?.exportedTasks[task.id] != signature else { continue }
+                            let name = SHA256.hash(data: Data(task.id.utf8)).map { String(format: "%02x", $0) }.joined() + ".json"
+                            let file = directory.appendingPathComponent(name)
+                            let contexts = RealtimeWorkspaceTransport.contexts(latest, task: task)
+                            let detail = RealtimeWorkspaceTransport.TaskDetail(task: task, contexts: contexts)
+                            try encoder.encode(detail).write(to: file, options: [.atomic])
+                            try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+                            self?.exportedTasks[task.id] = signature
+                        }
+                        let previewData = (reuseDetails || knownDetail != nil || !knownCollected.isEmpty) ? try encoder.encode(RealtimeWorkspaceTransport.project(latest, selectedTaskID: selectedID)) : data
+                        try previewData.write(to: previewURL, options: [.atomic])
                         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: previewURL.path)
                     } catch { NSLog("Realtime preview export failed: %@", String(describing: error)) }
                 }
@@ -94,7 +150,7 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                     Task { @MainActor in
                         if let json {
                             // Structured arguments prevent evidence from becoming code.
-                            do { _ = try await webView.callAsyncJavaScript("window.agentreinsReceive(JSON.parse(payload))", arguments: ["payload": json], in: nil, contentWorld: .page) }
+                            do { _ = try await webView.callAsyncJavaScript("window.agentreinsReceive(JSON.parse(payload))", arguments: ["payload": json], in: nil, contentWorld: .page); if self.detailRequestGeneration == requestGeneration { self.deliveredPublication = publication; self.deliveredGeneration = requestGeneration; self.deliveredTaskRevision = signature; self.deliveredDetail = nextDetail; self.deliveredCollected = collectedVersions } }
                             catch { NSLog("Realtime workspace delivery failed: %@", String(describing: error)) }
                         }
                         self.sending = false
@@ -117,17 +173,49 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
 @MainActor
 final class RealtimeWorkspaceState: ObservableObject {
     @Published private(set) var revision = 0
-    private var evidence: [UUID: GuardEvent] = [:]
-    private var sizes: [UUID: Int] = [:]
-    private var retainedBytes = 0
+    private var evidence = RealtimeLiveEvidenceBuffer()
+    private let coolingQueue = DispatchQueue(label: "com.agentreins.live-evidence-cache", qos: .utility)
+    private var coolingInFlight = false
+    private var evidenceError: String?
+    private var checkpointError: String?
+    private var pendingContextEvents: [UUID: GuardEvent] = [:]
+    private func allEvidence() -> [GuardEvent] {
+        do { return try evidence.snapshot().read() }
+        catch { evidenceError = "实时证据读取失败：\(error.localizedDescription)"; return [] }
+    }
+    private func scheduleCooling() {
+        guard !coolingInFlight else { return }
+        let plan = evidence.coolingPlan(byteBudget: byteBudget)
+        guard !plan.records.isEmpty else { return }
+        coolingInFlight = true
+        coolingQueue.async { [weak self] in
+            do {
+                let cooled = try plan.records.map { try $0.cooled(in: plan.directory) }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.evidence.install(cooled); self.coolingInFlight = false
+                    if self.evidenceError != nil { self.evidenceError = nil; self.revision += 1 }; self.scheduleCooling()
+                }
+            } catch {
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    // Keep the original in RAM on write failure; never drop it.
+                    self.coolingInFlight = false
+                    self.evidenceError = "实时证据转存失败，原文仍保留在内存：\(error.localizedDescription)"
+                    self.revision += 1
+                }
+            }
+        }
+    }
     private let contextQueue = DispatchQueue(label: "com.agentreins.context-presentation", qos: .utility)
     private var parsedContexts: [UUID: RealtimeContextExchange] = [:]
     private var parsingContexts = Set<UUID>()
-    private var contextInputs: [UUID: String] = [:]
+    private var contextInputs: [UUID: Int] = [:]
     private var registry = CollectionProcessRegistry()
     private var lastProcessSnapshot: [ProcessSnapshotRecord]?
     private let backgroundProjection: Bool
     private let projectionQueue = DispatchQueue(label: "com.agentreins.live-presentation", qos: .userInitiated)
+    private let projectionCache = RealtimeProjectionCache()
     private var projectionInFlight = false
     private var projectionGeneration = 0
     private var tasksDirty = true, contextsDirty = true
@@ -143,7 +231,7 @@ final class RealtimeWorkspaceState: ObservableObject {
     private func projectedTasks(force: Bool = false) -> [RealtimeTask] {
         if backgroundProjection && !force { scheduleLiveProjection(); return cachedTasks }
         if tasksDirty {
-            cachedTasks = RealtimeWorkspaceProjector.tasks(events: Array(evidence.values), since: since)
+            cachedTasks = RealtimeWorkspaceProjector.tasks(events: allEvidence(), since: since)
             tasksDirty = false; taskProjectionBuilds += 1
         }
         return cachedTasks
@@ -151,7 +239,7 @@ final class RealtimeWorkspaceState: ObservableObject {
     private func projectedContexts() -> [RealtimeContextExchange] {
         if backgroundProjection { scheduleLiveProjection(); return cachedContexts }
         if contextsDirty {
-            cachedContexts = RealtimeContextProjector.assemble(Array(parsedContexts.values), events: Array(evidence.values))
+            cachedContexts = RealtimeContextProjector.assemble(Array(parsedContexts.values), events: allEvidence())
             contextsDirty = false; contextProjectionBuilds += 1
         }
         return cachedContexts
@@ -164,6 +252,7 @@ final class RealtimeWorkspaceState: ObservableObject {
     init(byteBudget: Int = 32 * 1024 * 1024, checkpointURL: URL? = nil, backgroundProjection: Bool = false) {
         self.backgroundProjection = backgroundProjection
         self.byteBudget = byteBudget; self.checkpointURL = checkpointURL
+        self.checkpointWriter = checkpointURL.map { RealtimeActiveCheckpoint.Writer(url: $0, useDatabase: backgroundProjection) }
         terminationObserver = NotificationCenter.default.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated { self?.flushCheckpoint() }
         }
@@ -171,20 +260,37 @@ final class RealtimeWorkspaceState: ObservableObject {
             do {
                 if let checkpoint = try RealtimeActiveCheckpoint.load(checkpointURL) {
                     for event in checkpoint.events {
-                        evidence[event.id] = event; restoredIDs.insert(event.id)
-                        let size = Self.eventSize(event); sizes[event.id] = size; retainedBytes += size
+                        evidence.insert(event); restoredIDs.insert(event.id)
+                        if event.kind == "model", event.model != "codex-auto-review", event.modelPrompt != nil, ["prompt", "network_prompt"].contains(event.op) { pendingContextEvents[event.id] = event }
                     }
                     readTaskIDs = Set(checkpoint.readTaskIDs)
+                    truncated = checkpoint.coverageTruncated
                     since = min(since, checkpoint.events.map(\.ts).min() ?? since)
                     if !checkpoint.events.isEmpty {
                         continuityNotice = "已恢复本机已采活跃任务；\(checkpoint.savedAt.formatted()) 至本次启动之间的来源缺口需核对"
                     }
                 }
-            } catch { continuityNotice = "活跃任务检查点无法恢复：\(error.localizedDescription)" }
+            } catch {
+                continuityNotice = "活跃任务检查点无法恢复：\(error.localizedDescription)"
+                if FileManager.default.fileExists(atPath: RealtimeCheckpointDatabase.location(for: checkpointURL).path) {
+                    checkpointWriter = nil
+                    checkpointError = "实时恢复数据库读取失败，原数据库已保留；自动覆盖已停止"
+                }
+                // Preserve the original manifest at its original body location;
+                // subsequent input must not destroy a recoverable broken index.
+                let backup = checkpointURL.appendingPathExtension("unreadable-" + UUID().uuidString + ".backup")
+                do {
+                    try FileManager.default.copyItem(at: checkpointURL, to: backup)
+                    try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: backup.path)
+                    continuityNotice! += "；原索引已保留备份，缺失正文修复后可恢复"
+                } catch {
+                    checkpointWriter = nil
+                    checkpointError = "无法备份损坏的恢复索引；已暂停覆盖写入以保留原数据"
+                }
+            }
         }
-    }
-    private static func eventSize(_ event: GuardEvent) -> Int {
-        [event.userIntent, event.modelPrompt, event.modelResponse, event.command, event.beforeContent, event.afterContent, event.fileDiff, event.modelReasoning].compactMap { $0 }.reduce(512) { $0 + $1.utf8.count }
+        scheduleCooling()
+        scheduleContextParsing()
     }
     private var terminationObserver: NSObjectProtocol?
     private(set) var truncated = false
@@ -197,9 +303,11 @@ final class RealtimeWorkspaceState: ObservableObject {
     private let artifactQueue = DispatchQueue(label: "com.agentreins.artifacts", qos: .utility)
     private var artifactGeneration = 0
     private let checkpointURL: URL?
+    private var checkpointWriter: RealtimeActiveCheckpoint.Writer?
     private let checkpointQueue = DispatchQueue(label: "com.agentreins.active-checkpoint", qos: .utility)
     private var checkpointWork: DispatchWorkItem?
     private var checkpointGeneration = 0
+    private var checkpointWorkID: UUID?
     private var continuityNotice: String?
     static func checkpointLocation() -> URL {
         FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/Application Support/AgentGuard/realtime-active-v1.json")
@@ -221,124 +329,112 @@ final class RealtimeWorkspaceState: ObservableObject {
     }
     private func scheduleArtifacts() {
         if backgroundProjection { scheduleLiveProjection(); return }
-        let values = Array(evidence.values)
+        let values = allEvidence()
         let tasks = projectedTasks()
         let candidates = RealtimeArtifactProjector.candidates(events: values, tasks: tasks)
         guard candidates != artifactCandidates else { return }
         artifactCandidates = candidates; refreshArtifacts()
     }
-    func flushCheckpoint() {
-        guard let checkpointURL else { return }
-        checkpointWork?.cancel(); checkpointWork = nil
-        checkpointQueue.sync {} // Finish any previous atomic save before the shutdown snapshot.
-        let values = Array(evidence.values)
-        let tasks = projectedTasks(force: true)
-        let active = tasks.filter { retainForRestart($0) }
-        let keys = Set(active.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
-        let networkIDs = Set(values.filter { $0.kind == "network" }.sorted { $0.ts > $1.ts }.prefix(100).map { $0.id.uuidString })
-        let linked = Set(active.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } }).union(networkIDs)
-        let events = values.filter { e in
-            if linked.contains(e.id.uuidString) { return true }
-            guard let agent = RealtimeWorkspaceProjector.canonicalAgent(e.agent), let session = e.sessionId else { return false }
-            return linked.contains(e.id.uuidString) || keys.contains(agent + "\u{0}" + session + "\u{0}" + (e.turnId ?? ""))
+    nonisolated private static func checkpointRecords(_ snapshot: RealtimeLiveEvidenceBuffer.Snapshot, tasks: [RealtimeTask], readTaskIDs: Set<String>) -> [RealtimeLiveEvidenceBuffer.Record] {
+        let dismissed = tasks.filter { ["completed", "failed", "cancelled", "stopped"].contains($0.lifecycleStatus) && readTaskIDs.contains($0.id) }
+        let dismissedKeys = Set(dismissed.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
+        let dismissedIDs = Set(dismissed.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } })
+        let networkIDs = Set(snapshot.records.filter { $0.kind == "network" }.sorted { $0.ts > $1.ts }.prefix(100).map(\.id))
+        // Agent names repeat across the entire history; normalize each distinct
+        // name once rather than running Unicode searches for every record.
+        var agents: [String: String] = [:]
+        var unknownAgents = Set<String>()
+        return snapshot.records.filter { record in
+            if networkIDs.contains(record.id) { return true }
+            guard record.model != "codex-auto-review", record.toolName != "codex.internal_review_context",
+                  !dismissedIDs.contains(record.id.uuidString),
+                  let session = record.session, let rawAgent = record.agent else { return false }
+            guard !unknownAgents.contains(rawAgent) else { return false }
+            let agent: String
+            if let cached = agents[rawAgent] { agent = cached }
+            else if let canonical = RealtimeWorkspaceProjector.canonicalAgent(rawAgent) {
+                agents[rawAgent] = canonical; agent = canonical
+            } else { unknownAgents.insert(rawAgent); return false }
+            // Include newly observed turns even before their first UI projection.
+            return !dismissedKeys.contains(agent + "\u{0}" + session + "\u{0}" + (record.turn ?? ""))
         }
-        do { try RealtimeActiveCheckpoint(version: 1, savedAt: Date(), events: events, readTaskIDs: Array(readTaskIDs)).save(checkpointURL) }
-        catch { continuityNotice = "退出时活跃任务保存失败：\(error.localizedDescription)" }
+    }
+    func flushCheckpoint() {
+        guard let checkpointWriter else { return }
+        checkpointWork?.cancel(); checkpointWork = nil; checkpointWorkID = nil
+        checkpointGeneration += 1
+        checkpointQueue.sync {}
+        do {
+            let tasks = projectedTasks(force: true)
+            let records = Self.checkpointRecords(evidence.snapshot(), tasks: tasks, readTaskIDs: readTaskIDs)
+            _ = try checkpointWriter.save(records: records, readTaskIDs: Array(readTaskIDs), coverageTruncated: truncated)
+            checkpointError = nil
+        } catch { checkpointError = "退出时活跃任务保存失败：\(error.localizedDescription)" }
+        revision += 1
     }
     private func scheduleCheckpoint() {
-        guard let checkpointURL else { return }
+        guard let checkpointWriter else { return }
         checkpointGeneration += 1
         guard checkpointWork == nil else { return }
-        let generation = checkpointGeneration
-        let values = Array(evidence.values)
-        let tasks = projectedTasks()
-        let activeTasks = tasks.filter { retainForRestart($0) }
-        let activeKeys = Set(activeTasks.map { $0.agent + "\u{0}" + $0.session + "\u{0}" + $0.turn })
-        let networkIDs = Set(values.filter { $0.kind == "network" }.sorted { $0.ts > $1.ts }.prefix(100).map { $0.id.uuidString })
-        let linkedIDs = Set(activeTasks.flatMap { $0.cards.flatMap(\.eventIDs) + [$0.requestEventID, $0.nativeTerminalEventID].compactMap { $0 } }).union(networkIDs)
-        let active = values.filter { e in
-            if linkedIDs.contains(e.id.uuidString) { return true }
-            guard let agent = RealtimeWorkspaceProjector.canonicalAgent(e.agent), let session = e.sessionId else { return false }
-            return linkedIDs.contains(e.id.uuidString) || activeKeys.contains(agent + "\u{0}" + session + "\u{0}" + (e.turnId ?? ""))
-        }
-        let checkpoint = RealtimeActiveCheckpoint(version: 1, savedAt: Date(), events: active, readTaskIDs: Array(readTaskIDs))
+        let generation = checkpointGeneration, workID = UUID()
+        checkpointWorkID = workID
+        let snapshot = evidence.snapshot(), tasks = projectedTasks()
+        let readIDs = readTaskIDs, coverage = truncated
         let work = DispatchWorkItem { [weak self] in
-            defer {
-                DispatchQueue.main.async {
-                    guard let self else { return }
-                    self.checkpointWork = nil
-                    if self.checkpointGeneration != generation { self.scheduleCheckpoint() }
-                }
-            }
-            do { try checkpoint.save(checkpointURL) }
-            catch {
-                DispatchQueue.main.async {
-                    self?.continuityNotice = "活跃任务检查点保存失败：\(error.localizedDescription)；重启连续性未保证"
-                    self?.revision += 1
-                }
+            var failure: String?
+            do {
+                let records = Self.checkpointRecords(snapshot, tasks: tasks, readTaskIDs: readIDs)
+                _ = try checkpointWriter.save(records: records, readTaskIDs: Array(readIDs), coverageTruncated: coverage)
+            } catch { failure = "活跃任务检查点保存失败：\(error.localizedDescription)；重启连续性未保证" }
+            DispatchQueue.main.async {
+                guard let self else { return }
+                // A late result must not erase a newer shutdown/flush failure.
+                guard self.checkpointWorkID == workID else { return }
+                self.checkpointWork = nil; self.checkpointWorkID = nil
+                if self.checkpointError != failure { self.checkpointError = failure; self.revision += 1 }
+                if self.checkpointGeneration != generation { self.scheduleCheckpoint() }
             }
         }
         checkpointWork = work
-        checkpointQueue.asyncAfter(deadline: .now() + .milliseconds(800), execute: work)
+        checkpointQueue.asyncAfter(deadline: .now() + .seconds(3), execute: work)
     }
     func ingest(_ events: [GuardEvent]) {
-        var changed = false
+        var changed = false, projectionChanged = false
         for event in events where event.ts >= runtimeStartedAt || restoredIDs.contains(event.id) {
             // Startup EventStore replay can contain the old database projection
             // of this same source ID. It must not overwrite a newer repaired
             // live checkpoint. Fresh source observations still update normally.
-            if restoredIDs.contains(event.id), event.ts < runtimeStartedAt, evidence[event.id] != nil { continue }
-            if let old = evidence[event.id], old.ts == event.ts, old.action == event.action, old.userIntent == event.userIntent,
-               old.modelResponse == event.modelResponse, old.modelPrompt == event.modelPrompt, old.command == event.command,
-               old.afterContent == event.afterContent, old.fileDiff == event.fileDiff, old.beforeContent == event.beforeContent,
-               old.agent == event.agent, old.sessionId == event.sessionId, old.turnId == event.turnId, old.traceId == event.traceId,
-               old.toolName == event.toolName, old.source == event.source, old.path == event.path,
-               old.attributionMethod == event.attributionMethod, old.attributionConfidence == event.attributionConfidence,
-               old.processId == event.processId, old.remoteHost == event.remoteHost, old.remoteDomain == event.remoteDomain,
-               old.remotePort == event.remotePort, old.modelDecision == event.modelDecision, old.modelReasoning == event.modelReasoning,
-               old.endedAt == event.endedAt, old.startedAt == event.startedAt, old.inputTokens == event.inputTokens, old.outputTokens == event.outputTokens { continue }
+            if restoredIDs.contains(event.id), event.ts < runtimeStartedAt, evidence.contains(event.id) { continue }
+            if evidence.unchanged(event) { continue }
             changed = true
+            if evidence.hasTaskAssociation(event.id) || (event.sessionId != nil && RealtimeWorkspaceProjector.canonicalAgent(event.agent) != nil) { projectionChanged = true }
             collectedByID.removeValue(forKey: event.id)
-            let size = Self.eventSize(event)
-            retainedBytes += size - (sizes[event.id] ?? 0)
-            sizes[event.id] = size; evidence[event.id] = event
+            evidence.insert(event)
+            if event.kind == "model", event.model != "codex-auto-review", event.modelPrompt != nil, ["prompt", "network_prompt"].contains(event.op) { pendingContextEvents[event.id] = event }
         }
-        // Preserve small original-request records and currently active call
-        // boundaries ahead of bulky model/output previews under pressure.
-        if evidence.count > 6000 || retainedBytes > byteBudget {
-            func internalReview(_ e: GuardEvent) -> Bool { e.model == "codex-auto-review" || e.toolName == "codex.internal_review_context" }
-            let finalMessages = Set(evidence.values.filter { $0.op == "hook_turn_stop" }.compactMap { e -> String? in
-                guard let final = (RealtimeDetailProjector.object(e.afterContent)?["payload"] as? [String: Any])?["last_assistant_message"] as? String else { return nil }
-                return (e.sessionId ?? "") + "\u{0}" + final
-            })
-            let protected = Set(evidence.values.filter { e in
-                !internalReview(e) && Self.eventSize(e) <= byteBudget / 2 &&
-                (e.kind == "network" || ["prompt", "hook_user_prompt", "call", "hook_tool_start", "result", "hook_tool_end", "task_complete", "task_completed", "task_failed", "turn_completed", "task_cancelled", "hook_turn_stop"].contains(e.op) ||
-                 (e.op == "response" && e.modelResponse.map { finalMessages.contains((e.sessionId ?? "") + "\u{0}" + $0) } == true))
-            }.map(\.id))
-            for event in evidence.values.sorted(by: { a, b in
-                if internalReview(a) != internalReview(b) { return internalReview(a) }
-                if protected.contains(a.id) != protected.contains(b.id) { return !protected.contains(a.id) }
-                return a.ts < b.ts
-            }) {
-                guard evidence.count > 6000 || retainedBytes > byteBudget else { break }
-                retainedBytes -= sizes.removeValue(forKey: event.id) ?? 0
-                evidence.removeValue(forKey: event.id); truncated = true
-            }
-        }
-        if changed { tasksDirty = true; contextsDirty = true; collectedDirty = true; projectionGeneration += 1 }
-        parsedContexts = parsedContexts.filter { evidence[$0.key] != nil }
-        contextInputs = contextInputs.filter { evidence[$0.key] != nil }
-        for event in evidence.values where event.kind == "model" && event.model != "codex-auto-review" && ["prompt", "network_prompt"].contains(event.op) {
-            guard let body = event.modelPrompt, contextInputs[event.id] != body, !parsingContexts.contains(event.id) else { continue }
+        // The byte/count budget bounds only the hot cache. No original request,
+        // call boundary, result, or task identity is evicted to meet it.
+        if changed { scheduleCooling(); collectedDirty = true }
+        if projectionChanged { tasksDirty = true; contextsDirty = true; projectionGeneration += 1 }
+        scheduleContextParsing()
+        if changed { scheduleArtifacts(); scheduleCheckpoint(); revision += 1 }
+    }
+    private func scheduleContextParsing() {
+        for event in Array(pendingContextEvents.values) where event.kind == "model" && event.model != "codex-auto-review" && ["prompt", "network_prompt"].contains(event.op) {
+            guard event.modelPrompt != nil, !parsingContexts.contains(event.id) else { continue }
+            let bodyDigest = event.hashValue
+            guard contextInputs[event.id] != bodyDigest else { pendingContextEvents.removeValue(forKey: event.id); continue }
             parsingContexts.insert(event.id)
             contextQueue.async { [weak self] in
                 let parsed = RealtimeContextProjector.parse(event)
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.parsingContexts.remove(event.id)
-                    guard self.evidence[event.id] != nil else { return }
-                    self.contextInputs[event.id] = body
+                    guard self.pendingContextEvents[event.id]?.hashValue == bodyDigest else {
+                        self.scheduleContextParsing(); return
+                    }
+                    self.pendingContextEvents.removeValue(forKey: event.id)
+                    self.contextInputs[event.id] = bodyDigest
                     self.parsedContexts[event.id] = parsed
                     self.contextsDirty = true; self.projectionGeneration += 1
                     self.scheduleLiveProjection()
@@ -346,23 +442,24 @@ final class RealtimeWorkspaceState: ObservableObject {
                 }
             }
         }
-        if changed { scheduleArtifacts(); scheduleCheckpoint(); revision += 1 }
-    }
-    private func retainForRestart(_ task: RealtimeTask) -> Bool {
-        // Internal approval reviews are not unread user tasks. Their original
-        // collector evidence remains in the evidence store and current live view.
-        guard task.model != "codex-auto-review", !task.cards.contains(where: { $0.title == "codex.internal_review_context" }) else { return false }
-        return !["completed", "failed", "cancelled", "stopped"].contains(task.lifecycleStatus) || !readTaskIDs.contains(task.id)
     }
     private func scheduleLiveProjection() {
         guard backgroundProjection, (tasksDirty || contextsDirty), !projectionInFlight else { return }
         projectionInFlight = true
-        let generation = projectionGeneration, values = Array(evidence.values), since = since
-        let contexts = Array(parsedContexts.values)
+        let generation = projectionGeneration, snapshot = evidence.snapshot(), since = since
+        let contexts = Array(parsedContexts.values), cache = projectionCache, versions = contextInputs
         projectionQueue.async { [weak self] in
-            let tasks = RealtimeWorkspaceProjector.tasks(events: values, since: since)
-            let exchanges = RealtimeContextProjector.assemble(contexts, events: values)
-            let candidates = RealtimeArtifactProjector.candidates(events: values, tasks: tasks)
+            let result: (tasks: [RealtimeTask], contexts: [RealtimeContextExchange], candidates: [RealtimeArtifactProjector.Candidate])
+            do { result = try cache.project(snapshot, contexts: contexts, contextVersions: versions, since: since) }
+            catch {
+                DispatchQueue.main.async {
+                    self?.projectionInFlight = false
+                    self?.evidenceError = "实时证据读取失败：\(error.localizedDescription)"
+                    self?.revision += 1
+                }
+                return
+            }
+            let tasks = result.tasks, exchanges = result.contexts, candidates = result.candidates
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.projectionInFlight = false
@@ -376,25 +473,32 @@ final class RealtimeWorkspaceState: ObservableObject {
             }
         }
     }
+    private(set) var collectedBodyReads = 0
     private func projectedCollected() -> [RealtimeCollectedRecord] {
         guard collectedDirty else { return cachedCollected }
-        let ordered = evidence.values.sorted { $0.ts > $1.ts }
-        var seen = Set<UUID>()
-        let visible = (Array(ordered.prefix(200)) + Array(ordered.filter { $0.kind == "network" }.prefix(100)))
-            .filter { seen.insert($0.id).inserted }.sorted { $0.ts > $1.ts }
-        cachedCollected = visible.map { event in
-                if let cached = collectedByID[event.id] { return cached }
-            let display = CollectionRecordPresentation(event, receivedAt: event.ts)
-                let row = RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent) ?? "归属未确认", source: event.source ?? "来源未知",
+        let visible = evidence.latestCollected().records
+        var nextByID: [UUID: RealtimeCollectedRecord] = [:]
+        do {
+            let rows = try visible.map { record -> RealtimeCollectedRecord in
+                if let cached = collectedByID[record.id], cached.revision == record.revision.uuidString {
+                    nextByID[record.id] = cached; return cached
+                }
+                let event = try record.read()
+                collectedBodyReads += 1
+                let display = CollectionRecordPresentation(event, receivedAt: event.ts)
+                var row = RealtimeCollectedRecord(id: event.id.uuidString, agent: RealtimeWorkspaceProjector.canonicalAgent(event.agent) ?? "归属未确认", source: event.source ?? "来源未知",
                     kind: event.kind, op: event.op, summary: display.summary, preview: String(display.preview.prefix(16000)),
                     hasTaskIdentity: event.sessionId != nil && event.turnId != nil,
                     title: display.title, category: display.category, details: (display.details + ["路径：\(event.path)", "会话：\(event.sessionId ?? "未关联")", "轮次：\(event.turnId ?? "未关联")"]).joined(separator: "\n"), pid: event.processId,
                     session: event.sessionId, turn: event.turnId, call: event.toolCallId, timestamp: event.ts,
                     resource: event.kind == "network" ? RealtimeDetailProjector.resource(event:event,input:event.command,output:event.modelResponse,kind:"network") : nil)
-                collectedByID[event.id] = row; return row
+                row.revision = record.revision.uuidString
+                nextByID[event.id] = row; return row
             }
-        let kept = Set(cachedCollected.map(\.id))
-        collectedByID = collectedByID.filter { kept.contains($0.key.uuidString) }
+            cachedCollected = rows; collectedByID = nextByID
+        } catch {
+            evidenceError = "实时证据读取失败：\(error.localizedDescription)"; return cachedCollected
+        }
         collectedDirty = false
         return cachedCollected
     }
@@ -414,20 +518,33 @@ final class RealtimeWorkspaceState: ObservableObject {
         projectedProcessInput = processes
         return cachedProcesses
     }
+    private var deliveryCacheVersion = -1
+    private var deliveryCacheArtifacts: [RealtimeArtifact] = []
+    private var deliveryCache: [RealtimeTask] = []
+    private var addressCache: [String] = []
     func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil) -> RealtimeWorkspacePayload {
-        var value = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.assessingDelivery(projectedTasks(), artifacts: artifacts),
-            collected: projectedCollected(), unattributedCount: evidence.values.filter { $0.sessionId == nil || $0.turnId == nil }.count,
+        let tasks = projectedTasks()
+        if deliveryCacheVersion != taskProjectionBuilds || deliveryCacheArtifacts != artifacts {
+            deliveryCache = RealtimeWorkspaceProjector.assessingDelivery(tasks, artifacts: artifacts)
+            addressCache = Set(tasks.flatMap { $0.cards.flatMap { card in
+                ([card.resource?.remoteIP].compactMap { $0 } + (card.resource?.addresses ?? []))
+            } }.filter(IPGeolocationStore.isPublicIPAddress)).sorted()
+            deliveryCacheVersion = taskProjectionBuilds; deliveryCacheArtifacts = artifacts
+        }
+        var value = RealtimeWorkspacePayload(tasks: deliveryCache,
+            collected: projectedCollected(), unattributedCount: evidence.unattributedCount,
             processes: projectedProcesses(processes), health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
             observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: projectedContexts())
         if let geolocation {
-            let addresses = Set(value.tasks.flatMap { $0.cards.flatMap { card in ([card.resource?.remoteIP].compactMap { $0 } + (card.resource?.addresses ?? [])) } }.filter(IPGeolocationStore.isPublicIPAddress))
-            value.ipGeolocations = addresses.sorted().map { ip in
+            value.ipGeolocations = addressCache.map { ip in
                 let record = geolocation.records[ip]
                 return RealtimeIPLocation(ip: ip, location: record?.locationLabel, owner: record?.ownerLabel, source: "ipwho.is", updatedAt: record?.fetchedAt,
                     state: record != nil ? "ready" : geolocation.pending.contains(ip) ? "loading" : geolocation.failures[ip] != nil ? "failed" : "unqueried", error: geolocation.failures[ip])
             }
         }
-        value.artifacts = artifacts; value.readTaskIDs = Array(readTaskIDs); value.continuityNotice = continuityNotice
+        value.artifacts = artifacts; value.readTaskIDs = Array(readTaskIDs)
+        let notices = [continuityNotice, evidenceError, checkpointError].compactMap { $0 }
+        value.continuityNotice = notices.isEmpty ? nil : notices.joined(separator: " · ")
         return value
     }
 }

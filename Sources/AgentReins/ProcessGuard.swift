@@ -65,8 +65,7 @@ final class ProcessGuard: ObservableObject {
     private var currentCmdRules: [CmdRule] = []
     // ChatGPT is the macOS desktop host of the Codex runtime. Keeping the host
     // root is required to preserve the real ChatGPT -> Codex services PID tree.
-    private let agentMarkers = ["chatgpt", "codex", "kiro", "cursor", "workbuddy", "qoder", "zcode",
-                                "claude-code", "claude-desktop", "aider", "windsurf", "trae"]
+    private let agentMarkers = ["chatgpt", "codex", "workbuddy"]
     private let snapshotProvider: any ProcessSnapshotting
     private let networkProvider: any NetworkSnapshotting
     private let proxyDestinationProvider: any ProxyDestinationSnapshotting
@@ -210,18 +209,18 @@ final class ProcessGuard: ObservableObject {
             guard let self else { return }
             let procs = self.excludingCollectorTree(self.getProcs())
             let scopedRecords = procs.compactMap { p -> ProcessSnapshotRecord? in
-                guard let agent = p.agent else { return nil }
+                guard let agent = p.agent, Self.isTargetAgent(agent) else { return nil }
                 return ProcessSnapshotRecord(pid: p.pid, ppid: p.ppid, command: p.cmd,
                     agent: agent, birthIdentity: p.birth, executablePath: p.executable)
             }
-            let armEvents = procs.isEmpty ? [] : self.observationCoordinator.collect(processes: scopedRecords, includeSamples: false)
+            let armEvents = self.observationCoordinator.collect(processes: scopedRecords, includeSamples: false)
             let attachedPIDs = Set(armEvents.filter { $0.op == "process_watch_attached" }.compactMap { $0.processId.map(String.init) })
             let newlyAttached = scopedRecords.filter { attachedPIDs.contains($0.pid) }
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.processSnapshotInFlight = false
                 self.workingCollectionHealth.lastProcessDurationMS = Date().timeIntervalSince(started) * 1_000
-                guard !procs.isEmpty else {
+                if procs.isEmpty && self.snapshotProvider.snapshotFailed {
                     self.workingCollectionHealth.processFailures += 1
                     self.publishHealthIfNeeded()
                     self.persistHealth(source: "process", state: .failed,
@@ -299,6 +298,7 @@ final class ProcessGuard: ObservableObject {
         let trigger = hookTrigger ?? (targets == nil ? nil : "new_process_attached")
         pendingNetworkTriggers.removeAll()
         let sampledProcesses = hookTrigger == nil ? (targets ?? observedProcesses) : hookCorrelation.samplingTargets(observedProcesses)
+        guard !sampledProcesses.isEmpty else { networkSnapshotInFlight = false; return }
         let agentPIDs = sampledProcesses.map(\.pid)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
@@ -397,7 +397,7 @@ final class ProcessGuard: ObservableObject {
             let processKey = "\(p.pid)|\(p.birth ?? 0)|\(p.cmd)"
             if seen.contains(processKey) { continue }
             seen.insert(processKey)
-            let agent = attributions[p.pid]
+            guard let agent = attributions[p.pid], Self.isTargetAgent(agent) else { continue }
             let matched = currentCmdRules.filter { $0.regex.firstMatch(in: p.cmd,
                 range: NSRange(p.cmd.startIndex..., in: p.cmd)) != nil }
             for r in matched {
@@ -405,7 +405,7 @@ final class ProcessGuard: ObservableObject {
                                            pid: p.pid, ppid: p.ppid))
                 notify(title: "AgentReins observed a command", body: "\(r.message) · \(p.cmd)")
             }
-            if matched.isEmpty, let agent {
+            if matched.isEmpty {
                 newEvents.append(makeActivityEvent(command: p.cmd, agent: agent,
                                                    pid: p.pid, ppid: p.ppid))
             }
@@ -467,13 +467,12 @@ final class ProcessGuard: ObservableObject {
         var result: [String: String] = [:]
         var queue: [(pid: String, owner: String)] = []
         for (pid, node) in byPid {
-            if let owner = node.agent {
+            if let owner = node.agent, Self.isTargetAgent(owner) {
                 result[pid] = owner
                 queue.append((pid, owner))
                 continue
             }
-            let command = node.cmd.lowercased()
-            if let marker = agentMarkers.first(where: command.contains) {
+            if let marker = Self.targetExecutableOwner(node.cmd) {
                 result[pid] = marker
                 queue.append((pid, marker))
             }
@@ -488,6 +487,19 @@ final class ProcessGuard: ObservableObject {
             }
         }
         return result
+    }
+
+    nonisolated static func targetExecutableOwner(_ command: String) -> String? {
+        // Arguments/project paths mentioning an agent are not ownership evidence.
+        guard let executable = command.split(whereSeparator: { $0.isWhitespace }).first else { return nil }
+        let name = URL(fileURLWithPath: String(executable)).lastPathComponent.lowercased()
+        if name == "codex" || name.hasPrefix("codex-") { return "codex" }
+        if name == "workbuddy" { return "workbuddy" }
+        return nil
+    }
+
+    nonisolated static func isTargetAgent(_ agent: String) -> Bool {
+        ["codex", "chatgpt", "workbuddy"].contains(agent.lowercased())
     }
 
     private func canonicalAgent(_ marker: String?) -> String? {

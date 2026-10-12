@@ -23,6 +23,9 @@ final class CodexSight: ObservableObject {
         var workspace = "-"
         var model: String?
         var internalRole: String?
+        var metadataSessionID: String?
+        var subagentIdentity: SubagentIdentity?
+        var readingInheritedHistory: Bool?
         var currentTurn: String?
         var lastIntent: String?
         // Optional fields keep older live cursor checkpoints decodable. Retain
@@ -42,6 +45,84 @@ final class CodexSight: ObservableObject {
         }
     }
 
+    struct SubagentIdentity: Codable, Equatable, Sendable {
+        let session: String
+        let parentSession: String
+        let agentPath: String
+    }
+
+    /// A repair plan identifies only turns whose ownership is explicitly shown
+    /// by the child stream. It never imports parent prompts or rewrites evidence.
+    struct SubagentRepairPlan: Sendable {
+        let identity: SubagentIdentity
+        let turnIDs: Set<String>
+    }
+
+    /// Only metadata is read at cursor startup; old message bodies are not used
+    /// to recover a request. A matching first header is authoritative for forks.
+    nonisolated static func readSubagentIdentity(at url: URL) -> SubagentIdentity? {
+        guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: 64 * 1_024),
+              let newline = data.firstIndex(of: 0x0A),
+              let row = try? JSONSerialization.jsonObject(with: data.prefix(upTo: newline)) as? [String: Any],
+              row["type"] as? String == "session_meta",
+              let payload = row["payload"] as? [String: Any],
+              let identity = subagentIdentity(payload),
+              StreamState(url: url).session == identity.session else { return nil }
+        return identity
+    }
+
+    private nonisolated static func subagentIdentity(_ payload: [String: Any]) -> SubagentIdentity? {
+        guard let session = payload["id"] as? String ?? payload["session_id"] as? String,
+              let source = payload["source"] as? [String: Any],
+              let subagent = source["subagent"] as? [String: Any],
+              let spawn = subagent["thread_spawn"] as? [String: Any],
+              let parent = spawn["parent_thread_id"] as? String, !parent.isEmpty,
+              let agentPath = spawn["agent_path"] as? String, !agentPath.isEmpty else { return nil }
+        return SubagentIdentity(session: session, parentSession: parent, agentPath: agentPath)
+    }
+
+    nonisolated static func subagentIdentityEvent(_ identity: SubagentIdentity, turn: String?,
+                                                  timestamp: Date, workspace: String = "-") -> GuardEvent {
+        event(identity: "\(identity.session):\(turn ?? "none"):subagent-identity", kind: "context",
+            rule: "codex_subagent_identity", workspace: workspace, op: "subagent_identity",
+            timestamp: timestamp, action: "captured", session: identity.session, trace: nil, turn: turn,
+            intent: nil, prompt: nil, response: nil, toolCallId: nil, toolName: "codex.subagent_identity",
+            command: jsonString(["session": identity.session, "parent_session": identity.parentSession,
+                                 "agent_path": identity.agentPath]), model: nil)
+    }
+
+    /// A bounded, explicit migration helper for already-observed active records.
+    /// The caller intersects these native child turns with its recovery records;
+    /// this function does not mutate the checkpoint or emit historical events.
+    nonisolated static func subagentRepairPlan(at url: URL, maximumBytes: Int = 8 * 1_024 * 1_024) -> SubagentRepairPlan? {
+        guard maximumBytes > 0, let identity = readSubagentIdentity(at: url),
+              let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        guard let data = try? handle.read(upToCount: maximumBytes), let newline = data.lastIndex(of: 0x0A),
+              let text = String(data: data.prefix(through: newline), encoding: .utf8) else { return nil }
+        var inherited = false
+        var turns = Set<String>()
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let row = dictionary(line), let payload = row["payload"] as? [String: Any] else { continue }
+            let type = row["type"] as? String ?? ""
+            let payloadType = payload["type"] as? String ?? ""
+            if type == "session_meta", let session = payload["id"] as? String, session != identity.session {
+                inherited = true
+                continue
+            }
+            if type == "event_msg", payloadType == "thread_settings_applied" { inherited = false; continue }
+            let ownMessage = type == "response_item" && payloadType == "agent_message"
+                && payload["recipient"] as? String == identity.agentPath
+            if ownMessage { inherited = false }
+            guard !inherited else { continue }
+            if (type == "event_msg" && payloadType == "task_started") || ownMessage,
+               let turn = metadataTurn(payload) { turns.insert(turn) }
+        }
+        return SubagentRepairPlan(identity: identity, turnIDs: turns)
+    }
+
     struct CallBinding: Codable, Equatable, Sendable {
         let name: String
         let turn: String?
@@ -59,6 +140,7 @@ final class CodexSight: ObservableObject {
         var gaps: [GuardEvent]
     }
     private var pendingGaps: [GuardEvent] = []
+    private var cursorNeedsRetry = false
     private let liveCursorURL = URL(fileURLWithPath: ("~/Library/Application Support/AgentGuard" as NSString).expandingTildeInPath)
         .appendingPathComponent("codex-live-cursors.json")
     private let evidenceDatabase = try? EvidenceDatabase.shared()
@@ -79,11 +161,15 @@ final class CodexSight: ObservableObject {
             let id = UUID()
             startupID = id
             let root = URL(fileURLWithPath: ("~/.codex/sessions" as NSString).expandingTildeInPath)
-            let cursorURL = liveCursorURL
+            let cursorURL = liveCursorURL, startedAt = realtimeSince!
             queue.async { [weak self] in
                 let offsets = RealtimeLogBaseline.offsets(root: root)
                 let restored = Self.restoreLiveCursorCheckpoint(root: root, baselineOffsets: offsets,
                                                                  from: cursorURL)
+                if !FileManager.default.fileExists(atPath: cursorURL.path) {
+                    do { try Self.saveLiveCursorCheckpoint(sizes: restored.sizes, states: restored.states, to: cursorURL, savedAt: startedAt) }
+                    catch { DispatchQueue.main.async { self?.cursorNeedsRetry = true } }
+                }
                 DispatchQueue.main.async {
                     guard let self, self.startupID == id else { return }
                     self.startupID = nil
@@ -121,6 +207,7 @@ final class CodexSight: ObservableObject {
         let database = evidenceDatabase
         let liveCursorURL = realtimeSince == nil ? nil : liveCursorURL
         let pendingGaps = pendingGaps
+        let cursorNeedsRetry = cursorNeedsRetry
         let baselineOtherStreams = isInitialPoll
         let since = realtimeSince
         queue.async { [weak self] in
@@ -145,8 +232,10 @@ final class CodexSight: ObservableObject {
                     SourceCheckpoint(source: "codex", stream: stream, offset: Int64(offset),
                                      fingerprint: nil, updatedAt: Date())
                 }
-                try database.persistCollected(raw: batch.raw, events: collectedEvents, checkpoints: checkpoints)
-                if let liveCursorURL {
+                if !batch.raw.isEmpty || !collectedEvents.isEmpty || !checkpoints.isEmpty {
+                    try database.persistCollected(raw: batch.raw, events: collectedEvents, checkpoints: checkpoints)
+                }
+                if let liveCursorURL, cursorNeedsRetry || !batch.sizes.isEmpty || !collectedEvents.isEmpty {
                     var committedSizes = previousSizes
                     committedSizes.merge(batch.sizes) { _, new in new }
                     do { try Self.saveLiveCursorCheckpoint(sizes: committedSizes, states: batch.states, to: liveCursorURL) }
@@ -163,6 +252,7 @@ final class CodexSight: ObservableObject {
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 self.streamStates = batch.states
                 self.pendingGaps = []
+                self.cursorNeedsRetry = cursorWriteFailed
                 if cursorWriteFailed { self.collectionFailures += 1 }
                 self.collectionFailures += pendingGaps.count
                 let fresh = collectedEvents.filter { self.seen.insert($0.id).inserted }
@@ -292,7 +382,21 @@ final class CodexSight: ObservableObject {
         offsets.reduce(into: [:]) { result, entry in
             let url = URL(fileURLWithPath: entry.key)
             var state = StreamState(url: url)
+            if let identity = readSubagentIdentity(at: url) {
+                state.session = identity.session
+                state.metadataSessionID = identity.session
+                state.subagentIdentity = identity
+                state.internalRole = "thread_spawn"
+            }
             state.observedSize = entry.value
+            // A small byte anchor validates the installation boundary on restart;
+            // no historical transcript is decoded or projected.
+            if entry.value > 0, let handle = try? FileHandle(forReadingFrom: url) {
+                defer { try? handle.close() }
+                state.anchorOffset = entry.value - min(entry.value, 64)
+                try? handle.seek(toOffset: state.anchorOffset)
+                state.anchor = (try? handle.read(upToCount: Int(entry.value - state.anchorOffset))) ?? Data()
+            }
             state.fingerprint = (try? url.resourceValues(forKeys: [.fileResourceIdentifierKey]))?
                 .fileResourceIdentifier.map { String(describing: $0) }
             result[entry.key] = state
@@ -337,7 +441,20 @@ final class CodexSight: ObservableObject {
                 continue
             }
             restored.sizes[path] = cursor.offset
-            restored.states[path] = cursor.state
+            var state = cursor.state
+            if let identity = readSubagentIdentity(at: fileURL) {
+                // Older adapters allowed an inherited parent session_meta to
+                // replace this stream's identity. Repair framing, not prompts.
+                if state.session != identity.session {
+                    state.session = identity.session
+                    state.lastIntent = nil
+                    state.intentsByTurn = [:]
+                }
+                state.metadataSessionID = identity.session
+                state.subagentIdentity = identity
+                state.internalRole = "thread_spawn"
+            }
+            restored.states[path] = state
             restored.savedAt = checkpoint.savedAt
         }
         return restored
@@ -371,6 +488,9 @@ final class CodexSight: ObservableObject {
         var workspace = state.workspace
         var model = state.model
         var internalRole = state.internalRole
+        var metadataSessionID = state.metadataSessionID
+        var childIdentity = state.subagentIdentity
+        var readingInheritedHistory = state.readingInheritedHistory ?? false
         var currentTurn = state.currentTurn
         var lastIntent = state.lastIntent.flatMap { isRuntimeUserContext($0) ? nil : $0 }
         var intentsByTurn = state.intentsByTurn ?? [:]
@@ -384,6 +504,9 @@ final class CodexSight: ObservableObject {
         defer {
             state.session = session; state.workspace = workspace; state.model = model
             state.internalRole = internalRole
+            state.metadataSessionID = metadataSessionID
+            state.subagentIdentity = childIdentity
+            state.readingInheritedHistory = readingInheritedHistory
             state.currentTurn = currentTurn; state.lastIntent = lastIntent; state.calls = calls
             state.intentsByTurn = intentsByTurn; state.knownTurns = knownTurns
         }
@@ -413,13 +536,60 @@ final class CodexSight: ObservableObject {
             let timestampKey = row["timestamp"] as? String ?? deterministicUUID(String(line)).uuidString
             if type == "session_meta" {
                 let recordedSession = payload["id"] as? String ?? payload["session_id"] as? String ?? session
-                if recordedSession != session {
-                    currentTurn = nil; lastIntent = nil; calls = [:]; intentsByTurn = [:]; knownTurns = []
+                if let locked = metadataSessionID, recordedSession != locked {
+                    // A full-history child begins with its own header followed
+                    // by copied parent headers/history. Never adopt that parent.
+                    readingInheritedHistory = true
+                    result.append(event(identity: "\(session):\(timestampKey):inherited-context", kind: "context",
+                        rule: "codex_inherited_context", workspace: workspace, op: "inherited_context",
+                        timestamp: timestamp, action: "captured", session: session, trace: nil, turn: nil,
+                        intent: nil, prompt: nil, response: nil, toolCallId: nil,
+                        toolName: "codex.inherited_context",
+                        command: jsonString(["inherited_session": recordedSession]), model: nil))
+                    continue
                 }
-                session = recordedSession
+                if metadataSessionID == nil {
+                    if recordedSession != session {
+                        currentTurn = nil; lastIntent = nil; calls = [:]; intentsByTurn = [:]; knownTurns = []
+                    }
+                    metadataSessionID = recordedSession
+                    session = recordedSession
+                }
                 let subagent = (payload["source"] as? [String: Any])?["subagent"] as? [String: Any]
-                internalRole = subagent?["other"] as? String
+                if let identity = subagentIdentity(payload) {
+                    childIdentity = identity
+                    internalRole = "thread_spawn"
+                    result.append(subagentIdentityEvent(identity, turn: nil, timestamp: timestamp, workspace: workspace))
+                } else if let role = subagent?["other"] as? String { internalRole = role }
                 workspace = payload["cwd"] as? String ?? workspace
+            }
+            let ownAgentMessage = type == "response_item" && payloadType == "agent_message"
+                && childIdentity.map { payload["recipient"] as? String == $0.agentPath } == true
+            if readingInheritedHistory {
+                // This record is emitted by the child runtime after the copied
+                // history. The addressed agent message is an additional exact
+                // boundary for versions without thread_settings_applied.
+                if (type == "event_msg" && payloadType == "thread_settings_applied") || ownAgentMessage {
+                    readingInheritedHistory = false
+                    currentTurn = nil; lastIntent = nil; calls = [:]; intentsByTurn = [:]; knownTurns = []
+                } else { continue }
+            }
+            if ownAgentMessage, let identity = childIdentity {
+                let turn = metadataTurn(payload) ?? currentTurn
+                adoptTurn(turn)
+                result.append(subagentIdentityEvent(identity, turn: turn, timestamp: timestamp, workspace: workspace))
+                let parts = payload["content"] as? [[String: Any]] ?? []
+                // Delegation is not a human request. Encrypted content remains
+                // opaque; retain routing and the readable envelope only.
+                result.append(event(identity: "\(session):\(turn ?? "none"):\(payload["id"] as? String ?? timestampKey):delegation",
+                    kind: "context", rule: "codex_agent_message", workspace: workspace, op: "agent_message",
+                    timestamp: timestamp, action: "received", session: session, trace: nil, turn: turn,
+                    intent: nil, prompt: textContent(parts).map { String($0.prefix(2048)) }, response: nil,
+                    toolCallId: nil, toolName: "codex.agent_message",
+                    command: jsonString(["author": payload["author"] as? String ?? "",
+                        "recipient": identity.agentPath,
+                        "content_types": parts.compactMap { $0["type"] as? String }]), model: model))
+                continue
             }
 
             if type == "session_meta", let base = payload["base_instructions"] as? [String: Any],
@@ -717,6 +887,15 @@ final class CodexSight: ObservableObject {
                 action: isOutput ? "completed" : "requested", session: session, trace: nil,
                 turn: turn, intent: isOutput ? nil : intent(for: turn), prompt: nil, response: output,
                 toolCallId: callId, toolName: name, command: command, model: model))
+        }
+        if let identity = childIdentity {
+            let existing = Set(result.filter { $0.ruleId == "codex_subagent_identity" }.compactMap(\.turnId))
+            let byTurn = Dictionary(grouping: result.filter { $0.turnId != nil && $0.sessionId == identity.session }, by: { $0.turnId! })
+            for (turn, events) in byTurn where !existing.contains(turn) {
+                if let first = events.min(by: { $0.ts < $1.ts }) {
+                    result.append(subagentIdentityEvent(identity, turn: turn, timestamp: first.ts, workspace: first.path))
+                }
+            }
         }
         return result
     }

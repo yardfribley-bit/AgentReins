@@ -1,0 +1,12 @@
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+let writes=0;const element={style:{setProperty(){}},classList:{toggle(){}},querySelectorAll(){return []},set innerHTML(v){writes++;this.html=v},get innerHTML(){return this.html}};
+const env={window:{},innerWidth:900,addEventListener(){},document:{getElementById(id){return id==='graph'?element:null},querySelector(){return null}}};
+vm.createContext(env);vm.runInContext(fs.readFileSync('Sources/AgentReins/Resources/RealtimeWorkspace/flow.js','utf8'),env);
+const select=()=>{},base={scope:'task',nodes:[{key:'model',title:'Model',tag:'actual',subtitle:'original',phase:'running',x:0,y:0,w:100,h:100}],edges:[],onSelect:select,currentKey:'model'};
+for(let i=0;i<100;i++)env.window.AgentReinsFlow.render({...base,nodes:structuredClone(base.nodes),animate:true});
+assert.strictEqual(writes,1);
+env.window.AgentReinsFlow.render({...base,selectedKey:'model'});assert.strictEqual(writes,2);
+env.window.AgentReinsFlow.render({...base,nodes:[{...base.nodes[0],subtitle:'updated actual'}]});assert.strictEqual(writes,3);
+env.window.AgentReinsFlow.render({...base,scope:'other-task'});assert.strictEqual(writes,4);
+env.window.AgentReinsFlow.render({...base,edges:[{key:'edge',revision:'new',path:'M0 0 L10 10'}]});assert.strictEqual(writes,5);
+console.log('PASS actual flow renderer: 100 unchanged refreshes produce one DOM replacement; selection, content, scope and evidence edge changes redraw');

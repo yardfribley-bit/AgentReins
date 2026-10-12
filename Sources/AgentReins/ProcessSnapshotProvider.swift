@@ -40,11 +40,13 @@ enum ProcessArgumentRedactor {
 
 protocol ProcessSnapshotting: Sendable {
     var sourceID: String { get }
+    var snapshotFailed: Bool { get }
     func snapshot() -> [ProcessSnapshotRecord]
     func invalidateDiscovery()
 }
 
 extension ProcessSnapshotting {
+    var snapshotFailed: Bool { false }
     func invalidateDiscovery() {}
 }
 
@@ -55,6 +57,8 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
     let sourceID = "darwin-libproc"
     let agentMarkers: [String]
     private let stateLock = NSLock()
+    private var failed = false
+    var snapshotFailed: Bool { stateLock.lock(); defer { stateLock.unlock() }; return failed }
     private var knownRoots = Set<pid_t>()
     private var lastRootDiscovery = Date.distantPast
     private var cachedAgentRecords: [pid_t: ProcessSnapshotRecord] = [:]
@@ -75,7 +79,8 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
 
     func snapshot() -> [ProcessSnapshotRecord] {
         stateLock.lock()
-        let discoverRoots = Date().timeIntervalSince(lastRootDiscovery) >= rootDiscoveryInterval || knownRoots.isEmpty
+        failed = false
+        let discoverRoots = Date().timeIntervalSince(lastRootDiscovery) >= (knownRoots.isEmpty ? 2 : rootDiscoveryInterval)
         let rootsSnapshot = knownRoots
         stateLock.unlock()
 
@@ -87,7 +92,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
         var pids = [pid_t](repeating: 0, count: capacity)
         let byteCount = Int32(pids.count * MemoryLayout<pid_t>.size)
         let found = pids.withUnsafeMutableBytes { proc_listallpids($0.baseAddress, byteCount) }
-        guard found > 0 else { return [] }
+        guard found > 0 else { stateLock.lock(); failed = true; stateLock.unlock(); return [] }
 
         var records: [pid_t: (ppid: pid_t, executable: String, birth: UInt64)] = [:]
         for pid in pids.prefix(Int(found)) where pid > 0 {
@@ -163,6 +168,7 @@ final class DarwinLibprocSnapshotProvider: ProcessSnapshotting, @unchecked Senda
 
     private func agentOwner(for executable: String) -> String? {
         let path = executable.lowercased()
+        if agentMarkers.contains("codex"), let owner = ProcessGuard.targetExecutableOwner(executable), owner == "codex" { return owner }
         if agentMarkers.contains("workbuddy"), (path.contains("/applications/workbuddy.app/") || path.contains("/.workbuddy/binaries/")) { return "workbuddy" }
         if agentMarkers.contains("chatgpt"), path.contains("/applications/chatgpt.app/") { return "codex" }
         if agentMarkers.contains("cursor"), path.contains("/applications/cursor.app/") { return "cursor" }
@@ -307,6 +313,7 @@ struct ResilientProcessSnapshotProvider: ProcessSnapshotting {
     let sourceID = "libproc-with-ps-fallback"
     let primary: DarwinLibprocSnapshotProvider
     let fallback = PsProcessSnapshotProvider()
+    var snapshotFailed: Bool { primary.snapshotFailed }
 
     init(agentMarkers: [String]) {
         primary = DarwinLibprocSnapshotProvider(agentMarkers: agentMarkers)
@@ -316,6 +323,6 @@ struct ResilientProcessSnapshotProvider: ProcessSnapshotting {
 
     func snapshot() -> [ProcessSnapshotRecord] {
         let result = primary.snapshot()
-        return result.isEmpty ? fallback.snapshot() : result
+        return primary.snapshotFailed ? fallback.snapshot() : result
     }
 }

@@ -2,8 +2,8 @@ import Foundation
 
 /// Presentation-only projection. Never reads historical tasks or guesses cross-turn causality.
 struct RealtimeWorkspacePayload: Encodable {
-    let tasks: [RealtimeTask]
-    let collected: [RealtimeCollectedRecord]
+    var tasks: [RealtimeTask]
+    var collected: [RealtimeCollectedRecord]
     let unattributedCount: Int
     let processes: [RealtimeProcess]
     let health: [RealtimeHealth]
@@ -17,8 +17,12 @@ struct RealtimeWorkspacePayload: Encodable {
     var readTaskIDs: [String] = []
     var continuityNotice: String? = nil
     var ipGeolocations: [RealtimeIPLocation] = []
+    var lazyTasks = false
+    var collectedOrder: [String]? = nil
+    var detailDelta: RealtimeWorkspaceTransport.DetailDelta? = nil
 }
 struct RealtimeCollectedRecord: Encodable {
+    var revision = UUID().uuidString
     let id: String, agent: String, source: String, kind: String, op: String, summary: String, preview: String
     let hasTaskIdentity: Bool
     var title: String = ""
@@ -31,14 +35,14 @@ struct RealtimeCollectedRecord: Encodable {
     var timestamp: Date? = nil
     var resource: RealtimeResourceDetail? = nil
 }
-struct RealtimeProcess: Encodable {
+struct RealtimeProcess: Equatable, Encodable {
     let id: String, pid: String, parent: String, agent: String, name: String
     var executable: String = ""
     var command: String = ""
     var active: Bool = true
     var depth: Int = 0
 }
-struct RealtimeHealth: Encodable {
+struct RealtimeHealth: Equatable, Encodable {
     let source: String, state: String
     let accepted: Int
     let detail: String?
@@ -60,7 +64,7 @@ struct RealtimeUserInput: Encodable {
 struct RealtimeTask: Encodable, Identifiable {
     let id: String, agent: String, session: String, turn: String, title: String
     let startedAt: Date, lastActivity: Date
-    let cards: [RealtimeCard]
+    var cards: [RealtimeCard]
     let model: String?
     var reportedComplete: Bool
     var isPrimaryTask: Bool = true
@@ -89,8 +93,13 @@ struct RealtimeTask: Encodable, Identifiable {
     var unresolvedCallIDs: [String] = []
     var userInputs: [RealtimeUserInput] = []
     var latestUserInput: RealtimeUserInput? = nil
+    var parentSession: String? = nil
+    var subagentPath: String? = nil
+    var projectionRevision = UUID().uuidString
+    var detailsLoaded = true
+    var searchText = ""
 }
-struct RealtimeCard: Encodable, Identifiable {
+struct RealtimeCard: Equatable, Encodable, Identifiable {
     let id: String, kind: String, title: String, status: String, tag: String
     let summary: String, input: String, output: String, source: String, basis: String, confidence: String
     let call: String?, pid: Int32?, timestamp: Date
@@ -268,6 +277,9 @@ enum RealtimeWorkspaceProjector {
         return grouped.map { key, values in
             let ordered = values.sorted { $0.ts == $1.ts ? $0.id.uuidString < $1.id.uuidString : $0.ts < $1.ts }
             let first = ordered[0]
+            let subagent = ordered.first { $0.ruleId == "codex_subagent_identity" }
+                .flatMap { RealtimeDetailProjector.object($0.command) }
+            let subagentPath = subagent?["agent_path"] as? String
             let request = ordered.first { $0.op == "hook_user_prompt" && $0.userIntent?.isEmpty == false }
                 ?? ordered.first { $0.op == "prompt" && $0.userIntent?.isEmpty == false }
                 ?? ordered.first { $0.op == "network_prompt" && $0.userIntent?.isEmpty == false }
@@ -294,7 +306,8 @@ enum RealtimeWorkspaceProjector {
             }.filter { seenAttachments.insert($0.type).inserted } : resources.filter { seenAttachments.insert($0.path ?? $0.type).inserted }
             var attachmentKeys = Set<String>()
             let attachments = (explicitAttachments + legacyResources).filter { attachmentKeys.insert($0.path ?? $0.type).inserted }
-            let title = request?.userIntent ?? (!attachments.isEmpty ? "用户附件输入 · 未附带文字" : turn(first).isEmpty ? "会话活动 · 轮次尚未关联" : "当前轮次 · 用户需求未采集")
+            let title = subagentPath.map { "子任务 · " + ($0.split(separator: "/").last.map(String.init) ?? $0) }
+                ?? request?.userIntent ?? (!attachments.isEmpty ? "用户附件输入 · 未附带文字" : turn(first).isEmpty ? "会话活动 · 轮次尚未关联" : "当前轮次 · 用户需求未采集")
             let projectedCards = cards(ordered)
             let inputs = userInputs(ordered)
             let state = RealtimeLifecycleProjector.project(events: ordered, cards: projectedCards, hasRequest: request != nil || !attachments.isEmpty, hasTurn: !turn(first).isEmpty)
@@ -302,7 +315,7 @@ enum RealtimeWorkspaceProjector {
                 title: String(title.prefix(300)), startedAt: ordered.first!.ts, lastActivity: ordered.last!.ts,
                 cards: projectedCards, model: ordered.compactMap(\.model).last,
                 reportedComplete: state.status == "completed",
-                isPrimaryTask: !ordered.contains { $0.model == "codex-auto-review" || $0.toolName == "codex.internal_review_context" } && ordered.contains { ($0.op == "attachment" && $0.ruleId == "codex_attachment") || $0.kind == "model" || $0.op == "hook_user_prompt" || ($0.kind == "tool" && !turn($0).isEmpty) },
+                isPrimaryTask: subagent == nil && !ordered.contains { $0.model == "codex-auto-review" || $0.toolName == "codex.internal_review_context" } && ordered.contains { ($0.op == "attachment" && $0.ruleId == "codex_attachment") || $0.kind == "model" || $0.op == "hook_user_prompt" || ($0.kind == "tool" && !turn($0).isEmpty) },
                 originalRequest: request?.userIntent, requestSource: request?.source, requestEventID: request?.id.uuidString,
                 lifecycleStatus: state.status, currentStep: state.currentStep, currentCardID: state.currentCardID, statusBasis: state.basis,
                 coverage: state.coverage, lifecycle: state.lifecycle, inputAttachments: attachments,
@@ -311,7 +324,9 @@ enum RealtimeWorkspaceProjector {
                 nativeEndOp: state.nativeEndOp, nativeEndAction: state.nativeEndAction, nativeEndSource: state.nativeEndSource,
                 nativeEndMessage: state.nativeEndMessage, nativeEndMessageTruncated: state.nativeEndMessageTruncated,
                 stopReason: state.stopReason, lastFailureCardID: state.lastFailureCardID, unresolvedCallIDs: state.unresolvedCallIDs,
-                userInputs: inputs, latestUserInput: inputs.last)
+                userInputs: inputs, latestUserInput: inputs.last,
+                parentSession: subagent?["parent_session"] as? String, subagentPath: subagentPath,
+                searchText: projectedCards.flatMap { [$0.title, $0.summary, $0.resource?.path, $0.resource?.url, $0.resource?.domain, $0.execution?.command.map { String($0.prefix(220)) }].compactMap { $0 } }.joined(separator: "\n"))
         }.sorted { $0.lastActivity > $1.lastActivity }
     }
     static func cards(_ records: [GuardEvent]) -> [RealtimeCard] {
@@ -453,7 +468,7 @@ enum RealtimeWorkspaceProjector {
 }
 
 /// Existing IP attribution cache, scoped to addresses actually seen in live tasks.
-struct RealtimeIPLocation: Encodable {
+struct RealtimeIPLocation: Equatable, Encodable {
     let ip: String
     let location: String?
     let owner: String?

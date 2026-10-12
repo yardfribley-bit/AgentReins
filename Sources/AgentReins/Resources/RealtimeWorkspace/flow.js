@@ -2,6 +2,7 @@
 /* Layout follows the approved prototype. Motion is a new confirmed evidence event. */
 (()=>{
  const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+ let lastRender=null,lastSelect=null;
  let lastScope=null,known=new Map(),seeded=false,zoomMode='readable',currentScale=.85,currentNode=null,diagramNodes=[],dimensions={width:1000,height:1340},observer;
  const compact={user:'用户输入',perception:'输入材料',model:'大语言模型',context:'上下文 / 记忆',plan:'规划调度',direct:'直接回答？',reply:'回复输出',action:'工具执行',closure:'目标完成？',mcp:'MCP / Skill',api:'网络',code:'命令',database:'数据库',files:'文件',external:'外部服务',observation:'可观测层'};
  function applySize(){const host=document.getElementById('graph'),viewport=document.getElementById('graph-viewport'),spacer=document.getElementById('graph-spacer');if(!host||!viewport||!spacer)return;
@@ -17,6 +18,10 @@
  addEventListener('resize',applySize);
 
  function render({scope,nodes=[],edges=[],selectedKey,currentKey,paused,onSelect,width=1000,height=1340,animate=false}){
+  // Layout nodes contain display fields only, never the original evidence bodies.
+  const signature=JSON.stringify([scope,nodes,edges,selectedKey,currentKey,paused,width,height]);
+  if(signature===lastRender&&onSelect===lastSelect)return;
+  lastRender=signature;lastSelect=onSelect;
   if(scope!==lastScope){lastScope=scope;known=new Map();seeded=false;}
   const changed=edges.filter(e=>!e.independent&&known.get(e.key)!==e.revision&&e.revision&&e.revision!=='[]');
   const pulse=animate&&seeded&&!paused?changed.at(-1):null;

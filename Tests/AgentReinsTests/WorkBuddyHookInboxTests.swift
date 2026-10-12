@@ -3,6 +3,52 @@ import XCTest
 @testable import AgentReins
 
 final class WorkBuddyHookInboxTests: XCTestCase {
+    func testLiveAppendNeverReadsOrSeedsPreexistingBody() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = root.appendingPathComponent("session.jsonl")
+        let old = "{\"type\":\"message\",\"sessionId\":\"s\",\"role\":\"user\",\"content\":\"pre-install secret\"}\n"
+        try Data(old.utf8).write(to: file)
+        let baseline = UInt64(old.utf8.count)
+        let appended = "{\"type\":\"message\",\"sessionId\":\"s\",\"role\":\"assistant\",\"content\":\"live result\"}\n"
+        try Data((old + appended).utf8).write(to: file)
+        let batch = WorkBuddySight.readRecentEvents(root: root.path, changedAfter: .distantPast,
+            previousSizes: [file.path: baseline], previousStates: [:], targets: [file])
+        XCTAssertEqual(batch.raw.count, 1)
+        XCTAssertEqual(batch.raw.first?.offsetStart, Int64(baseline))
+        XCTAssertEqual(batch.raw.first?.payload, Data(appended.utf8))
+        XCTAssertTrue(batch.states[file.path]?.lastIntent.isEmpty == true)
+        XCTAssertFalse(batch.events.contains { String(describing: $0).contains("pre-install secret") })
+    }
+
+    @MainActor
+    func testLiveRestartCollectsOnlyAppendAfterInstallation() async throws {
+        let root = FileManager.default.temporaryDirectory.resolvingSymlinksInPath().appendingPathComponent(UUID().uuidString)
+        let projects = root.appendingPathComponent("projects"), inbox = root.appendingPathComponent("inbox")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = projects.appendingPathComponent("session.jsonl")
+        let old = "{\"type\":\"message\",\"sessionId\":\"s\",\"role\":\"user\",\"content\":\"pre-install\"}\n"
+        try Data(old.utf8).write(to: file)
+        let db = try EvidenceDatabase.shared(url: root.appendingPathComponent("evidence.sqlite3"))
+        let first = WorkBuddySight(rootURL: projects, database: db, hookRoot: inbox)
+        first.start(realtimeOnly: true)
+        let marker = projects.path + "/.agentreins-activation"
+        let deadline = Date().addingTimeInterval(4)
+        while try db.parserStates(source: "workbuddy-live")[marker] == nil, Date() < deadline { try await Task.sleep(for: .milliseconds(25)) }
+        XCTAssertNotNil(try db.parserStates(source: "workbuddy-live")[marker])
+        first.stop()
+        let added = "{\"type\":\"message\",\"sessionId\":\"s\",\"role\":\"user\",\"content\":\"new while stopped\"}\n"
+        let handle = try FileHandle(forWritingTo: file);try handle.seekToEnd();try handle.write(contentsOf: Data(added.utf8));try handle.close()
+        let second = WorkBuddySight(rootURL: projects, database: db, hookRoot: inbox)
+        second.start(realtimeOnly: true);defer { second.stop() }
+        let nextDeadline = Date().addingTimeInterval(4)
+        while try db.rawRecords(source: "workbuddy").isEmpty, Date() < nextDeadline { try await Task.sleep(for: .milliseconds(25)) }
+        let raw = try db.rawRecords(source: "workbuddy")
+        XCTAssertEqual(raw.count, 1);XCTAssertEqual(raw.first?.payload, Data(added.utf8))
+    }
+
     func testLargeToolResultIsNotSilentlyDroppedAtOldOneMegabyteLimit() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
@@ -51,6 +97,36 @@ final class WorkBuddyHookInboxTests: XCTestCase {
         XCTAssertNil(envelope.event.processId, "Hook writer PID must never be attributed as tool PID")
         XCTAssertTrue(envelope.event.afterContent!.contains("echo fixture"))
         XCTAssertEqual(envelope.raw.payload, try Data(contentsOf: file))
+    }
+
+    @MainActor
+    func testPreInstallHookIsDiscardedWithoutEnteringEvidenceOrLiveTasks() async throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        let projects = root.appendingPathComponent("projects")
+        let inbox = root.appendingPathComponent("inbox")
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: inbox, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let file = inbox.appendingPathComponent("old.json")
+        let record: [String: Any] = ["event_id": UUID().uuidString, "hook_event_name": "UserPromptSubmit",
+            "observed_at_ms": Date().addingTimeInterval(-60).timeIntervalSince1970 * 1000,
+            "payload": ["session_id": "old-session", "prompt": "旧需求不得混入实时任务"]]
+        let bytes = try JSONSerialization.data(withJSONObject: record)
+        try bytes.write(to: file)
+        let database = try EvidenceDatabase.shared(url: root.appendingPathComponent("evidence.sqlite3"))
+        let collector = WorkBuddySight(rootURL: projects, database: database, hookRoot: inbox)
+        var received: [GuardEvent] = []
+        collector.onEvents = { received += $0 }
+        collector.onHookSignals = { received += $0 }
+        collector.start(realtimeOnly: true)
+        defer { collector.stop() }
+        let deadline = Date().addingTimeInterval(4)
+        while FileManager.default.fileExists(atPath: file.path) && Date() < deadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertFalse(FileManager.default.fileExists(atPath: file.path))
+        XCTAssertFalse(received.contains { $0.sessionId == "old-session" })
+        XCTAssertTrue(try database.rawRecords(source: "workbuddy-hook").isEmpty)
     }
 
     @MainActor
