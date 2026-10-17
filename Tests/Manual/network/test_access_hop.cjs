@@ -131,14 +131,14 @@ assert.match(holder.innerHTML, /全部外网访问/);
 const homeHead=holder.innerHTML.match(/<thead>[\s\S]*?<\/thead>/)[0];
 assert.ok(homeHead.indexOf('任务')>=0&&homeHead.indexOf('任务')<homeHead.indexOf('时间'));
 assert.match(holder.innerHTML, /上传探针文件/);
-assert.match(holder.innerHTML, /工具/);
-assert.match(holder.innerHTML, /调用参数/);
-assert.match(holder.innerHTML, /git push origin main/);
-assert.match(holder.innerHTML, /连接/);
-assert.match(holder.innerHTML, /经代理连通 1 次/);
-assert.match(holder.innerHTML, /命令退出 0/);
-assert.match(holder.innerHTML, /访问了哪里/);
-assert.match(holder.innerHTML, /github\.com:443/);
+assert.match(holder.innerHTML, /谁/);
+assert.match(holder.innerHTML, /协议/);
+assert.match(holder.innerHTML, /cursor-audit-probe\.txt/);
+assert.match(holder.innerHTML, /协议/);
+assert.match(holder.innerHTML, /带走了 cursor-audit-probe\.txt/);
+assert.match(holder.innerHTML, /带走了 cursor-audit-probe\.txt/);
+assert.match(holder.innerHTML, /去了哪里/);
+assert.match(holder.innerHTML, /github\.com/);
 assert.match(holder.innerHTML, /Git push/);
 assert.doesNotMatch(holder.innerHTML, /127\.0\.0\.1/);
 const [localOnly] = api.projectLocal([{
@@ -154,6 +154,20 @@ const [localGh] = api.projectLocal([{
   blocks: [{ direction: 'send', kind: 'data', textPreview: '--version' }]
 }]);
 assert.strictEqual(localGh, undefined);
+const [ghRepo] = api.projectLocal([{
+  captureMode: 'agent-path', agent: 'Cursor', tool: 'gh', startedAt: '2026-10-17T10:33:20Z', pid: 50, exitCode: 1, runID: 'gh-pr',
+  connections: [{ kind: 'connected', detail: ['目标未从命令解析'] }],
+  blocks: [{ direction: 'send', kind: 'data', textPreview: 'pr list --hostname github-tajleonbennis --repo tajleonbennis-maker/secretwatcher --json url,state' }, { direction: 'receive', kind: 'data', textPreview: 'unknown flag: --hostname' }]
+}]);
+assert.strictEqual(ghRepo.host, 'github-tajleonbennis/tajleonbennis-maker/secretwatcher');
+assert.match(ghRepo.args.join(' '), /--hostname github-tajleonbennis/);
+const ghHolder = { innerHTML: '' };
+api.render(ghHolder, { tasks: [], collected: [] });
+api.setLocalTransports([{ captureMode: 'agent-path', agent: 'Cursor', tool: 'gh', startedAt: '2026-10-17T10:33:20Z', pid: 50, exitCode: 1, runID: 'gh-pr', connections: [{ kind: 'connected', detail: ['目标未从命令解析'] }], blocks: [{ direction: 'send', kind: 'data', textPreview: 'pr list --hostname github-tajleonbennis --repo tajleonbennis-maker/secretwatcher --json url,state' }, { direction: 'receive', kind: 'data', textPreview: 'unknown flag: --hostname' }] }]);
+api.render(ghHolder, { tasks: [], collected: [] });
+assert.match(ghHolder.innerHTML, /github-tajleonbennis\/tajleonbennis-maker\/secretwatcher/);
+assert.match(ghHolder.innerHTML, /没连上/);
+assert.doesNotMatch(ghHolder.innerHTML, /连通/);
 const [proxiedSite] = api.projectLocal([{
   captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T09:01:00Z', pid: 22, exitCode: 0, runID: 'via-proxy',
   connections: [{ kind: 'proxyTunnel', detail: ['example.com:443'] }, { kind: 'connected', detail: ['127.0.0.1 (127.0.0.1) port 18891'] }],
@@ -169,12 +183,12 @@ const [ghHost] = api.projectLocal([{
 }]);
 assert.strictEqual(ghHost.host, 'api.github.com');
 assert.doesNotMatch(String(ghHost.networkBody.request), /secret-value/);
-assert.match(holder.innerHTML, /发出/);
+assert.match(holder.innerHTML, /带走了 cursor-audit-probe\.txt/);
 assert.match(holder.innerHTML, /cursor-audit-probe\.txt/);
-assert.match(holder.innerHTML, /git push origin main/);
-assert.match(holder.innerHTML, /main -&gt; main/);
+assert.doesNotMatch(holder.innerHTML, /git push origin main/);
+assert.doesNotMatch(holder.innerHTML, /main -&gt; main/);
 assert.doesNotMatch(holder.innerHTML, /old-diff|Git diff/);
-assert.match(holder.innerHTML, /读正文/);
+assert.match(holder.innerHTML, /打开/);
 const taskHolder = { innerHTML: '', querySelectorAll: () => [] };
 api.render(taskHolder, { tasks: [{ id: 'hb', agent: 'Cursor', session: 's', title: '<heartbeat><automation_id>agentreins</automation_id>', originalRequest: '<heartbeat><automation_id>agentreins</automation_id>', cards: [] }], collected: [] }, { taskOnly: 'hb' });
 assert.match(taskHolder.innerHTML, /机器标记/);
@@ -203,22 +217,22 @@ const allHead=pageHolder.innerHTML.match(/<thead>[\s\S]*?<\/thead>/)[0];
 assert.ok(allHead.indexOf('任务')<allHead.indexOf('时间'));
 assert.match(pageHolder.innerHTML, /https:\/\/news\.baidu\.com\//);
 assert.match(pageHolder.innerHTML, /WebFetch/);
-assert.match(pageHolder.innerHTML, /GET https:\/\/news\.baidu\.com\//);
-assert.match(pageHolder.innerHTML, /正文为空/);
+assert.match(pageHolder.innerHTML, /网页《百度新闻——海量中文资讯平台》/);
+assert.match(pageHolder.innerHTML, /只要了头信息/);
 assert.match(pageHolder.innerHTML, /网页《百度新闻——海量中文资讯平台》/);
 assert.match(pageHolder.innerHTML, /热点要闻/);
-assert.match(pageHolder.innerHTML, /安全检查：已查看发出和返回的正文/);
+assert.doesNotMatch(pageHolder.innerHTML, /安全检查：已查看发出和返回的正文/);
 assert.match(pageHolder.innerHTML, /访问一下百度/);
 assert.doesNotMatch(pageHolder.innerHTML, /<!doctype|<script|secret\(\)/);
 const scoped={innerHTML:'', querySelectorAll:()=>[]};
 api.setLocalTransports([{captureMode:'agent-path', agent:'WorkBuddy', tool:'curl', startedAt:'2026-10-17T06:55:00Z', pid:30, exitCode:0, runID:'curl-baidu', session:'wb-session', connections:[{kind:'connected', detail:['www.example.com:443']}], blocks:[{direction:'send', kind:'data', http:['GET /probe HTTP/1.1','Host: www.example.com']},{direction:'receive', kind:'data', textPreview:'probe ok'}]}]);
 api.render(scoped,{tasks:[visitTask], collected:[baidu, head], processes:[], ipGeolocations:[]},{taskOnly:'visit'});
-assert.match(scoped.innerHTML, /<strong>3<\/strong><span>对外访问<\/span>/);
+assert.match(scoped.innerHTML, /<strong>3<\/strong><span>出去了<\/span>/);
 const taskHead=scoped.innerHTML.match(/<thead>[\s\S]*?<\/thead>/)[0];
 assert.ok(taskHead.startsWith('<thead><tr><th>时间</th>'));
 assert.doesNotMatch(taskHead, /任务/);
-const headAt=scoped.innerHTML.indexOf('HEAD https://www.baidu.com/');
-const getAt=scoped.innerHTML.indexOf('GET https://news.baidu.com/');
+const headAt=scoped.innerHTML.indexOf('www.baidu.com');
+const getAt=scoped.innerHTML.indexOf('news.baidu.com');
 const curlAt=scoped.innerHTML.indexOf('>curl<');
 assert.ok(headAt>=0&&headAt<getAt&&getAt<curlAt);
 const retryHolder={innerHTML:'', querySelectorAll:()=>[]};
@@ -228,12 +242,34 @@ api.setLocalTransports([
   {captureMode:'agent-path', agent:'Cursor', tool:'git', startedAt:'2026-10-17T10:02:00Z', pid:43, exitCode:1, runID:'gh-push-fail', session:'repo-chat', args:['push','origin','main'], gitOperation:{operation:'push'}, connections:[{kind:'proxyTunnel',detail:['github.com:443']},{kind:'connected',detail:['127.0.0.1:18891']}], blocks:[{direction:'send',kind:'data',textPreview:'git push origin main'}]}
 ]);
 api.render(retryHolder,{tasks:[{id:'repo',agent:'Cursor',session:'repo-chat',title:'推送仓库',originalRequest:'推送仓库',cards:[]}],collected:[]},{taskOnly:'repo'});
-assert.match(retryHolder.innerHTML, /同一工具的重复连接/);
-assert.match(retryHolder.innerHTML, /github\.com · curl · 调用 2 次 · 失败 1 次 · 连接尝试 4 次/);
-assert.match(retryHolder.innerHTML, /github\.com · Git push · 调用 1 次 · 失败 1 次/);
-assert.match(retryHolder.innerHTML, /curl -I https:\/\/github\.com\/org\/repo/);
-assert.match(retryHolder.innerHTML, /尝试 3 次，未连通 3 次，关闭 1 次，命令退出 28/);
-assert.match(retryHolder.innerHTML, /尝试 1 次，连通 1 次，命令退出 0/);
-assert.match(retryHolder.innerHTML, /git push origin main/);
+assert.match(retryHolder.innerHTML, /重复访问/);
+assert.match(retryHolder.innerHTML, /curl 去了 github.com 2 次，1 次没成/);
+assert.match(retryHolder.innerHTML, /没连上/);
+assert.match(retryHolder.innerHTML, /只要了头信息/);
+assert.doesNotMatch(retryHolder.innerHTML, /git push origin main/);
 assert.doesNotMatch(retryHolder.innerHTML, /140\.82\.112\.3/);
+const archiveHolder={innerHTML:'', querySelectorAll:()=>[]};
+api.setLocalTransports([]);
+api.setCapturedBodies([{
+  id:'disk-baidu', agent:'WorkBuddy', source:'agentsight:workbuddy-network-body', kind:'network',
+  timestamp:'2026-10-17T06:53:45Z', session:'workbuddy-network:flow', turn:'flow',
+  details:JSON.stringify({requestPath:'/', method:'GET'}),
+  resource:{domain:'news.baidu.com', method:'GET', url:'https://news.baidu.com/', evidenceType:'http'},
+  networkBody:{flow:'workbuddy-http:flow', request:'', response:'网页《百度》', requestComplete:true, responseComplete:true, responseStatus:200}
+}]);
+api.render(archiveHolder,{tasks:[],collected:[]});
+assert.match(archiveHolder.innerHTML, /news\.baidu\.com/);
+assert.doesNotMatch(archiveHolder.innerHTML, /这次还没有采到外网交互/);
+const copilotHolder={innerHTML:'', querySelectorAll:()=>[]};
+api.setCapturedBodies([{
+  id:'cap', agent:'WorkBuddy', source:'agentsight:workbuddy-network-body', kind:'network',
+  timestamp:'2026-10-17T10:41:50Z', session:'workbuddy-network:e3', turn:'e3',
+  details:JSON.stringify({requestPath:'/v2/operation-platform/slots/active-batch', method:'POST', responseStatus:200}),
+  resource:{domain:'copilot.tencent.com', method:'POST', url:'https://copilot.tencent.com/v2/operation-platform/slots/active-batch', evidenceType:'http'},
+  networkBody:{flow:'workbuddy-http:e3', request:'{}', response:'{}', requestComplete:true, responseComplete:true, responseStatus:200}
+}]);
+api.render(copilotHolder,{tasks:[],collected:[]});
+assert.match(copilotHolder.innerHTML, /copilot\.tencent\.com\/v2\/operation-platform\/slots\/active-batch/);
+assert.match(copilotHolder.innerHTML, />POST</);
+assert.doesNotMatch(copilotHolder.innerHTML, /这次还没有采到外网交互/);
 console.log('access hop ok');

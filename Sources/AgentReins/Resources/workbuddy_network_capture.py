@@ -103,13 +103,11 @@ def error(flow):
 
 
 def _release(flow):
-    """Drop the buffered body after it has been written. mitmdump otherwise retains every flow."""
-    try:
-        flow.request.content = b""
-        if flow.response is not None:
-            flow.response.content = b""
-    except Exception:
-        pass
+    """Drop the flow from mitmdump's view after the body is recorded.
+
+    This hook runs before the response is sent. Clearing response.content here
+    replaces the download the client receives with an empty body.
+    """
     try:
         from mitmproxy import ctx
         ctx.master.commands.call("view.flows.remove", [flow])

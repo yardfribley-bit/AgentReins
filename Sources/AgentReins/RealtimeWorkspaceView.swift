@@ -46,9 +46,13 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
             if action == "loadTransportAudit" {
                 guard let view = message.webView else { return }
                 encodingQueue.async {
-                    let records = NativeTransportAudit.records()
+                    // Our capture files, not the 32 MB task checkpoint.
+                    let payload: [String: Any] = [
+                        "commands": CapturedNetworkArchive.commandRecords(),
+                        "captures": CapturedNetworkArchive.httpsRecords()
+                    ]
                     Task { @MainActor in
-                        _ = try? await view.callAsyncJavaScript("window.agentreinsTransportReceive(records)", arguments: ["records": records], in: nil, contentWorld: .page)
+                        _ = try? await view.callAsyncJavaScript("window.agentreinsTransportReceive(records)", arguments: ["records": payload], in: nil, contentWorld: .page)
                     }
                 }
                 return

@@ -66,6 +66,139 @@ def git_state(path, global_args=(), isolate=False):
             'refs':optional('for-each-ref','--format=%(refname) %(objectname)'),
             'worktree':None if bare else optional('-c','core.fsmonitor=false','status','--porcelain=v1','-uno')}
 
+def _flag_value(args, name):
+    for index, arg in enumerate(args):
+        if arg==name and index+1<len(args) and (args[index+1]=='-' or not str(args[index+1]).startswith('-')):
+            return args[index+1]
+        if str(arg).startswith(name+'='):
+            return str(arg).split('=',1)[1]
+    return None
+
+def _url_name(value):
+    try:
+        name=pathlib.PurePosixPath(urlsplit(value).path).name
+    except ValueError:
+        return None
+    if not name or name in ('.','..'):return None
+    return name
+
+def download_paths(tool, args, cwd):
+    """Files a download command was asked to write. Missing files stay unverified."""
+    root=pathlib.Path(cwd or os.getcwd())
+    paths=[]
+    def add(path):
+        if not path or path=='-':return
+        candidate=pathlib.Path(path)
+        if not candidate.is_absolute():candidate=root/candidate
+        text=str(candidate)
+        if text not in paths:paths.append(text)
+    if tool=='wget' and '--spider' not in args:
+        output=_flag_value(args,'-O') or _flag_value(args,'--output-document')
+        if output=='-':return []
+        if output:add(output)
+        else:
+            for arg in args:
+                if not str(arg).startswith('-') and '://' in str(arg):
+                    name=_url_name(arg)
+                    if name:add(name)
+    elif tool=='curl':
+        for index, arg in enumerate(args[:-1]):
+            if arg in ('-o','--output'):add(args[index+1])
+            elif str(arg).startswith('--output='):add(str(arg).split('=',1)[1])
+        if '-O' in args or '--remote-name' in args:
+            for arg in args:
+                if not str(arg).startswith('-') and '://' in str(arg):
+                    name=_url_name(arg)
+                    if name:add(name)
+    return paths[:20]
+
+def brew_formulas(args):
+    verbs={'install','fetch','upgrade','reinstall'}
+    if not any(arg in verbs for arg in args):return []
+    names=[]
+    started=False
+    for arg in args:
+        if arg in verbs:
+            started=True
+            continue
+        if not started or str(arg).startswith('-') or '://' in str(arg):continue
+        if arg not in names:names.append(arg)
+    return names[:20]
+
+def brew_cache_dir():
+    home=os.environ.get('HOME') or str(pathlib.Path.home())
+    return pathlib.Path(home)/'Library'/'Caches'/'Homebrew'/'downloads'
+
+def cache_snapshot(directory):
+    snap={}
+    if not directory.is_dir():return snap
+    for path in directory.iterdir():
+        if path.is_file() and not path.is_symlink():
+            stat=path.stat()
+            snap[path.name]=(stat.st_mtime_ns, stat.st_size)
+    return snap
+
+def cache_changes(directory, before):
+    changed=[]
+    if not directory.is_dir():return changed
+    for path in directory.iterdir():
+        if not path.is_file() or path.is_symlink():continue
+        stat=path.stat()
+        if before.get(path.name)!=(stat.st_mtime_ns, stat.st_size):changed.append(path)
+    changed.sort(key=lambda item: item.stat().st_mtime_ns, reverse=True)
+    return changed[:8]
+
+def download_record(path, source=None, max_bytes=32*1024*1024):
+    p=pathlib.Path(path)
+    record={'path':str(p),'source':source}
+    if not p.is_file() or p.is_symlink():
+        record['state']='unavailable'
+        return record
+    size=p.stat().st_size
+    record['bytes']=size
+    if size>max_bytes:
+        record['state']='tooLarge'
+        return record
+    hashed=file_result(path)
+    hashed['source']=source
+    return hashed
+
+def session_http_lines(text):
+    """Request and status lines from curl -v or wget --debug. CONNECT is not the site status."""
+    request=[]; response=[]
+    for line in (text or '').splitlines():
+        raw=line[2:].strip() if line.startswith(('> ','< ')) else line.strip()
+        if re.match(r'(?i)(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s+\S+.*HTTP/', raw):
+            if raw not in request:request.append(raw)
+        elif re.match(r'(?i)Host:\s*\S+', raw):
+            if raw not in request:request.append(raw)
+        elif re.match(r'HTTP/\d', raw) and 'connection established' not in raw.lower():
+            if raw not in response:response.append(raw)
+    return request[:8], response[:8]
+
+def brew_download_host(text):
+    for url in re.findall(r'https://[^\s\'\"]+', text or ''):
+        if not any(part in url for part in ('ghcr.io','github.com','brew.sh')):continue
+        host=urlsplit(url).hostname
+        if host:return host
+    return None
+
+def download_evidence(tool, args, cwd, cache_before=None, log_text=''):
+    records=[]
+    for path in download_paths(tool, args, cwd):
+        records.append(download_record(path))
+    if tool=='brew':
+        urls=re.findall(r'https://\S+', log_text or '')
+        source=next((item for item in urls if 'ghcr.io' in item or 'github' in item or 'brew' in item), urls[0] if urls else None)
+        for path in cache_changes(brew_cache_dir(), cache_before or {}):
+            records.append(download_record(path, source=source))
+    seen=[]; unique=[]
+    for record in records:
+        key=record.get('path')
+        if key in seen:continue
+        seen.append(key); unique.append(record)
+    return unique[:8]
+
 def upload_names(tool,args):
     """Local file names an outbound command was asked to send. Directory trees are not expanded."""
     names=[]

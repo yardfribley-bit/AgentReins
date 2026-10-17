@@ -132,7 +132,8 @@
 .network-scope-switch button{border:1px solid var(--line,#ddd);background:#fff;border-radius:999px;padding:6px 12px}
 .network-scope-switch button[aria-pressed="true"]{background:#1c1c1c;color:#fff;border-color:#1c1c1c}
 .network-table tr.is-fail td:first-child{box-shadow:inset 3px 0 #9a3412}
-.network-read{margin-top:16px}
+.network-read-row td{max-width:none;padding:4px 14px 16px;background:#faf9f6}
+.network-read{margin-top:0}
 .network-read h3{margin:0 0 6px;font-size:16px}
 .task-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:start}
 .task-open{display:block;min-width:0;padding:0;text-align:left}

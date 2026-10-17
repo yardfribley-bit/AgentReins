@@ -12,8 +12,9 @@
  function agentTransport(record){
   return record&&record.captureMode==='agent-path'&&['Codex','WorkBuddy','Cursor'].includes(record.agent)&&/^[A-Za-z0-9._+-]{1,32}$/.test(record.tool||'');
  }
- let localRuns=[];
+ let localRuns=[],capturedBodies=[];
  function setLocalTransports(records){localRuns=list(records).filter(agentTransport);}
+ function setCapturedBodies(records){capturedBodies=list(records);}
  function hostToken(value){
   const s=String(value||'').trim();
   const m=s.match(/^(?:[a-z][a-z0-9+.-]*:\/\/)?(\[[^\]]+\]|[A-Za-z0-9.-]+)/i);
@@ -30,6 +31,42 @@
   const text=String(value||'').trim();
   if(!text||loopbackHost(text)||/目标未|未从命令解析|未采到/.test(text))return null;
   return text;
+ }
+ function invocationArgs(run){
+  const saved=list(run.args).map(arg=>String(arg)).filter(Boolean);
+  if(saved.length)return saved.slice(0,40);
+  const sent=list(run.blocks).find(block=>block.direction==='send'&&block.textPreview&&!list(block.http).length);
+  const text=String(sent?.textPreview||'').trim();
+  if(!text||/[\n\r]/.test(text))return [];
+  return text.split(' ').filter(Boolean).slice(0,40);
+ }
+ function flagValue(args,name){
+  for(let index=0;index<args.length;index++){
+   const arg=args[index];
+   if(arg===name&&args[index+1]&&!args[index+1].startsWith('-'))return args[index+1];
+   if(arg.startsWith(name+'='))return arg.slice(name.length+1);
+  }
+  return '';
+ }
+ function askedDestination(run){
+  const args=invocationArgs(run);
+  const output=new Set(['-O','--output-document','-o','--output','-P','--directory-prefix']);
+  const urls=[]; const peers=[];
+  args.forEach((arg,index)=>{
+   if(arg.startsWith('-')||output.has(args[index-1]))return;
+   if(/:\/\//.test(arg))urls.push(arg);
+   else if(arg.includes('@')||/^(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?$/.test(arg)||/^[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+(?::\d{1,5})?$/.test(arg))peers.push(arg);
+  });
+  if(urls[0]||peers[0])return urls[0]||peers[0];
+  if(run.tool==='gh'){
+   const host=flagValue(args,'--hostname');
+   const repo=flagValue(args,'--repo')||flagValue(args,'-R');
+   if(host&&repo)return host+'/'+repo;
+   if(host)return host;
+   if(repo)return 'github.com/'+repo.replace(/^\//,'');
+   if(args.includes('api'))return 'api.github.com';
+  }
+  return null;
  }
  function hostsFromBlocks(blocks){
   const found=[];
@@ -54,32 +91,114 @@
    const tunnelHost=externalDetail(tunnel?.detail?.[0]);
    const connectedHost=externalDetail(connected?.detail?.[0]);
    const headerHost=hostsFromBlocks(blocks);
-   const target=tunnelHost||headerHost||connectedHost;
+   const asked=externalDetail(askedDestination(run));
+   const formula=list(run.formulas).find(Boolean);
+   const target=tunnelHost||headerHost||connectedHost||asked||(run.tool==='brew'&&formula?'Homebrew':null);
    // 127.0.0.1 is the local proxy or a local port, never the external site.
    if(!target)return null;
    const proxied=!!tunnelHost||(!!(connected&&loopbackHost(connected.detail?.[0]))&&!!headerHost);
    const side=direction=>blocks.filter(b=>b.direction===direction);
-   const hideLine=line=>/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(String(line).trim());
+   const hideLine=line=>/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(String(line).trim())||/connection established/i.test(String(line));
    const text=items=>items.map(b=>{
     const http=list(b.http).filter(line=>!hideLine(line));
     const preview=String(b.textPreview||'').split('\n').filter(line=>!hideLine(line)).join('\n');
-    return http.join('\n')||preview;
+    return [http.join('\n'),preview].filter(Boolean).join('\n');
    }).filter(Boolean).join('\n\n');
    const bytes=items=>items.filter(b=>b.kind==='data').reduce((n,b)=>n+(Number(b.observedBytes)||0),0);
    const sent=side('send'),received=side('receive');
    const names=list(run.outboundFiles).filter(Boolean);
-   const invocation=list(run.args).map(arg=>String(arg)).filter(Boolean).slice(0,40);
-   const downloadPath=typeof run.fileResult?.path==='string'?run.fileResult.path:'';
-   const downloadBase=downloadPath&&downloadPath!=='/dev/null'?downloadPath.split(/[/\\]/).pop():'';
-   const downloaded=downloadBase&&downloadBase!=='null'?[downloadBase]:[];
+   const invocation=invocationArgs(run);
+   const downloads=list(run.downloads).filter(item=>item&&typeof item==='object');
+   const fallback=run.fileResult&&typeof run.fileResult==='object'?[run.fileResult]:[];
+   const downloadRecords=(downloads.length?downloads:fallback).filter(item=>item.path&&item.path!=='/dev/null');
+   const downloaded=downloadRecords.map(item=>String(item.path).split(/[/\\]/).pop()).filter(name=>name&&name!=='null');
    const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
-   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,exitCode:run.exitCode,gap:run.gap||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
+   const statusLine=received.flatMap(block=>list(block.http).map(String)).filter(line=>/^HTTP\//.test(line)&&!/connection established/i.test(line)).pop();
+   const statusMatch=statusLine&&statusLine.match(/\s(\d{3})\b/);
+   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,exitCode:run.exitCode,gap:run.gap||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
   }).filter(Boolean);
  }
  function localExchanges(){return projectLocal(localRuns);}
+ function cardObject(card){
+  try{const value=JSON.parse(card&&card.input||'');if(value&&typeof value==='object'&&!Array.isArray(value))return value;}catch{}
+  return {};
+ }
+ function shellText(card){
+  const recorded=card&&card.execution&&card.execution.command;
+  if(typeof recorded==='string'&&recorded.trim())return recorded.trim();
+  const raw=cardObject(card).command||cardObject(card).cmd||cardObject(card).shell_command;
+  return typeof raw==='string'?raw.trim():'';
+ }
+ function splitCommand(text){
+  const parts=[];
+  const pattern=/"([^"]*)"|'([^']*)'|(\S+)/g;
+  let match;while((match=pattern.exec(text)))parts.push(match[1]??match[2]??match[3]);
+  return parts;
+ }
+ function cardResult(card){
+  const text=String(card&&card.output||'');
+  if(!text||text==='结果尚未采集'||text==='正文未采集')return null;
+  return text;
+ }
+ function cardExit(card){
+  const recorded=card&&card.execution;
+  if(recorded&&recorded.exitCode!=null&&recorded.exitCode!=='')return recorded.exitCode;
+  if(card&&(card.phase==='failed'||card.status==='attention'))return 1;
+  if(card&&(card.phase==='returned'||card.status==='returned'))return 0;
+  return null;
+ }
+ function commandKey(tool,args){return String(tool||'')+' '+list(args).map(arg=>String(arg)).join(' ');}
+ function remoteCardVisit(task,card){
+  const title=String(card.title||'');
+  if(card.kind!=='web'&&!/fetch|search|browse/i.test(title))return null;
+  const query=cardObject(card);
+  const url=[query.url,query.website,query.link,query.uri].find(value=>typeof value==='string'&&/^https?:\/\//i.test(value))||'';
+  const search=[query.query,query.search_term,query.searchTerm,query.q].find(value=>typeof value==='string'&&value.trim())||'';
+  const prompt=typeof query.prompt==='string'?query.prompt:'';
+  const where=url||search||prompt;
+  if(!where||loopbackHost(where))return null;
+  const name=/search/i.test(title)&&!/fetch/i.test(title)?'搜索':title||'远程访问工具';
+  const failed=card.phase==='failed'||card.status==='attention';
+  return {id:'task-tool:'+card.id,agent:task.agent,tool:name,args:[],accessKind:'remote-tool',accessHop:'remote-tool',host:where,url:url||null,timestamp:card.timestamp,startedAt:card.timestamp,session:task.session,turn:task.turn,taskID:task.id,call:card.call||null,connections:[],source:'task-tool',requestObject:query,exitCode:failed?1:null,networkBody:{flow:'task-tool:'+card.id,request:JSON.stringify(query),response:cardResult(card),requestComplete:true,responseComplete:cardResult(card)!=null,responseStatus:failed?502:undefined}};
+ }
+ function commandCardVisit(task,card){
+  const title=String(card.title||'');
+  if(card.kind!=='command'&&!/terminal|shell|bash/i.test(title))return null;
+  const text=shellText(card);
+  const mentions=(text.match(/\b(curl|wget|brew|git|gh|ssh|scp|sftp|rsync)\b/g)||[]);
+  if(/[\n;]/.test(text)&&mentions.length>1)return null;
+  const parts=splitCommand(text);
+  const tool=String(parts[0]||'').split('/').pop();
+  if(!['curl','wget','brew','git','gh','ssh','scp','sftp','rsync'].includes(tool))return null;
+  const args=parts.slice(1);
+  const operation=tool==='git'?args.find(arg=>!arg.startsWith('-')):null;
+  const run={captureMode:'agent-path',agent:task.agent,tool,args,startedAt:card.timestamp,pid:card.pid||0,exitCode:cardExit(card),runID:'card-'+card.id,session:task.session,gitOperation:operation?{operation}:null,outboundFiles:[],connections:[],blocks:[{direction:'send',kind:'data',textPreview:shellText(card)},cardResult(card)?{direction:'receive',kind:'data',textPreview:String(cardResult(card)).slice(0,4000)}:null].filter(Boolean)};
+  const projected=projectLocal([run])[0];
+  if(!projected)return null;
+  projected.id='task-tool:'+card.id;
+  projected.call=card.call||null;
+  projected.taskID=task.id;
+  projected.turn=task.turn;
+  return projected;
+ }
+ function taskToolVisits(task){
+  const seen=new Set();
+  const visits=[];
+  for(const card of list(task&&task.cards)){
+   const visit=remoteCardVisit(task,card)||commandCardVisit(task,card);
+   if(!visit)continue;
+   const key=visit.accessKind==='remote-tool'?visit.tool+'\0'+visit.host:commandKey(visit.tool,visit.args);
+   if(seen.has(key))continue;
+   seen.add(key);
+   const transport=localExchanges().find(record=>record.agent===task.agent&&record.session&&record.session===task.session&&commandKey(record.tool,record.args)===commandKey(visit.tool,visit.args));
+   if(transport){transport.taskID=task.id;transport.turn=task.turn;visits.push(transport);continue;}
+   visits.push(visit);
+  }
+  return visits;
+ }
  function delegatedTarget(object){
   if(!object||typeof object!=='object')return null;
-  for(const key of ['url','query','target','website','link','uri'])if(typeof object[key]==='string'&&object[key])return object[key];
+  for(const key of ['url','query','search_term','searchTerm','q','target','website','link','uri','prompt'])if(typeof object[key]==='string'&&object[key])return object[key];
   return null;
  }
  function accessHop(r){
@@ -87,7 +206,7 @@
   const host=String(r.host||'');
   if(r.accessHop==='model'||service.includes('/chat/completions'))return {kind:'model',localParty:r.agent||'本机',remoteParty:service||host||'模型服务',notice:'这是本机与模型服务的上下文交换，不是访问工具与网站的交互。'};
   if(r.accessHop==='remote-tool'||/\/agenttool\/|\/v2\/videos\//i.test(service))return {kind:'remote-tool',localParty:r.agent||'本机',remoteParty:service||host||'远程访问工具',delegated:delegatedTarget(r.requestObject),notice:'这是本机与远程访问工具之间的交互。工具再到网站的那一段不在本机，下面的正文不是网站原始 HTTP。'};
-  if(r.accessKind==='local-tool'||r.accessHop==='local-target'||r.source==='agentsight:local-transport'||(r.source==='agentsight:workbuddy-network-body'&&host&&!service))return {kind:'local-tool',localParty:(r.agent||'本机')+' 的本机 '+(r.tool||'网络客户端'),remoteParty:host||'访问目标未采到',notice:r.route==='proxied'?'本次经过代理。下面是本机访问工具与访问目标之间的数据，不是和代理本身的握手。':'本次是本机访问工具直连访问目标。下面是该工具实际发出和收到的数据。'};
+  if(r.accessKind==='local-tool'||r.accessHop==='local-target'||r.source==='agentsight:local-transport'||(r.source==='agentsight:workbuddy-network-body'&&host))return {kind:'local-tool',localParty:(r.agent||'本机')+' 的本机 '+(r.tool||'网络客户端'),remoteParty:host||'访问目标未采到',notice:r.route==='proxied'?'本次经过代理。下面是本机访问工具与访问目标之间的数据，不是和代理本身的握手。':'本次是本机访问工具直连访问目标。下面是该工具实际发出和收到的数据。'};
   return {kind:'unclassified',localParty:r.agent||'本机',remoteParty:host||service||'对端未采到',notice:'尚未确认这是远程访问工具还是本机访问工具。没有正文就不能判断交互内容。'};
  }
  function redact(value){
@@ -120,6 +239,7 @@
   const archived=list(payload.tasks).flatMap(t=>list(t.cards).filter(c=>c.kind==='network'||c.networkBody).map(c=>({...c,agent:t.agent,session:t.session,turn:t.turn,details:c.input,preview:c.output})));
   const byID=new Map(archived.map(r=>[r.id,r]));
   for(const r of list(payload.collected))byID.set(r.id,r);
+  for(const r of capturedBodies)if(!byID.has(r.id))byID.set(r.id,r);
   const candidates=[...byID.values()].filter(r=>(r.kind==='network'||r.networkBody)&&['Codex','WorkBuddy','Cursor'].includes(r.agent));
   const groups=new Map();
   for(const r of candidates.slice().sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))){
@@ -245,6 +365,9 @@
   if(/<\s*\/?\s*(heartbeat|automation_id|automation)\b/i.test(raw)&&plain.length<48)return plain?('机器标记 · '+plain):'机器标记，没有用户原话';
   return plain||raw;
  }
+ function visitSite(record){
+  return siteKey(httpURL(record))||siteKey(record.url)||siteKey(record.host);
+ }
  function siteKey(value){
   const match=String(value||'').match(/^https?:\/\/([^\/\s:?#]+)(?::\d+)?([^?#\s]*)?/i);
   if(!match||loopbackHost(match[1]))return '';
@@ -282,11 +405,22 @@
   if(r.accessKind!=='local-tool'&&r.taskTitle)return plainTask(r.taskTitle);
   return '尚未归入任务';
  }
+ function remoteToolName(r){
+  const service=String(r.serviceURL||'');
+  if(/webfetch/i.test(service))return 'WebFetch';
+  if(/search/i.test(service))return '搜索';
+  if(/\/v2\/videos\//i.test(service))return '视频生成';
+  const tail=service.split('/').filter(Boolean).pop();
+  return tail||'远程访问工具';
+ }
  function whereOf(r){
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool'&&hop.delegated)return hop.delegated;
   const page=httpURL(r);
   if(page)return page;
   const query=r.requestObject||{};
   if(typeof query.query==='string'&&query.query)return query.query;
+  if(typeof query.prompt==='string'&&query.prompt)return query.prompt;
   return r.host||r.serviceURL||'目标未采到';
  }
  function viaOf(r){
@@ -328,27 +462,121 @@
   const audit=r.networkBody?.securityAudit;
   if(!audit)return '';
   const findings=list(audit.findings);
-  if(!findings.length)return '<p class="network-notice">安全检查：已查看发出和返回的正文，未命中当前规则。</p>';
-  return '<p class="network-notice">安全检查：需核查 · '+esc(findings.map(item=>item.label||item.rule).filter(Boolean).join('、'))+'</p>';
+  if(!findings.length)return '';
+  return '<p class="network-notice">需核查 · '+esc(findings.map(item=>item.label||item.rule).filter(Boolean).join('、'))+'</p>';
+ }
+ function showWhere(r){
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool')return '远程访问工具';
+  if(hop.kind==='model')return '模型服务';
+  return String(whereOf(r)||'').replace(/:(?:443|80)$/,'');
+ }
+ function protocolOf(r){
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool')return '工具调用';
+  if(hop.kind==='model')return '模型';
+  if(/加密/.test(String(r.gap||'')))return '加密通道';
+  const blob=[r.networkBody?.request,r.networkBody?.response].join('\n');
+  const lines=blob.split('\n').map(line=>line.trim()).filter(line=>line&&!/^CONNECT\s/i.test(line)&&!/connection established/i.test(line));
+  const version=lines.join('\n').match(/HTTP\/(\d+(?:\.\d+)?)/i);
+  if(version)return 'HTTP/'+version[1].replace(/\.0$/,'');
+  if(r.tool==='brew'||list(r.formulas).length||list(r.downloads).length)return '安装包';
+  return '连接';
+ }
+ function responseText(r){
+  const body=r.networkBody||{};
+  return String(body.response!=null?body.response:body.toolInstructions||'');
+ }
+ function headRequest(r){
+  const args=list(r.args).map(String);
+  if(args.includes('-I')||args.includes('--head'))return true;
+  if(args.some(arg=>/^-[A-Za-z]*I[A-Za-z]*$/.test(arg)))return true;
+  return /^HEAD$/i.test(String(r.method||''))||/\bHEAD\s+\//.test(String(r.networkBody?.request||''));
+ }
+ function broughtPhrase(r){
+  const raw=responseText(r);
+  if(/certificate verify|error setting certificate|CAfile/i.test(raw))return '';
+  if(/<!doctype html|<html[\s>]/i.test(raw)){
+   const title=raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+   const name=title?title[1].replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim():'';
+   return name?'网页《'+name+'》':'一个网页';
+  }
+  const lines=raw.split('\n').map(line=>line.trim()).filter(line=>line&&!/^HTTP\//i.test(line)&&!/^CONNECT\s/i.test(line)&&!/connection established/i.test(line)&&!/^(?:>|<)?\s*(host|user-agent|accept|content-type|content-length|date|server|cache-control|pragma|age|cf-|alt-svc|allow|last-modified|accept-ranges)\s*:/i.test(line)&&!line.startsWith('* ')&&line!=='外传文件名'&&line!=='下载文件名'&&!/^(curl|git|wget|gh|ssh|scp|sftp|rsync)\b/.test(line));
+  const text=lines.join(' ').replace(/\s+/g,' ').trim();
+  if(text.length<2)return '';
+  if(/^[{[]/.test(text)){
+   try{
+    const value=JSON.parse(text);
+    const title=value&&(value.title||(Array.isArray(value.results)&&value.results[0]&&value.results[0].title));
+    if(title)return String(title).slice(0,32);
+   }catch{}
+   return '';
+  }
+  return text.length>32?text.slice(0,32)+'…':text;
+ }
+ function askCell(r){
+  const files=list(r.outboundFiles).filter(Boolean);
+  if(files.length)return files.join('、');
+  const query=r.requestObject||{};
+  const prompt=typeof query.prompt==='string'?query.prompt:'';
+  const where=showWhere(r);
+  if(prompt&&prompt!==where)return prompt;
+  if(headRequest(r))return '只要头信息';
+  return '—';
+ }
+ function verdict(r){
+  const status=Number(r.networkBody?.responseStatus);
+  const exit=r.exitCode!=null&&r.exitCode!==''?Number(r.exitCode):null;
+  const back=broughtPhrase(r);
+  const files=list(r.outboundFiles).filter(Boolean);
+  const saved=list(r.downloads).filter(item=>item&&(item.state==='verified'||item.bytes!=null||item.state==='tooLarge'));
+  const savedNames=saved.map(item=>String(item.path||'').split(/[/\\]/).pop()).filter(Boolean);
+  if(/certificate verify|error setting certificate|CAfile/i.test(responseText(r)))return '证书没配好';
+  if(/加密/.test(String(r.gap||'')))return '看不到通道里的内容';
+  if(status>=400)return '对方返回 '+status;
+  if(r.accessKind==='remote-tool'||accessHop(r).kind==='remote-tool'){
+   if(callFailed(r)&&!back)return '工具没有带回内容';
+   if(back)return '收回了 '+(back.startsWith('网页')?back:back);
+   if(responseText(r).trim())return '收回了一段结果';
+   return '工具做了这次访问';
+  }
+  if(savedNames.length)return '下载了 '+savedNames.join('、');
+  if(status>=200&&status<400&&exit!=null&&exit!==0)return '网站回了 '+status+'，命令失败';
+  if(files.length&&exit===0)return '带走了 '+files.join('、');
+  if(callFailed(r)&&!(status>=100))return '没连上';
+  if(headRequest(r)&&(status>=200&&status<400||exit===0))return '只要了头信息';
+  if(status>=200&&status<300||exit===0)return '通了';
+  return '没完成';
+ }
+ function connectionBrief(r){
+  const status=Number(r.networkBody?.responseStatus);
+  if(r.accessKind==='remote-tool'&&!externalConnections(r).length)return '工具代办';
+  if(/certificate verify|error setting certificate|CAfile/i.test(responseText(r)))return '没完成';
+  if(callFailed(r)&&!(status>=100))return '没通';
+  if(status>=400)return '通到了';
+  return '通了';
  }
  function externalConnections(r){
-  return list(r.connections).filter(item=>!loopbackHost(list(item.detail).join(' ')));
+  return list(r.connections).filter(item=>externalDetail(list(item.detail).join(' ')));
  }
  function connectionLine(r){
   const rows=externalConnections(r);
   const count=kind=>rows.filter(item=>item.kind===kind).length;
   const attempts=count('attempt'),connected=count('connected'),reused=count('reuse'),tunneled=count('proxyTunnel');
   const closed=count('closed')+rows.filter(item=>item.kind==='connectionState'&&String((item.detail||[])[2]||'')==='closed').length;
+  const status=Number(r.networkBody?.responseStatus);
+  const httpReached=status>=100&&!connected&&!tunneled&&!reused;
   const parts=[];
-  if(attempts)parts.push('尝试 '+attempts+' 次');
+  if(attempts)parts.push((httpReached?'连通 ':'尝试 ')+attempts+' 次');
   if(connected)parts.push('连通 '+connected+' 次');
   if(tunneled)parts.push('经代理连通 '+tunneled+' 次');
   if(reused)parts.push('复用 '+reused+' 次');
-  const missed=Math.max(0,attempts-(connected+reused));
-  if(missed)parts.push('未连通 '+missed+' 次');
+  const missed=Math.max(0,attempts-(connected+reused+tunneled));
+  if(missed&&!(status>=100))parts.push('未连通 '+missed+' 次');
   if(closed)parts.push('关闭 '+closed+' 次');
-  const status=Number(r.networkBody?.responseStatus);
+  if(/加密/.test(String(r.gap||'')))parts.push('通道加密，没有明文');
   if(status>=100)parts.push('HTTP '+status);
+  if(r.accessKind==='remote-tool'&&!rows.length)return parts.concat('远程工具访问，本机没有这次连接').join('，');
   if(r.exitCode!=null&&r.exitCode!=='')parts.push('命令退出 '+r.exitCode);
   if(parts.length)return parts.join('，');
   if(r.route==='proxied')return '经本机代理发出，追踪里没有分开的连接次数';
@@ -375,14 +603,25 @@
   const card=matchedToolCard(r,tasks);
   if(card)return card.title;
   const hop=accessHop(r);
-  if(hop.kind==='local-tool')return '网页抓取';
-  if(hop.kind==='remote-tool')return '远程访问工具';
+  if(hop.kind==='local-tool')return r.method?String(r.method):'网页抓取';
+  if(hop.kind==='remote-tool')return remoteToolName(r);
   if(hop.kind==='model')return '模型接口';
   return '工具未确认';
  }
  function parameterText(r,tasks){
   const args=list(r.args).map(arg=>String(arg)).filter(Boolean);
-  if(args.length)return ((r.tool?r.tool+' ':'')+args.join(' ')).slice(0,500);
+  if(args.length){
+   const names=list(r.outboundFiles);
+   const command=(r.tool?r.tool+' ':'')+args.join(' ');
+   return (names.length?command+' · '+names.join('、'):command).slice(0,500);
+  }
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool'){
+   const query=r.requestObject||{};
+   const service=String(r.serviceURL||'').replace(/^https?:\/\//,'');
+   const prompt=typeof query.prompt==='string'&&query.prompt!==hop.delegated?query.prompt:'';
+   return [hop.delegated,prompt,service].filter(Boolean).join(' · ').slice(0,500);
+  }
   const page=httpURL(r);
   if(r.method&&page)return r.method+' '+page;
   const card=matchedToolCard(r,tasks);
@@ -407,9 +646,9 @@
    group.attempts+=externalConnections(record).filter(item=>item.kind==='attempt').length;
    groups.set(key,group);
   }
-  const repeated=[...groups.values()].filter(group=>group.calls>1||group.failed>0||group.attempts>1);
+  const repeated=[...groups.values()].filter(group=>group.calls>1);
   if(!repeated.length)return '';
-  return '<section class="network-rollup"><h3>同一工具的重复连接</h3>'+repeated.map(group=>'<p>'+esc(redact(group.task+' · '+group.dest+' · '+group.name+' · 调用 '+group.calls+' 次'+(group.failed?' · 失败 '+group.failed+' 次':'')+(group.attempts?' · 连接尝试 '+group.attempts+' 次':'')))+'</p>').join('')+'</section>';
+  return '<section class="network-rollup"><h3>重复访问</h3>'+repeated.map(group=>'<p>'+esc(redact(group.name+' 去了 '+group.dest+' '+group.calls+' 次'+(group.failed?'，'+group.failed+' 次没成':'')))+'</p>').join('')+'</section>';
  }
  function behaviorArticle(r,payload){
   const b=r.networkBody||{};
@@ -433,6 +672,7 @@
   const status=Number(r.networkBody?.responseStatus);
   if(status>=100)return 'HTTP '+status;
   if(r.exitCode!=null&&r.exitCode!==''&&Number(r.exitCode)===0)return '完成';
+  if(r.accessKind==='remote-tool'&&r.networkBody?.response)return '完成';
   return '已记录';
  }
  function clock(r){
@@ -442,19 +682,97 @@
  function statsMarkup(records){
   const failed=records.filter(callFailed).length;
   const attempts=records.reduce((sum,record)=>sum+attemptCount(record),0);
-  return '<div class="network-stats"><div><strong>'+records.length+'</strong><span>对外访问</span></div><div'+(failed?' class="is-fail"':'')+'><strong>'+failed+'</strong><span>失败</span></div><div><strong>'+attempts+'</strong><span>连接尝试</span></div></div>';
+  return '<div class="network-stats"><div><strong>'+records.length+'</strong><span>出去了</span></div><div'+(failed?' class="is-fail"':'')+'><strong>'+failed+'</strong><span>没成</span></div></div>';
+ }
+ function readableExchange(value){
+  const raw=String(value||'');
+  if(!raw.trim()||/certificate verify|error setting certificate|CAfile/i.test(raw))return '';
+  const text=readablePreview(raw).replace(/^(?:网页《[^》]*》|网页)\n?/,'').trim();
+  return text==='未采到'?'':text;
+ }
+ function sentView(r){
+  const hop=accessHop(r);
+  const query=r.requestObject||{};
+  if(hop.kind==='remote-tool'){
+   const bits=[query.url,query.website,query.query,query.search_term,query.searchTerm,query.q,query.prompt].filter(value=>typeof value==='string'&&value.trim());
+   return bits.length?[...new Set(bits)].join('\n'):'没有送出正文。';
+  }
+  if(hop.kind==='model'){
+   const text=readableExchange(r.networkBody?.request);
+   return text||'没有送出正文。';
+  }
+  const files=list(r.outboundFiles).filter(Boolean);
+  if(files.length)return '要送出 '+files.join('、');
+  const formulas=list(r.formulas).filter(Boolean);
+  if(formulas.length)return '要安装 '+formulas.join('、');
+  if(headRequest(r))return '没有送出正文。';
+  const text=readableExchange(r.networkBody?.request);
+  const body=String(text||'').split('\n').map(line=>line.trim()).filter(line=>line&&line!=='外传文件名'&&line!=='下载文件名'&&!/^(curl|wget|git|gh|brew|ssh|scp|sftp|rsync)\b/.test(line)).join('\n');
+  return body||'没有送出正文。';
+ }
+ function sentLabel(r){
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool')return '交给工具';
+  if(list(r.formulas).length)return '交给 Homebrew';
+  const method=String(r.method||r.networkBody?.request||'').match(/\b(GET|HEAD|POST|PUT|PATCH|DELETE)\b/i);
+  return method?method[1].toUpperCase():'请求';
+ }
+ function downloadLines(r){
+  return list(r.downloads).map(item=>{
+   const name=String(item.path||'').split(/[/\\]/).pop()||'未命名文件';
+   if(item.state==='unavailable')return '预期下载 '+name+'，文件没有留下。';
+   const bytes=item.bytes!=null?item.bytes+' 字节':'大小未采到';
+   const hash=item.sha256?'sha256 '+String(item.sha256).slice(0,16)+'…':(item.state==='tooLarge'?'文件较大，未计算校验':'校验未采到');
+   return '下载了 '+name+'\n'+bytes+'\n'+hash;
+  }).filter(Boolean);
+ }
+ function backView(r){
+  if(/certificate verify|error setting certificate|CAfile/i.test(responseText(r)))return '连上了。对方没有返回内容。本机证书没配好。';
+  if(/加密/.test(String(r.gap||'')))return '通道里的正文没采到。';
+  const files=downloadLines(r);
+  const hop=accessHop(r);
+  const raw=responseText(r);
+  const text=/<!doctype html|<html[\s>]/i.test(raw)?readablePreview(raw):readableExchange(raw);
+  if(hop.kind==='remote-tool')return text||'工具没有带回内容。';
+  if(headRequest(r))return '没有正文。只收回了头信息。';
+  const status=Number(r.networkBody?.responseStatus);
+  if(status>=400)return '对方返回 '+status+'。'+(text?'\n'+text:'');
+  if(files.length)return files.join('\n\n');
+  if(text)return text;
+  if(status>=200&&status<300||r.exitCode===0)return '正文是空的。';
+  return '没有收回正文。';
+ }
+ function backLabel(r){
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool')return '工具返回';
+  if(list(r.downloads).length)return '下载的文件';
+  const status=Number(r.networkBody?.responseStatus);
+  return status>=100?String(status):'收回';
+ }
+ function relationLine(r){
+  const hop=accessHop(r);
+  if(hop.kind==='remote-tool')return '本机和远程工具之间的交互。工具自己再去网站的那一段不在本机。';
+  if(hop.kind==='model')return '本机和模型服务之间的交互。';
+  const call=r.call?'已对上这次工具调用。':'还没对上哪次工具调用。';
+  return '本机 '+(r.tool||'工具')+' 和 '+showWhere(r)+' 之间的交互。'+call;
+ }
+ function protocolRaw(r){
+  const blob=[r.networkBody?.request,r.networkBody?.response].filter(value=>value!=null).join('\n');
+  const lines=blob.split('\n').map(line=>line.trim()).filter(line=>line&&!/connection established/i.test(line)&&!/^CONNECT\s/i.test(line)&&!/certificate verify|error setting certificate|CAfile/i.test(line)&&!/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(line)&&(/^(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s/i.test(line)||/^HTTP\//i.test(line)||/^(?:>|<)?\s*host:/i.test(line)));
+  const files=downloadLines(r);
+  return [...lines.slice(0,12),...files].join('\n')||'没有留下协议行。';
  }
  function exchangeMarkupFor(r,tasks){
-  const body=r.networkBody||{};
-  const sent=String(body.request||'').replace(/外传文件名\n[\s\S]*?(?:\n\n|$)/,'').replace(/下载文件名\n[\s\S]*?(?:\n\n|$)/,'').trim();
-  const files=(label,names)=>names.length?'<p>'+label+'：'+esc(redact(names.join('、')))+'</p>':'';
-  return '<section class="network-read"><h3>'+esc(clock(r)+' · '+toolName(r,tasks))+'</h3><p>'+esc(redact(parameterText(r,tasks)))+'</p><div class="network-exchange-pair"><section class="network-out"><h3>发出</h3>'+files('上传文件',list(r.outboundFiles))+'<pre class="network-readable">'+esc(presentExchange(sent===''?body.request:sent,body.requestComplete))+'</pre></section><section class="network-in"><h3>返回</h3>'+files('下载文件',list(r.downloadedFiles))+'<pre class="network-readable">'+esc(presentExchange(body.response!=null?body.response:body.toolInstructions,body.response!=null?body.responseComplete:body.toolInstructions!=null))+'</pre></section></div>'+securityLine(r)+'</section>';
+  return '<section class="network-read"><h3>'+esc(toolName(r,tasks)+' · '+showWhere(r))+'</h3><p>'+esc(relationLine(r))+'</p><div class="network-exchange-pair"><section class="network-out"><h3>送出</h3><p>'+esc(sentLabel(r))+'</p><pre class="network-readable">'+esc(redact(sentView(r)))+'</pre></section><section class="network-in"><h3>收回</h3><p>'+esc(backLabel(r))+'</p><pre class="network-readable">'+esc(redact(backView(r)))+'</pre></section></div><details><summary>协议原文</summary><pre class="network-readable">'+esc(redact(protocolRaw(r)))+'</pre></details>'+securityLine(r)+'</section>';
  }
  function tableMarkup(records,tasks,{all=false,selected=null}={}){
-  const headers=all?['任务','时间','工具','调用参数','访问了哪里','连接','结果','']:['时间','工具','调用参数','访问了哪里','连接','结果',''];
+  const headers=all?['任务','时间','谁','去了哪里','协议','结果','']:['时间','谁','去了哪里','协议','结果',''];
   const body=records.map(record=>{
-   const cells=[esc(redact(taskNameOf(record,tasks))),esc(clock(record)),esc(redact(toolName(record,tasks))),esc(redact(parameterText(record,tasks))),esc(redact(whereOf(record))),esc(connectionLine(record)),esc(resultLabel(record)),'<button type="button" data-network-record="'+esc(record.id)+'" aria-pressed="'+(selected===record.id)+'">读正文</button>'];
-   return '<tr'+(callFailed(record)?' class="is-fail"':'')+'>'+(all?cells:cells.slice(1)).map(cell=>'<td>'+cell+'</td>').join('')+'</tr>';
+   const open=selected===record.id;
+   const cells=[esc(redact(taskNameOf(record,tasks))),esc(clock(record)),esc(redact(toolName(record,tasks))),esc(redact(showWhere(record))),esc(protocolOf(record)),esc(verdict(record)),'<button type="button" data-network-record="'+esc(record.id)+'" aria-pressed="'+open+'">'+(open?'收起':'打开')+'</button>'];
+   const row='<tr'+(callFailed(record)?' class="is-fail"':'')+'>'+(all?cells:cells.slice(1)).map(cell=>'<td>'+cell+'</td>').join('')+'</tr>';
+   const detail=open?'<tr class="network-read-row"><td colspan="'+headers.length+'">'+exchangeMarkupFor(record,tasks)+'</td></tr>':'';
+   return row+detail;
   }).join('');
   return '<div class="network-table-wrap"><table class="network-table"><thead><tr>'+headers.map(header=>'<th>'+header+'</th>').join('')+'</tr></thead><tbody>'+body+'</tbody></table></div>';
  }
@@ -473,21 +791,26 @@
    const exchanges=allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(agent==='all'||record.agent===agent));
    records=[...locals,...exchanges].sort((a,b)=>new Date(b.startedAt||b.timestamp)-new Date(a.startedAt||a.timestamp)).filter(matches).slice(0,40);
    title='全部外网访问';
-   note='归进任务的和尚未归入任务的放在一起。对不上会话、也对不上网址的，任务名写成尚未归入任务。';
+   note='还没归进任务的，也列在这里。';
    showAll=true;
   }else{
    const taskLocals=localExchanges().filter(record=>record.agent===activeTask.agent&&activeTask.session&&(record.session===activeTask.session||record.codexThreadID===activeTask.session)&&networkBehavior(record));
    const taskExchanges=allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(record.taskID===activeTask.id||taskForVisit(record,[activeTask])?.task));
-   records=[...taskLocals,...taskExchanges].sort((a,b)=>new Date(a.startedAt||a.timestamp)-new Date(b.startedAt||b.timestamp)).filter(matches).slice(0,40);
-   title=plainTask(activeTask.originalRequest||activeTask.title||'这次任务');
-   note=activeTask.agent+' · '+(activeTask.originalRequest?plainTask(activeTask.originalRequest):'归到这次任务的外网访问');
+   const covered=new Set([...taskLocals,...taskExchanges].map(record=>visitSite(record)?toolName(record,[activeTask])+'\0'+visitSite(record):'').filter(Boolean));
+   const toolVisits=taskToolVisits(activeTask).filter(record=>{const site=visitSite(record);return networkBehavior(record)&&!(site&&covered.has(toolName(record,[activeTask])+'\0'+site));});
+   const byID=new Map();
+   for(const record of [...toolVisits,...taskLocals,...taskExchanges])if(!byID.has(record.id))byID.set(record.id,record);
+   records=[...byID.values()].sort((a,b)=>new Date(a.startedAt||a.timestamp)-new Date(b.startedAt||b.timestamp)).filter(matches).slice(0,40);
+   const fullTitle=plainTask(activeTask.originalRequest||activeTask.title||'这次任务');
+   title=fullTitle.length>42?fullTitle.slice(0,42)+'…':fullTitle;
+   note=activeTask.agent;
    showAll=false;
   }
-  const current=records.find(record=>record.id===selected)||records.find(callFailed)||records[0];
+  const current=selected?records.find(record=>record.id===selected):null;
   const taskPill=activeTask?'<button type="button" aria-pressed="true">这次任务</button>':(focusTask?'<button type="button" data-network-scope="'+esc(focusTask)+'">这次任务</button>':'');
   const allPill=activeTask?'<button type="button" data-network-all>全部外网访问</button>':'<button type="button" aria-pressed="true">全部外网访问</button>';
   const back=activeTask?'<button type="button" data-task="'+esc(activeTask.id)+'">返回任务过程</button>':'';
-  holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id})+exchangeMarkupFor(current,payload.tasks):'<p>'+(activeTask?'这次任务还没有归上的外网访问。对不上会话、也对不上网址的访问留在全部外网访问里。':'这次还没有采到外网交互。')+'</p>');
+  holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id}):'<p>'+(activeTask?'这次任务还没有归上的外网访问。':'还没有采到外网访问。')+'</p>');
  }
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,localExchanges};
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,localExchanges};
 })();

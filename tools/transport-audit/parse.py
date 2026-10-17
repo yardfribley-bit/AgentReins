@@ -13,7 +13,7 @@ def parse(run, trace_path=None):
     manifest = json.loads((run/'manifest.json').read_text())
     is_curl = manifest['tool'] == 'curl'
     path = pathlib.Path(trace_path) if trace_path else run/('curl.trace' if is_curl else 'git-curl.trace')
-    events, blocks, processes = [], [], {}
+    events, blocks, processes, errors = [], [], {}, []
     block = None
     sink=None
     bodies=run/'bodies';bodies.mkdir(exist_ok=True,mode=0o700)
@@ -73,6 +73,9 @@ def parse(run, trace_path=None):
                     if m:
                         events.append(dict(info, kind=kind, detail=m.groups()))
                         break
+                else:
+                    if re.search(r'certificate verify|error setting certificate|SSL certificate|alert certificate', message, re.I):
+                        errors.append(message)
     if sink:sink.close()
     for item in blocks:
         digest = item.pop('_hash').hexdigest()
@@ -105,6 +108,9 @@ def parse(run, trace_path=None):
             # Git's textual libcurl dump is lossy for binary bodies.
             item['capturedBytes'] = None
             item['completeBlock'] = False
+    if errors:
+        blocks.append({'direction':'receive','kind':'data','observedBytes':0,'http':[],
+                       'textPreview':'\n'.join(dict.fromkeys(errors)),'previewTruncated':False,'source':'trace-info'})
     trace2 = run/'git-processes.jsonl'
     if trace2.exists():
         with trace2.open() as trace_source:

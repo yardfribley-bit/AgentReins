@@ -306,7 +306,7 @@ document.addEventListener('click',e=>{
  else if(el.dataset.graphMode){graphMode=el.dataset.graphMode;renderGraph();}
  else if(el.dataset.networkScope){networkTask=el.dataset.networkScope;taskID=networkTask;following=false;networkQuery='';networkSelected=null;view='network';if(shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);render();}
  else if(el.hasAttribute('data-network-all')){networkTask=null;renderNetwork();}
- else if(el.dataset.networkRecord){networkSelected=el.dataset.networkRecord;renderNetwork();}
+ else if(el.dataset.networkRecord){networkSelected=networkSelected===el.dataset.networkRecord?null:el.dataset.networkRecord;renderNetwork();const opened=$('network-view')?.querySelector('.network-read');if(opened)opened.scrollIntoView({block:'nearest'});}
  else if(el.dataset.networkIp){bridge('resolveNetworkIP',{recordID:el.dataset.networkId,ip:el.dataset.networkIp});}
  else if(el.dataset.networkTask){selectTask(el.dataset.networkTask);}
  else if(el.dataset.task)selectTask(el.dataset.task);

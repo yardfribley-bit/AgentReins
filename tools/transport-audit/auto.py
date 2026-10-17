@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Agent-only PATH entry. No permission decisions, shell parsing or proxy changes."""
-import datetime,json,os,pathlib,re,signal,subprocess,sys,threading,uuid
+import datetime,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
 BASE=pathlib.Path(__file__).resolve().parent
 ENCRYPTED_TOOLS={'ssh','scp','sftp','rsync'}
 
@@ -12,23 +12,39 @@ def redact_text(text):
     text=re.sub(r'(?i)((?:password|secret|token|api[_-]?key)\s*[\"\']?\s*[:=]\s*[\"\']?)[^\s\"\',}]+', r'\1[隐藏]', text)
     return text
 
+def flag_value(args, name):
+    for index, arg in enumerate(args):
+        if arg==name and index+1<len(args) and not str(args[index+1]).startswith('-'):
+            return args[index+1]
+        if str(arg).startswith(name+'='):
+            return str(arg).split('=',1)[1]
+    return None
+
 def command_destination(tool, args, env):
     found=destination_from_args(args)
     if found: return found
-    if tool=='gh' and 'api' in args:
-        host=env.get('GH_HOST') or 'github.com'
-        return host if host.startswith('api.') else 'api.'+host
+    if tool=='gh':
+        host=flag_value(args,'--hostname')
+        repo=flag_value(args,'--repo') or flag_value(args,'-R')
+        if host and repo: return host+'/'+repo
+        if host: return host
+        if repo: return (env.get('GH_HOST') or 'github.com')+'/'+str(repo).lstrip('/')
+        if 'api' in args:
+            host=env.get('GH_HOST') or 'github.com'
+            return host if host.startswith('api.') else 'api.'+host
     return None
 
 def destination_from_args(args):
-    """The peer the local tool was asked to reach. Loopback is a normal destination, not a special mode."""
+    """The peer the local tool was asked to reach. An output filename is not a destination."""
     host=r'[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?(?:\.[A-Za-z0-9](?:[A-Za-z0-9-]{0,62}[A-Za-z0-9])?)+(?::\d{1,5})?'
     ipv4=r'(?:\d{1,3}\.){3}\d{1,3}(?::\d{1,5})?'
-    for item in args:
-        if item.startswith('-'): continue
-        if '://' in item or '@' in item or re.fullmatch(host, item) or re.fullmatch(ipv4, item):
-            return item
-    return None
+    output_flags={'-O','--output-document','-o','--output','-P','--directory-prefix'}
+    urls=[]; peers=[]
+    for index, item in enumerate(args):
+        if str(item).startswith('-') or (index and args[index-1] in output_flags): continue
+        if '://' in item: urls.append(item)
+        elif '@' in item or re.fullmatch(host, item) or re.fullmatch(ipv4, item): peers.append(item)
+    return (urls or peers or [None])[0]
 
 def main():
     tool=pathlib.Path(sys.argv[0]).name
@@ -107,7 +123,11 @@ def main():
     manifest['operation']=operation
     session=None
     stderr_copy=None
+    cache_before=None
     try:
+        if tool=='brew':
+            from results import brew_cache_dir, cache_snapshot
+            cache_before=cache_snapshot(brew_cache_dir())
         if tool not in ('curl','git'):
             proc=subprocess.Popen(command,env=env,stderr=subprocess.PIPE)
         else:
@@ -146,12 +166,14 @@ def main():
             raw=session.read_bytes() if session and session.exists() else b''
             text=redact_text(raw.decode('utf-8','replace'))
             sent=redact_text(' '.join(args))
-            target=command_destination(tool,args,env) or '目标未从命令解析'
-            http=[line[2:] for line in text.splitlines() if line.startswith(('> ','< ')) and ('HTTP/' in line or line.startswith('> '))][:12]
+            target=command_destination(tool,args,env)
+            from results import session_http_lines, brew_download_host
+            request_http, response_http=session_http_lines(text)
+            if tool=='brew' and not target:target=brew_download_host(text)
             evidence={'schema':1,'invocation':manifest,'helpers':[],'packFiles':[],'children':[],
-                      'connections':[{'kind':'connected','detail':[target],'time':manifest['startedAt'],'source':'argv','line':1}],
-                      'blocks':[{'direction':'send','kind':'data','observedBytes':len(sent.encode()),'http':[line for line in http if not line.startswith('HTTP/')],'textPreview':sent[:4000],'previewTruncated':len(sent)>4000},
-                                {'direction':'receive','kind':'data','observedBytes':len(raw),'http':[line for line in http if line.startswith('HTTP/')],'textPreview':text[:4000],'previewTruncated':len(text)>4000}],
+                      'connections':[{'kind':'connected' if code==0 else 'attempt','detail':[target],'time':manifest['startedAt'],'source':'argv','line':1}] if target else [],
+                      'blocks':[{'direction':'send','kind':'data','observedBytes':len(sent.encode()),'http':request_http,'textPreview':sent[:4000],'previewTruncated':len(sent)>4000},
+                                {'direction':'receive','kind':'data','observedBytes':len(raw),'http':response_http,'textPreview':text[:4000],'previewTruncated':len(text)>4000}],
                       'limitations':[manifest.get('gap') or '会话日志不是逐字节的原始协议正文。']}
         # Only one unambiguous explicit -o output; never guess shell redirection.
         outputs=[args[i+1] for i,x in enumerate(args[:-1]) if x in ('-o','--output')]
@@ -168,6 +190,11 @@ def main():
             from results import upload_names
             names=upload_names(tool,args)
             if names:evidence['outboundFiles']=names
+        from results import brew_formulas, download_evidence
+        downloaded=download_evidence(tool,args,os.getcwd(),cache_before,text if tool not in ('curl','git') else '')
+        if downloaded:evidence['downloads']=downloaded
+        formulas=brew_formulas(args) if tool=='brew' else []
+        if formulas:evidence['formulas']=formulas
         evidence['attribution']='Agent launch environment; native task and call identity unconfirmed'
         save('transport.json',evidence)
     except Exception as error:

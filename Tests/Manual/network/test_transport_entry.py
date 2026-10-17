@@ -27,8 +27,31 @@ class TransportEntryTests(unittest.TestCase):
         self.assertEqual(auto.destination_from_args(["127.0.0.1:8766"]), "127.0.0.1:8766")
         self.assertIsNone(auto.destination_from_args(["-fsS", "-o", "out"]))
 
+    def test_gh_uses_hostname_and_repo_when_no_url_is_present(self):
+        args = ["pr", "list", "--hostname", "github-tajleonbennis", "--repo", "owner/name", "--json", "url"]
+        self.assertEqual(auto.command_destination("gh", args, {}), "github-tajleonbennis/owner/name")
+        self.assertEqual(auto.command_destination("gh", ["api", "user"], {}), "api.github.com")
+        self.assertIsNone(auto.command_destination("gh", ["--version"], {}))
+
 
 class OutboundNameTests(unittest.TestCase):
+    def test_download_paths_name_the_file_a_command_was_asked_to_write(self):
+        from results import brew_download_host, brew_formulas, download_paths, download_record, session_http_lines
+        self.assertEqual(download_paths('wget', ['https://downloads.example.com/pkg.tgz'], '/tmp/work'), ['/tmp/work/pkg.tgz'])
+        self.assertEqual(download_paths('wget', ['-O', 'out.bin', 'https://downloads.example.com/pkg.tgz'], '/tmp/work'), ['/tmp/work/out.bin'])
+        self.assertEqual(download_paths('wget', ['-O', '-', 'https://downloads.example.com/pkg.tgz'], '/tmp/work'), [])
+        self.assertEqual(download_paths('curl', ['-O', 'https://downloads.example.com/pkg.tgz'], '/tmp/work'), ['/tmp/work/pkg.tgz'])
+        self.assertEqual(brew_formulas(['install', 'wget']), ['wget'])
+        self.assertEqual(brew_formulas(['--version']), [])
+        missing = download_record('/tmp/agentreins-missing-download.bin')
+        self.assertEqual(missing['state'], 'unavailable')
+        request, response = session_http_lines('GET /pkg.tgz HTTP/1.1\nHost: downloads.example.com\nHTTP/1.1 200 Connection established\nHTTP/1.1 200 OK\n')
+        self.assertEqual(request, ['GET /pkg.tgz HTTP/1.1', 'Host: downloads.example.com'])
+        self.assertEqual(response, ['HTTP/1.1 200 OK'])
+        self.assertEqual(brew_download_host('==> Downloading https://ghcr.io/v2/homebrew/core/wget/blobs/sha256:abc'), 'ghcr.io')
+        import auto
+        self.assertEqual(auto.destination_from_args(['-O', 'probe.html', 'https://example.com/']), 'https://example.com/')
+
     def test_upload_names_keep_the_file_name(self):
         from results import upload_names
         self.assertEqual(upload_names('curl', ['-T', 'secrets/token.txt', 'https://example.com']), ['token.txt'])

@@ -25,7 +25,13 @@
  }
  function publish(records){runs=list(records).filter(r=>r.captureMode==='agent-path');window.AgentReinsNetwork?.setLocalTransports(runs);window.agentreinsRenderNetwork?.();}
  const list=v=>Array.isArray(v)?v:[];
- window.agentreinsTransportReceive=records=>{publish(records);if(!area.hidden)render();};
+ window.agentreinsTransportReceive=payload=>{
+  const commands=Array.isArray(payload)?payload:list(payload&&payload.commands);
+  const captures=Array.isArray(payload)?[]:list(payload&&payload.captures);
+  window.AgentReinsNetwork?.setCapturedBodies?.(captures);
+  publish(commands);
+  if(!area.hidden)render();
+ };
  window.agentreinsLoadLocalTransports=async()=>{try{if(window.webkit?.messageHandlers?.agentreins){window.webkit.messageHandlers.agentreins.postMessage({action:'loadTransportAudit'});return;}const response=await fetch('/transport-audit.json',{cache:'no-store'});if(!response.ok)throw Error('证据读取失败');publish(await response.json());}catch(e){if(!area.hidden)area.textContent=e.message;}};
  button.onclick=async()=>{area.hidden=false;area.textContent='正在读取连接证据…';await window.agentreinsLoadLocalTransports();render();};
 if(new URLSearchParams(location.search).get('audit')==='commands')button.click();
