@@ -66,6 +66,64 @@ def git_state(path, global_args=(), isolate=False):
             'refs':optional('for-each-ref','--format=%(refname) %(objectname)'),
             'worktree':None if bare else optional('-c','core.fsmonitor=false','status','--porcelain=v1','-uno')}
 
+def upload_names(tool,args):
+    """Local file names an outbound command was asked to send. Directory trees are not expanded."""
+    names=[]
+    if tool=='curl':
+        values={'--upload-file','-T','--data','--data-raw','--data-binary','--data-ascii','-d','--form','-F','--form-string'}
+        for i,arg in enumerate(args):
+            source=None
+            if arg in values and i+1<len(args):source=args[i+1]
+            elif any(arg.startswith(flag+'=') for flag in values):source=arg.split('=',1)[1]
+            if not source:continue
+            for part in source.split(';'):
+                if '@' in part:part=part.split('@',1)[1]
+                part=part.split(',',1)[0]
+                if part and part not in ('-','') and not part.startswith('http'):names.append(pathlib.Path(part).name)
+    elif tool in ('scp','rsync'):
+        operands=[arg for arg in args if not arg.startswith('-')]
+        sources=operands[:-1] if len(operands)>1 else []
+        names+=[pathlib.Path(item).name for item in sources if item and ':' not in item]
+    seen=[];
+    for name in names:
+        if name and name not in seen:seen.append(name)
+    return seen[:500]
+
+def pushed_paths(repository,before,args):
+    """File names in the commits a push would send. This is not the pack byte stream."""
+    if not before or before.get('state')!='observed' or not repository:return []
+    refs={}
+    for line in (before.get('refs') or '').splitlines():
+        parts=line.split()
+        if len(parts)==2:refs[parts[0]]=parts[1]
+    branch=before.get('branch')
+    local=before.get('commit')
+    remote=None
+    if branch:
+        remote=next((sha for name,sha in refs.items() if name.startswith('refs/remotes/') and name.endswith('/'+branch)),None)
+    operands=[arg for arg in args if not arg.startswith('-')]
+    tail=operands[operands.index('push')+1:] if 'push' in operands else []
+    if len(tail)>=2 and ':' not in tail[-1]:
+        branch=tail[-1]
+        local=refs.get('refs/heads/'+branch) or local
+        remote=next((sha for name,sha in refs.items() if name.startswith('refs/remotes/') and name.endswith('/'+branch)),None)
+    if not local:return []
+    env=metadata_environment(isolate=True)
+    spec=f'{remote}..{local}' if remote else local
+    command=['/usr/bin/git','-C',repository,'log' if remote else 'ls-tree','--name-only']
+    if remote:command+=['--pretty=format:',spec]
+    else:command+=['-r',local]
+    try:
+        text=subprocess.check_output(command,env=env,stderr=subprocess.DEVNULL,timeout=20).decode('utf-8','replace')
+    except (OSError,subprocess.SubprocessError):
+        return []
+    seen=[]
+    for line in text.splitlines():
+        name=line.strip()
+        if name and name not in seen:seen.append(name)
+        if len(seen)>=500:break
+    return seen
+
 def git_invocation(args,cwd):
     """Parse Git global options to locate operation; preserve unknown cases as unknown."""
     path=pathlib.Path(cwd);i=0;context_known=True

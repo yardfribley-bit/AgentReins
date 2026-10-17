@@ -98,6 +98,7 @@ struct AgentReinsApp: App {
                         workBuddyNetworkCapture.stop()
                         workBuddySight.stop()
                         codexSight.stop()
+                        cursorSight.stop()
                         liveMemoryMonitor.stop()
                         processGuard.stop()
                         fileGuard.stop()
@@ -177,7 +178,7 @@ struct AgentReinsApp: App {
                         turnJournalStore.ingest(journalEvents(from: fresh))
                         eventStore.record(fresh + projected)
                     }
-                    // Realtime WorkBuddy / Codex scope; cursorSight.start() disabled.
+                    cursorSight.start()
                     webAgentSight.onEvents = { events in
                         let fresh = eventStore.unrecorded(events)
                         attributionResolver.observe(fresh)

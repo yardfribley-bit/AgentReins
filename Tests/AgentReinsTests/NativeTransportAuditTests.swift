@@ -10,7 +10,7 @@ final class NativeTransportAuditTests: XCTestCase {
         func write(_ name: String, _ mode: String, at base: URL) throws {
             let folder = base.appendingPathComponent(name)
             try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let item: [String: Any] = ["invocation": ["agent": "Codex", "captureMode": mode, "tool": "curl", "startedAt": "2026-10-14T01:00:00Z", "codexThreadID": "native-session"], "fileResult": ["sha256": "verified-hash", "bytes": 227], "blocks": [["kind": "data", "observedBytes": 227]]]
+            let item: [String: Any] = ["invocation": ["agent": "Codex", "captureMode": mode, "tool": "curl", "args": ["-I", "https://github.com/org/repo"], "startedAt": "2026-10-14T01:00:00Z", "codexThreadID": "native-session"], "fileResult": ["sha256": "verified-hash", "bytes": 227], "blocks": [["kind": "data", "observedBytes": 227]]]
             try JSONSerialization.data(withJSONObject: item).write(to: folder.appendingPathComponent("transport.json"))
         }
         try write("live", "agent-path", at: root)
@@ -19,7 +19,9 @@ final class NativeTransportAuditTests: XCTestCase {
         try FileManager.default.createSymbolicLink(at: root.appendingPathComponent("escape"), withDestinationURL: outside.appendingPathComponent("escape"))
         let rows = NativeTransportAudit.records(root: root)
         XCTAssertEqual(rows.count, 1)
+        XCTAssertEqual(rows.first?["runID"] as? String, "live")
         XCTAssertEqual(rows.first?["codexThreadID"] as? String, "native-session")
+        XCTAssertEqual(rows.first?["args"] as? [String], ["-I", "https://github.com/org/repo"])
         XCTAssertEqual((rows.first?["fileResult"] as? [String: Any])?["sha256"] as? String, "verified-hash")
         XCTAssertTrue(rows.first?["task"] is NSNull)
     }

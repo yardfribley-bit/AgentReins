@@ -94,10 +94,27 @@ def request(flow):
 
 def response(flow):
     _capture(flow, "response")
+    _release(flow)
 
 
 def error(flow):
     _capture(flow, "error")
+    _release(flow)
+
+
+def _release(flow):
+    """Drop the buffered body after it has been written. mitmdump otherwise retains every flow."""
+    try:
+        flow.request.content = b""
+        if flow.response is not None:
+            flow.response.content = b""
+    except Exception:
+        pass
+    try:
+        from mitmproxy import ctx
+        ctx.master.commands.call("view.flows.remove", [flow])
+    except Exception:
+        pass
 
 
 POLICY_PATH = Path(os.environ.get("AGENTREINS_SECURITY_POLICY", "~/Library/Application Support/AgentReins/security-policy.json")).expanduser()
@@ -204,9 +221,15 @@ def _capture(flow, stage):
     })
 
     website_parent = _website_scope(flow, stage)
-    service_allowed = flow.request.pretty_host.lower() == ALLOWED_HOST and flow.request.path.split("?", 1)[0] in ALLOWED_PATHS
-    if not service_allowed and not website_parent:
-        return
+    host = flow.request.pretty_host.lower()
+    path = flow.request.path.split("?", 1)[0]
+    remote_hosts = {item.strip().lower() for item in os.environ.get("AGENTREINS_REMOTE_TOOL_HOSTS", ALLOWED_HOST).split(",") if item.strip()}
+    if path.rstrip("/").endswith("/chat/completions"):
+        access_hop = "model"
+    elif "/agenttool/" in path or (host in remote_hosts and path.startswith("/v2/videos/")):
+        access_hop = "remote-tool"
+    else:
+        access_hop = "local-target"
 
     encoded_request = flow.request.raw_content or b""
     decoded_request = flow.request.get_content(strict=False) or b""
@@ -214,6 +237,7 @@ def _capture(flow, stage):
     declared = flow.request.headers.get("content-length")
     record = {
         "flowID": flow.id,
+        "accessHop": access_hop,
         "websiteParentFlow": website_parent,
         "websiteURL": flow.request.pretty_url if website_parent else None,
         "captureStage": stage,

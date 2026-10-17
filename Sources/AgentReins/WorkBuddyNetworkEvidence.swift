@@ -51,6 +51,8 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
     let requestHeaders: [[String]]?
     let responseHeaders: [[String]]?
     let responseSHA256: String?
+    /// model, remote-tool, or local-target. Absent on captures made before this field.
+    let accessHop: String?
 
     init(observedAt: Date, host: String, path: String, method: String, httpVersion: String,
          contentEncoding: String?, declaredContentLength: Int?, capturedWireBodyBytes: Int,
@@ -60,12 +62,14 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
          captureStage: String? = nil, transportError: String? = nil,
          websiteParentFlow: String? = nil, websiteURL: String? = nil,
          requestComplete: Bool? = nil, requestHeaders: [[String]]? = nil,
-         responseHeaders: [[String]]? = nil, responseSHA256: String? = nil, securityAudit: NetworkSecurityAudit? = nil) {
+         responseHeaders: [[String]]? = nil, responseSHA256: String? = nil, securityAudit: NetworkSecurityAudit? = nil,
+         accessHop: String? = nil) {
         self.securityAudit = securityAudit
         self.requestComplete = requestComplete
         self.requestHeaders = requestHeaders
         self.responseHeaders = responseHeaders
         self.responseSHA256 = responseSHA256
+        self.accessHop = accessHop
         self.websiteParentFlow = websiteParentFlow
         self.websiteURL = websiteURL
         self.flowID = flowID
@@ -112,17 +116,15 @@ enum WorkBuddyNetworkEvidence {
             && website?.host?.lowercased() == record.host.lowercased()
             && website?.path == record.path
             && website?.user == nil && website?.password == nil
-        guard (isWebsite || (record.host.lowercased() == "copilot.tencent.com" &&
-              ["/v1/chat/completions", "/v2/chat/completions", "/v3/chat/completions",
-               "/agenttool/v1/intent/recall", "/agenttool/v1/webfetch",
-               "/agenttool/v1/search", "/v2/videos/generations",
-               "/v2/videos/tasks"].contains(record.path))),
+        let labeled = ["model", "remote-tool", "local-target"].contains(record.accessHop ?? "")
+        let knownService = record.host.lowercased() == "copilot.tencent.com" &&
+              (record.path.hasSuffix("/chat/completions") || record.path.contains("/agenttool/") || record.path.hasPrefix("/v2/videos/"))
+        guard (isWebsite || labeled || knownService),
               let requestData = Data(base64Encoded: record.requestBodyBase64),
               SHA256.hash(data: requestData).hex == record.requestSHA256.lowercased() else { return [] }
 
         let requestComplete = (record.requestComplete ?? false) || (record.declaredContentLength.map { $0 == record.capturedWireBodyBytes } ?? (isWebsite && record.capturedWireBodyBytes == 0))
-        let isModelRoute = !isWebsite && ["/v1/chat/completions", "/v2/chat/completions",
-                            "/v3/chat/completions"].contains(record.path)
+        let isModelRoute = !isWebsite && (record.accessHop == "model" || record.path.hasSuffix("/chat/completions"))
         let isMemoryRoute = !isWebsite && record.path == "/agenttool/v1/intent/recall"
         let requestObject = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any]
         let intent = userIntent(in: requestObject)

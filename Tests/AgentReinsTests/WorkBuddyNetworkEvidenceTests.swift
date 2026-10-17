@@ -141,6 +141,16 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
                 websiteParentFlow: parent, websiteURL: url)
         }
         XCTAssertTrue(WorkBuddyNetworkEvidence.project(record(nil, parent: nil)).isEmpty)
+        var direct = record(nil, parent: nil)
+        direct = WorkBuddyNetworkCaptureRecord(
+            observedAt: direct.observedAt, host: direct.host, path: direct.path, method: direct.method,
+            httpVersion: direct.httpVersion, contentEncoding: direct.contentEncoding,
+            declaredContentLength: direct.declaredContentLength, capturedWireBodyBytes: direct.capturedWireBodyBytes,
+            requestBodyBase64: direct.requestBodyBase64, requestSHA256: direct.requestSHA256,
+            responseStatus: direct.responseStatus, responseComplete: direct.responseComplete,
+            responseBodyBase64: direct.responseBodyBase64, accessHop: "local-target")
+        XCTAssertEqual(WorkBuddyNetworkEvidence.project(direct).last?.modelResponse, "actual HTML")
+        XCTAssertEqual(WorkBuddyNetworkEvidence.project(direct).last?.remoteDomain, "www.baidu.com")
         XCTAssertTrue(WorkBuddyNetworkEvidence.project(record("https://other.test/s", parent: "parent")).isEmpty)
         let events = WorkBuddyNetworkEvidence.project(record("https://www.baidu.com/s?wd=test", parent: "parent"))
         XCTAssertEqual(events.first?.action, "captured_complete")
@@ -312,6 +322,27 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         XCTAssertEqual(second.nextOffset, UInt64(history.count))
         XCTAssertEqual(second.malformed, 0)
         XCTAssertEqual(first.events.count + second.events.count, 8)
+    }
+
+    func testHeartbeatStaysOutOfLiveEvidence() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("workbuddy-heartbeat-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+        let heartbeat = WorkBuddyNetworkCaptureRecord(
+            observedAt: Date(), host: "galileotelemetry.tencent.com", path: "/v1/metrics",
+            method: "POST", httpVersion: "HTTP/1.1", contentEncoding: nil,
+            declaredContentLength: 4, capturedWireBodyBytes: 4,
+            requestBodyBase64: Data("ping".utf8).base64EncodedString(),
+            requestSHA256: sha256(Data("ping".utf8)),
+            responseStatus: 200, responseComplete: true,
+            responseBodyBase64: Data("ok".utf8).base64EncodedString(),
+            clientAddress: "127.0.0.1:1", remoteHost: "203.0.113.8", remotePort: 443)
+        let line = try encoder.encode(heartbeat) + Data([0x0A])
+        try line.write(to: url)
+        let read = WorkBuddyNetworkCapture.read(url: url, offset: 0)
+        XCTAssertTrue(read.events.isEmpty)
+        XCTAssertEqual(read.malformed, 0)
+        XCTAssertEqual(read.nextOffset, UInt64(line.count))
     }
 
     private func captureRecord(request: Data, response: Data, observedAt: Date = Date()) -> WorkBuddyNetworkCaptureRecord {

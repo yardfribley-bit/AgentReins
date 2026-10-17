@@ -9,6 +9,87 @@
   if(host.includes(':')){if(host.startsWith('::ffff:'))return scope(host.slice(7))==='local'?'local':'unknown';if(host==='::'||host==='::1'||/^f[cd]|^fe[89ab]|^ff/.test(host))return 'local';return /^[23][0-9a-f]{0,3}:/.test(host)&&!host.startsWith('2001:db8:')?'public':'unknown';}
   return 'unknown';
  }
+ function agentTransport(record){
+  return record&&record.captureMode==='agent-path'&&['Codex','WorkBuddy','Cursor'].includes(record.agent)&&/^[A-Za-z0-9._+-]{1,32}$/.test(record.tool||'');
+ }
+ let localRuns=[];
+ function setLocalTransports(records){localRuns=list(records).filter(agentTransport);}
+ function hostToken(value){
+  const s=String(value||'').trim();
+  const m=s.match(/^(?:[a-z][a-z0-9+.-]*:\/\/)?(\[[^\]]+\]|[A-Za-z0-9.-]+)/i);
+  return m?m[1].replace(/^\[|\]$/g,''):'';
+ }
+ function loopbackHost(value){
+  const host=hostToken(value).toLowerCase();
+  if(!host)return false;
+  if(host==='localhost'||host==='::1')return true;
+  const v4=host.match(/^(\d+)\.\d+\.\d+\.\d+$/);
+  return !!(v4&&v4[1]==='127');
+ }
+ function externalDetail(value){
+  const text=String(value||'').trim();
+  if(!text||loopbackHost(text)||/目标未|未从命令解析|未采到/.test(text))return null;
+  return text;
+ }
+ function hostsFromBlocks(blocks){
+  const found=[];
+  for(const b of blocks){
+   for(const line of list(b.http)){
+    const host=String(line).match(/^host:\s*(\S+)/i);
+    if(host)found.push(host[1]);
+    const absolute=String(line).match(/^(?:GET|HEAD|POST|PUT|PATCH|DELETE|OPTIONS)\s+(https?:\/\/\S+)/i);
+    if(absolute)found.push(absolute[1]);
+   }
+   const preview=String(b.textPreview||'');
+   const hostLine=preview.match(/(?:^|\n)>?\s*Host:\s*(\S+)/);
+   if(hostLine)found.push(hostLine[1]);
+  }
+  return found.map(externalDetail).find(Boolean)||null;
+ }
+ function projectLocal(records){
+  return list(records).filter(agentTransport).map(run=>{
+   const tunnel=(run.connections||[]).find(c=>c.kind==='proxyTunnel');
+   const connected=(run.connections||[]).find(c=>c.kind==='connected');
+   const blocks=list(run.blocks);
+   const tunnelHost=externalDetail(tunnel?.detail?.[0]);
+   const connectedHost=externalDetail(connected?.detail?.[0]);
+   const headerHost=hostsFromBlocks(blocks);
+   const target=tunnelHost||headerHost||connectedHost;
+   // 127.0.0.1 is the local proxy or a local port, never the external site.
+   if(!target)return null;
+   const proxied=!!tunnelHost||(!!(connected&&loopbackHost(connected.detail?.[0]))&&!!headerHost);
+   const side=direction=>blocks.filter(b=>b.direction===direction);
+   const hideLine=line=>/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(String(line).trim());
+   const text=items=>items.map(b=>{
+    const http=list(b.http).filter(line=>!hideLine(line));
+    const preview=String(b.textPreview||'').split('\n').filter(line=>!hideLine(line)).join('\n');
+    return http.join('\n')||preview;
+   }).filter(Boolean).join('\n\n');
+   const bytes=items=>items.filter(b=>b.kind==='data').reduce((n,b)=>n+(Number(b.observedBytes)||0),0);
+   const sent=side('send'),received=side('receive');
+   const names=list(run.outboundFiles).filter(Boolean);
+   const invocation=list(run.args).map(arg=>String(arg)).filter(Boolean).slice(0,40);
+   const downloadPath=typeof run.fileResult?.path==='string'?run.fileResult.path:'';
+   const downloadBase=downloadPath&&downloadPath!=='/dev/null'?downloadPath.split(/[/\\]/).pop():'';
+   const downloaded=downloadBase&&downloadBase!=='null'?[downloadBase]:[];
+   const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
+   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,exitCode:run.exitCode,gap:run.gap||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
+  }).filter(Boolean);
+ }
+ function localExchanges(){return projectLocal(localRuns);}
+ function delegatedTarget(object){
+  if(!object||typeof object!=='object')return null;
+  for(const key of ['url','query','target','website','link','uri'])if(typeof object[key]==='string'&&object[key])return object[key];
+  return null;
+ }
+ function accessHop(r){
+  const service=String(r.serviceURL||'');
+  const host=String(r.host||'');
+  if(r.accessHop==='model'||service.includes('/chat/completions'))return {kind:'model',localParty:r.agent||'本机',remoteParty:service||host||'模型服务',notice:'这是本机与模型服务的上下文交换，不是访问工具与网站的交互。'};
+  if(r.accessHop==='remote-tool'||/\/agenttool\/|\/v2\/videos\//i.test(service))return {kind:'remote-tool',localParty:r.agent||'本机',remoteParty:service||host||'远程访问工具',delegated:delegatedTarget(r.requestObject),notice:'这是本机与远程访问工具之间的交互。工具再到网站的那一段不在本机，下面的正文不是网站原始 HTTP。'};
+  if(r.accessKind==='local-tool'||r.accessHop==='local-target'||r.source==='agentsight:local-transport'||(r.source==='agentsight:workbuddy-network-body'&&host&&!service))return {kind:'local-tool',localParty:(r.agent||'本机')+' 的本机 '+(r.tool||'网络客户端'),remoteParty:host||'访问目标未采到',notice:r.route==='proxied'?'本次经过代理。下面是本机访问工具与访问目标之间的数据，不是和代理本身的握手。':'本次是本机访问工具直连访问目标。下面是该工具实际发出和收到的数据。'};
+  return {kind:'unclassified',localParty:r.agent||'本机',remoteParty:host||service||'对端未采到',notice:'尚未确认这是远程访问工具还是本机访问工具。没有正文就不能判断交互内容。'};
+ }
  function redact(value){
   const keys=/^(authorization|cookie|set-cookie|api[_-]?key|access[_-]?token|refresh[_-]?token|password|secret)$/i;
   const scrub=text=>String(text).replace(/\bBearer\s+[A-Za-z0-9._~+\/-]+/gi,'Bearer [已隐藏凭据]').replace(/\b(?:sk-proj-|sk-or-v1-|ghp_)[A-Za-z0-9_-]{20,}/g,'[已隐藏凭据]').replace(/([?&](?:api[_-]?key|access[_-]?token|token|password)=)[^&\s"']*/gi,'$1[已隐藏凭据]');
@@ -39,7 +120,7 @@
   const archived=list(payload.tasks).flatMap(t=>list(t.cards).filter(c=>c.kind==='network'||c.networkBody).map(c=>({...c,agent:t.agent,session:t.session,turn:t.turn,details:c.input,preview:c.output})));
   const byID=new Map(archived.map(r=>[r.id,r]));
   for(const r of list(payload.collected))byID.set(r.id,r);
-  const candidates=[...byID.values()].filter(r=>(r.kind==='network'||r.networkBody)&&['Codex','WorkBuddy'].includes(r.agent));
+  const candidates=[...byID.values()].filter(r=>(r.kind==='network'||r.networkBody)&&['Codex','WorkBuddy','Cursor'].includes(r.agent));
   const groups=new Map();
   for(const r of candidates.slice().sort((a,b)=>new Date(a.timestamp)-new Date(b.timestamp))){
    const key=r.networkBody?.flow?'flow:'+r.networkBody.flow:r.id,old=groups.get(key);
@@ -114,52 +195,299 @@
   const labels={'credential-outbound':'发送正文疑似包含访问凭据','private-key-outbound':'发送正文包含私钥标记','instruction-override-inbound':'返回内容含覆盖指令的可疑文本','download-execute-inbound':'返回内容含下载后执行命令'};
   return '<section class="network-next"><h3>安全审计 · '+(a.findings?.length?'需人工核查':'已检测，未命中当前规则')+'</h3>'+list(a.findings).map(f=>'<p><strong>'+esc(f.label||labels[f.rule]||f.rule)+'</strong><br>'+esc(f.direction==='request'?'发送正文':'返回正文')+' · '+esc(f.count)+' 处命中 · 首次位于字符 '+esc(f.characterOffset)+'<br><small>规则：'+esc(f.rule)+'；依据：正文模式匹配，尚未确认泄露、攻击或执行。</small><br>'+esc(f.recommendation||(/credential|private-key/.test(f.rule)?'如为有效密钥，请撤销或轮换，并检查使用记录':'核对任务意图，谨慎执行返回内容中的指令'))+'</p>').join('')+'<p>实际接收方：'+esc(a.destinationHost||r.host||'未采到')+' · '+esc(a.destinationPolicy==='approved'?'符合用户配置的接收方名单（不等于安全认证）':a.destinationPolicy==='unapproved'?'不在用户配置的接收方名单内':'尚未配置接收方名单')+'</p>'+(a.policyError?'<p>'+esc(a.policyError)+'</p>':'')+'<p class="network-notice">检查范围：已采解码正文；不含未采流量。发送 '+esc(a.requestBytesInspected)+' 字节，返回 '+esc(a.responseBytesInspected??'尚未检查')+' 字节。未命中不代表安全；示例代码和引用文本也可能命中。</p><small>规则版本：'+esc(a.version)+' · 证据流：'+esc(r.networkBody.flow)+'</small></section>';
  }
+ function resourceBrief(r){
+  const q=r.requestObject||{},b=r.networkBody||{};
+  if(r.accessKind==='local-tool'){
+   const names=list(r.outboundFiles);
+   const out=names.length?'外传 '+names.slice(0,3).join('、'):(r.host||'目标未采到');
+   return '带出 '+out+' · '+(r.exitCode===0?'命令完成':'命令未成功');
+  }
+  const out=q.url||q.query||(b.request!=null?String(b.request).replace(/\s+/g,' ').slice(0,72):'未采到');
+  const back=b.response!=null?String(b.response).replace(/\s+/g,' ').slice(0,72):(b.toolInstructions?'工具指令':'未采到');
+  return '带出 '+out+' · 带回 '+back;
+ }
+ function networkBehavior(r){
+  if(r.tool!=='git')return true;
+  const op=r.gitOperation?.operation;
+  return ['push','fetch','pull','clone','ls-remote'].includes(op)||r.route==='proxied'||list(r.outboundFiles).length>0||list(r.downloadedFiles).length>0;
+ }
+ function showOnAccessPage(r){
+  const blob=[r.serviceURL,r.details,r.host,r.url].join(' ');
+  if(/galileotelemetry|\/v1\/metrics|\/v1\/traces|\/console\/as\/conversations|\/v3\/config|\/edge-cloud\/credentials|\/ocp\/api\//.test(blob))return false;
+  const kind=accessHop(r).kind;
+  return kind==='remote-tool'||kind==='model'||kind==='local-tool';
+ }
  function taskExchangeMarkup(r){
-  const b=r.networkBody||{},q=r.requestObject||{},a=parseBody(b.response),model=r.serviceURL?.includes('/chat/completions');
-  const remoteTool=!!r.serviceURL&&/\/(webfetch|search)(?:[/?]|$)/i.test(r.serviceURL);
-  const tool=remoteTool?(r.serviceURL.includes('/webfetch')?'WebFetch':'Search'):model?'模型服务':r.tool||'外部服务';
+  const b=r.networkBody||{},q=r.requestObject||{},model=r.serviceURL?.includes('/chat/completions');
+  const hop=accessHop(r);
+  const remoteTool=hop.kind==='remote-tool';
+  const localTool=hop.kind==='local-tool';
   const text=v=>esc(redact(v));
-  const sent=q.url?'网站：'+q.url+(q.prompt?'\n提取要求：'+q.prompt:''):q.query?'搜索条件：'+q.query:Array.isArray(q.messages)?'对话上下文：'+q.messages.length+' 条消息':b.request!=null?(b.request===''?'本次请求正文为空':b.requestTruncated?'已采到请求正文；当前预览截断，请查看已采内容':String(b.request)):'请求正文未采到，不能判断发送了哪些内容';
-  const response=a?.title?'标题：'+a.title+(a.content?'\n'+String(a.content).slice(0,1600):''):Array.isArray(a?.results)?a.results.slice(0,10).map(x=>[x.title,x.url,x.snippet||x.description].filter(Boolean).join('\n')).join('\n\n'):b.response!=null?(b.response||'本次返回正文为空'):b.toolInstructions||'返回正文未采到';
+  const outbound=b.request!=null?(b.request===''?'本次带出去的正文为空':String(b.request)):'带出去的资源未采到，不能判断发送了哪些内容';
+  const inbound=b.response!=null?(b.response||'本次带回来的正文为空'):(b.toolInstructions||'带回来的资源未采到');
   const association=r.taskConfidence==='native'?'来源任务与调用标识匹配':/unique exact native tool parameters/.test(r.record?.requestRecord?.resource?.basis||r.basis||'')?'工具参数唯一匹配，属于推断关联':'候选任务关联，尚未确认具体调用';
   const field=(label,value)=>'<dt>'+label+'</dt><dd>'+text(value)+'</dd>';
-  const pane=(title,summary,raw,bytes,truncated,note,wire)=>'<section><h3>'+title+'</h3><p>'+note+'</p><pre class="network-readable">'+text(summary)+'</pre><small>'+(raw!=null?'已采正文 '+text(bytes??'未知')+' 字节':'正文未采到')+(truncated?' · 预览截断':'')+'</small><details><summary>查看展示内容</summary><pre>'+text(raw??'正文未采到')+'</pre></details>'+bodyDownload(wire,title.startsWith('发送')?'本机发送的 HTTP 正文':'服务返回的已采 HTTP 正文（未解析）')+'</section>';
-  return '<h2>'+text(stepTitle(r))+'</h2><p>'+text(coverage(b))+'</p><h3>本机与谁通信</h3><div class="network-route"><strong>'+text(r.agent)+' → '+(r.proxy?text(r.proxy)+'（'+text(r.proxyHost||'本机代理')+':'+text(r.proxyPort||'端口未知')+'） → ':'')+text(r.serviceURL||r.host||'服务地址未采到')+'</strong></div><dl class="network-facts">'+field('实际服务地址',r.serviceURL||r.host||'未采到')+field('连接对端 IP',r.ip||'未采到')+(q.url?field('委托访问的网站',q.url):'')+'</dl>'+(remoteTool?'<p class="network-notice">本机将访问要求交给远程工具。下面展示本机与工具服务的交互；工具到网站这一段没有服务端采集数据。</p>':'')+'<div class="network-exchange-pair">'+pane('发送 → '+tool,sent,b.request,b.requestBytes,b.requestTruncated,'本机发送的内容',b.wireRequest)+pane('返回 ← '+tool,response,b.response??b.toolInstructions,b.responseBytes,b.responseTruncated,model?'已解析模型输出，字节数不代表原始 HTTP 响应':remoteTool?'工具服务返回的内容，不是网站原始 HTTP 响应':'对方返回的内容',b.wireResponse)+'</div>'+securityMarkup(r)+'<p class="network-notice">'+(b.responseComplete===true?'响应结束已确认':b.responseComplete===false?'响应完整性未确认': '未取得响应结束标记')+'。</p>'+ (b.transportError?'<p>传输错误：'+text(b.transportError)+'</p>':'')+'<details><summary>协议字段与完整性</summary><p>请求结束：'+(b.requestComplete===true?'已确认':b.requestComplete===false?'未确认':'未采到')+' · HTTP 状态：'+text(b.responseStatus??'未采到')+'</p><h4>请求头</h4><pre>'+text(b.requestHeaders!=null?JSON.stringify(b.requestHeaders,null,2):'未采到')+'</pre><h4>响应头</h4><pre>'+text(b.responseHeaders!=null?JSON.stringify(b.responseHeaders,null,2):'未采到')+'</pre></details><details><summary>数据来源与关联依据</summary><dl class="network-facts">'+field('采集来源',r.source||'未提供')+field('请求记录',r.record?.requestRecord?.id||'未提供')+field('当前记录',r.id||'未提供')+field('交互标识',b.flow||'未提供')+field('工具调用标识',r.call||'未确认')+field('关联方式',association)+field('依据',r.basis||'未提供')+'</dl></details>';
+  const outNote=localTool?'本机工具发给访问目标的内容。':remoteTool?'本机发给远程访问工具的内容。':'本机发送出去的内容。';
+  const inNote=localTool?'访问目标返回给本机工具的内容。':remoteTool?'远程访问工具返回给本机的内容，不是网站原始 HTTP。':model?'模型服务返回给本机的内容。':'对端返回给本机的内容。';
+  const uploaded=list(r.outboundFiles),downloaded=list(r.downloadedFiles),taken=[...new Set([q.url,q.query,q.prompt,hop.delegated].filter(Boolean))].join('\n');
+  const outFacts=[field('怎么交互',(localTool?(r.route==='proxied'?'经过代理访问 ':'直连访问 '):'')+(localTool?r.host:r.serviceURL||r.host||'目标未采到')),field('上传的文件',uploaded.length?uploaded.join('\n'):'无文件'),field('下载的文件',downloaded.length?downloaded.join('\n'):'无文件'),taken?field('带走的内容',taken):'',field('字节',b.request!=null?String(b.requestBytes??'未知'):'未采到')].join('');
+  const inFacts=[field('字节',b.response!=null?String(b.responseBytes??'未知'):'未采到'),field('HTTP 状态',b.responseStatus??'未采到')].join('');
+  const parties=text(hop.localParty)+' → '+text(hop.remoteParty);
+  return '<h2>'+text(localTool?r.taskTitle||stepTitle(r):stepTitle(r))+'</h2><p class="network-resource-lead">'+(localTool?'本机访问工具与访问目标。':'')+'下面是这次外网访问带出去的资源，以及带回来的资源。</p><div class="network-exchange-pair"><section class="network-out"><h3>带出去的资源</h3><p>'+outNote+'</p><dl class="network-facts">'+outFacts+'</dl><pre class="network-readable">'+text(outbound)+'</pre>'+(b.requestTruncated?'<small>预览截断，已采内容仍在本机。</small>':'')+bodyDownload(b.wireRequest,'本机发送的 HTTP 正文')+'</section><section class="network-in"><h3>带回来的资源</h3><p>'+inNote+'</p><dl class="network-facts">'+inFacts+'</dl><pre class="network-readable">'+text(inbound)+'</pre>'+(b.responseTruncated?'<small>预览截断，已采内容仍在本机。</small>':'')+bodyDownload(b.wireResponse,'带回来的 HTTP 正文')+'</section></div><p class="network-notice">'+text(hop.notice)+'</p>'+securityMarkup(r)+(b.transportError?'<p>传输错误：'+text(b.transportError)+'</p>':'')+(localTool&&r.gap?'<p>'+text(r.gap)+'</p>':'')+'<details><summary>连接与归属</summary><div class="network-route"><strong>'+parties+'</strong></div><dl class="network-facts">'+field(localTool?'访问目标':remoteTool?'远程访问工具':'实际服务地址',localTool?r.host:r.serviceURL||r.host||'未采到')+field('连接对端 IP',r.ip||'未采到')+field('采集来源',r.source||'未提供')+field('交互标识',b.flow||'未提供')+field('工具调用标识',r.call||'未确认')+field('关联方式',association)+'</dl><p>请求结束：'+(b.requestComplete===true?'已确认':b.requestComplete===false?'未确认':'未采到')+' · '+(b.responseComplete===true?'响应结束已确认':b.responseComplete===false?'响应完整性未确认':'未取得响应结束标记')+'。</p><h4>请求头</h4><pre>'+text(b.requestHeaders!=null?JSON.stringify(b.requestHeaders,null,2):'未采到')+'</pre><h4>响应头</h4><pre>'+text(b.responseHeaders!=null?JSON.stringify(b.responseHeaders,null,2):'未采到')+'</pre></details>';
  }
- function render(holder,payload,{agent='all',query='',taskOnly=null,selected=null}={}){
-  const openDetails=holder.querySelectorAll?Array.from(holder.querySelectorAll('details[open]')).map(d=>d.querySelector('summary')?.textContent):[];
-  const previousKey=holder._networkDetailKey;
-  const all=rows(payload),q=query.toLowerCase();
-  const activeTask=list(payload.tasks).find(t=>t.id===taskOnly);
-  if(activeTask?.detailsLoaded===false){holder.innerHTML='<header><button data-network-all>返回任务列表</button><h2>'+esc(redact(activeTask.title))+'</h2></header><p>正在读取此任务的网络交互记录…</p>';return;}
-  if(!activeTask){
-   const tasks=list(payload.tasks).filter(t=>['WorkBuddy','Codex'].includes(t.agent)&&(agent==='all'||t.agent===agent)&&(!q||String(t.title||'').toLowerCase().includes(q))&&!String(t.session||'').startsWith('workbuddy-network:'));
-   const counted=tasks.map(t=>({task:t,records:all.filter(r=>r.taskID===t.id&&r.evidenceType!=='tool_intent')}));
-   const visible=counted.filter(x=>x.records.length).sort((a,b)=>b.records.filter(r=>r.networkBody?.flow).length-a.records.filter(r=>r.networkBody?.flow).length);
-   holder.innerHTML='<h2>选择任务，查看外网访问过程</h2><p>以下任务有已采网络证据；连接观察不等于已取得请求正文。</p>'+visible.map(({task:t,records})=>'<button class="network-round" data-network-scope="'+esc(t.id)+'"><strong>'+esc(redact(t.title||'未命名任务'))+'</strong><small>'+esc(t.agent)+'</small><span>'+records.filter(r=>r.networkBody?.flow).length+' 次数据交互 · '+records.filter(r=>!r.networkBody?.flow).length+' 条连接观察</span></button>').join('')+(visible.length?'':'<p>当前没有已关联任务的网络证据，不能判断没有外联。</p>')+'<p>'+counted.filter(x=>!x.records.length).length+' 个任务尚无已关联网络证据。</p>';
-   return;
+ function matchedTask(r,tasks){
+  if(r.taskID){const hit=list(tasks).find(t=>t.id===r.taskID);if(hit)return hit;}
+  return list(tasks).find(t=>t.agent===r.agent&&t.session&&(t.session===r.session||t.session===r.codexThreadID))||null;
+ }
+ function plainTask(text){
+  const raw=String(text||'');
+  const plain=raw.replace(/<[^>]*>/g,' ').replace(/\s+/g,' ').trim();
+  if(/<\s*\/?\s*(heartbeat|automation_id|automation)\b/i.test(raw)&&plain.length<48)return plain?('机器标记 · '+plain):'机器标记，没有用户原话';
+  return plain||raw;
+ }
+ function siteKey(value){
+  const match=String(value||'').match(/^https?:\/\/([^\/\s:?#]+)(?::\d+)?([^?#\s]*)?/i);
+  if(!match||loopbackHost(match[1]))return '';
+  const path=(match[2]||'/').replace(/\/+$/,'')||'/';
+  return match[1].toLowerCase()+path;
+ }
+ function urlsOf(task){
+  const chunks=[];
+  for(const card of list(task&&task.cards))chunks.push(card.input,card.output,card.summary,card.title,card.resource&&card.resource.url);
+  return [...chunks.filter(Boolean).join('\n').matchAll(/https?:\/\/[^\s"'<>\\)\]]+/g)].map(item=>item[0]);
+ }
+ function httpURL(r){
+  const query=r.requestObject||{};
+  for(const value of [query.url,r.url])if(typeof value==='string'&&/^https?:\/\//i.test(value))return value;
+  const host=hostToken(r.host);
+  if(!host||loopbackHost(host))return '';
+  let path='';
+  try{const detail=JSON.parse(r.details||'{}');if(typeof detail.requestPath==='string')path=detail.requestPath.split('?')[0];}catch{}
+  if(!path)return '';
+  return 'https://'+host+(path.startsWith('/')?path:'/'+path);
+ }
+ function taskForVisit(r,tasks){
+  const known=matchedTask(r,tasks);
+  if(known)return {task:known,basis:'session'};
+  if(r.taskID)return null;
+  const key=siteKey(httpURL(r));
+  if(!key)return null;
+  const hits=list(tasks).filter(task=>urlsOf(task).some(url=>siteKey(url)===key));
+  return hits.length===1?{task:hits[0],basis:'url'}:null;
+ }
+ function taskNameOf(r,tasks){
+  const linked=taskForVisit(r,tasks);
+  const title=linked&&(linked.task.latestUserInput?.content||linked.task.originalRequest||linked.task.title);
+  if(title)return plainTask(title);
+  if(r.accessKind!=='local-tool'&&r.taskTitle)return plainTask(r.taskTitle);
+  return '尚未归入任务';
+ }
+ function whereOf(r){
+  const page=httpURL(r);
+  if(page)return page;
+  const query=r.requestObject||{};
+  if(typeof query.query==='string'&&query.query)return query.query;
+  return r.host||r.serviceURL||'目标未采到';
+ }
+ function viaOf(r){
+  if(r.accessKind==='local-tool'){
+   const name=r.tool==='git'?('Git '+(r.gitOperation?.operation||'操作')):(r.tool||'本机工具');
+   return name+' · '+(r.route==='proxied'?'经本机代理':'直连');
   }
-  const nativeCards=list(activeTask.cards).filter(c=>c.call&&c.id==='call:'+c.call);
-  // Network observations drive this view; local calls and destination intent are not network events.
-  const taskEvents=all.filter(r=>r.taskID===activeTask.id&&r.evidenceType!=='tool_intent'&&scope(r.ip||r.host)!=='local');
-  const connections=taskEvents.filter(r=>!r.networkBody?.flow);
-  const stepRecords=taskEvents.filter(r=>r.networkBody?.flow).map(r=>{
-   const c=r.call?nativeCards.find(c=>c.call===r.call):null;
-   return c?{...r,tool:c.title,toolResult:c.output}:r;
-  });
-  stepRecords.sort((a,b)=>new Date(a.startedAt)-new Date(b.startedAt));
-  const unassociated=all.filter(r=>r.agent===activeTask.agent&&r.evidenceType!=='tool_intent'&&!r.taskID);
-  const unassociatedSelection=unassociated.find(r=>r.id===selected);
-  const chosen=unassociatedSelection||stepRecords.find(r=>r.id===selected)||connections.find(r=>r.id===selected)||stepRecords.find(r=>r.serviceURL&&/\/(webfetch|search)/.test(r.serviceURL))||stepRecords[0]||connections[0];
-  const steps=new Map();
-  for(const r of stepRecords){const key=(r.taskConfidence==='native'&&r.call)||r.networkBody?.flow||r.id;if(!steps.has(key))steps.set(key,[]);steps.get(key).push(r);}
-  const connectionList=connections.length?'<details open><summary>连接观察（'+connections.length+' 条采样，不计为交互轮次）</summary>'+connections.map(r=>'<button class="network-round" data-network-record="'+esc(r.id)+'" aria-pressed="'+(chosen?.id===r.id)+'"><strong>'+esc(r.host||'目标未采到')+'</strong><span>'+esc(r.state==='SYN_SENT'?'连接尝试':r.state||'状态未采到')+'</span></button>').join('')+'</details>':'';
-  const taskSidebar='<aside class="network-journeys"><h2>任务访问步骤</h2>'+[...steps.values()].map((group,index)=>'<section class="network-journey"><h3>'+esc((index+1)+'. '+redact(stepTitle(group[0])))+'</h3>'+group.map((r,i)=>'<button class="network-round" data-network-record="'+esc(r.id)+'" aria-pressed="'+(chosen?.id===r.id)+'"><strong>'+esc(group.length>1?'交互 '+(i+1):r.tool||'查看交互')+'</strong><small>'+esc(r.startedAt?new Date(r.startedAt).toLocaleTimeString('zh-CN',{hour12:false}):'时间未采到')+'</small><span>'+esc(coverage(r.networkBody))+'</span></button>').join('')+'</section>').join('')+connectionList+'</aside>';
-  holder.innerHTML='<header><button data-network-all>返回任务列表</button><h2>'+esc(redact(activeTask.title))+'</h2><p>'+esc(activeTask.agent)+' · 任务过程 / 外部服务与外网安全</p>'+(activeTask.detailFreshness==='ahead_of_snapshot'?'<p class="network-warning">已显示该任务更新的已采详情，任务列表仍在同步。</p>':'')+'</header><div class="network-workspace">'+taskSidebar+'<section class="network-evidence">'+(chosen?((unassociatedSelection?'<p class="network-warning">待关联证据：属于同一应用，尚未确认属于当前任务，不计入本任务步骤。</p>':'')+(chosen.networkBody?.flow?taskExchangeMarkup(chosen):connectionMarkup(chosen))):'<p>该任务尚未采到已关联的外网网络事件，无法据此判断是否访问外网或是否安全。</p><button data-network-all>查看已有网络证据的任务</button>')+'</section></div><details><summary>待关联交互（同应用，未确认属于此任务）</summary>'+journeyMarkup(unassociated,selected)+'</details>';
-  const detailKey=activeTask.id+':'+(chosen?.id||'');
-  if(previousKey===detailKey&&holder.querySelectorAll)for(const d of holder.querySelectorAll('details'))if(openDetails.includes(d.querySelector('summary')?.textContent))d.open=true;
-  holder._networkDetailKey=detailKey;
-  return;
+  const hop=accessHop(r);
+  const verb=r.method?' · '+r.method:'';
+  const status=Number(r.networkBody?.responseStatus)>=100?' · HTTP '+r.networkBody.responseStatus:'';
+  if(hop.kind==='model')return '模型接口';
+  if(hop.kind==='remote-tool')return '远程访问工具'+(r.tool?' · '+r.tool:'')+verb+status;
+  if(hop.kind==='local-tool')return '网页抓取'+verb+status;
+  return (r.tool||'访问')+' · '+(r.serviceURL||r.host||'方式未采到');
  }
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup};
+ function shownExchange(value){
+  const lines=String(redact(value)||'').split('\n').map(s=>s.trim()).filter(line=>line&&line!=='外传文件名'&&line!=='下载文件名'&&!line.startsWith('* ')&&!/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(line)&&!/^CONNECT\s/i.test(line)&&!/connection established/i.test(line));
+  if(!lines.length)return '未采到';
+  const text=lines.slice(0,12).join('\n');
+  return text.length>520?text.slice(0,520)+'…':text;
+ }
+ function readablePreview(value){
+  const raw=String(value||'');
+  if(/<!doctype html|<html[\s>]/i.test(raw)){
+   const title=raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
+   const name=title?title[1].replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim():'';
+   const plain=raw.replace(/<script[\s\S]*?<\/script>/gi,' ').replace(/<style[\s\S]*?<\/style>/gi,' ').replace(/<[^>]+>/g,' ').replace(/&nbsp;/g,' ').replace(/\s+/g,' ').trim();
+   const lead=plain.slice(0,180);
+   return (name?'网页《'+name+'》':'网页')+(lead?'\n'+lead:'');
+  }
+  return shownExchange(raw);
+ }
+ function presentExchange(value,complete){
+  if(value==null)return '未采到';
+  if(String(value).trim()==='')return complete===true?'正文为空':'未采到';
+  return readablePreview(value);
+ }
+ function securityLine(r){
+  const audit=r.networkBody?.securityAudit;
+  if(!audit)return '';
+  const findings=list(audit.findings);
+  if(!findings.length)return '<p class="network-notice">安全检查：已查看发出和返回的正文，未命中当前规则。</p>';
+  return '<p class="network-notice">安全检查：需核查 · '+esc(findings.map(item=>item.label||item.rule).filter(Boolean).join('、'))+'</p>';
+ }
+ function externalConnections(r){
+  return list(r.connections).filter(item=>!loopbackHost(list(item.detail).join(' ')));
+ }
+ function connectionLine(r){
+  const rows=externalConnections(r);
+  const count=kind=>rows.filter(item=>item.kind===kind).length;
+  const attempts=count('attempt'),connected=count('connected'),reused=count('reuse'),tunneled=count('proxyTunnel');
+  const closed=count('closed')+rows.filter(item=>item.kind==='connectionState'&&String((item.detail||[])[2]||'')==='closed').length;
+  const parts=[];
+  if(attempts)parts.push('尝试 '+attempts+' 次');
+  if(connected)parts.push('连通 '+connected+' 次');
+  if(tunneled)parts.push('经代理连通 '+tunneled+' 次');
+  if(reused)parts.push('复用 '+reused+' 次');
+  const missed=Math.max(0,attempts-(connected+reused));
+  if(missed)parts.push('未连通 '+missed+' 次');
+  if(closed)parts.push('关闭 '+closed+' 次');
+  const status=Number(r.networkBody?.responseStatus);
+  if(status>=100)parts.push('HTTP '+status);
+  if(r.exitCode!=null&&r.exitCode!=='')parts.push('命令退出 '+r.exitCode);
+  if(parts.length)return parts.join('，');
+  if(r.route==='proxied')return '经本机代理发出，追踪里没有分开的连接次数';
+  return '这次没有留下连接次数';
+ }
+ function callFailed(r){
+  const status=Number(r.networkBody?.responseStatus);
+  if(status>=400)return true;
+  if(r.exitCode!=null&&r.exitCode!==''&&Number(r.exitCode)!==0)return true;
+  const rows=externalConnections(r);
+  const attempts=rows.filter(item=>item.kind==='attempt').length;
+  const reached=rows.filter(item=>item.kind==='connected'||item.kind==='reuse'||item.kind==='proxyTunnel').length;
+  return attempts>0&&reached===0;
+ }
+ function matchedToolCard(r,tasks){
+  const key=siteKey(httpURL(r));
+  const linked=key&&taskForVisit(r,tasks);
+  if(!linked)return null;
+  return list(linked.task.cards).find(card=>urlsOf({cards:[card]}).some(url=>siteKey(url)===key)&&card.title)||null;
+ }
+ function toolName(r,tasks){
+  if(r.tool==='git')return 'Git '+(r.gitOperation?.operation||'操作');
+  if(r.tool)return r.tool;
+  const card=matchedToolCard(r,tasks);
+  if(card)return card.title;
+  const hop=accessHop(r);
+  if(hop.kind==='local-tool')return '网页抓取';
+  if(hop.kind==='remote-tool')return '远程访问工具';
+  if(hop.kind==='model')return '模型接口';
+  return '工具未确认';
+ }
+ function parameterText(r,tasks){
+  const args=list(r.args).map(arg=>String(arg)).filter(Boolean);
+  if(args.length)return ((r.tool?r.tool+' ':'')+args.join(' ')).slice(0,500);
+  const page=httpURL(r);
+  if(r.method&&page)return r.method+' '+page;
+  const card=matchedToolCard(r,tasks);
+  if(card){
+   const body=String(card.input||'').replace(/\s+/g,' ').trim();
+   return (card.title+(body?' '+body:'')).slice(0,500);
+  }
+  const preview=String(r.networkBody?.request||'').split('\n').map(line=>line.trim()).find(line=>line&&line!=='外传文件名'&&line!=='下载文件名');
+  if(preview)return preview.slice(0,240);
+  return '这次记录没有留下工具参数';
+ }
+ function rollupMarkup(records,tasks){
+  const groups=new Map();
+  for(const record of records){
+   const name=toolName(record,tasks);
+   const dest=hostToken(whereOf(record))||whereOf(record);
+   const task=taskNameOf(record,tasks);
+   const key=[task,name,dest].join('\0');
+   const group=groups.get(key)||{task,name,dest,calls:0,failed:0,attempts:0};
+   group.calls+=1;
+   if(callFailed(record))group.failed+=1;
+   group.attempts+=externalConnections(record).filter(item=>item.kind==='attempt').length;
+   groups.set(key,group);
+  }
+  const repeated=[...groups.values()].filter(group=>group.calls>1||group.failed>0||group.attempts>1);
+  if(!repeated.length)return '';
+  return '<section class="network-rollup"><h3>同一工具的重复连接</h3>'+repeated.map(group=>'<p>'+esc(redact(group.task+' · '+group.dest+' · '+group.name+' · 调用 '+group.calls+' 次'+(group.failed?' · 失败 '+group.failed+' 次':'')+(group.attempts?' · 连接尝试 '+group.attempts+' 次':'')))+'</p>').join('')+'</section>';
+ }
+ function behaviorArticle(r,payload){
+  const b=r.networkBody||{};
+  const up=list(r.outboundFiles),down=list(r.downloadedFiles);
+  const sent=String(b.request||'').replace(/外传文件名\n[\s\S]*?(?:\n\n|$)/,'').replace(/下载文件名\n[\s\S]*?(?:\n\n|$)/,'').trim();
+  const when=r.startedAt?new Date(r.startedAt).toLocaleString('zh-CN',{hour12:false}):'时间未采到';
+  const files=(label,names)=>names.length?'<p>'+label+'：'+esc(redact(names.join('、')))+'</p>':'';
+  const link=taskForVisit(r,payload.tasks);
+  const basis=link&&link.basis==='url'?'<p class="network-notice">归入依据：这次网址与该任务里记录的网址一致。</p>':'';
+  return '<article class="network-behavior"><header><h3>任务：'+esc(redact(taskNameOf(r,payload.tasks)))+'</h3><small>'+esc((r.agent||'')+' · '+when)+'</small></header><dl class="network-facts"><dt>访问了哪里</dt><dd>'+esc(redact(whereOf(r)))+'</dd><dt>通过什么</dt><dd>'+esc(viaOf(r))+'</dd><dt>工具</dt><dd>'+esc(redact(toolName(r,payload.tasks)))+'</dd><dt>调用参数</dt><dd>'+esc(redact(parameterText(r,payload.tasks)))+'</dd><dt>连接</dt><dd>'+esc(connectionLine(r))+'</dd></dl><h4>交换的数据</h4><div class="network-exchange-pair"><section class="network-out"><h3>发出</h3>'+files('上传文件',up)+'<pre class="network-readable">'+esc(presentExchange(sent===''?b.request:sent,b.requestComplete))+'</pre></section><section class="network-in"><h3>返回</h3>'+files('下载文件',down)+'<pre class="network-readable">'+esc(presentExchange(b.response!=null?b.response:b.toolInstructions,b.response!=null?b.responseComplete:b.toolInstructions!=null))+'</pre></section></div>'+securityLine(r)+basis+'</article>';
+ }
+ function attemptCount(r){
+  const attempts=externalConnections(r).filter(item=>item.kind==='attempt').length;
+  if(attempts)return attempts;
+  if(externalConnections(r).some(item=>item.kind==='connected'||item.kind==='proxyTunnel'||item.kind==='reuse'))return 1;
+  if(Number(r.networkBody?.responseStatus)>=100||(r.exitCode!=null&&r.exitCode!==''))return 1;
+  return 0;
+ }
+ function resultLabel(r){
+  if(callFailed(r))return '失败';
+  const status=Number(r.networkBody?.responseStatus);
+  if(status>=100)return 'HTTP '+status;
+  if(r.exitCode!=null&&r.exitCode!==''&&Number(r.exitCode)===0)return '完成';
+  return '已记录';
+ }
+ function clock(r){
+  const value=r.startedAt||r.timestamp;
+  return value?new Date(value).toLocaleTimeString('zh-CN',{hour12:false}):'时间未采到';
+ }
+ function statsMarkup(records){
+  const failed=records.filter(callFailed).length;
+  const attempts=records.reduce((sum,record)=>sum+attemptCount(record),0);
+  return '<div class="network-stats"><div><strong>'+records.length+'</strong><span>对外访问</span></div><div'+(failed?' class="is-fail"':'')+'><strong>'+failed+'</strong><span>失败</span></div><div><strong>'+attempts+'</strong><span>连接尝试</span></div></div>';
+ }
+ function exchangeMarkupFor(r,tasks){
+  const body=r.networkBody||{};
+  const sent=String(body.request||'').replace(/外传文件名\n[\s\S]*?(?:\n\n|$)/,'').replace(/下载文件名\n[\s\S]*?(?:\n\n|$)/,'').trim();
+  const files=(label,names)=>names.length?'<p>'+label+'：'+esc(redact(names.join('、')))+'</p>':'';
+  return '<section class="network-read"><h3>'+esc(clock(r)+' · '+toolName(r,tasks))+'</h3><p>'+esc(redact(parameterText(r,tasks)))+'</p><div class="network-exchange-pair"><section class="network-out"><h3>发出</h3>'+files('上传文件',list(r.outboundFiles))+'<pre class="network-readable">'+esc(presentExchange(sent===''?body.request:sent,body.requestComplete))+'</pre></section><section class="network-in"><h3>返回</h3>'+files('下载文件',list(r.downloadedFiles))+'<pre class="network-readable">'+esc(presentExchange(body.response!=null?body.response:body.toolInstructions,body.response!=null?body.responseComplete:body.toolInstructions!=null))+'</pre></section></div>'+securityLine(r)+'</section>';
+ }
+ function tableMarkup(records,tasks,{all=false,selected=null}={}){
+  const headers=all?['任务','时间','工具','调用参数','访问了哪里','连接','结果','']:['时间','工具','调用参数','访问了哪里','连接','结果',''];
+  const body=records.map(record=>{
+   const cells=[esc(redact(taskNameOf(record,tasks))),esc(clock(record)),esc(redact(toolName(record,tasks))),esc(redact(parameterText(record,tasks))),esc(redact(whereOf(record))),esc(connectionLine(record)),esc(resultLabel(record)),'<button type="button" data-network-record="'+esc(record.id)+'" aria-pressed="'+(selected===record.id)+'">读正文</button>'];
+   return '<tr'+(callFailed(record)?' class="is-fail"':'')+'>'+(all?cells:cells.slice(1)).map(cell=>'<td>'+cell+'</td>').join('')+'</tr>';
+  }).join('');
+  return '<div class="network-table-wrap"><table class="network-table"><thead><tr>'+headers.map(header=>'<th>'+header+'</th>').join('')+'</tr></thead><tbody>'+body+'</tbody></table></div>';
+ }
+ function render(holder,payload,{agent='all',query='',taskOnly=null,selected=null,focusTask=null}={}){
+  const allRows=rows(payload),q=query.toLowerCase();
+  const activeTask=list(payload.tasks).find(task=>task.id===taskOnly);
+  if(activeTask?.detailsLoaded===false){holder.innerHTML='<header><button data-network-all>返回任务列表</button><h2>'+esc(redact(activeTask.title))+'</h2></header><p>正在读取此任务的网络交互记录…</p>';return;}
+  const matches=record=>{
+   if(!q)return true;
+   const blob=[taskNameOf(record,payload.tasks),record.agent,toolName(record,payload.tasks),parameterText(record,payload.tasks),whereOf(record),connectionLine(record),record.networkBody?.request,record.networkBody?.response].join('\n').toLowerCase();
+   return blob.includes(q);
+  };
+  let records,title,note,showAll;
+  if(!activeTask){
+   const locals=localExchanges().filter(record=>(agent==='all'||record.agent===agent)&&networkBehavior(record));
+   const exchanges=allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(agent==='all'||record.agent===agent));
+   records=[...locals,...exchanges].sort((a,b)=>new Date(b.startedAt||b.timestamp)-new Date(a.startedAt||a.timestamp)).filter(matches).slice(0,40);
+   title='全部外网访问';
+   note='归进任务的和尚未归入任务的放在一起。对不上会话、也对不上网址的，任务名写成尚未归入任务。';
+   showAll=true;
+  }else{
+   const taskLocals=localExchanges().filter(record=>record.agent===activeTask.agent&&activeTask.session&&(record.session===activeTask.session||record.codexThreadID===activeTask.session)&&networkBehavior(record));
+   const taskExchanges=allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(record.taskID===activeTask.id||taskForVisit(record,[activeTask])?.task));
+   records=[...taskLocals,...taskExchanges].sort((a,b)=>new Date(a.startedAt||a.timestamp)-new Date(b.startedAt||b.timestamp)).filter(matches).slice(0,40);
+   title=plainTask(activeTask.originalRequest||activeTask.title||'这次任务');
+   note=activeTask.agent+' · '+(activeTask.originalRequest?plainTask(activeTask.originalRequest):'归到这次任务的外网访问');
+   showAll=false;
+  }
+  const current=records.find(record=>record.id===selected)||records.find(callFailed)||records[0];
+  const taskPill=activeTask?'<button type="button" aria-pressed="true">这次任务</button>':(focusTask?'<button type="button" data-network-scope="'+esc(focusTask)+'">这次任务</button>':'');
+  const allPill=activeTask?'<button type="button" data-network-all>全部外网访问</button>':'<button type="button" aria-pressed="true">全部外网访问</button>';
+  const back=activeTask?'<button type="button" data-task="'+esc(activeTask.id)+'">返回任务过程</button>':'';
+  holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id})+exchangeMarkupFor(current,payload.tasks):'<p>'+(activeTask?'这次任务还没有归上的外网访问。对不上会话、也对不上网址的访问留在全部外网访问里。':'这次还没有采到外网交互。')+'</p>');
+ }
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,localExchanges};
 })();

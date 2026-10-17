@@ -180,6 +180,7 @@ enum RealtimeWorkspaceProjector {
         guard let value = value?.lowercased() else { return nil }
         if value.contains("workbuddy") { return "WorkBuddy" }
         if value.contains("codex") { return "Codex" }
+        if value.contains("cursor") { return "Cursor" }
         return nil
     }
     // Repair the presentation of an already-active live checkpoint captured by

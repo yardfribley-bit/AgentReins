@@ -177,10 +177,10 @@ struct RealtimeActiveCheckpoint: Codable {
         }
     }
 
-    static func load(_ url: URL) throws -> RealtimeActiveCheckpoint? {
+    static func load(_ url: URL, maximumRawBytes: Int = 32 * 1024 * 1024) throws -> RealtimeActiveCheckpoint? {
         let databaseURL = RealtimeCheckpointDatabase.location(for: url)
         if FileManager.default.fileExists(atPath: databaseURL.path),
-           let checkpoint = try RealtimeCheckpointDatabase(url: databaseURL).load() { return checkpoint }
+           let checkpoint = try RealtimeCheckpointDatabase(url: databaseURL).load(maximumRawBytes: maximumRawBytes) { return checkpoint }
 
         guard FileManager.default.fileExists(atPath: url.path) else { return nil }
         let size = try url.resourceValues(forKeys: [.fileSizeKey]).fileSize ?? 0

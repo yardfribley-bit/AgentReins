@@ -97,19 +97,11 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         pollInFlight = true
         let url = captureURL
         let previous = offset
-        let database = database
         queue.async { [weak self] in
             let result = Self.read(url: url, offset: previous)
-            do {
-                guard let database else { throw CocoaError(.fileWriteUnknown) }
-                // Network events still need native session attribution on the main actor.
-                // The offset is runtime-only and restarts at zero, so persisted raw data
-                // remains replayable without preempting the corrected event identities.
-                try database.appendRaw(result.raw.map { [$0] } ?? [])
-            } catch {
-                DispatchQueue.main.async { self?.pollInFlight = false }
-                return // Do not advance the read offset before durable evidence.
-            }
+            // The jsonl file is already the durable capture. Copying every chunk into
+            // the evidence database duplicated heartbeats and response bodies until
+            // that database reached tens of gigabytes and this process was paused.
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.pollInFlight = false
@@ -138,6 +130,17 @@ final class WorkBuddyNetworkCapture: ObservableObject {
                     detail: self.detail))
             }
         }
+    }
+
+    /// Heartbeats and session polling stay in the jsonl. They are not turned into
+    /// live evidence, because each one carries a full body and arrives continuously.
+    nonisolated static func retainsLiveBody(_ record: WorkBuddyNetworkCaptureRecord) -> Bool {
+        let host = record.host.lowercased()
+        let path = record.path
+        if host == "galileotelemetry.tencent.com" { return false }
+        if path == "/v1/metrics" || path == "/v1/traces" || path.hasPrefix("/ocp/api/") { return false }
+        if path.hasPrefix("/console/as/conversations") || path == "/v3/config" || path == "/edge-cloud/credentials" { return false }
+        return true
     }
 
     nonisolated static func read(url: URL, offset: UInt64)
@@ -184,6 +187,7 @@ final class WorkBuddyNetworkCapture: ObservableObject {
                 malformed += 1
                 continue
             }
+            if !Self.retainsLiveBody(record) { continue }
             let projected = WorkBuddyNetworkEvidence.project(record)
             if projected.isEmpty { malformed += 1 } else { events += projected }
         }

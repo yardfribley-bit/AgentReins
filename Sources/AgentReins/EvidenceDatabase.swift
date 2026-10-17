@@ -107,6 +107,9 @@ final class EvidenceDatabase: @unchecked Sendable {
         try execute("PRAGMA synchronous=NORMAL")
         try execute("PRAGMA busy_timeout=5000")
         try execute("PRAGMA foreign_keys=ON")
+        // The evidence file is tens of gigabytes. Keep SQLite's own page cache small
+        // so opening it does not reserve a multi-gigabyte cache in this process.
+        try execute("PRAGMA cache_size=-16384")
         try execute("""
             CREATE TABLE IF NOT EXISTS evidence_records (
               evidence_key TEXT PRIMARY KEY,

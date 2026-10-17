@@ -274,7 +274,7 @@ final class RealtimeWorkspaceState: ObservableObject {
         }
         if let checkpointURL {
             do {
-                if let checkpoint = try RealtimeActiveCheckpoint.load(checkpointURL) {
+                if let checkpoint = try RealtimeActiveCheckpoint.load(checkpointURL, maximumRawBytes: byteBudget) {
                     for event in checkpoint.events {
                         evidence.insert(event); restoredIDs.insert(event.id)
                         if event.kind == "model", event.model != "codex-auto-review", event.modelPrompt != nil, ["prompt", "network_prompt"].contains(event.op) { pendingContextEvents[event.id] = event }
@@ -462,7 +462,7 @@ final class RealtimeWorkspaceState: ObservableObject {
     private func scheduleLiveProjection() {
         guard backgroundProjection, (tasksDirty || contextsDirty), !projectionInFlight else { return }
         projectionInFlight = true
-        let generation = projectionGeneration, snapshot = evidence.snapshot(), since = since
+        let generation = projectionGeneration, snapshot = evidence.liveProjectionSnapshot(), since = since
         let contexts = Array(parsedContexts.values), cache = projectionCache, versions = contextInputs
         projectionQueue.async { [weak self] in
             let result: (tasks: [RealtimeTask], contexts: [RealtimeContextExchange], candidates: [RealtimeArtifactProjector.Candidate])

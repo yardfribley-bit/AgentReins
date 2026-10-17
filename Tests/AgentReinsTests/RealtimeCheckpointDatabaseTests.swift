@@ -10,9 +10,9 @@ final class RealtimeCheckpointDatabaseTests: XCTestCase {
         addTeardownBlock { try? FileManager.default.removeItem(at: root) }
         return root.appendingPathComponent("active.json")
     }
-    private func event(_ session: String, id: UUID = UUID(), output: String = "hello") -> GuardEvent {
+    private func event(_ session: String, id: UUID = UUID(), output: String = "hello", at: Date = Date()) -> GuardEvent {
         GuardEvent(id: id, kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "codex",
-            op: "prompt", severity: "info", ts: Date(), action: "sent", sessionId: session, turnId: "turn",
+            op: "prompt", severity: "info", ts: at, action: "sent", sessionId: session, turnId: "turn",
             userIntent: "真实原始需求", modelResponse: output)
     }
     private func sql(_ url: URL, _ query: String) throws {
@@ -40,6 +40,19 @@ final class RealtimeCheckpointDatabaseTests: XCTestCase {
         XCTAssertEqual(restored.readTaskIDs, ["read"]); XCTAssertTrue(restored.coverageTruncated)
         let idle = try writer.save(records: buffer.snapshot().records, readTaskIDs: ["read"], coverageTruncated: true)
         XCTAssertEqual(idle.serializedEvents, 0)
+    }
+    func testRestartKeepsOnlyEventsInsideTheMemoryBudget() throws {
+        let url = try location()
+        let older = event("older", output: String(repeating: "x", count: 8_000), at: Date(timeIntervalSince1970: 1))
+        let newer = event("newer", output: "kept", at: Date(timeIntervalSince1970: 2))
+        var buffer = RealtimeLiveEvidenceBuffer()
+        buffer.insert(older); buffer.insert(newer)
+        try RealtimeActiveCheckpoint.Writer(url: url, useDatabase: true).save(records: buffer.snapshot().records, readTaskIDs: [], coverageTruncated: false)
+        let restored = try XCTUnwrap(RealtimeCheckpointDatabase(url: RealtimeCheckpointDatabase.location(for: url)).load(maximumRawBytes: 2_000))
+        XCTAssertEqual(restored.events.map(\.id), [newer.id])
+        XCTAssertTrue(restored.coverageTruncated)
+        let again = try XCTUnwrap(RealtimeActiveCheckpoint.load(url, maximumRawBytes: 2_000))
+        XCTAssertEqual(again.events.map(\.id), [newer.id])
     }
     func testFailedTransactionKeepsPreviousEventsAndMetadata() throws {
         let url = try location(), old = event("old")

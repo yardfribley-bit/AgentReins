@@ -20,7 +20,7 @@ final class RealtimeCheckpointDatabase: @unchecked Sendable {
         guard sqlite3_open_v2(url.path, &handle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil) == SQLITE_OK else { throw failure("open") }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
         sqlite3_busy_timeout(handle, 5000)
-        try execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL;")
+        try execute("PRAGMA journal_mode=WAL; PRAGMA synchronous=FULL; PRAGMA cache_size=-2048;")
         try execute("CREATE TABLE IF NOT EXISTS live_events(event_id TEXT PRIMARY KEY, revision TEXT NOT NULL, body BLOB NOT NULL, sha256 TEXT NOT NULL, raw_bytes INTEGER NOT NULL, ts REAL NOT NULL, session TEXT, turn TEXT); CREATE INDEX IF NOT EXISTS live_task ON live_events(session,turn,ts); CREATE TABLE IF NOT EXISTS live_metadata(key TEXT PRIMARY KEY,value BLOB NOT NULL);")
         let statement = try prepare("SELECT event_id,revision FROM live_events")
         defer { sqlite3_finalize(statement) }
@@ -52,7 +52,7 @@ final class RealtimeCheckpointDatabase: @unchecked Sendable {
         return Data(bytes: pointer, count: size)
     }
     private func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-    func load() throws -> RealtimeActiveCheckpoint? {
+    func load(maximumRawBytes: Int = 32 * 1024 * 1024) throws -> RealtimeActiveCheckpoint? {
         let meta = try prepare("SELECT value FROM live_metadata WHERE key='snapshot'")
         defer { sqlite3_finalize(meta) }
         let result = sqlite3_step(meta)
@@ -60,11 +60,28 @@ final class RealtimeCheckpointDatabase: @unchecked Sendable {
         guard result == SQLITE_ROW else { throw failure("metadata read") }
         let metadata = try JSONDecoder().decode(Metadata.self, from: bytes(meta, 0))
         guard metadata.version == 1 else { throw failure("unsupported version") }
-        let statement = try prepare("SELECT event_id,body,sha256,raw_bytes FROM live_events ORDER BY ts,event_id")
+        let index = try prepare("SELECT event_id,raw_bytes FROM live_events ORDER BY ts DESC,event_id DESC")
+        defer { sqlite3_finalize(index) }
+        var keep: [String] = []
+        var used = 0
+        var overflow = false
+        var status = sqlite3_step(index)
+        while status == SQLITE_ROW {
+            let rawSize = Int(sqlite3_column_int64(index, 1))
+            let id = text(index, 0) ?? ""
+            if !id.isEmpty, rawSize > 0, rawSize <= maximumRawBytes, used + rawSize <= maximumRawBytes {
+                keep.append(id); used += rawSize
+            } else { overflow = true }
+            status = sqlite3_step(index)
+        }
+        guard status == SQLITE_DONE else { throw failure("body index") }
+        let statement = try prepare("SELECT event_id,body,sha256,raw_bytes FROM live_events WHERE event_id=?")
         defer { sqlite3_finalize(statement) }
         var events: [GuardEvent] = []
-        var status = sqlite3_step(statement)
-        while status == SQLITE_ROW {
+        for id in keep.reversed() {
+            sqlite3_reset(statement); sqlite3_clear_bindings(statement)
+            bind(id, 1, statement)
+            guard sqlite3_step(statement) == SQLITE_ROW else { throw failure("body read") }
             let compressed = try bytes(statement, 1)
             let rawSize = Int(sqlite3_column_int64(statement, 3))
             guard rawSize > 0, rawSize <= 256 * 1024 * 1024, hash(compressed) == text(statement, 2) else { throw failure("body checksum") }
@@ -72,11 +89,30 @@ final class RealtimeCheckpointDatabase: @unchecked Sendable {
             guard data.count == rawSize else { throw failure("decompressed size") }
             let event = try JSONDecoder().decode(GuardEvent.self, from: data)
             guard event.id.uuidString == text(statement, 0) else { throw failure("event identity") }
-            events.append(event); status = sqlite3_step(statement)
+            events.append(event)
         }
-        guard status == SQLITE_DONE else { throw failure("body read") }
+        if overflow { try discard(except: Set(keep)) }
         return RealtimeActiveCheckpoint(version: 1, savedAt: metadata.savedAt, events: events,
-            readTaskIDs: metadata.readTaskIDs, coverageTruncated: metadata.coverageTruncated)
+            readTaskIDs: metadata.readTaskIDs, coverageTruncated: metadata.coverageTruncated || overflow)
+    }
+    private func discard(except keep: Set<String>) throws {
+        try execute("BEGIN IMMEDIATE")
+        do {
+            try execute("CREATE TEMP TABLE IF NOT EXISTS live_keep(id TEXT PRIMARY KEY)")
+            try execute("DELETE FROM live_keep")
+            let insert = try prepare("INSERT INTO live_keep(id) VALUES(?)")
+            defer { sqlite3_finalize(insert) }
+            for id in keep {
+                sqlite3_reset(insert); sqlite3_clear_bindings(insert); bind(id, 1, insert)
+                guard sqlite3_step(insert) == SQLITE_DONE else { throw failure("remember retained event") }
+            }
+            try execute("DELETE FROM live_events WHERE event_id NOT IN (SELECT id FROM live_keep)")
+            try execute("COMMIT")
+            revisions = revisions.filter { keep.contains($0.key.uuidString) }
+        } catch {
+            try? execute("ROLLBACK")
+            throw error
+        }
     }
     func save(records: [RealtimeLiveEvidenceBuffer.Record], readTaskIDs: [String], coverageTruncated: Bool, savedAt: Date) throws -> RealtimeActiveCheckpoint.Writer.SaveMetrics {
         let desired = Dictionary(records.map { ($0.id, $0.revision) }, uniquingKeysWith: { _, last in last })

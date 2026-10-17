@@ -11,9 +11,12 @@ app=pathlib.Path('/Applications/WorkBuddy.app')
 ca=pathlib.Path.home()/'.mitmproxy/mitmproxy-ca-cert.pem'
 if not app.is_dir() or not ca.is_file():raise SystemExit('WorkBuddy or local audit CA file unavailable')
 command=['/usr/bin/open','-a',str(app)]
+audit=str(pathlib.Path.home()/'.agentreins'/'audit.sh')
 for item in ['HTTP_PROXY=http://127.0.0.1:18891','HTTPS_PROXY=http://127.0.0.1:18891',
              'ALL_PROXY=http://127.0.0.1:18891','NO_PROXY=localhost,127.0.0.1,::1',
-             'NODE_EXTRA_CA_CERTS='+str(ca)]:command+=['--env',item]
+             'NODE_EXTRA_CA_CERTS='+str(ca),'CURL_CA_BUNDLE='+str(ca),'SSL_CERT_FILE='+str(ca),
+             'GIT_SSL_CAINFO='+str(ca),'REQUESTS_CA_BUNDLE='+str(ca),
+             'BASH_ENV='+audit,'ENV='+audit]:command+=['--env',item]
 audit_bin=pathlib.Path(__file__).resolve().parents[1]/'tools/transport-audit/bin'
 for item in ['PATH='+str(audit_bin)+os.pathsep+os.environ.get('PATH','/usr/bin:/bin'), 'WORKBUDDY_EXTRA_PATHS='+str(audit_bin)+(':'+os.environ['WORKBUDDY_EXTRA_PATHS'] if os.environ.get('WORKBUDDY_EXTRA_PATHS') else ''), 'AGENTREINS_TRANSPORT_AGENT=WorkBuddy', 'AGENTREINS_REAL_CURL=/usr/bin/curl', 'AGENTREINS_REAL_GIT=/usr/bin/git']:
  command+=['--env',item]

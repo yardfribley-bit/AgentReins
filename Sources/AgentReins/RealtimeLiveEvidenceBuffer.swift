@@ -95,6 +95,17 @@ struct RealtimeLiveEvidenceBuffer {
     }
     func read(_ id: UUID) throws -> GuardEvent? { try records[id]?.read() }
     func snapshot() -> Snapshot { Snapshot(records: Array(records.values)) }
+    /// Projection reads bodies. Network capture is a high-volume stream, so the
+    /// live projection only rehydrates the bounded network windows plus task events.
+    func liveProjectionSnapshot() -> Snapshot {
+        let keep = Set(recentIDs + networkIDs + exchangeIDs)
+        let networkOps: Set<String> = ["network_prompt", "network_response", "tool_service_request", "tool_service_response", "memory_recall", "memory_recall_response"]
+        return Snapshot(records: records.values.filter { record in
+            if keep.contains(record.id) { return true }
+            if record.kind == "network" || networkOps.contains(record.op) { return false }
+            return true
+        })
+    }
     private func newer(_ lhs: UUID, _ rhs: UUID) -> Bool {
         guard let left = records[lhs], let right = records[rhs] else { return false }
         return left.ts == right.ts ? lhs.uuidString < rhs.uuidString : left.ts > right.ts

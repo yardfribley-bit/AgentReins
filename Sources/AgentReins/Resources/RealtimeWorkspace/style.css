@@ -73,7 +73,7 @@
 @media(min-width:851px){
  body{overflow:hidden}.shell{height:100dvh;min-height:0}.sidebar{height:100dvh;min-height:0;overflow:hidden}.sidebar-bottom{padding-top:10px}#tasks{flex:1;min-height:40px;max-height:none;overflow:auto}.section-label{margin-top:16px}
  main{height:100dvh;display:flex;flex-direction:column;min-height:0;overflow:hidden}.topbar{height:44px;min-height:44px;padding:0 18px}#heading{flex:none;padding:9px 18px;max-height:145px;overflow:auto}h1{font-size:19px;line-height:1.35}.heading-meta{margin-bottom:3px}.heading-side strong{font-size:18px}.request{font-size:12px;max-height:34px;margin-top:4px;line-height:1.4}.status-line{margin-top:6px;gap:8px}#task-state{max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stopped-callout{margin-top:6px;padding:6px 10px;max-height:70px;overflow:auto}.warning-bar{flex:none;font-size:10px;margin:0 18px 6px;max-height:28px;overflow:auto}
- #process-view{flex:1;min-height:0;padding-bottom:0}.process-layout{height:100%;min-height:0;grid-template-columns:minmax(0,1fr) 300px;margin:0 18px;align-items:stretch}.canvas-panel{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(120px,1fr) auto auto auto 86px}.architecture-toolbar{padding:5px 10px;gap:8px}.architecture-modes button{padding:5px 8px;font-size:11px}.runtime-controls{padding:6px 10px;gap:8px}.runtime-controls label{font-size:10px}.runtime-controls select{font-size:11px;max-width:100%;padding:4px}.runtime-note{padding:4px 10px;font-size:10px;max-height:34px;overflow:auto}#current-bar{margin:0 10px 5px;padding:6px 10px;max-height:46px;overflow:auto;font-size:11px}#current-bar small{font-size:10px;margin-top:0}.timeline-head{padding:5px 10px}.timeline-viewport{height:86px;max-height:86px;overflow:auto}#timeline{padding:0 10px 8px}.timeline-row{padding:5px 0}.detail-panel{height:100%;min-height:0;max-height:none;overflow:auto;padding:15px;border-left:1px solid var(--line);border-top:0}.detail-panel h2{font-size:17px}footer{flex:none;margin:6px 18px;font-size:10px}.board,.collection-body,.collection-grid{margin-left:18px;margin-right:18px}#collection-view,#result-screen{flex:1;min-height:0;overflow:auto}
+ #process-view{flex:1;min-height:0;padding-bottom:0}.process-layout{height:100%;min-height:0;grid-template-columns:minmax(0,1fr) 300px;margin:0 18px;align-items:stretch}.canvas-panel{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(120px,1fr) auto auto auto 86px}.architecture-toolbar{padding:5px 10px;gap:8px}.architecture-modes button{padding:5px 8px;font-size:11px}.runtime-controls{padding:6px 10px;gap:8px}.runtime-controls label{font-size:10px}.runtime-controls select{font-size:11px;max-width:100%;padding:4px}.runtime-note{padding:4px 10px;font-size:10px;max-height:34px;overflow:auto}#current-bar{margin:0 10px 5px;padding:6px 10px;max-height:46px;overflow:auto;font-size:11px}#current-bar small{font-size:10px;margin-top:0}.timeline-head{padding:5px 10px}.timeline-viewport{height:86px;max-height:86px;overflow:auto}#timeline{padding:0 10px 8px}.timeline-row{padding:5px 0}.detail-panel{height:100%;min-height:0;max-height:none;overflow:auto;padding:15px;border-left:1px solid var(--line);border-top:0}.detail-panel h2{font-size:17px}footer{flex:none;margin:6px 18px;font-size:10px}.board,.collection-body,.collection-grid{margin-left:18px;margin-right:18px}#collection-view,#result-screen,#network-view{flex:1;min-height:0;overflow:auto}.transport-audit{flex:none;max-height:42vh;overflow:auto}
 }
 .graph-zoom{display:flex;align-items:center;gap:5px;font-size:11px}.graph-zoom button{padding:4px 7px;border:1px solid var(--line);border-radius:4px;background:white}.graph-zoom button[aria-pressed=true]{color:var(--purple);background:var(--soft)}.graph-zoom output{min-width:32px;text-align:center;font-variant-numeric:tabular-nums}
 #graph-viewport{position:relative;min-height:0;overflow:auto;background:#fdfcf9;overscroll-behavior:contain}#graph-spacer{position:relative;margin:8px auto}#graph{position:absolute;left:0;top:0;margin:0;min-height:0!important;transform-origin:top left;aspect-ratio:auto!important;overflow:visible}.overview-title{display:none}#graph.overview .full-title{display:none}#graph.overview .overview-title{display:inline}#graph.overview .ar-node{padding:calc(3px / var(--graph-scale));display:flex;align-items:center;justify-content:center;text-align:center}#graph.overview .ar-node strong{font-size:calc(11px / var(--graph-scale));line-height:1.2;max-height:100%;overflow:hidden}#graph.overview .ar-node .ar-node-tag,#graph.overview .ar-node .ar-node-note,#graph.overview .ar-inner{display:none}#graph.overview .ar-edge-text{font-size:calc(9px / var(--graph-scale))}#graph.overview .ar-node.resource strong{font-size:calc(9px / var(--graph-scale))}#graph.overview .ar-status-dot{width:calc(5px / var(--graph-scale));height:calc(5px / var(--graph-scale));right:5%;top:8%}
@@ -108,13 +108,44 @@
 .network-evidence pre {white-space:pre-wrap;overflow-wrap:anywhere}
 @media(max-width:800px){.network-workspace{display:block}}
 
+.network-resource-lead{margin:8px 0 14px}
 .network-exchange-pair{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:16px}
 .network-exchange-pair>section{border:1px solid var(--border,#ddd);border-radius:8px;padding:14px;min-width:0}
+.network-out{border-color:#e4d3b0;background:#fffaf2}
+.network-in{border-color:#c9e2d6;background:#f4faf6}
 .network-next{margin-top:20px;padding-top:14px;border-top:1px solid var(--border,#ddd)}
 .network-round strong{display:block;overflow-wrap:anywhere}
+.network-behavior{margin:16px 0;padding:16px 18px;border:1px solid var(--border,#ddd);border-radius:12px;background:#fff}
+.network-behavior header{display:flex;justify-content:space-between;gap:16px;align-items:baseline}
+.network-behavior h3{margin:0;font-size:16px}
+.network-behavior h4{margin:14px 0 8px;font-size:13px;color:#666}
+.network-behavior .network-facts{margin-top:12px}
+.network-behavior .network-readable{max-height:180px;background:transparent}
+.network-rollup{margin:12px 0 18px;padding:12px 14px;border:1px solid #e4d7c3;border-radius:10px;background:#fff8ee}
+.network-rollup h3{margin:0 0 8px;font-size:14px}
+.network-rollup p{margin:4px 0}
+.network-stats{display:flex;gap:28px;margin:4px 0 16px}
+.network-stats strong{display:block;font-size:22px;line-height:1.2}
+.network-stats span{color:#777;font-size:12px}
+.network-stats .is-fail strong{color:#9a3412}
+.network-scope-switch{display:flex;gap:8px;margin:4px 0 12px}
+.network-scope-switch button{border:1px solid var(--line,#ddd);background:#fff;border-radius:999px;padding:6px 12px}
+.network-scope-switch button[aria-pressed="true"]{background:#1c1c1c;color:#fff;border-color:#1c1c1c}
+.network-table tr.is-fail td:first-child{box-shadow:inset 3px 0 #9a3412}
+.network-read{margin-top:16px}
+.network-read h3{margin:0 0 6px;font-size:16px}
+.task-item{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:6px;align-items:start}
+.task-open{display:block;min-width:0;padding:0;text-align:left}
+.task-open strong{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
+.task-net,.task-jump{border:1px solid var(--line);background:#fff;color:var(--purple);border-radius:6px;padding:4px 8px;font-size:12px;white-space:nowrap}
+.heading-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
+.heading-row h1{min-width:0}
+.heading-side{display:flex;align-items:center;gap:8px;flex:none}
+.network-task-bar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:8px 0 16px}
+.network-task-bar h2{flex-basis:100%}
 @media(max-width:1000px){.network-exchange-pair{grid-template-columns:1fr}}
 /* Task-scoped network exchanges: keep readable payloads bounded. */
-.network-readable {white-space:pre-wrap;overflow-wrap:anywhere;max-height:340px;overflow:auto;font-family:inherit;line-height:1.65}
+.network-readable {white-space:pre-wrap;overflow-wrap:anywhere;max-height:520px;overflow:auto;font-family:inherit;line-height:1.65;margin-top:10px}
 .network-journey h3 {font-size:14px;overflow-wrap:anywhere;margin:16px 0 8px}
 .network-evidence .network-route {overflow-wrap:anywhere;padding:16px;border:1px solid var(--border,#ddd);border-radius:10px}
 .network-exchange-pair small {display:block;margin:10px 0;color:var(--muted,#666)}
