@@ -120,7 +120,9 @@ final class WorkBuddyNetworkCapture: ObservableObject {
                 } else if self.connected {
                     self.detail = "WorkBuddy HTTPS records received; completeness is verified per request"
                 } else if self.proxyRunning {
-                    self.detail = "Audit proxy is running on 18891; WorkBuddy must be launched with this proxy to capture HTTPS bodies"
+                    self.detail = self.lastUpdate == nil
+                        ? "Audit proxy is running on 18891; no HTTPS records received yet; capture coverage unverified"
+                        : "Audit proxy is running; no HTTPS records in the last 120 seconds; Agent may be idle or traffic may bypass capture; coverage unverified"
                 }
                 self.offset = result.nextOffset
                 if !result.events.isEmpty {
@@ -171,6 +173,13 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         let decoder = WorkBuddyNetworkEvidence.captureDecoder()
         var events: [GuardEvent] = [], malformed = 0
         for line in safeData.split(separator: 0x0A) {
+            if let plaintext = ProcessPlaintextEvidence.project(Data(line)) {
+                if plaintext.isEmpty,
+                   let object = try? JSONSerialization.jsonObject(with: Data(line)) as? [String: Any],
+                   object["stage"] as? String != "ready" { malformed += 1 }
+                events += plaintext
+                continue
+            }
             guard let record = try? decoder.decode(WorkBuddyNetworkCaptureRecord.self, from: Data(line)) else {
                 malformed += 1
                 continue

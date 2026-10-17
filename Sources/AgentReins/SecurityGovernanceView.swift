@@ -9,6 +9,7 @@ struct SecurityGovernanceView: View {
     @EnvironmentObject private var policies: AlertPolicyStore
     @State private var showingModel = false
     @State private var showingRules = false
+    @State private var showingSensitiveRules = false
     @State private var confirmingAnalysis = false
     @State private var candidateToApprove: AIRuleCandidate?
     @State private var loading = false
@@ -21,6 +22,7 @@ struct SecurityGovernanceView: View {
             if section == .rules { rulesPanel }
         }
         .sheet(isPresented: $showingModel) { AnalysisModelSettingsView().environmentObject(analyzer) }
+        .sheet(isPresented: $showingSensitiveRules) { SensitiveRuleEditor().environmentObject(analyzer) }
         .sheet(isPresented: $showingRules) { AlertPolicySettingsView().environmentObject(policies) }
         .confirmationDialog("将所选范围的证据发送给已配置的分析模型？", isPresented: $confirmingAnalysis) {
             Button("启用后台分析") {
@@ -131,6 +133,7 @@ struct SecurityGovernanceView: View {
             HStack {
                 Text("已有本机规则与 AI 提案").font(.title3.bold())
                 Spacer()
+                Button("自然语言敏感规则") { showingSensitiveRules = true }
                 Button("管理规则与适用范围") { showingRules = true }
             }
             Text("已有 \(policies.policies.count) 条规则 · \(policies.aiCandidates.count) 条 AI 提案待处理。已有规则不会因界面改版而重置。")

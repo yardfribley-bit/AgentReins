@@ -1,6 +1,29 @@
 import Foundation
 import CryptoKit
 
+struct NetworkSecurityFinding: Codable, Equatable, Sendable {
+    let rule: String
+    let direction: String
+    let severity: String
+    let count: Int
+    let characterOffset: Int
+    let basis: String
+    let status: String
+    var label: String? = nil
+    var recommendation: String? = nil
+}
+struct NetworkSecurityAudit: Codable, Equatable, Sendable {
+    let version: String
+    let findings: [NetworkSecurityFinding]
+    let requestBytesInspected: Int
+    let responseBytesInspected: Int?
+    let scope: String
+    let verdict: String
+    var policyError: String? = nil
+    var destinationHost: String? = nil
+    var destinationPolicy: String? = nil
+}
+
 struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
     let observedAt: Date
     let host: String
@@ -21,13 +44,30 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
     let flowID: String?
     let captureStage: String?
     let transportError: String?
+    let websiteParentFlow: String?
+    let websiteURL: String?
+    let securityAudit: NetworkSecurityAudit?
+    let requestComplete: Bool?
+    let requestHeaders: [[String]]?
+    let responseHeaders: [[String]]?
+    let responseSHA256: String?
 
     init(observedAt: Date, host: String, path: String, method: String, httpVersion: String,
          contentEncoding: String?, declaredContentLength: Int?, capturedWireBodyBytes: Int,
          requestBodyBase64: String, requestSHA256: String, responseStatus: Int?,
          responseComplete: Bool, responseBodyBase64: String?, clientAddress: String? = nil,
          remoteHost: String? = nil, remotePort: Int? = nil, flowID: String? = nil,
-         captureStage: String? = nil, transportError: String? = nil) {
+         captureStage: String? = nil, transportError: String? = nil,
+         websiteParentFlow: String? = nil, websiteURL: String? = nil,
+         requestComplete: Bool? = nil, requestHeaders: [[String]]? = nil,
+         responseHeaders: [[String]]? = nil, responseSHA256: String? = nil, securityAudit: NetworkSecurityAudit? = nil) {
+        self.securityAudit = securityAudit
+        self.requestComplete = requestComplete
+        self.requestHeaders = requestHeaders
+        self.responseHeaders = responseHeaders
+        self.responseSHA256 = responseSHA256
+        self.websiteParentFlow = websiteParentFlow
+        self.websiteURL = websiteURL
         self.flowID = flowID
         self.captureStage = captureStage
         self.transportError = transportError
@@ -66,27 +106,42 @@ enum WorkBuddyNetworkEvidence {
     }
 
     static func project(_ record: WorkBuddyNetworkCaptureRecord) -> [GuardEvent] {
-        guard record.host.lowercased() == "copilot.tencent.com",
+        let website = record.websiteURL.flatMap(URL.init(string:))
+        let isWebsite = record.websiteParentFlow?.isEmpty == false
+            && ["http", "https"].contains(website?.scheme?.lowercased() ?? "")
+            && website?.host?.lowercased() == record.host.lowercased()
+            && website?.path == record.path
+            && website?.user == nil && website?.password == nil
+        guard (isWebsite || (record.host.lowercased() == "copilot.tencent.com" &&
               ["/v1/chat/completions", "/v2/chat/completions", "/v3/chat/completions",
-               "/agenttool/v1/intent/recall", "/v2/videos/generations",
-               "/v2/videos/tasks"].contains(record.path),
+               "/agenttool/v1/intent/recall", "/agenttool/v1/webfetch",
+               "/agenttool/v1/search", "/v2/videos/generations",
+               "/v2/videos/tasks"].contains(record.path))),
               let requestData = Data(base64Encoded: record.requestBodyBase64),
               SHA256.hash(data: requestData).hex == record.requestSHA256.lowercased() else { return [] }
 
-        let requestComplete = record.declaredContentLength.map { $0 == record.capturedWireBodyBytes } ?? false
-        let isModelRoute = ["/v1/chat/completions", "/v2/chat/completions",
+        let requestComplete = (record.requestComplete ?? false) || (record.declaredContentLength.map { $0 == record.capturedWireBodyBytes } ?? (isWebsite && record.capturedWireBodyBytes == 0))
+        let isModelRoute = !isWebsite && ["/v1/chat/completions", "/v2/chat/completions",
                             "/v3/chat/completions"].contains(record.path)
-        let isMemoryRoute = record.path == "/agenttool/v1/intent/recall"
+        let isMemoryRoute = !isWebsite && record.path == "/agenttool/v1/intent/recall"
         let requestObject = try? JSONSerialization.jsonObject(with: requestData) as? [String: Any]
         let intent = userIntent(in: requestObject)
         let model = requestObject?["model"] as? String
         let identity = record.flowID ?? String(record.requestSHA256.prefix(20))
         let session = "workbuddy-network:\(identity)"
         let metadata = json([
-            "capture": "complete HTTPS request body",
+            "capture": requestComplete ? "complete HTTPS request body" : "HTTPS request body; completeness unconfirmed",
+            "requestHeaders": record.requestHeaders ?? [],
+            "responseHeaders": record.responseHeaders ?? [],
+            "headersCaptured": record.requestHeaders != nil,
+            "securityAudit": record.securityAudit.flatMap { try? JSONEncoder().encode($0) }.flatMap { try? JSONSerialization.jsonObject(with: $0) } ?? NSNull(),
+            "responseSHA256": record.responseSHA256 ?? "not captured",
             "captureStage": record.captureStage ?? "legacy_response",
             "transportError": record.transportError ?? "none",
             "requestPath": record.path,
+            "websiteURL": record.websiteURL ?? "not captured",
+            "websiteParentFlow": record.websiteParentFlow ?? "not applicable",
+            "websiteScope": isWebsite ? "exact URL requested through audited Agent WebFetch; redirects excluded" : "Agent service endpoint",
             "method": record.method,
             "responseStatus": record.responseStatus ?? -1,
             "httpVersion": record.httpVersion,
@@ -103,6 +158,9 @@ enum WorkBuddyNetworkEvidence {
                 ? "domain captured; socket endpoint unavailable"
                 : "request body and socket endpoint observed in the same HTTPS flow"
         ])
+        if let expected = record.responseSHA256, let encoded = record.responseBodyBase64 {
+            guard let data = Data(base64Encoded: encoded), SHA256.hash(data: data).hex == expected.lowercased() else { return [] }
+        }
         let routeMethod = record.remoteHost == nil
             ? "complete HTTPS request body; declared and captured lengths match"
             : "complete HTTPS request body + same-flow domain/IP/socket endpoint"
@@ -139,7 +197,7 @@ enum WorkBuddyNetworkEvidence {
             events.append(GuardEvent(
                 id: uuid("\(identity):response"), kind: isModelRoute ? "model" : "network",
                 ruleId: isModelRoute ? "workbuddy_network_response_body" : (isMemoryRoute ? "workbuddy_memory_recall_response" : "workbuddy_tool_service_response"),
-                path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: nil,
+                path: ("~/.workbuddy" as NSString).expandingTildeInPath, command: metadata,
                 agent: "workbuddy", op: isModelRoute ? "network_response" : (isMemoryRoute ? "memory_recall_response" : "tool_service_response"),
                 severity: "info", ts: record.observedAt,
                 action: record.responseComplete ? "received_complete" : "received_partial",
@@ -161,14 +219,20 @@ enum WorkBuddyNetworkEvidence {
     }
 
     static func userIntent(in object: [String: Any]?) -> String? {
-        guard let messages = object?["messages"] as? [[String: Any]],
-              let user = messages.last(where: { $0["role"] as? String == "user" }) else { return nil }
-        let text: String
-        if let value = user["content"] as? String { text = value }
-        else if let parts = user["content"] as? [[String: Any]] {
-            text = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
-        } else { return nil }
-        return WorkBuddySight.cleanUserIntent(text)
+        guard let messages = object?["messages"] as? [[String: Any]] else { return nil }
+        // Background tool notifications are protocol messages, not a new human task.
+        for user in messages.reversed() where user["role"] as? String == "user" {
+            let text: String
+            if let value = user["content"] as? String { text = value }
+            else if let parts = user["content"] as? [[String: Any]] {
+                if parts.contains(where: { $0["type"] as? String == "tool_result" }) { continue }
+                text = parts.compactMap { $0["text"] as? String }.joined(separator: "\n")
+            } else { continue }
+            let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+            if trimmed.hasPrefix("<task-notification>") || trimmed.hasPrefix("<system-reminder>") { continue }
+            if let intent = WorkBuddySight.cleanUserIntent(text), !intent.isEmpty { return intent }
+        }
+        return nil
     }
 
     private struct ParsedResponse {

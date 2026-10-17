@@ -2,6 +2,7 @@
 /* A runtime diagram is a projection of evidence, never an invented execution plan. */
 ((root)=>{
  const arr=v=>Array.isArray(v)?v:[],cut=(s,n=32)=>{const a=Array.from(String(s??''));return a.slice(0,n).join('')+(a.length>n?'…':'');};
+ function externalNetwork(c){const d=c.resource||{};if(d.evidenceType==='tool_intent')return false;if(d.evidenceType==='proxy_route'&&d.domain)return true;const host=d.remoteIP||d.domain||d.observedRemoteHost||'';return !!host&&!/^(127\.|localhost$|::1$|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.)/.test(host);}
  const nativeCalls=t=>arr(t?.cards).filter(c=>c.call&&c.id?.startsWith('call:'));
  function instructionCalls(exchange){
   if(!exchange?.toolInstructions)return [];
@@ -109,13 +110,13 @@
   const plans=cards.filter(c=>['plan','planning'].includes(kind(c)));
   const memories=cards.filter(c=>kind(c)==='memory');
   const files=cards.filter(c=>['file','files'].includes(kind(c)));
-  const network=cards.filter(c=>['web','network'].includes(kind(c))||c.resource?.evidenceType==='http');
-  const observations=arr(input.networkObservations);
+  const network=cards.filter(c=>(['web','network'].includes(kind(c))||c.resource?.evidenceType==='http')&&externalNetwork(c));
+  const observations=arr(input.networkObservations).filter(externalNetwork);
   const apiCalls=network.filter(c=>c.resource?.method&&c.resource?.url&&c.resource?.evidenceType!=='tool_intent');
   const services=cards.filter(c=>['mcp','skill'].includes(kind(c)));
   const commands=cards.filter(c=>kind(c)==='command'||c.execution);
   const databases=cards.filter(c=>kind(c)==='database'||c.resource?.kind==='database');
-  const external=externalServices(t).concat(cards.filter(c=>kind(c)==='external'||c.resource?.kind==='external'));
+  const external=Array.from(new Map(network.concat(externalServices(t),cards.filter(c=>kind(c)==='external'||c.resource?.kind==='external')).map(c=>[c.id,c])).values());
   const verified=cards.filter(c=>['verify','verification'].includes(kind(c)));
   const replyCards=cards.filter(c=>kind(c)==='model'&&c.phase==='returned'&&!c.call);
   const replyText=t?.nativeEndMessage||exchange?.response||replyCards.at(-1)?.output;
@@ -141,7 +142,7 @@
   add('action',345,837,280,175,'工具执行 / 行动层',chosen?`执行 · ${chosen.title}`:'执行',chosen?cut(chosen.execution?.command||chosen.summary,38):'本轮原生工具调用未采到','action',chosen?(chosen.detailType||chosen.kind):'group',chosen||{stage:'command',cards:[]},chosen?(chosen.execution?.status==='requested'?'pending':chosen.phase):'missing',chosen?[[chosen.tag||chosen.phase,cut(chosen.output||chosen.execution?.stdout||'点击查看参数与完整执行过程',35)]]:[]);
   const labels={running:'进行中',stopped:'已停止 · 交付未确认',completed:'已完成',failed:'失败',cancelled:'已取消',observed:'状态待确认',awaiting_confirmation:'等待执行'};
   add('closure',764,840,200,145,'目标完成？','任务状态',labels[t?.lifecycleStatus]||'状态待确认','decision','agent',t||{},t?.lifecycleStatus==='failed'?'failed':t?.lifecycleStatus==='stopped'?'stopped':t?.lifecycleStatus==='completed'?'returned':'recorded',[],'diamond');
-  [['mcp','MCP / Skill',services,'mcp'],['api','API / 网络',network,'network'],['code','代码 / 命令',commands,'command'],['database','数据库',databases,'database'],['files','文件系统',files,'files'],['external','外部服务',external,'external']].forEach(([key,title,items,stage],i)=>
+  [['mcp','MCP / Skill',services,'mcp'],['api','API / 网络',network,'network'],['code','代码 / 命令',commands,'command'],['database','数据库',databases,'database'],['files','文件系统',files,'files'],['external','外部服务 / 外网安全',external,'external']].forEach(([key,title,items,stage],i)=>
    add(key,143+i*139,1090,118,70,title,key==='api'&&(items.length||observations.length)?`${apiCalls.length} HTTP · ${network.length} 关联 / ${observations.length} 独立`:items.length?`${items.length} 项真实记录`:missing,'','resource','group',{stage,cards:items,observations:key==='api'?observations:[]},items.length||key==='api'&&observations.length?'recorded':'missing',[],'resource'));
   const ps=arr(input.processes).filter(p=>!t||p.agent===t.agent);
   add('observation',145,1240,812,88,'可观测层','观测','调用关联 · 进程 · 文件 · 网络 · 终端输出 · 延迟与用量','observe','observation',{cards:[...files,...network],processes:ps,coverage:arr(t?.coverage)},ps.length||files.length||network.length?'recorded':'missing',[],'observe');
@@ -186,12 +187,12 @@
   }
   const hidden=g.calls.filter(c=>!shown.some(s=>s.id===c.id));
   if(hidden.length){add('other-calls',`其余 ${hidden.length} 次工具调用`,'展开完整调用列表','时间线与下拉框保留全部调用','action','group',{stage:'mcp',cards:hidden});relation('other-call-observations',hub.key,'other-calls','同轮调用记录','group',{stage:'mcp',cards:hidden},false,'折叠的原生调用集合，不推断某次模型下发关系');}
-  for(const [key,kind,title] of [['files','files','文件'],['network','network','网络资源']]){const items=arr(t?.cards).filter(c=>key==='files'?['files','file'].includes(c.detailType||c.kind):['web','network'].includes(c.detailType||c.kind));if(!items.length)continue;
+  for(const [key,kind,title] of [['files','files','文件'],['network','network','网络资源']]){const items=arr(t?.cards).filter(c=>key==='files'?['files','file'].includes(c.detailType||c.kind):['web','network'].includes(c.detailType||c.kind)&&externalNetwork(c));if(!items.length)continue;
    const recent=items.at(-1),resource=recent.resource;add(key,`${title} · ${cut(resource?.domain||resource?.path?.split('/').at(-1)||resource?.remoteIP||recent.title,20)}`,`${items.length} 项实际记录`,cut(resource?.url||resource?.path||recent.summary,40),key==='files'?'action':'context','group',{stage:kind,cards:items});
    const origin=shown.find(c=>arr(c.eventIDs).some(id=>arr(recent.eventIDs).includes(id)));
    relation('resource-'+key,origin?'card:'+origin.id:hub.key,key,origin?'同一调用的资源':'独立资源观察','group',{stage:kind,cards:items},!!origin,origin?'资源与工具记录含相同原始证据 ID':'同轮观察已保留，不能据此推断具体调用关系',origin?arr(recent.eventIDs):[]);
   }
-  const observations=arr(input.networkObservations);
+  const observations=arr(input.networkObservations).filter(externalNetwork);
   if(observations.length){add('network-observations',`独立网络观察 · ${observations.length} 条`,'未确认任务归属','可点开原始连接与代理目标','context','group',{stage:'network',cards:[],observations});relation('independent-network-observations',hub.key,'network-observations','同Agent独立观察','group',{stage:'network',cards:[],observations},false,'采到系统连接；没有据此推断它属于当前任务');}
   if(selected&&nodes.some(n=>n.key==='tool-result'))relation('tool-return','card:'+selected.id,'tool-result','实际返回','tool-result',selected,true,'相同原生调用 ID 的返回',arr(selected.eventIDs));
   // Context, plan and observations keep source objects; structural spokes stay dashed.

@@ -3,6 +3,29 @@ import XCTest
 @testable import AgentReins
 
 final class WorkBuddyLivePipelineTests: XCTestCase {
+    func testBackgroundContinuationUsesOriginalCallAcrossNewHumanTurn() throws {
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString + ".jsonl")
+        defer { try? FileManager.default.removeItem(at: file) }
+        let rows: [[String: Any]] = [
+            ["id":"a", "type":"message", "role":"user", "content":[["text":"下载源码"]]],
+            ["id":"c", "type":"function_call", "callId":"download", "name":"Bash", "arguments":"{}"],
+            ["id":"b", "type":"message", "role":"user", "content":[["text":"另一个任务"]]],
+            ["id":"r", "type":"function_call_result", "callId":"download", "output":[["text":"background started"]]],
+            ["id":"n", "type":"message", "role":"user", "content":[["text":"<task-notification><tool-use-id>download</tool-use-id></task-notification>"]]],
+            ["id":"v", "type":"function_call", "callId":"verify", "name":"Bash", "arguments":"{}"]
+        ]
+        let text = try rows.enumerated().map { index, row in
+            var row = row; row["sessionId"] = "s"; row["timestamp"] = 1000 + index
+            return String(decoding: try JSONSerialization.data(withJSONObject: row), as: UTF8.self)
+        }.joined(separator:"\n")
+        try text.write(to:file, atomically:true, encoding:.utf8)
+        let events = WorkBuddySight.parseSession(file, fullHistory:true)
+        XCTAssertEqual(events.first { $0.op == "result" }?.turnId, "a")
+        XCTAssertEqual(events.first { $0.ruleId == "workbuddy_background_continuation" }?.turnId, "a")
+        XCTAssertEqual(events.first { $0.toolCallId == "verify" }?.turnId, "a")
+        XCTAssertEqual(events.first { $0.toolCallId == "verify" }?.userIntent, "下载源码")
+    }
+
     func testHTTPSDemandSkipsQueriesInsideCompactionAndKeepsCurrentHumanInput() {
         let old = "<cb_summary><user_query>旧采集测试</user_query></cb_summary>"
         let body: [String: Any] = ["messages": [["role":"user", "content": [["type":"text", "text": old + "\n<user_query>安装青简</user_query>"]]]]]

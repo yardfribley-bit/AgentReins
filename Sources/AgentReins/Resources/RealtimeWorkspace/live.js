@@ -7,6 +7,7 @@ const stageNames=[['user','需求'],['environment','材料'],['context','上下�
 const statuses={running:'进行中',awaiting_confirmation:'等我确认',completed:'已完成未读',stopped:'已停止 · 交付未确认',failed:'失败',cancelled:'已取消',observed:'状态待确认'};
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='process',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
+let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null;
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
 let objects=new Map(),runtimeExchangeID=null,runtimeCallID=null,runtimeTaskID=null,timelineMode='tools',runtimeProjection=null;
@@ -77,7 +78,7 @@ function renderTasks(){
 }
 function stopExcerpt(t){const paragraphs=String(t?.nativeEndMessage||'').split(/\n\s*\n/).map(s=>s.trim()).filter(s=>s&&!/^#{1,6}\s/.test(s));return paragraphs.length?cut(paragraphs[0].replace(/\*\*/g,''),140):'执行已结束，尚无目标验证记录。点击核对最后答复与执行详情。';}
 function renderHeading(){const t=task();
- if(view!=='process'){$('heading').innerHTML=`<div class="heading-meta">本机实时工作台 · WorkBuddy / Codex</div><h1>${view==='collection'?'采集现场，确认数据从哪里来':'任务结果看板'}</h1><p class="request">${view==='collection'?'应用进程、文件与网络观察独立保留；缺少任务身份的记录可以查找。':'按任务归列，点击找到当前步骤、失败原因和实际交付物。'}</p>`;return;}
+ if(view!=='process'){$('heading').innerHTML=`<div class="heading-meta">本机实时工作台 · WorkBuddy / Codex</div><h1>${view==='network'?'外网访问，追查目标和发起来源':view==='collection'?'采集现场，确认数据从哪里来':'任务结果看板'}</h1><p class="request">${view==='network'?'查看 WorkBuddy、Codex 的目标地址、位置、会话与实际证据。':view==='collection'?'应用进程、文件与网络观察独立保留；缺少任务身份的记录可以查找。':'按任务归列，点击找到当前步骤、失败原因和实际交付物。'}</p>`;return;}
  const duration=t?Math.max(0,Math.round((new Date(t.lastActivity)-new Date(t.startedAt))/1000)):null;const durationText=duration==null?'':duration>=86400?Math.floor(duration/86400)+' 天 '+Math.floor(duration%86400/3600)+' 小时':duration>=3600?Math.floor(duration/3600)+' 小时 '+Math.floor(duration%3600/60)+' 分钟':String(Math.floor(duration/60)).padStart(2,'0')+':'+String(duration%60).padStart(2,'0');
  $('heading').innerHTML=`<div class="heading-meta"><span class="agent-label">${esc(t?.agent||'等待 Agent')}</span><span>${esc(t?.model||'模型身份未采集')}</span>${t?`<span>开始 ${esc(time(t.startedAt))}</span>`:''}</div><div class="heading-row"><h1>${esc(t?cut(inputTitle(t),82):'等待一个真实任务')}</h1><div class="heading-side">${duration!=null?`<strong>${durationText}</strong>已观察跨度`:''}</div></div>${t?.originalRequest?`<p class="request"><b>起始原话：</b>${esc(t.originalRequest)}</p>${t?.latestUserInput?.content&&t.latestUserInput.content!==t.originalRequest?`<p class="request latest-input"><b>最新补充：</b>${esc(t.latestUserInput.content)}</p>`:''}`:t?.subagentPath?`<p class="request">Agent 委派的子任务 · ${esc(t.subagentPath)}<br>工具与执行结果属于当前子任务，用户原始需求归属父会话。</p>`:array(t?.inputAttachments).length?'<p class="request">本次输入为附件，没有附带文字需求。点击原始输入查看路径。</p>':t?'<p class="request-missing">本轮用户原话尚未采到。后续活动保留，任务起点待补齐。</p>':'<p class="request">这里将从你的原话开始，展示模型往返、执行过程与结果。</p>'}<div class="status-line">${badge(t?state(t):'等待新任务',cls(t))}<span id="task-state">${esc(t?current(t):'等待真实采集数据')}</span>${t?`<span class="divider"></span><button class="link-button" data-select="user">查看原始输入</button>`:''}</div>${t&&taskStatus(t)==='stopped'?`<div class="stopped-callout"><strong>Agent 已停止 · 目标达成尚未确认</strong><span>${esc(stopExcerpt(t))}</span><br><button class="link-button" data-select="closure">查看停止原文与最后一步 →</button></div>`:''}`;
 }
@@ -94,10 +95,11 @@ function renderGraph(animate=false){
  $('runtime-note').innerHTML=`${g.exchange?`当前展示第 ${g.choices.indexOf(g.exchange)+1} 次${g.exchange.structured?'实际模型请求':'本地输入片段'}${chosen?`，工具 ${esc(chosen.title)}${inChosenCycle?'':'（未归属于所选请求）'}`:''}。`:g.calls.length?'模型请求未采到；原生工具调用仍可查看。':'等待模型请求或原生工具调用。'}${g.relationships?` 蜘蛛图展开 ${g.shownCallCount} 次具体调用${g.hiddenCallCount?`，其余 ${g.hiddenCallCount} 次可点开集合或时间线`:''}。`:''}${g.unlinked.length?` ${g.unlinked.length} 个调用未与模型响应配对。`:''}${chosen&&['returned','failed'].includes(chosen.phase)&&!g.next?' 这次返回是否进入下一次请求，尚未取得配对证据。':''}`;
  $('current-bar').innerHTML=`<span>${esc(t?current(t):'等待带任务身份的新记录')}</span><small>${esc(t?.statusBasis||'系统观察持续保留，尚不代表任务执行。')}</small>`;
 }
+function reportedWebFailure(c){return c?.title==='WebFetch'&&/^Error:\s*(?:Error:\s*)?(?:Error during web fetch|Request timed out)/i.test(c.output||'');}
 function renderTimeline(){
  const all=cards(),cs=timelineMode==='tools'?window.AgentReinsRuntimeGraph.nativeCalls(task()):all,scroll=$('timeline-viewport').scrollTop;
  $('timeline-tools').classList.toggle('active',timelineMode==='tools');$('timeline-all').classList.toggle('active',timelineMode==='all');$('stage-caption').textContent=`${cs.length} 项`;
- $('timeline').innerHTML=cs.map((c,i)=>`<button class="timeline-row ${c.id===task()?.currentCardID?'current':''} ${selection==='card:'+c.id?'active':''}" data-select="card:${esc(c.id)}"><span class="time">${timelineMode==='tools'?'#'+(i+1):esc(time(c.timestamp))}</span><span class="timeline-dot ${esc(c.phase)}"></span><span class="timeline-text">${esc(c.title)}<small>${esc(cut(c.execution?.command||c.summary,110))}</small></span><span class="timeline-tag">${esc(c.tag)}</span></button>`).join('')||empty(timelineMode==='tools'?'本轮尚未采到原生工具调用。其他活动可以从“全部证据”查看。':'本轮尚无执行记录。');$('timeline-viewport').scrollTop=scroll;
+ $('timeline').innerHTML=cs.map((c,i)=>`<button class="timeline-row ${c.id===task()?.currentCardID?'current':''} ${selection==='card:'+c.id?'active':''}" data-select="card:${esc(c.id)}"><span class="time">${timelineMode==='tools'?'#'+(i+1):esc(time(c.timestamp))}</span><span class="timeline-dot ${reportedWebFailure(c)?'failed':esc(c.phase)}"></span><span class="timeline-text">${esc(c.title)}<small>${esc(cut(c.execution?.command||c.summary,110))}</small></span><span class="timeline-tag ${reportedWebFailure(c)?'output-error':''}">${reportedWebFailure(c)?'工具报告访问失败':esc(c.tag)}</span></button>`).join('')||empty(timelineMode==='tools'?'本轮尚未采到原生工具调用。其他活动可以从“全部证据”查看。':'本轮尚无执行记录。');$('timeline-viewport').scrollTop=scroll;
 }
 function contextDetail(d){const blocks=array(d.blocks);let b=blocks.find(b=>b.id===contextBlockID)||blocks.find(b=>b.change==='added')||blocks[0];contextBlockID=b?.id||null;return kv([['请求时间',time(d.timestamp)],['覆盖',d.coverage],['组成',`${blocks.length} 块 · ${d.characters||0} 字符`],['与上次比较',d.previousID?`新增 ${d.added} · 保留 ${d.retained} · 移出 ${d.removed}`:'没有可比较的前次请求']])+`<div class="context-block-list">${blocks.map(b=>`<button class="context-block ${b.id===contextBlockID?'active':''}" data-block="${esc(b.id)}">${esc(b.label||b.role)}<small>${esc(b.characters||b.content?.length||0)} 字符${b.change==='added'?' · 本次新增':''}${b.containsCurrentInput?' · 含本次原话':''}${b.callID?' · '+esc(b.callID):''}</small></button>`).join('')}</div>`+section(b?.label||'请求内容',b?box(b.content,true,'context-content'):empty('请求已记录，但未取得可展示的结构化正文。'))+(b?.callID?kv([['工具调用',b.callID],['回流依据',array(b.toolEvidenceIDs).join(', ')||'未匹配到唯一执行记录']]):'')+(d.truncated?'<p class="notice">当前显示为截断预览；完整请求是否已采集，请以上方“覆盖”字段为准。</p>':'')+`<button class="link-button" data-runtime-exchange="${esc(d.id)}">切换到这次模型往返 →</button>`;}
 function commandDetail(c){
@@ -114,12 +116,15 @@ function networkDetail(c,t){
  const proxy=r.proxySource?section('代理日志确认的目标',kv([['代理',r.proxySource],['目标主机',domain],['目标端口',r.remotePort],['日志时间',time(r.proxyObservedAt)],['关联依据','同一客户端端口、采样时间与进程出生身份']])+'<p class="note">域名由代理访问日志确认；网站服务器IP、HTTP路径与正文没有因此获得。</p>'):'';
  const target=intent?section('工具声明 / 执行记录中的目标',kv([['目标资源',r.requestedURL||url],['目标主机',domain],['依据',r.destinationBasis||c.basis]])+'<p class="note">这条记录说明命令的目标，不能单凭它证明已经连接或上传。</p>'):'';
  const http=r.method&&url&&!intent?section(type==='tool_report'?'工具提供的 HTTP 信息':'实际 HTTP 资源',kv([['请求',r.method+' '+url],['响应状态',r.statusCode],['内容类型',r.contentType]])):empty('本条未采HTTP方法、资源路径或正文。系统连接和代理目标仍可单独核对。');
- return target+section('系统观测到的连接',socket)+proxy+http+section('地址归属',kv([['观测的远端 IP',r.remoteIP],['端口',r.remotePort],['已采地址',addresses.join('\n')],['地址范围',r.ipScope],['归属依据',r.geo?.source||r.geolocationSource]])+(r.remoteIP?`<div id="ip-info" data-ip="${esc(r.remoteIP)}">${ipInfo(r.remoteIP,t?.id)}</div>`:empty('网站远端IP未采到，不能把本机代理地址当成网站IP。')))+section(intent?'原始目标参数':'采集元数据',box(c.input||'此来源未提供参数',true))+(type==='http'?section('HTTP 响应 / 已采内容',box(c.output||'响应正文未采到',true)):!['socket','proxy_route','tool_intent'].includes(type)&&c.output?section('工具返回 / 已采资源',box(c.output,true)):cards(t).some(x=>x.id==='call:'+c.call)?`<button class="link-button" data-select="card:call:${esc(c.call)}">查看对应工具的执行与返回 →</button>`:'')+(r.basis?`<p class="note">${esc(r.basis)}</p>`:'');
+ const relatedCall=c.call?cards(t).find(x=>x.id==='call:'+c.call):null;
+ const record=shown.collected.find(x=>array(c.eventIDs).includes(x.id));
+ const overview=window.AgentReinsNetwork.exchangeMarkup({agent:t?.agent,host:domain||r.remoteIP,port:r.remotePort,ip:r.remoteIP,proxy:r.proxySource,session:t?.session,call:c.call,taskID:t?.id,taskConfidence:/time window|时间窗口/i.test(r.basis||'')||!c.call?'candidate':'native',command:relatedCall?.execution?.command,tool:relatedCall?.title,evidenceType:type,networkBody:record?.networkBody});
+ return overview+target+'<details class="network-raw-details"><summary>连接、代理与原始采集字段</summary>'+section('系统观测到的连接',socket)+proxy+http+section('地址归属',kv([['观测的远端 IP',r.remoteIP],['端口',r.remotePort],['已采地址',addresses.join('\n')],['地址范围',r.ipScope],['归属依据',r.geo?.source||r.geolocationSource]])+(r.remoteIP?`<div id="ip-info" data-ip="${esc(r.remoteIP)}">${ipInfo(r.remoteIP,t?.id)}</div>`:empty('网站远端IP未采到，不能把本机代理地址当成网站IP。')))+section(intent?'原始目标参数':'采集元数据',box(c.input||'此来源未提供参数',true))+(type==='http'?section('HTTP 响应 / 已采内容',box(c.output||'响应正文未采到',true)):!['socket','proxy_route','tool_intent'].includes(type)&&c.output?section('工具返回 / 已采资源',box(c.output,true)):cards(t).some(x=>x.id==='call:'+c.call)?`<button class="link-button" data-select="card:call:${esc(c.call)}">查看对应工具的执行与返回 →</button>`:'')+(r.basis?`<p class="note">${esc(r.basis)}</p>`:'')+'</details>';
 }
 function filesDetail(c){const r=c.resource||{},tab=detailTab;const diff=r.diff;return kv([['文件路径',r.path],['实际动作',c.title],['来源',c.source]])+`<div class="tabs"><button data-tab="output" class="${tab==='output'?'active':''}">已采内容</button><button data-tab="input" class="${tab==='input'?'active':''}">读取 / 写入参数</button>${diff?`<button data-tab="diff" class="${tab==='diff'?'active':''}">本轮 diff</button>`:''}${r.before!=null?`<button data-tab="before" class="${tab==='before'?'active':''}">变更前</button>`:''}${r.after!=null?`<button data-tab="after" class="${tab==='after'?'active':''}">变更后</button>`:''}</div>`+(tab==='diff'&&diff?`<div class="diff-content">${text(diff).split('\n').map(line=>`<span class="diff-line ${line.startsWith('+')&&!line.startsWith('+++')?'add':line.startsWith('-')&&!line.startsWith('---')?'remove':''}">${esc(line)}</span>`).join('')}</div>`:box(tab==='input'?c.input:tab==='before'?r.before:tab==='after'?r.after:c.output||'本条没有文件正文',true))+(c.outputTruncated||c.inputTruncated?'<p class="notice">当前内容为采集片段，已达到预览上限。</p>':'')+`<p class="note">${esc(r.basis||'打开句柄不等于读取全文；模型提出写入不等于文件已落盘。仅展示本轮已有证据。')}</p>`;}
-function modelDetail(d){const contexts=array(d.contexts),cs=array(d.cards);return contexts.length?contexts.map((c,i)=>`<div class="message"><header><span>请求 ${i+1} · ${esc(time(c.timestamp))}</span><span>${esc(c.responseID?'响应已配对':'响应待配对')}</span></header><button class="link-button" data-context="${esc(c.id)}">查看 ${array(c.blocks).length} 个实际上下文块 →</button>${c.inputTokens!=null||c.outputTokens!=null?kv([['输入 tokens',c.inputTokens],['输出 tokens',c.outputTokens]]):''}</div>${c.response?section('模型实际返回',box(c.response)):''}${c.toolInstructions?section('下发的工具指令',box(c.toolInstructions,true)):''}${c.recordedReasoning?`<details class="technical"><summary>来源实际返回的 reasoning</summary><p>${esc(c.recordedReasoning)}</p></details>`:''}<p class="note">${esc(c.responseBasis||'配对依据未提供')}</p>`).join(''):cs.map(c=>`<div class="message"><header><span>${esc(c.title)}</span><span>${esc(time(c.timestamp))}</span></header>${box(c.output||c.input||c.summary,true)}<p class="note">${esc(c.basis)}</p></div>`).join('')||empty('本轮没有可配对的模型内容。');}
+function modelDetail(d){const contexts=array(d.contexts),cs=array(d.cards);return contexts.length?contexts.map((c,i)=>`<div class="message"><header><span>请求 ${i+1} · ${esc(time(c.timestamp))}</span><span>${esc(c.responseID?'响应已配对':'响应待配对')}</span></header><button class="link-button" data-context="${esc(c.id)}">查看 ${array(c.blocks).length} 个实际上下文块 →</button>${c.inputTokens!=null||c.outputTokens!=null?kv([['输入 tokens',c.inputTokens],['输出 tokens',c.outputTokens]]):''}</div>${c.response?section('模型实际返回',box(c.response)):''}${c.toolInstructions?section('下发的工具指令',box(c.toolInstructions,true)):''}${c.recordedReasoning?`<details class="technical"><summary>来源实际返回的 reasoning</summary><p>${esc(c.recordedReasoning)}</p></details>`:''}${array(c.toolSteps).length?section('模型指令与实际执行',array(c.toolSteps).map(s=>'<div class="message"><strong>'+esc(s.name)+'</strong>'+kv([['调用编号',s.callID],['执行证据',s.status]])+box(s.arguments,true)+'</div>').join('')):''}${(c.responseCharacters>16000||c.reasoningCharacters>16000||c.instructionsCharacters>16000)?'<p class="notice">此处为显示预览，原始采集正文另行保留；不能以预览长度判断采集字节数。</p>':''}<p class="note">${esc(c.responseBasis||'配对依据未提供')}</p>`).join(''):cs.map(c=>`<div class="message"><header><span>${esc(c.title)}</span><span>${esc(time(c.timestamp))}</span></header>${box(c.output||c.input||c.summary,true)}<p class="note">${esc(c.basis)}</p></div>`).join('')||empty('本轮没有可配对的模型内容。');}
 function artifactDetail(items){return items.length?items.map(a=>`<div class="artifact-row"><strong>${esc(a.name)}</strong><small>${esc(a.path)}</small>${kv([['状态',a.status|| (a.exists?'文件存在已确认':'文件存在未确认')],['大小',a.sizeBytes!=null?a.sizeBytes+' bytes':null],['来源',a.source]])}${a.preview!=null?`<div class="result-preview"><pre class="artifact-preview">${esc(a.preview)}</pre></div>${a.previewTruncated?'<p class="note">内容超过预览上限。</p>':''}`:'<p class="note">当前来源没有提供内嵌内容预览。</p>'}${a.openable?`<button class="primary" data-open-artifact="${esc(a.id)}" data-artifact-task="${esc(a.taskID)}">打开实际产物 ↗</button>`:''}${a.basis?`<p class="note">${esc(a.basis)}</p>`:''}</div>`).join(''):empty('本轮尚未识别出可以核对的交付物。文件操作记录仍可从“文件”查看。');}
-function toolResultDetail(c){return c.execution?commandDetail(c):kv([['工具',c.title],['调用 ID',c.call],['状态',c.tag]])+section('实际返回',box(c.output||'来源未提供返回内容',true));}
+function toolResultDetail(c){const failure=reportedWebFailure(c)?'<div class="notice">工具报告网页访问失败。已返回工具结果，不等于成功取得网页；具体错误见下方原始返回。</div>':'';return failure+ c.execution?commandDetail(c):kv([['工具',c.title],['调用 ID',c.call],['状态',c.tag]])+section('实际返回',box(c.output||'来源未提供返回内容',true));}
 function architectureTransfer(d){
  if(!d.confirmed)return empty('这条线是架构路径。本轮没有可配对的传递内容。');
  const target=d.target||{};
@@ -178,6 +183,8 @@ function renderDetail(force=false,panel=$('detail')){
  case 'agent':title='任务是否真的完成';body=taskStateDetail(t);break;
  default:title=d.title||typeNames[o.type]||'实际工具';body=(d.summary?`<p class="detail-intro">${esc(d.summary)}</p>`:'')+section(o.type==='plan'?'实际计划 / 调度内容':'实际调用参数',box(d.input||'来源未提供参数',true))+section(o.type==='failure'?'原因 / 返回':o.type==='verify'?'实际验证返回':'实际返回',box(d.output||'尚未取得返回',true));
  }
+ if(t && (o.type==='group'&&['external','network'].includes(d.stage)||d.resource?.domain||d.resource?.remoteIP||o.type==='web'||o.type==='network')) body='<button class="quiet" data-network-scope="'+esc(t.id)+'">查看此任务的外网数据交互</button>'+body;
+ if(array(d.codeFindings).length)body=section('代码安全 · '+d.codeFindings.length+' 项待核查', '<p>基于本次已采代码的规则检测，不代表漏洞已确认；行号对应采集片段。</p>'+array(d.codeFindings).map(f=>'<div class="event-item"><strong>'+esc(f.title)+'</strong><p>'+esc(f.severity)+' · 第 '+esc(f.line)+' 行 · '+esc(f.ruleId)+'</p>'+box(f.evidence,true)+'</div>').join(''))+body;
  panel.innerHTML=`<div class="detail-kicker" id="detail-type">${esc(type)}</div><div class="detail-title-row"><h2 id="detail-title">${esc(title)}</h2>${d.tag?badge(d.tag):''}</div>${snapshot?'<div class="detail-controls"><span class="read-lock">已固定查看对象 · 主图继续更新</span><button class="updated" id="detail-updated" '+(changed?'':'hidden')+'>有新内容，点击更新</button><button class="link-button" data-action="follow-current">跟随当前步骤</button></div>':''}<div id="detail-code">${body}</div>${evidence(o)}`;
  panel.scrollTop=scroll;
 }
@@ -191,9 +198,10 @@ function renderCollection(){
 function boardCard(t){const as=taskArtifacts(t);return `<button class="board-card" data-board-task="${esc(t.id)}"><small>${esc(t.agent)} · ${esc(time(t.lastActivity))}</small><strong>${esc(cut(inputTitle(t),110))}</strong><p>${esc(current(t))}</p><div class="artifact-chip">${esc(taskStatus(t)==='completed'?as.length?as.map(a=>a.name).join(' · ')+' →':'完成记录已收到 · 交付物待核对':taskStatus(t)==='stopped'?'查看停止原文、最后一步与未完成事项 →':taskStatus(t)==='awaiting_confirmation'?'查看当前等待记录 →':taskStatus(t)==='failed'?'查看失败原因与执行返回 →':'定位当前步骤 →')}</div></button>`;}
 function renderBoard(){const ts=listTasks(),columns=[['running','进行中'],['stopped','已停止 · 交付未确认'],['completed','已完成未读'],['failed','失败']];$('result-screen').innerHTML=`<div class="board-summary"><span>${ts.length} 个带任务身份的任务</span><span>已识别产物 ${shown.artifacts.length} 项</span><span>工具调用显示在任务内部</span></div><div class="board">${columns.map(([status,title])=>{const list=ts.filter(t=>taskStatus(t)===status&&(status!=='completed'||!read(t)));return `<section class="board-column kanban-column" data-status="${status}"><div class="board-head"><i class="status-dot ${status}"></i>${title}<span>${list.length}</span></div>${list.map(boardCard).join('')||empty('当前没有此状态任务')}</section>`;}).join('')}</div>${[['observed','状态待确认'],['awaiting_confirmation','等待执行'],['cancelled','已取消'],['read','已完成已读']].map(([status,title])=>{const list=ts.filter(t=>status==='read'?taskStatus(t)==='completed'&&read(t):taskStatus(t)===status);return `<details class="board-extra"><summary>${title} · ${list.length}</summary><div class="board-extra-list">${list.map(boardCard).join('')||empty('当前无此状态任务')}</div></details>`;}).join('')}`;}
 function render(animate=false){
- if(following)taskID=newest();if(task()?.detailsLoaded===false)requestTask(taskID);rebuildObjects();renderTasks();renderHeading();
+ if(following)taskID=newest();if(task()?.detailsLoaded===false)requestTask(taskID);rebuildObjects();renderTasks();renderHeading();if(view==='process'&&task())$('heading').insertAdjacentHTML('beforeend',`<button class="quiet" data-network-scope="${esc(task().id)}">查看此任务的外网访问</button>`);
  document.querySelectorAll('[data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
- $('view-name').textContent={process:'任务过程',collection:'采集现场',results:'结果看板'}[view];
+ $('view-name').textContent={network:'外网访问',process:'任务过程',collection:'采集现场',results:'结果看板'}[view];
+ $('network-view').hidden=view!=='network';
  $('process-view').hidden=view!=='process';$('collection-view').hidden=view!=='collection';$('result-screen').hidden=view!=='results';
  $('live-label').textContent=paused?'画面已暂停 · 采集继续':shown.observing?'本机实时采集中':'采集未启动';$('pause').textContent=paused?'恢复画面':'暂停画面';
  $('follow-latest').textContent=following?'正在跟随最新任务':'跟随最新任务';
@@ -201,12 +209,21 @@ function render(animate=false){
  $('footer-state').textContent=`${shown.publishedAt?'更新 '+time(shown.publishedAt)+' · ':''}${paused?'画面固定，采集继续':'真实采集数据'} · 当前任务 ${primaryTasks().length} 个`;
  if(view==='process'){if($('collection-detail'))$('collection-detail').innerHTML='';renderStages();renderGraph(animate);renderTimeline();renderDetail();}
  else if(view==='collection'){$('detail').innerHTML='';renderCollection();if(snapshot)renderCollectionDetail();}
+ else if(view==='network')renderNetwork();
  else renderBoard();
  if(view==='process'&&task()?.detailsLoaded===false){$('current-bar').textContent='正在读取该任务的完整执行证据…';$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
 }
+function renderNetwork(){if(networkTask&&shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);const focused=document.activeElement?.id==='network-search',position=focused?document.activeElement.selectionStart:null;window.AgentReinsNetwork.render($('network-view'),shown,{agent:networkAgent,query:networkQuery,taskOnly:networkTask,selected:networkSelected});if(focused){$('network-search').focus();$('network-search').setSelectionRange(position,position);}}
 function renderCollectionDetail(){const holder=$('collection-detail');if(holder&&snapshot)renderDetail(true,holder);}
 addEventListener('agentreins-layout',()=>renderGraph(false));
 function rememberTask(task,contexts){hydratedTasks.delete(task.id);hydratedTasks.set(task.id,{task,contexts});while(hydratedTasks.size>5)hydratedTasks.delete(hydratedTasks.keys().next().value);pendingTasks.delete(task.id);}
+function sameTaskOwner(a,b){return a&&b&&['agent','session','turn'].every(k=>typeof a[k]==='string'&&a[k]===b[k]);}
+function cachedTaskAhead(header,cached){return cached&&typeof cached.task.previewBaseRevision==='string'&&cached.task.previewBaseRevision===header.projectionRevision&&cached.task.projectionRevision!==header.projectionRevision;}
+function cachedTaskFits(header,cached){return cached&&header.id===cached.task.id&&sameTaskOwner(header,cached.task)&&(cached.task.projectionRevision===header.projectionRevision||cachedTaskAhead(header,cached));}
+function fillCachedTask(header,cached){
+ if(cached.task.projectionRevision!==header.projectionRevision)return {...cached.task,detailsLoaded:true};
+ return {...cached.task,...header,cards:cached.task.cards,detailsLoaded:true,previewBaseRevision:null,detailFreshness:null};
+}
 function receive(payload){
  const incoming=normalize(payload||{});
  if(Array.isArray(incoming.collectedOrder)){
@@ -229,10 +246,10 @@ function receive(payload){
    if(t.cards.length!==delta.cardOrder.length||incoming.contexts.length!==delta.contextOrder.length){t.cards=[];t.detailsLoaded=false;incoming.contexts=[];bridge('selectTask',{taskID:delta.taskID});}
   }else{if(t){t.cards=[];t.detailsLoaded=false;}incoming.contexts=[];bridge('selectTask',{taskID:delta.taskID});}
  }
- for(const t of incoming.tasks)if(t.detailsLoaded!==false)rememberTask(t,incoming.contexts.filter(c=>c.agent===t.agent&&c.session===t.session&&c.turn===t.turn));
- incoming.tasks=incoming.tasks.map(t=>{const cached=hydratedTasks.get(t.id);return t.detailsLoaded===false&&cached?.task.projectionRevision===t.projectionRevision?{...cached.task,...t,cards:cached.task.cards,detailsLoaded:true}:t;});
+ for(const t of incoming.tasks)if(t.detailsLoaded!==false){const cached=hydratedTasks.get(t.id);if(!(cachedTaskFits(t,cached)&&cachedTaskAhead(t,cached)))rememberTask(t,incoming.contexts.filter(c=>c.agent===t.agent&&c.session===t.session&&c.turn===t.turn));}
+ incoming.tasks=incoming.tasks.map(t=>{const cached=hydratedTasks.get(t.id);return cachedTaskFits(t,cached)&&(t.detailsLoaded===false||cachedTaskAhead(t,cached))?fillCachedTask(t,cached):t;});
  const contexts=new Map(incoming.contexts.map(c=>[c.id,c]));
- for(const t of incoming.tasks){const cached=hydratedTasks.get(t.id);if(cached?.task.projectionRevision===t.projectionRevision)for(const c of cached.contexts)if(!contexts.has(c.id))contexts.set(c.id,c);}
+ for(const t of incoming.tasks){const cached=hydratedTasks.get(t.id);if(cachedTaskFits(t,cached))for(const c of cached.contexts)if(!contexts.has(c.id))contexts.set(c.id,c);}
  incoming.contexts=[...contexts.values()];latest=incoming;
  if(paused){
   let filled=false;
@@ -250,13 +267,19 @@ async function requestTask(id){
  if(handler){handler.postMessage({action:'selectTask',taskID:id});return;}
  const expected=(paused?shown:latest).tasks.find(t=>t.id===id)?.projectionRevision;
  try{
-  const response=await fetch('/task.json?id='+encodeURIComponent(id),{cache:'no-store',signal:AbortSignal.timeout(10000)});
+  const response=await fetch('/task.json?id='+encodeURIComponent(id)+'&revision='+encodeURIComponent(expected||''),{cache:'no-store',signal:AbortSignal.timeout(10000)});
   if(!response.ok)throw Error('任务详情暂时不可读取');
   const detail=await response.json();
-  if(detail.task?.id!==id)return;
-  if(detail.task?.projectionRevision!==expected){if(paused&&taskID===id)toast('该任务已有新记录，恢复画面后可读取最新详情。');return;}
-  if((paused?shown:latest).tasks.find(t=>t.id===id)?.projectionRevision!==expected)return;
-  rememberTask(detail.task,array(detail.contexts));receive(latest);
+  const header=(paused?shown:latest).tasks.find(t=>t.id===id);
+  if(detail.task?.id!==id||header?.projectionRevision!==expected||!sameTaskOwner(header,detail.task))return;
+  const contexts=array(detail.contexts);
+  if(contexts.some(c=>!sameTaskOwner(c,detail.task)))throw Error('上下文与任务归属不一致');
+  if(detail.task.projectionRevision!==expected){
+   if(paused||detail.previewTaskExport?.state!=='ahead_of_snapshot'||detail.previewTaskExport.snapshotRevision!==expected){if(taskID===id||networkTask===id)toast(paused?'该任务已有新记录，恢复画面后可读取最新详情。':'任务详情正在同步，请稍后重试。');return;}
+   detail.task={...detail.task,previewBaseRevision:expected,detailFreshness:'ahead_of_snapshot',detailsLoaded:true};
+   latest={...latest,tasks:latest.tasks.map(t=>t.id===id?detail.task:t),contexts:latest.contexts.filter(c=>!sameTaskOwner(c,detail.task)).concat(contexts)};
+  }
+  rememberTask(detail.task,contexts);receive(latest);
  }catch(error){if(taskID===id)toast('读取任务详情失败：'+error.message);}finally{pendingTasks.delete(id);}
 }
 window.agentreinsReceive=receive;
@@ -266,8 +289,13 @@ document.addEventListener('click',e=>{
  if(el.hasAttribute('data-graph-focus')){window.AgentReinsFlow.focus();}
  else if(el.dataset.action==='toggle-details'){const collapsed=document.body.classList.toggle('details-collapsed');$('toggle-details').textContent=collapsed?'显示详情':'收起详情';}
  else if(el.dataset.zoom){window.AgentReinsFlow.zoom(el.dataset.zoom);}
- else if(el.dataset.view){view=el.dataset.view;render();}
+ else if(el.dataset.view){view=el.dataset.view;if(view==='network')networkTask=null;render();}
  else if(el.dataset.graphMode){graphMode=el.dataset.graphMode;renderGraph();}
+ else if(el.dataset.networkScope){networkTask=el.dataset.networkScope;networkQuery='';networkSelected=null;view='network';if(shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);render();}
+ else if(el.hasAttribute('data-network-all')){networkTask=null;renderNetwork();}
+ else if(el.dataset.networkRecord){networkSelected=el.dataset.networkRecord;renderNetwork();}
+ else if(el.dataset.networkIp){bridge('resolveNetworkIP',{recordID:el.dataset.networkId,ip:el.dataset.networkIp});}
+ else if(el.dataset.networkTask){selectTask(el.dataset.networkTask);}
  else if(el.dataset.task)selectTask(el.dataset.task);
  else if(el.dataset.boardTask){const t=shown.tasks.find(t=>t.id===el.dataset.boardTask);selectTask(t.id,taskStatus(t)==='completed'?'artifact':taskStatus(t)==='stopped'?'closure':t.currentCardID?'card:'+t.currentCardID:null);}
  else if(el.dataset.timeline){timelineMode=el.dataset.timeline;renderTimeline();}
@@ -286,7 +314,8 @@ document.addEventListener('click',e=>{
  else if(el.id==='follow-latest'){runtimeExchangeID=null;runtimeCallID=null;following=true;selection=null;snapshot=null;render();}
  else if(el.id==='pause'){paused=!paused;if(!paused)shown=latest;render();}
 });
-document.addEventListener('change',e=>{if(e.target.id==='runtime-exchange'){runtimeExchangeID=e.target.value||null;runtimeCallID=null;selection=null;snapshot=null;render();if(runtimeExchangeID&&objects.has('model'))choose('model');}else if(e.target.id==='runtime-call'){runtimeCallID=e.target.value||null;selection=null;snapshot=null;render();if(runtimeCallID)choose('card:'+runtimeCallID);}else if(e.target.id==='collection-filter'){collectionFilter=e.target.value;renderCollection();}});
+document.addEventListener('input',e=>{if(e.target.id==='network-search'){const position=e.target.selectionStart;networkQuery=e.target.value;renderNetwork();const input=$('network-search');input.focus();input.setSelectionRange(position,position);}});
+document.addEventListener('change',e=>{if(e.target.id==='network-agent'){networkAgent=e.target.value;renderNetwork();return;}if(e.target.id==='runtime-exchange'){runtimeExchangeID=e.target.value||null;runtimeCallID=null;selection=null;snapshot=null;render();if(runtimeExchangeID&&objects.has('model'))choose('model');}else if(e.target.id==='runtime-call'){runtimeCallID=e.target.value||null;selection=null;snapshot=null;render();if(runtimeCallID)choose('card:'+runtimeCallID);}else if(e.target.id==='collection-filter'){collectionFilter=e.target.value;renderCollection();}});
 $('search').oninput=e=>{query=e.target.value;renderTasks();};$('agent-filter').onchange=e=>{agentFilter=e.target.value;if(following)taskID=newest();render();};
-const initialView=new URLSearchParams(location.search).get('view');if(['process','collection','results'].includes(initialView))view=initialView;render();
+const initialParams=new URLSearchParams(location.search),initialView=initialParams.get('view');if(['process','collection','results','network'].includes(initialView))view=initialView;const initialTask=initialParams.get('task');if(view==='network'&&initialTask&&initialTask.length<=4096){networkTask=initialTask;taskID=initialTask;following=false;}render();
 })();

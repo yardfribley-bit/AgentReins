@@ -98,7 +98,36 @@ final class EventAttributionResolver: ObservableObject {
         guard event.source == "agentsight:workbuddy-network-body" else { return event }
         if event.op != "network_prompt", let trace = event.traceId, let match = workBuddyFlows[trace] {
             return event.attributed(sessionId: match.sessionId, turnId: match.turnId,
-                toolCallId: event.toolCallId, confidence: .inferred, method: "same HTTPS flow as an already-attributed request")
+                toolCallId: match.toolCallId ?? event.toolCallId, toolName: match.toolName, confidence: .inferred, method: "same HTTPS flow as an already-attributed request")
+        }
+        if event.op == "tool_service_request", let body = event.modelPrompt,
+           let request = Self.toolArguments(body) {
+            let matches = contexts.filter { context in
+                guard context.agent == "workbuddy", context.kind == "tool", context.op == "call",
+                      context.toolCallId != nil, abs(event.ts.timeIntervalSince(context.timestamp)) <= 180,
+                      let arguments = Self.toolArguments(context.command),
+                      let name = context.toolName?.lowercased() else { return false }
+                if name == "webfetch" {
+                    guard let url = arguments["url"] as? String, let prompt = arguments["prompt"] as? String,
+                          !url.isEmpty, !prompt.isEmpty else { return false }
+                    return request["url"] as? String == url && request["prompt"] as? String == prompt
+                }
+                if ["websearch", "search"].contains(name) {
+                    guard let query = arguments["query"] as? String, !query.isEmpty else { return false }
+                    return request["query"] as? String == query
+                        && ["type", "max_results"].allSatisfy { key in
+                            arguments[key] == nil || String(describing: arguments[key]!) == String(describing: request[key] ?? "")
+                        }
+                }
+                return false
+            }
+            let unique = Dictionary(grouping: matches) { "\($0.sessionId):\($0.turnId):\($0.toolCallId!)" }
+            if unique.count == 1, let match = unique.values.first?.first {
+                if let trace = event.traceId { workBuddyFlows[trace] = match }
+                return event.attributed(sessionId: match.sessionId, turnId: match.turnId,
+                    toolCallId: match.toolCallId, toolName: match.toolName, confidence: .inferred,
+                    method: "unique exact native tool parameters matched to captured HTTPS request; not PID proof")
+            }
         }
         guard let intent = normalizedIntent(event.userIntent), !intent.isEmpty else { return event }
         let matching = activeWorkBuddyPrompts.values.filter { context in
@@ -191,6 +220,16 @@ final class EventAttributionResolver: ObservableObject {
         }
         guard let group = byCall.values.first else { return nil }
         return group.max(by: { $0.timestamp < $1.timestamp })
+    }
+
+    private static func toolArguments(_ text: String?) -> [String: Any]? {
+        guard let text else { return nil }
+        var value = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !value.hasPrefix("{"), let first = value.firstIndex(of: "("), value.hasSuffix(")") {
+            value = String(value[value.index(after: first)..<value.index(before: value.endIndex)])
+        }
+        guard let data = value.data(using: .utf8) else { return nil }
+        return (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
     }
 
     private func requestedDomain(in command: String?) -> String? {

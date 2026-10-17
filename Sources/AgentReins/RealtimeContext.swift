@@ -9,6 +9,14 @@ struct RealtimeContextBlock: Equatable, Encodable {
     var toolEvidenceIDs: [String] = []
     var containsCurrentInput = false
 }
+struct RealtimeModelToolStep: Equatable, Encodable {
+    let callID: String
+    let name: String
+    let arguments: String
+    let executionEventIDs: [String]
+    let resultEventIDs: [String]
+    let status: String
+}
 struct RealtimeContextExchange: Equatable, Encodable {
     let id: String, agent: String, session: String, turn: String, source: String, coverage: String
     let timestamp: Date
@@ -30,6 +38,10 @@ struct RealtimeContextExchange: Equatable, Encodable {
     var responseBasis = "响应尚未按原生标识配对"
     var inputTokens: Int? = nil
     var outputTokens: Int? = nil
+    var toolSteps: [RealtimeModelToolStep] = []
+    var responseCharacters: Int? = nil
+    var reasoningCharacters: Int? = nil
+    var instructionsCharacters: Int? = nil
 }
 
 enum RealtimeContextProjector {
@@ -121,13 +133,28 @@ enum RealtimeContextProjector {
         // block made routine UI refreshes quadratic in long active sessions.
         var responses: [String: [GuardEvent]] = [:]
         var toolResults: [String: [GuardEvent]] = [:]
+        var toolExecutions: [String: [GuardEvent]] = [:]
         for event in events {
             guard let agent = RealtimeWorkspaceProjector.canonicalAgent(event.agent) else { continue }
             if event.kind == "model", ["network_response", "response"].contains(event.op), let trace = event.traceId {
                 responses[agent + "\u{0}" + trace, default: []].append(event)
             }
+            if event.kind == "tool" || event.source == "workbuddy-hook",
+               let session = event.sessionId, let turn = event.turnId, let call = event.toolCallId {
+                toolExecutions[agent + "\u{0}" + session + "\u{0}" + turn + "\u{0}" + call, default: []].append(event)
+            }
             if ["result", "hook_tool_finish"].contains(event.op), let session = event.sessionId, let call = event.toolCallId {
                 toolResults[agent + "\u{0}" + session + "\u{0}" + call, default: []].append(event)
+            }
+        }
+        // Reused call IDs across model responses cannot establish a unique instruction.
+        var instructionOwners: [String: Set<UUID>] = [:]
+        for response in events where response.kind == "model" && ["network_response", "response"].contains(response.op) {
+            guard let agent = RealtimeWorkspaceProjector.canonicalAgent(response.agent),
+                  let session = response.sessionId, let turn = response.turnId else { continue }
+            for call in RealtimeDetailProjector.object(response.modelDecision)?["tool_calls"] as? [[String: Any]] ?? [] {
+                guard let id = call["id"] as? String else { continue }
+                instructionOwners[agent + "\u{0}" + session + "\u{0}" + turn + "\u{0}" + id, default: []].insert(response.id)
             }
         }
         let requestIDs = Set(events.map { $0.id.uuidString })
@@ -164,6 +191,23 @@ enum RealtimeContextProjector {
                         exchange.response = response.modelResponse.map { String($0.prefix(16_000)) }
                         exchange.toolInstructions = response.modelDecision.map { String($0.prefix(16_000)) }
                         exchange.recordedReasoning = response.modelReasoning.map { String($0.prefix(16_000)) }
+                        exchange.responseCharacters = response.modelResponse?.count
+                        exchange.reasoningCharacters = response.modelReasoning?.count
+                        exchange.instructionsCharacters = response.modelDecision?.count
+                        let instruction = RealtimeDetailProjector.object(response.modelDecision)
+                        exchange.toolSteps = (instruction?["tool_calls"] as? [[String: Any]] ?? []).compactMap { call in
+                            guard let id = call["id"] as? String, !id.isEmpty else { return nil }
+                            let function = call["function"] as? [String: Any] ?? [:]
+                            let key = exchange.agent + "\u{0}" + exchange.session + "\u{0}" + exchange.turn + "\u{0}" + id
+                            let ambiguous = (instructionOwners[key]?.count ?? 0) > 1
+                            let matches = ambiguous ? [] : (toolExecutions[key] ?? []).filter { $0.ts >= exchange.timestamp }
+                            let starts = matches.filter { ["call", "hook_tool_start"].contains($0.op) }
+                            let ends = matches.filter { ["result", "hook_tool_finish"].contains($0.op) }
+                            return RealtimeModelToolStep(callID: id, name: function["name"] as? String ?? "未知工具",
+                                arguments: String((function["arguments"] as? String ?? "").prefix(16_000)),
+                                executionEventIDs: starts.map { $0.id.uuidString }, resultEventIDs: ends.map { $0.id.uuidString },
+                                status: ambiguous ? "调用编号被多次模型响应使用，执行归属待确认" : !ends.isEmpty ? "已采工具返回，是否成功需核对结果" : !starts.isEmpty ? "已采调用，返回待采集" : "仅模型指令，执行尚未证实")
+                        }
                         exchange.responseID = response.id.uuidString; exchange.responseBasis = "相同 Agent 与原生 trace / HTTPS flow；任务归属仍沿用原置信度"
                         exchange.inputTokens = response.inputTokens; exchange.outputTokens = response.outputTokens
                     }

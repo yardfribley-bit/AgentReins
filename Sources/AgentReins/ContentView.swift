@@ -6,6 +6,7 @@ struct ContentView: View {
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
+    @State private var showingSensitiveRules = false
     @StateObject private var geolocation = IPGeolocationStore()
     @StateObject private var realtime = RealtimeWorkspaceState(checkpointURL: RealtimeWorkspaceState.checkpointLocation(), backgroundProjection: true)
     private let healthTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
@@ -14,6 +15,12 @@ struct ContentView: View {
             health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running,
             error: eventStore.persistenceError, geolocation: geolocation), onMarkRead: { realtime.markRead($0) }, onRefreshArtifacts: { realtime.refreshArtifacts() }, onResolveIP: { geolocation.resolve([$0]) })
         .frame(minWidth: 900, minHeight: 600)
+        .toolbar {
+            Button("敏感数据规则", systemImage: "shield.lefthalf.filled") {
+                showingSensitiveRules = true
+            }
+        }
+        .sheet(isPresented: $showingSensitiveRules) { SensitiveRuleEditor() }
         .task {
             realtime.ingest(eventStore.events)
             realtime.updateProcesses(processGuard.processInventory)

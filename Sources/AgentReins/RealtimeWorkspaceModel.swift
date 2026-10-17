@@ -22,6 +22,7 @@ struct RealtimeWorkspacePayload: Encodable {
     var detailDelta: RealtimeWorkspaceTransport.DetailDelta? = nil
 }
 struct RealtimeCollectedRecord: Encodable {
+    var networkBody: RealtimeNetworkBodyPreview? = nil
     var revision = UUID().uuidString
     let id: String, agent: String, source: String, kind: String, op: String, summary: String, preview: String
     let hasTaskIdentity: Bool
@@ -47,13 +48,13 @@ struct RealtimeHealth: Equatable, Encodable {
     let accepted: Int
     let detail: String?
 }
-struct RealtimeInputAttachment: Encodable {
+struct RealtimeInputAttachment: Equatable, Encodable {
     let type: String
     let path: String?
     let source: String
     let eventIDs: [String]
 }
-struct RealtimeUserInput: Encodable {
+struct RealtimeUserInput: Equatable, Encodable {
     let id: String
     let content: String?
     let timestamp: Date
@@ -61,7 +62,7 @@ struct RealtimeUserInput: Encodable {
     let eventIDs: [String]
     let basis: String
 }
-struct RealtimeTask: Encodable, Identifiable {
+struct RealtimeTask: Equatable, Encodable, Identifiable {
     let id: String, agent: String, session: String, turn: String, title: String
     let startedAt: Date, lastActivity: Date
     var cards: [RealtimeCard]
@@ -110,9 +111,21 @@ struct RealtimeCard: Equatable, Encodable, Identifiable {
     var inputTruncated: Bool = false
     var outputTruncated: Bool = false
     var phase: String = "recorded"
+    var networkBody: RealtimeNetworkBodyPreview? = nil
+    var codeFindings: [CodeFinding] = []
 }
 
 enum RealtimeWorkspaceProjector {
+    static func codeFindings(_ events: [GuardEvent]) -> [CodeFinding] {
+        var seen = Set<String>()
+        return events.flatMap { $0.codeFindings ?? [] }.filter { seen.insert($0.id).inserted }.map {
+            CodeFinding(ruleId: $0.ruleId, title: $0.title, severity: $0.severity,
+                        line: $0.line, evidence: $0.ruleId == "hardcoded-secret"
+                        ? "[敏感值已隐藏，请在源文件核查并轮换可能泄露的凭据]"
+                        : ProcessArgumentRedactor.redact($0.evidence))
+        }
+    }
+
     /// Retain both source IDs while displaying an unambiguous native/transport
     /// echo once. Repeated sends, different turns and ambiguous matches stay separate.
     static func userInputs(_ events: [GuardEvent]) -> [RealtimeUserInput] {
@@ -363,7 +376,8 @@ enum RealtimeWorkspaceProjector {
                 confidence: event.attributionConfidence?.rawValue ?? "unknown", call: call, pid: event.processId ?? request?.processId, timestamp: event.ts,
                 eventIDs: events.map { $0.id.uuidString }, detailType: kind, execution: execution,
                 resource: RealtimeDetailProjector.resource(event: event, input: rawInput, output: rawOutput, kind: kind),
-                inputTruncated: RealtimeDetailProjector.truncated(rawInput), outputTruncated: RealtimeDetailProjector.truncated(visibleOutput), phase: phase))
+                inputTruncated: RealtimeDetailProjector.truncated(rawInput), outputTruncated: RealtimeDetailProjector.truncated(visibleOutput), phase: phase,
+                codeFindings: codeFindings(events)))
         }
         for event in ordered where !isToolLifecycle(event) {
             if ["prompt", "hook_user_prompt"].contains(event.op), event.userIntent != nil { continue }
@@ -413,7 +427,8 @@ enum RealtimeWorkspaceProjector {
                 confidence: event.attributionConfidence?.rawValue ?? "unknown", call: event.toolCallId, pid: event.processId, timestamp: event.ts, eventIDs: [event.id.uuidString],
                 detailType: kind, execution: kind == "command" ? RealtimeDetailProjector.execution(request: event, result: nil, events: [event], input: event.command, output: nil) : nil,
                 resource: RealtimeDetailProjector.resource(event: event, input: rawInput, output: rawBody, kind: kind),
-                inputTruncated: RealtimeDetailProjector.truncated(rawInput), outputTruncated: RealtimeDetailProjector.truncated(rawBody), phase: phase))
+                inputTruncated: RealtimeDetailProjector.truncated(rawInput), outputTruncated: RealtimeDetailProjector.truncated(rawBody), phase: phase,
+                networkBody: RealtimeNetworkBodyPreview(event: event), codeFindings: codeFindings([event])))
             if event.kind == "model", let decision = event.modelDecision, !decision.isEmpty {
                 output.append(RealtimeCard(id: "decision:\(event.id.uuidString)", kind: "plan", title: "模型下发的工具指令", status: "pending", tag: "模型决策；执行状态另行核对",
                     summary: String(decision.prefix(220)), input: "", output: String(decision.prefix(16000)), source: event.source ?? "来源未标明",

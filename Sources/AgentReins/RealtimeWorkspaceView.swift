@@ -43,9 +43,25 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
         func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
             guard message.frameInfo.isMainFrame, message.frameInfo.request.url?.isFileURL == true,
                   let body = message.body as? [String: Any], let action = body["action"] as? String, let latest else { return }
+            if action == "loadTransportAudit" {
+                guard let view = message.webView else { return }
+                encodingQueue.async {
+                    let records = NativeTransportAudit.records()
+                    Task { @MainActor in
+                        _ = try? await view.callAsyncJavaScript("window.agentreinsTransportReceive(records)", arguments: ["records": records], in: nil, contentWorld: .page)
+                    }
+                }
+                return
+            }
             if action == "refreshCollected" {
                 detailRequestGeneration += 1; deliveredCollected = [:]
                 if let view = message.webView { publish(view) }; return
+            }
+            if action == "resolveNetworkIP", let recordID = body["recordID"] as? String,
+               let ip = body["ip"] as? String, IPGeolocationStore.isPublicIPAddress(ip),
+               latest.collected.contains(where: { $0.id == recordID && $0.kind == "network" &&
+                   ($0.resource?.remoteIP == ip || $0.resource?.addresses.contains(ip) == true) }) {
+                onResolveIP?(ip); return
             }
             if action == "refreshArtifacts" { onRefreshArtifacts?(); return }
             guard let taskID = body["taskID"] as? String, latest.tasks.contains(where: { $0.id == taskID }) else { return }
@@ -491,7 +507,8 @@ final class RealtimeWorkspaceState: ObservableObject {
                     hasTaskIdentity: event.sessionId != nil && event.turnId != nil,
                     title: display.title, category: display.category, details: (display.details + ["路径：\(event.path)", "会话：\(event.sessionId ?? "未关联")", "轮次：\(event.turnId ?? "未关联")"]).joined(separator: "\n"), pid: event.processId,
                     session: event.sessionId, turn: event.turnId, call: event.toolCallId, timestamp: event.ts,
-                    resource: event.kind == "network" ? RealtimeDetailProjector.resource(event:event,input:event.command,output:event.modelResponse,kind:"network") : nil)
+                    resource: (event.kind == "network" || event.source == "agentsight:workbuddy-network-body") ? RealtimeDetailProjector.resource(event:event,input:event.command,output:event.modelResponse,kind:"network") : nil)
+                row.networkBody = RealtimeNetworkBodyPreview(event: event)
                 row.revision = record.revision.uuidString
                 nextByID[event.id] = row; return row
             }
@@ -536,7 +553,10 @@ final class RealtimeWorkspaceState: ObservableObject {
             processes: projectedProcesses(processes), health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
             observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: projectedContexts())
         if let geolocation {
-            value.ipGeolocations = addressCache.map { ip in
+            let networkAddresses = value.collected.filter { $0.kind == "network" }.flatMap { row in
+                [row.resource?.remoteIP].compactMap { $0 } + (row.resource?.addresses ?? [])
+            }.filter(IPGeolocationStore.isPublicIPAddress)
+            value.ipGeolocations = Set(addressCache + networkAddresses).sorted().map { ip in
                 let record = geolocation.records[ip]
                 return RealtimeIPLocation(ip: ip, location: record?.locationLabel, owner: record?.ownerLabel, source: "ipwho.is", updatedAt: record?.fetchedAt,
                     state: record != nil ? "ready" : geolocation.pending.contains(ip) ? "loading" : geolocation.failures[ip] != nil ? "failed" : "unqueried", error: geolocation.failures[ip])

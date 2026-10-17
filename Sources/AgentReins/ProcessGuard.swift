@@ -58,6 +58,7 @@ final class ProcessGuard: ObservableObject {
     private var observedProcesses: [ProcessSnapshotRecord] = []
     private var processSnapshotInFlight = false
     private var networkSnapshotInFlight = false
+    private var pendingNetworkProcesses: [String: ProcessSnapshotRecord] = [:]
     private typealias SnapshotProcess = (pid: String, ppid: String, cmd: String, agent: String?, birth: UInt64?, executable: String?)
     private var latestProcesses: [SnapshotProcess] = []
     private var seen: Set<String> = []
@@ -253,7 +254,7 @@ final class ProcessGuard: ObservableObject {
                 self.process(procs: procs, attributions: attributions)
                 self.onEvents?(armEvents + self.hookCorrelation.observeProcesses(inventory))
                 if !self.pendingResourceTriggers.isEmpty { self.captureProcessObservations() }
-                if !self.pendingNetworkTriggers.isEmpty { self.captureNetwork() }
+                if !self.pendingNetworkTriggers.isEmpty || !self.pendingNetworkProcesses.isEmpty { self.captureNetwork() }
                 // Socket queries run separately, so they cannot hold up process discovery.
                 if !newlyAttached.isEmpty { self.captureNetwork(targets: newlyAttached) }
                 self.persistHealth(source: "process", state: .healthy,
@@ -285,6 +286,10 @@ final class ProcessGuard: ObservableObject {
     }
 
     private func captureNetwork(targets: [ProcessSnapshotRecord]? = nil) {
+        // A newly discovered child must not be discarded while another sample runs.
+        for target in targets ?? [] {
+            pendingNetworkProcesses[target.pid] = target
+        }
         guard running, !networkSnapshotInFlight else {
             if networkSnapshotInFlight {
                 workingCollectionHealth.skippedNetworkSnapshots += 1
@@ -297,18 +302,23 @@ final class ProcessGuard: ObservableObject {
         let hookTrigger = pendingNetworkTriggers.isEmpty ? nil : pendingNetworkTriggers.keys.sorted().joined(separator: ",")
         let trigger = hookTrigger ?? (targets == nil ? nil : "new_process_attached")
         pendingNetworkTriggers.removeAll()
-        let sampledProcesses = hookTrigger == nil ? (targets ?? observedProcesses) : hookCorrelation.samplingTargets(observedProcesses)
+        let queued = Array(pendingNetworkProcesses.values)
+        pendingNetworkProcesses.removeAll()
+        let base = hookTrigger == nil ? (queued.isEmpty ? observedProcesses : queued) : hookCorrelation.samplingTargets(observedProcesses)
+        let sampledProcesses = Array(Dictionary((base + queued).map { ($0.pid, $0) }, uniquingKeysWith: { _, newer in newer }).values)
         guard !sampledProcesses.isEmpty else { networkSnapshotInFlight = false; return }
         let agentPIDs = sampledProcesses.map(\.pid)
         DispatchQueue.global(qos: .utility).async { [weak self] in
             guard let self else { return }
-            let connections = self.networkProvider.snapshot(pids: agentPIDs)
+            let networkSnapshot = self.networkProvider.capture(pids: agentPIDs)
+            let connections = networkSnapshot.connections
             let observedAt = Date()
             let validatedProcesses = sampledProcesses.filter {
                 guard let pid = Int32($0.pid), let birth = $0.birthIdentity else { return false }
                 return LibprocProcessActivitySampler.birthIdentity(pid) == birth
             }
-            let socketEvents = self.observationCoordinator.observeSockets(processes: validatedProcesses, connections: connections, trigger: trigger)
+            let socketEvents = networkSnapshot.failure == nil
+                ? self.observationCoordinator.observeSockets(processes: validatedProcesses, connections: connections, trigger: trigger) : []
             let ipcRecords = LsofUnixSocketSnapshotProvider().snapshot(pids: agentPIDs)
             let ipcProcesses = validatedProcesses.filter {
                 guard let pid = Int32($0.pid), let birth = $0.birthIdentity else { return false }
@@ -324,11 +334,19 @@ final class ProcessGuard: ObservableObject {
                 self.networkSnapshotInFlight = false
                 guard self.running else { return }
                 self.onEvents?(socketEvents + ipcEvents)
-                if !self.pendingNetworkTriggers.isEmpty { self.captureNetwork() }
+                if !self.pendingNetworkTriggers.isEmpty || !self.pendingNetworkProcesses.isEmpty { self.captureNetwork() }
                 self.workingCollectionHealth.lastNetworkDurationMS = Date().timeIntervalSince(started) * 1_000
-                self.workingCollectionHealth.lastNetworkSuccess = Date()
+                // Preserve positive observations even when the snapshot is partial;
+                // only a complete snapshot may imply that previous sockets closed.
                 self.processNetwork(processes: validatedProcesses, connections: connections,
                                     proxyDestinations: proxyDestinations, observedAt: observedAt)
+                if let failure = networkSnapshot.failure {
+                    self.workingCollectionHealth.networkFailures += 1
+                    self.persistHealth(source: "network", state: .failed, detail: failure)
+                    self.publishHealthIfNeeded(force: true)
+                    return
+                }
+                self.workingCollectionHealth.lastNetworkSuccess = Date()
                 self.persistHealth(source: "network", state: .healthy,
                                    detail: "Socket evidence is sampled and may miss short connections")
                 self.publishHealthIfNeeded()
@@ -353,6 +371,7 @@ final class ProcessGuard: ObservableObject {
         networkTimer = nil
         processSnapshotInFlight = false
         networkSnapshotInFlight = false
+        pendingNetworkProcesses.removeAll()
     }
 
     // MARK: - 内部

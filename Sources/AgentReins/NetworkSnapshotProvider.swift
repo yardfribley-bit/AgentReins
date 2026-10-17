@@ -25,31 +25,65 @@ struct NetworkConnectionRecord: Sendable, Equatable {
     var identity: String { "\(pid)|\(localAddress)|\(remoteHost)|\(remotePort)|\(state ?? "unknown")" }
 }
 
+struct NetworkSnapshotResult: Sendable {
+    let connections: [NetworkConnectionRecord]
+    let failure: String?
+}
+
 protocol NetworkSnapshotting: Sendable {
     var sourceID: String { get }
     func snapshot(pids: [String]) -> [NetworkConnectionRecord]
+    func capture(pids: [String]) -> NetworkSnapshotResult
+}
+
+extension NetworkSnapshotting {
+    func capture(pids: [String]) -> NetworkSnapshotResult {
+        NetworkSnapshotResult(connections: snapshot(pids: pids), failure: nil)
+    }
 }
 
 struct LsofNetworkSnapshotProvider: NetworkSnapshotting {
     let sourceID = "lsof-network"
 
     func snapshot(pids: [String]) -> [NetworkConnectionRecord] {
+        capture(pids: pids).connections
+    }
+
+    func capture(pids: [String]) -> NetworkSnapshotResult {
         let targets = Array(Set(pids.compactMap(Int.init))).sorted()
-        guard !targets.isEmpty else { return [] }
+        guard !targets.isEmpty else { return .init(connections: [], failure: nil) }
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/sbin/lsof")
-        // `-a` intersects the PID and TCP selectors. Without it lsof scans all
-        // machine sockets and filters later, causing a visible CPU spike.
+        // Intersect selectors: never enumerate unrelated machine traffic.
         process.arguments = ["-a", "-p", targets.map(String.init).joined(separator: ","),
                              "-iTCP", "-n", "-P", "-F", "pfnT"]
         let pipe = Pipe()
+        // A file avoids stderr pipe backpressure. Never persist diagnostic contents.
+        let errorURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+        guard FileManager.default.createFile(atPath: errorURL.path, contents: nil,
+                                            attributes: [.posixPermissions: 0o600]),
+              let errorFile = try? FileHandle(forUpdating: errorURL) else {
+            return .init(connections: [], failure: "Unable to prepare network collector diagnostics")
+        }
+        defer { try? errorFile.close(); try? FileManager.default.removeItem(at: errorURL) }
         process.standardOutput = pipe
-        process.standardError = Pipe()
-        do { try process.run() } catch { return [] }
+        process.standardError = errorFile
+        do { try process.run() } catch {
+            return .init(connections: [], failure: "Unable to launch network snapshot collector")
+        }
         let data = pipe.fileHandleForReading.readDataToEndOfFile()
         process.waitUntilExit()
-        guard let output = String(data: data, encoding: .utf8) else { return [] }
-        return Self.parse(output)
+        let diagnosticSize = (try? errorFile.offset()) ?? 0
+        return Self.classify(output: String(decoding: data, as: UTF8.self),
+                             exitCode: process.terminationStatus, hasDiagnostics: diagnosticSize > 0)
+    }
+
+    static func classify(output: String, exitCode: Int32, hasDiagnostics: Bool) -> NetworkSnapshotResult {
+        // lsof returns 1 when no selected sockets exist. Diagnostics or other
+        // failures must not become a healthy empty snapshot or a socket closure.
+        let clean = !hasDiagnostics && (exitCode == 0 || (exitCode == 1 && output.isEmpty))
+        return .init(connections: parse(output),
+                     failure: clean ? nil : "Network snapshot incomplete (collector exit \(exitCode)); coverage unknown")
     }
 
     static func parse(_ output: String) -> [NetworkConnectionRecord] {

@@ -2,6 +2,17 @@ import XCTest
 @testable import AgentReins
 
 final class ProcessSocketStateTests: XCTestCase {
+    func testEmptySnapshotIsDistinctFromCollectorFailure() {
+        XCTAssertNil(LsofNetworkSnapshotProvider.classify(output: "", exitCode: 1, hasDiagnostics: false).failure)
+        XCTAssertNotNil(LsofNetworkSnapshotProvider.classify(output: "", exitCode: 1, hasDiagnostics: true).failure)
+        XCTAssertNotNil(LsofNetworkSnapshotProvider.classify(output: "", exitCode: 2, hasDiagnostics: false).failure)
+        let partial = LsofNetworkSnapshotProvider.classify(
+            output: "p10\nn127.0.0.1:1234->1.1.1.1:443\nTST=ESTABLISHED\n",
+            exitCode: 0, hasDiagnostics: true)
+        XCTAssertEqual(partial.connections.count, 1)
+        XCTAssertNotNil(partial.failure)
+    }
+
     func testListenersEstablishedAndClosedRemainDistinct() {
         let records = LsofNetworkSnapshotProvider.parse("""
         p10

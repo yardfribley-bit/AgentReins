@@ -913,7 +913,9 @@ final class CodexSight: ObservableObject {
             modelDecision: op == "call" ? "The model selected \(toolName ?? "a tool")" : nil,
             modelReasoning: reasoning, modelPrompt: prompt, modelResponse: response, toolName: toolName, model: model,
             inputTokens: inputTokens, outputTokens: outputTokens, cachedTokens: cachedTokens,
-            reasoningTokens: reasoningTokens, source: "agentsight:codex-local-compat",
+            reasoningTokens: reasoningTokens,
+            codeFindings: kind == "tool" && op == "call" ? CodeSecurityScanner.scanGenerated(toolName: toolName, arguments: command) : nil,
+            source: "agentsight:codex-local-compat",
             processId: processID, startedAt: startedAt, endedAt: endedAt, durationMS: durationMS)
     }
 

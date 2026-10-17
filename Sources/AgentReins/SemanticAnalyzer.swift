@@ -604,6 +604,10 @@ final class SemanticAnalyzer: ObservableObject {
         let cleanKey = key.trimmingCharacters(in: .whitespacesAndNewlines)
         let cleanModel = model.trimmingCharacters(in: .whitespacesAndNewlines)
         let resolvedKey: String?
+        if cleanKey.isEmpty && Self.chatCompletionsURL(baseURL: cleanBaseURL)?.host != Self.chatCompletionsURL(baseURL: self.baseURL)?.host {
+            lastError = "切换服务地址后，请填写该服务的密钥。"
+            return false
+        }
         if cleanKey.isEmpty {
             resolvedKey = cachedAnalysisAPIKey ?? KeychainStore.analysisAPIKey()
         } else {
@@ -720,6 +724,29 @@ final class SemanticAnalyzer: ObservableObject {
     /// Uses the configured analysis model only to understand the user's
     /// feature name. No project evidence is uploaded at this stage, and the
     /// returned words are only search hints—not historical facts.
+    func understandSensitiveRule(_ text: String) async -> SensitiveRuleDraft? {
+        guard configured, let key = cachedAnalysisAPIKey ?? KeychainStore.analysisAPIKey(),
+              let endpoint = Self.chatCompletionsURL(baseURL: baseURL) else {
+            lastError = "请先配置并测试规则理解模型。"; return nil
+        }
+        let instruction = """
+        将用户规则描述转换为本机发送正文的字面量匹配规则。返回严格 JSON：
+        name, kind(keyword 或 secret), value, explanation, limitation, supported(boolean)。
+        只有用户明确给出的具体文本才能作为 value；不得猜测秘密值或生成正则。
+        客户名单、源代码等抽象语义类别无法用字面量精确检测，必须 supported=false 并说明需补充具体标记。
+        明确说明匹配不等于理解上下文、也不拦截。不要声称已启用规则。
+        """
+        do {
+            guard text.count <= 4000 else { throw URLError(.dataLengthExceedsMaximum) }
+            let data = try await requestJSON(body: ["model": model, "temperature": 0,
+                "response_format": ["type": "json_object"],
+                "messages": [["role": "system", "content": instruction], ["role": "user", "content": text]]], endpoint: endpoint, key: key)
+            let draft = try JSONDecoder().decode(SensitiveRuleDraft.self, from: data)
+            if draft.supported { try draft.validate() }
+            return draft
+        } catch { lastError = "规则理解失败，请重试或补充具体匹配文本。"; return nil }
+    }
+
     func understandFeatureQuery(_ query: String) async -> FeatureQueryUnderstanding? {
         guard let key = cachedAnalysisAPIKey ?? KeychainStore.analysisAPIKey(),
               let endpoint = Self.chatCompletionsURL(baseURL: baseURL) else { return nil }

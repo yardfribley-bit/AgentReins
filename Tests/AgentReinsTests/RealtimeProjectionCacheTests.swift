@@ -3,9 +3,9 @@ import XCTest
 @testable import AgentReins
 
 final class RealtimeProjectionCacheTests: XCTestCase {
-    private func event(_ session: String, text: String = "原始需求", id: UUID = UUID(), turn: String = "turn", kind: String = "model") -> GuardEvent {
+    private func event(_ session: String, text: String = "原始需求", id: UUID = UUID(), turn: String = "turn", kind: String = "model", agent: String = "codex") -> GuardEvent {
         GuardEvent(id: id, kind: kind, ruleId: "fixture", path: "-", command: nil,
-                   agent: "codex", op: "prompt", severity: "info", ts: Date(),
+                   agent: agent, op: "prompt", severity: "info", ts: Date(),
                    action: "completed", sessionId: session, turnId: turn,
                    userIntent: text, modelResponse: "hello", toolName: "exec")
     }
@@ -62,5 +62,42 @@ final class RealtimeProjectionCacheTests: XCTestCase {
         let result = try cache.project(buffer.snapshot(), contexts: [], since: .distantPast)
         XCTAssertEqual(cache.rebuiltGroups, 3)
         XCTAssertTrue(result.tasks.contains { $0.originalRequest == "修正后的原始需求" })
+    }
+    func testWorkBuddyNewTurnKeepsAllUnchangedTaskExportRevisions() throws {
+        var buffer = RealtimeLiveEvidenceBuffer()
+        for turn in 0..<40 { buffer.insert(event("workbuddy", text: "原始需求 \(turn)", turn: "turn-\(turn)", agent: "WorkBuddy")) }
+        let cache = RealtimeProjectionCache()
+        let first = try cache.project(buffer.snapshot(), contexts: [], since: .distantPast)
+        let old = Dictionary(uniqueKeysWithValues: first.tasks.map { ($0.id, $0.projectionRevision) })
+        buffer.insert(event("workbuddy", text: "新的实时任务", turn: "new", agent: "WorkBuddy"))
+        let second = try cache.project(buffer.snapshot(), contexts: [], since: .distantPast)
+        XCTAssertEqual(second.tasks.count, 41)
+        XCTAssertEqual(second.tasks.filter { old[$0.id] == $0.projectionRevision }.count, 40,
+                       "New WorkBuddy evidence must not trigger re-export of all old task bodies")
+        let changed = event("workbuddy", text: "原始需求被修正", id: buffer.snapshot().records.first { $0.turn == "turn-0" }!.id, turn: "turn-0", agent: "WorkBuddy")
+        buffer.insert(changed)
+        let third = try cache.project(buffer.snapshot(), contexts: [], since: .distantPast)
+        let corrected = third.tasks.first { $0.turn == "turn-0" }!
+        XCTAssertNotEqual(corrected.projectionRevision, old[corrected.id])
+        XCTAssertEqual(corrected.originalRequest, "原始需求被修正")
+        XCTAssertEqual(third.tasks.filter { old[$0.id] == $0.projectionRevision }.count, 39)
+    }
+    func testWorkBuddyAssembledContextChangeInvalidatesOnlyItsTask() throws {
+        var buffer = RealtimeLiveEvidenceBuffer()
+        let request = event("workbuddy", agent: "WorkBuddy")
+        buffer.insert(request);buffer.insert(event("workbuddy", turn: "other", agent: "WorkBuddy"))
+        let cache = RealtimeProjectionCache()
+        var context = RealtimeContextExchange(id: request.id.uuidString, agent: "WorkBuddy", session: "workbuddy", turn: "turn",
+            source: "fixture", coverage: "fixture", timestamp: request.ts, trace: nil, structured: true,
+            characters: 3, counts: ["user":1], blocks: [], fingerprints: [], truncated: false)
+        let first = try cache.project(buffer.snapshot(), contexts: [context], contextVersions: [request.id:1], since: .distantPast)
+        context.blocks = [RealtimeContextBlock(id: "block", role: "user", label: "用户消息", content: "修正的上下文", fingerprint: "changed", characters: 6, callID: nil)]
+        let second = try cache.project(buffer.snapshot(), contexts: [context], contextVersions: [request.id:2], since: .distantPast)
+        let firstTask = first.tasks.first { $0.turn == "turn" }!, secondTask = second.tasks.first { $0.turn == "turn" }!
+        XCTAssertEqual(firstTask.cards, secondTask.cards)
+        XCTAssertNotEqual(firstTask.projectionRevision, secondTask.projectionRevision,
+                         "A context change must invalidate detail export even when cards do not change")
+        XCTAssertEqual(first.tasks.first { $0.turn == "other" }!.projectionRevision,
+                       second.tasks.first { $0.turn == "other" }!.projectionRevision)
     }
 }

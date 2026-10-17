@@ -14,6 +14,9 @@ command=['/usr/bin/open','-a',str(app)]
 for item in ['HTTP_PROXY=http://127.0.0.1:18891','HTTPS_PROXY=http://127.0.0.1:18891',
              'ALL_PROXY=http://127.0.0.1:18891','NO_PROXY=localhost,127.0.0.1,::1',
              'NODE_EXTRA_CA_CERTS='+str(ca)]:command+=['--env',item]
+audit_bin=pathlib.Path(__file__).resolve().parents[1]/'tools/transport-audit/bin'
+for item in ['PATH='+str(audit_bin)+os.pathsep+os.environ.get('PATH','/usr/bin:/bin'), 'WORKBUDDY_EXTRA_PATHS='+str(audit_bin)+(':'+os.environ['WORKBUDDY_EXTRA_PATHS'] if os.environ.get('WORKBUDDY_EXTRA_PATHS') else ''), 'AGENTREINS_TRANSPORT_AGENT=WorkBuddy', 'AGENTREINS_REAL_CURL=/usr/bin/curl', 'AGENTREINS_REAL_GIT=/usr/bin/git']:
+ command+=['--env',item]
 if a.dry_run:
  print('Target: WorkBuddy; proxy: 127.0.0.1:18891; CA: '+str(ca));raise SystemExit(0)
 processes=subprocess.check_output(['ps','-axo','comm='],text=True).splitlines()

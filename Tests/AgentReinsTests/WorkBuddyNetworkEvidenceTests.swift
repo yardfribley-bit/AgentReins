@@ -4,6 +4,42 @@ import XCTest
 @testable import AgentReins
 
 final class WorkBuddyNetworkEvidenceTests: XCTestCase {
+    func testBackgroundNotificationDoesNotReplaceHumanIntent() {
+        XCTAssertNil(WorkBuddySight.cleanUserIntent("<task-notification>done</task-notification>\nUse TaskOutput to retrieve results"))
+        let messages: [[String: Any]] = [
+            ["role": "user", "content": "下载 PentAGI 并研究工具编排"],
+            ["role": "user", "content": "<task-notification>git clone completed</task-notification>"],
+            ["role": "user", "content": [["type": "tool_result", "content": "done"]]]
+        ]
+        XCTAssertEqual(WorkBuddyNetworkEvidence.userIntent(in: ["messages": messages]), "下载 PentAGI 并研究工具编排")
+        XCTAssertNil(WorkBuddyNetworkEvidence.userIntent(in: ["messages": Array(messages.dropFirst())]))
+    }
+
+    func testProtocolFieldsReachPreviewAndRejectCorruptedResponse() throws {
+        let body = Data("{}".utf8), response = Data("ok".utf8)
+        for valid in [true, false] {
+            let record = WorkBuddyNetworkCaptureRecord(observedAt: Date(), host: "copilot.tencent.com",
+                path: "/agenttool/v1/webfetch", method: "POST", httpVersion: "HTTP/2", contentEncoding: nil,
+                declaredContentLength: nil, capturedWireBodyBytes: body.count,
+                requestBodyBase64: body.base64EncodedString(), requestSHA256: sha256(body),
+                responseStatus: 200, responseComplete: true, responseBodyBase64: response.base64EncodedString(),
+                flowID: "protocol-test", requestComplete: true,
+                requestHeaders: [["accept", "text/plain"]], responseHeaders: [["content-type", "text/plain"]],
+                responseSHA256: valid ? sha256(response) : "invalid",
+                securityAudit: NetworkSecurityAudit(version: "content-rules-v1", findings: [],
+                    requestBytesInspected: body.count, responseBytesInspected: response.count,
+                    scope: "decoded_body_only", verdict: "no_rule_match"))
+            let events = WorkBuddyNetworkEvidence.project(record)
+            if !valid { XCTAssertTrue(events.isEmpty); continue }
+            let preview = try XCTUnwrap(RealtimeNetworkBodyPreview(event: XCTUnwrap(events.last)))
+            XCTAssertEqual(preview.securityAudit?.requestBytesInspected, body.count)
+            XCTAssertEqual(preview.responseStatus, 200)
+            let taskCards = RealtimeWorkspaceProjector.tasks(events: events, since: .distantPast).flatMap(\.cards)
+            XCTAssertTrue(taskCards.contains { $0.networkBody?.responseStatus == 200 }, "Task detail must preserve network evidence independently of recent collection window")
+            XCTAssertEqual(preview.requestComplete, true)
+            XCTAssertEqual(preview.responseHeaders, [["content-type", "text/plain"]])
+        }
+    }
     func testStreamingToolInstructionsArePreservedWithoutInventingExecution() throws {
         let request = Data("{\"model\":\"test\",\"messages\":[{\"role\":\"user\",\"content\":\"read file\"}]}".utf8)
         let response = Data(("data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"id\":\"call-one\",\"function\":{\"name\":\"read_file\",\"arguments\":\"{\\\"path\\\":\"}}]}}]}\n" + "data: {\"choices\":[{\"index\":0,\"delta\":{\"tool_calls\":[{\"index\":0,\"function\":{\"arguments\":\"\\\"/tmp/a\\\"}\"}}]}}]}\n").utf8)
@@ -72,7 +108,7 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
     }
 
     func testVideoServiceBodiesArePreservedWithoutBeingClassifiedAsModelResponses() throws {
-        for path in ["/v2/videos/generations", "/v2/videos/tasks"] {
+        for path in ["/v2/videos/generations", "/v2/videos/tasks", "/agenttool/v1/webfetch", "/agenttool/v1/search"] {
             let body = Data(#"{"prompt":"TLS handshake","task_id":"video-123"}"#.utf8)
             let response = Data(#"{"status":"completed","video_url":"https://example.test/video.mp4"}"#.utf8)
             let record = WorkBuddyNetworkCaptureRecord(
@@ -93,6 +129,25 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         }
     }
 
+    func testWebsiteRequiresExactScopedURLAndKeepsQueryEvidence() {
+        let request = Data()
+        func record(_ url: String?, parent: String?) -> WorkBuddyNetworkCaptureRecord {
+            WorkBuddyNetworkCaptureRecord(observedAt: Date(), host: "www.baidu.com", path: "/s",
+                method: "GET", httpVersion: "HTTP/2", contentEncoding: nil,
+                declaredContentLength: nil, capturedWireBodyBytes: 0,
+                requestBodyBase64: request.base64EncodedString(), requestSHA256: sha256(request),
+                responseStatus: 200, responseComplete: true,
+                responseBodyBase64: Data("actual HTML".utf8).base64EncodedString(),
+                websiteParentFlow: parent, websiteURL: url)
+        }
+        XCTAssertTrue(WorkBuddyNetworkEvidence.project(record(nil, parent: nil)).isEmpty)
+        XCTAssertTrue(WorkBuddyNetworkEvidence.project(record("https://other.test/s", parent: "parent")).isEmpty)
+        let events = WorkBuddyNetworkEvidence.project(record("https://www.baidu.com/s?wd=test", parent: "parent"))
+        XCTAssertEqual(events.first?.action, "captured_complete")
+        XCTAssertTrue(events.first?.command?.contains("wd=test") == true)
+        XCTAssertEqual(events.last?.modelResponse, "actual HTML")
+        XCTAssertEqual(events.last?.kind, "network")
+    }
     func testRejectsTamperedRequestBody() throws {
         let request = Data(#"{"messages":[]}"#.utf8)
         let record = WorkBuddyNetworkCaptureRecord(
@@ -138,6 +193,33 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         XCTAssertEqual(snapshot.externalRequests.first?.purpose, "agentMemoryRecall")
         XCTAssertEqual(snapshot.externalRequests.first?.requestPath, "/agenttool/v1/intent/recall")
         XCTAssertEqual(snapshot.externalRequests.first?.responseBody, #"{"memories":[]}"#)
+    }
+
+    @MainActor
+    func testToolServiceUsesExactArgumentsAndPropagatesCallAcrossFlow() {
+        let now = Date(), resolver = EventAttributionResolver()
+        let arguments = #"{"url":"https://www.baidu.com","prompt":"提取标题"}"#
+        func tool(_ call: String, prompt: String = "提取标题") -> GuardEvent {
+            GuardEvent(kind: "tool", ruleId: "call", path: "-",
+                command: "WebFetch({\"url\":\"https://www.baidu.com\",\"prompt\":\"\(prompt)\"})",
+                agent: "workbuddy", op: "call", severity: "info", ts: now, action: "requested",
+                sessionId: "native", turnId: "turn", toolCallId: call, toolName: "WebFetch")
+        }
+        let request = GuardEvent(kind: "network", ruleId: "request", path: "-", command: nil,
+            agent: "workbuddy", op: "tool_service_request", severity: "info", ts: now, action: "captured_complete",
+            sessionId: "synthetic", traceId: "flow", turnId: "flow", modelPrompt: arguments,
+            source: "agentsight:workbuddy-network-body")
+        resolver.observe([tool("one"), tool("different", prompt: "提取天气")], now: now)
+        let resolved = resolver.resolveWorkBuddyNetworkBody(request)
+        XCTAssertEqual(resolved.toolCallId, "one")
+        XCTAssertEqual(resolved.sessionId, "native")
+        let response = GuardEvent(kind: "network", ruleId: "response", path: "-", command: nil,
+            agent: "workbuddy", op: "tool_service_response", severity: "info", ts: now, action: "received_complete",
+            sessionId: "synthetic", traceId: "flow", turnId: "flow", source: "agentsight:workbuddy-network-body")
+        XCTAssertEqual(resolver.resolveWorkBuddyNetworkBody(response).toolCallId, "one")
+        let ambiguous = EventAttributionResolver()
+        ambiguous.observe([tool("one"), tool("two")], now: now)
+        XCTAssertNil(ambiguous.resolveWorkBuddyNetworkBody(request).toolCallId)
     }
 
     @MainActor

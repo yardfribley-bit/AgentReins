@@ -3,15 +3,15 @@ import CoreFoundation
 
 /// Task state, step state and collector health are separate facts. This reducer
 /// only consumes events already isolated by native Agent/session/turn identity.
-struct RealtimeCoverage: Encodable {
+struct RealtimeCoverage: Equatable, Encodable {
     let category: String, status: String, count: Int, detail: String
     let eventIDs: [String]
 }
-struct RealtimeLifecycleStage: Encodable {
+struct RealtimeLifecycleStage: Equatable, Encodable {
     let id: String, title: String, status: String, summary: String
     let eventIDs: [String], cardIDs: [String]
 }
-struct RealtimeTaskLifecycle: Encodable {
+struct RealtimeTaskLifecycle: Equatable, Encodable {
     let currentStageID: String, phase: String
     let stages: [RealtimeLifecycleStage]
 }

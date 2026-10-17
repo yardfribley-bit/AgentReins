@@ -81,6 +81,26 @@ final class RealtimeProjectionCache: @unchecked Sendable {
             if parsed.isEmpty { exchanges = [] }
             else if let old = entries[group], old.contextIDs == ids, old.contextRevisions == contextRevisions { exchanges = old.contexts }
             else { exchanges = RealtimeContextProjector.assemble(parsed, events: try contextRecords.map { try $0.read() }) }
+            // WorkBuddy keeps a cross-session group for exact native/HTTPS reconciliation.
+            // A change in that group must not give every unchanged task a new export
+            // revision. Compare the full projected task AND assembled context, so a
+            // late response/tool-result or corrected attribution still invalidates it.
+            if let old = entries[group] {
+                let previousTasks = Dictionary(uniqueKeysWithValues: old.tasks.map { ($0.id, $0) })
+                func contextKey(_ agent: String, _ session: String, _ turn: String) -> String {
+                    agent + "\u{0}" + session + "\u{0}" + turn
+                }
+                let oldContexts = Dictionary(grouping: old.contexts) { contextKey($0.agent, $0.session, $0.turn) }
+                let newContexts = Dictionary(grouping: exchanges) { contextKey($0.agent, $0.session, $0.turn) }
+                tasks = tasks.map { task in
+                    guard let previous = previousTasks[task.id] else { return task }
+                    var candidate = task
+                    candidate.projectionRevision = previous.projectionRevision
+                    let context = contextKey(task.agent, task.session, task.turn)
+                    guard candidate == previous, (oldContexts[context] ?? []) == (newContexts[context] ?? []) else { return task }
+                    return previous
+                }
+            }
             next[group] = Entry(revisions: revisions, contextIDs: ids, contextRevisions: contextRevisions, tasks: tasks,
                 contexts: exchanges,
                 candidates: candidates)

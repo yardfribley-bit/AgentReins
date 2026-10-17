@@ -92,7 +92,7 @@ enum CodeSecurityScanner {
             if let widget = object["widget_code"] as? String {
                 return scan(path: "generated-widget.html", before: nil, after: widget)
             }
-            if let command = object["command"] as? String {
+            if let command = (object["command"] as? String) ?? (object["cmd"] as? String) {
                 return scan(path: "generated-command.sh", before: nil, after: command)
             }
             for key in ["code", "content", "text"] {

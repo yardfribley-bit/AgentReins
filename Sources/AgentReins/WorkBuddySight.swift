@@ -32,6 +32,8 @@ final class WorkBuddySight: ObservableObject {
         var currentTurn: [String: String] = [:]
         var toolNames: [String: String] = [:]
         var lastModelEndpoint: [String: String] = [:]
+        var callTurns: [String: String]? = nil
+        var turnIntents: [String: String]? = nil
     }
     private var parserStates: [String: ParserState] = [:]
     private var isPolling = false
@@ -361,10 +363,12 @@ final class WorkBuddySight: ObservableObject {
         var lastIntent = state.lastIntent, lastReasoning = state.lastReasoning
         var currentTurn = state.currentTurn, toolNames = state.toolNames
         var lastModelEndpoint = state.lastModelEndpoint
+        var callTurns = state.callTurns ?? [:], turnIntents = state.turnIntents ?? [:]
         defer {
             state.lastIntent = lastIntent; state.lastReasoning = lastReasoning
             state.currentTurn = currentTurn; state.toolNames = toolNames
             state.lastModelEndpoint = lastModelEndpoint
+            state.callTurns = callTurns; state.turnIntents = turnIntents
         }
         var result: [GuardEvent] = []
         // 启动时只读取活跃窗口；完整历史已在 EventStore，避免重复解析巨型会话。
@@ -382,6 +386,17 @@ final class WorkBuddySight: ObservableObject {
             let type = row["type"] as? String ?? ""
             if type == "message", row["role"] as? String == "user", let intent = textContent(row["content"]) {
                 let readableIntent = cleanUserIntent(intent)
+                if intent.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<task-notification>"),
+                   let range = intent.range(of: #"<tool-use-id>[^<]+</tool-use-id>"#, options: .regularExpression) {
+                    let call = String(intent[range]).replacingOccurrences(of: "<tool-use-id>", with: "").replacingOccurrences(of: "</tool-use-id>", with: "").trimmingCharacters(in: .whitespacesAndNewlines)
+                    if let turn = callTurns[session + "\u{0}" + call], !turn.isEmpty {
+                        currentTurn[session] = turn
+                        lastIntent[session] = turnIntents[session + "\u{0}" + turn]
+                        result.append(GuardEvent(id: id, kind: "context", ruleId: "workbuddy_background_continuation", path: row["cwd"] as? String ?? "-", command: nil, agent: "workbuddy", op: "recovered_context", severity: "info", ts: date(row["timestamp"]), action: "captured", sessionId: session, turnId: turn, toolCallId: call, modelPrompt: intent, source: "agentsight:workbuddy-local"))
+                        continue
+                    }
+                }
+                if let readableIntent { turnIntents[session + "\u{0}" + rawId] = String(readableIntent.prefix(1_000)) }
                 lastIntent[session] = readableIntent.map { String($0.prefix(1_000)) }
                 currentTurn[session] = rawId
                 let provider = row["providerData"] as? [String: Any] ?? [:]
@@ -442,6 +457,13 @@ final class WorkBuddySight: ObservableObject {
             let callId = row["callId"] as? String
             let recordedName = row["name"] as? String
             if type == "function_call", let callId, let recordedName { toolNames[callId] = recordedName }
+            let callKey = callId.map { session + "\u{0}" + $0 }
+            if type == "function_call", let key = callKey, let turn = currentTurn[session] {
+                if let existing = callTurns[key], existing != turn { callTurns[key] = "" }
+                else if callTurns[key] == nil { callTurns[key] = turn }
+            }
+            let knownTurn = callKey.flatMap { callTurns[$0] }
+            let executionTurn = knownTurn.map { $0.isEmpty ? nil : $0 } ?? currentTurn[session]
             let name = recordedName ?? callId.flatMap { toolNames[$0] } ?? "unknown_tool"
             let args = row["arguments"] as? String
             let status = row["status"] as? String
@@ -456,7 +478,7 @@ final class WorkBuddySight: ObservableObject {
             result.append(GuardEvent(id: id, kind: "tool", ruleId: "agentsight_\(type)", path: row["cwd"] as? String ?? "-",
                 command: command, agent: agent, op: type == "function_call" ? "call" : "result", severity: "info",
                 ts: timestamp, action: status ?? (type == "function_call" ? "requested" : "completed"),
-                sessionId: session, traceId: provider["traceId"] as? String, turnId: currentTurn[session], toolCallId: callId,
+                sessionId: session, traceId: provider["traceId"] as? String, turnId: executionTurn, toolCallId: callId,
                 userIntent: type == "function_call" ? lastIntent[session] : nil,
                 modelDecision: type == "function_call" ? "The model selected \(name)" : nil,
                 modelReasoning: type == "function_call" ? (provider["reasoning"] as? String ?? lastReasoning[session]) : nil,
@@ -538,6 +560,7 @@ final class WorkBuddySight: ObservableObject {
 
     /// WorkBuddy 会把系统注入块和用户原话放在同一 message 中；摘要只取用户真正输入，原文仍保存在 modelPrompt。
     nonisolated static func cleanUserIntent(_ text: String) -> String? {
+        if text.trimmingCharacters(in: .whitespacesAndNewlines).hasPrefix("<task-notification>") { return nil }
         var value = text
         let blockPatterns = [
             // Compaction includes old <user_query> examples. They are context,

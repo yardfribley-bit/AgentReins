@@ -78,6 +78,7 @@ struct RealtimeLiveEvidenceBuffer {
     private var hotRecords: [UUID: Record] = [:]
     private var recentIDs: [UUID] = []
     private var networkIDs: [UUID] = []
+    private var exchangeIDs: [UUID] = []
     private var collectedIndexDirty = false
     private let directory = Directory()
     private(set) var hotBytes = 0
@@ -107,14 +108,15 @@ struct RealtimeLiveEvidenceBuffer {
             let ordered = records.keys.sorted(by: newer)
             recentIDs = Array(ordered.prefix(200))
             networkIDs = Array(ordered.filter { records[$0]?.kind == "network" }.prefix(100))
+            exchangeIDs = Array(ordered.filter { ["network_prompt", "network_response", "tool_service_request", "tool_service_response"].contains(records[$0]?.op ?? "") }.prefix(50))
             collectedIndexDirty = false
         }
-        let ids = Set(recentIDs + networkIDs).sorted(by: newer)
+        let ids = Set(recentIDs + networkIDs + exchangeIDs).sorted(by: newer)
         return Snapshot(records: ids.compactMap { records[$0] })
     }
     mutating func insert(_ event: GuardEvent) {
         let isNew = records[event.id] == nil
-        if let old = records[event.id], old.ts != event.ts || old.kind != event.kind { collectedIndexDirty = true }
+        if let old = records[event.id], old.ts != event.ts || old.kind != event.kind || old.op != event.op { collectedIndexDirty = true }
         if let old = records[event.id] {
             if case .hot = old.body { hotBytes -= old.cost; hotCount -= 1 }
             if !old.hasTaskIdentity { unattributedCount -= 1 }
@@ -127,6 +129,7 @@ struct RealtimeLiveEvidenceBuffer {
         if isNew && !collectedIndexDirty {
             recentIDs = recentIncluding(event.id, in: recentIDs, limit: 200)
             if event.kind == "network" { networkIDs = recentIncluding(event.id, in: networkIDs, limit: 100) }
+            if ["network_prompt", "network_response", "tool_service_request", "tool_service_response"].contains(event.op) { exchangeIDs = recentIncluding(event.id, in: exchangeIDs, limit: 50) }
         }
         hotBytes += cost; hotCount += 1
     }

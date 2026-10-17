@@ -219,7 +219,7 @@ struct AgentReinsApp: App {
     private func refineRecentNetworkEvents() {
         let refined = eventStore.events.prefix(200)
             .filter { $0.kind == "network" && $0.toolName == nil }
-            .map { attributionResolver.resolve($0) }
+            .map { $0.source == "agentsight:workbuddy-network-body" ? attributionResolver.resolveWorkBuddyNetworkBody($0) : attributionResolver.resolve($0) }
             .filter { $0.toolName != nil }
         eventStore.record(refined)
     }

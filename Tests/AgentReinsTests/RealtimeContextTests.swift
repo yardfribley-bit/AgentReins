@@ -8,6 +8,39 @@ final class RealtimeContextTests: XCTestCase {
         let body = try JSONSerialization.data(withJSONObject: ["messages": messages, "tools": [["type":"function", "function":["name":"read_file"]]]], options: .sortedKeys)
         return GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: agent, op: "network_prompt", severity: "info", ts: start.addingTimeInterval(seconds), action: "captured_complete", sessionId: "session", traceId: trace, turnId: turn, userIntent: messages.last(where: { $0["role"] as? String == "user" })?["content"] as? String, modelPrompt: String(decoding: body, as: UTF8.self), source: "agentsight:workbuddy-network-body")
     }
+    func testModelInstructionRequiresMatchingExecutionAndPreservesReasoning() throws {
+        let req = try request([["role":"system", "content":"system"], ["role":"user", "content":"search"]])
+        let response = GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "network_response", severity: "info", ts: start.addingTimeInterval(1), action: "received_complete", sessionId: "session", traceId: "workbuddy-http:one", turnId: "one", modelDecision: #"{"tool_calls":[{"id":"c","function":{"name":"WebSearch","arguments":"{\"query\":\"test\"}"}}]}"#, modelReasoning: String(repeating: "r", count: 20000), modelResponse: "")
+        func result(turn: String, agent: String = "workbuddy") -> GuardEvent {
+            GuardEvent(kind: "tool", ruleId: "fixture", path: "-", command: nil, agent: agent, op: "result", severity: "info", ts: start.addingTimeInterval(2), action: "completed", sessionId: "session", turnId: turn, toolCallId: "c", modelResponse: "result", toolName: "WebSearch")
+        }
+        let parsed = try XCTUnwrap(RealtimeContextProjector.parse(req))
+        let absent = try XCTUnwrap(RealtimeContextProjector.assemble([parsed], events: [req,response,result(turn: "other"),result(turn: "one",agent: "codex")]).first)
+        XCTAssertEqual(absent.toolSteps.count, 1)
+        XCTAssertTrue(absent.toolSteps[0].resultEventIDs.isEmpty)
+        XCTAssertEqual(absent.reasoningCharacters, 20000)
+        XCTAssertEqual(response.modelReasoning?.count, 20000)
+        let actual = result(turn: "one")
+        let linked = try XCTUnwrap(RealtimeContextProjector.assemble([parsed], events: [req,response,actual]).first)
+        XCTAssertEqual(linked.toolSteps[0].resultEventIDs, [actual.id.uuidString])
+        XCTAssertTrue(linked.toolSteps[0].executionEventIDs.isEmpty)
+    }
+    func testRepeatedModelCallIDDoesNotClaimSameExecutionTwice() throws {
+        let first = try request([["role":"user", "content":"search"]])
+        let second = try request([["role":"user", "content":"retry"]], seconds: 2, trace: "workbuddy-http:two")
+        func response(trace: String, seconds: Double) -> GuardEvent {
+            GuardEvent(kind: "model", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "network_response", severity: "info", ts: start.addingTimeInterval(seconds), action: "received_complete", sessionId: "session", traceId: trace, turnId: "one", modelDecision: #"{"tool_calls":[{"id":"reused","function":{"name":"WebSearch","arguments":"{}"}}]}"#)
+        }
+        let result = GuardEvent(kind: "tool", ruleId: "fixture", path: "-", command: nil, agent: "workbuddy", op: "result", severity: "info", ts: start.addingTimeInterval(4), action: "completed", sessionId: "session", turnId: "one", toolCallId: "reused", modelResponse: "result")
+        let parsed = try [first,second].map { try XCTUnwrap(RealtimeContextProjector.parse($0)) }
+        let exchanges = RealtimeContextProjector.assemble(parsed, events: [first,second,response(trace: "workbuddy-http:one",seconds: 1),response(trace: "workbuddy-http:two",seconds: 3),result])
+        XCTAssertEqual(exchanges.count, 2)
+        for exchange in exchanges {
+            XCTAssertEqual(exchange.toolSteps.count, 1)
+            XCTAssertTrue(exchange.toolSteps[0].resultEventIDs.isEmpty)
+            XCTAssertTrue(exchange.toolSteps[0].status.contains("待确认"))
+        }
+    }
     func testLargeCompactedUserBlockKeepsCurrentInputVisibleInTruncatedPreview() throws {
         let current = "https://example.test/app 安装这个软件"
         let body: [String: Any] = ["messages": [["role":"user", "content":"<cb_summary>" + String(repeating: "old context ", count: 3000) + "</cb_summary>\n<user_query>" + current + "</user_query>"]]]

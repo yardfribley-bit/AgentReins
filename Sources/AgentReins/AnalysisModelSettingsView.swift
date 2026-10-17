@@ -3,7 +3,7 @@ import SwiftUI
 struct AnalysisModelSettingsView: View {
     private enum Provider: String, CaseIterable, Identifiable {
         case openRouter = "OpenRouter"
-        case custom = "Custom OpenAI-compatible"
+        case custom = "其他兼容服务"
         var id: String { rawValue }
     }
 
@@ -39,31 +39,31 @@ struct AnalysisModelSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack {
                 VStack(alignment: .leading, spacing: 4) {
-                    Text("AI Rule Analyst").font(.title2.bold())
-                    Text("Choose a provider and model. AgentReins stores the API key in macOS Keychain.")
+                    Text("规则理解模型").font(.title2.bold())
+                    Text("选择服务、粘贴密钥、选择模型，测试后保存。密钥保存在本机钥匙串。")
                         .font(.system(size: 13)).foregroundStyle(.secondary)
                 }
                 Spacer()
-                Button("Done") { dismiss() }.buttonStyle(.bordered)
+                Button("完成") { dismiss() }.buttonStyle(.bordered)
             }
 
-            Picker("Provider", selection: $provider) {
+            Picker("服务", selection: $provider) {
                 ForEach(Provider.allCases) { Text($0.rawValue).tag($0) }
             }.pickerStyle(.segmented)
 
             VStack(alignment: .leading, spacing: 11) {
                 if provider == .custom {
-                    input("BASE URL", "https://your-provider.example/v1", text: $baseURL)
-                    input("MODEL ID", "provider/model-name", text: $model)
+                    input("接口地址", "https://your-provider.example/v1", text: $baseURL)
+                    input("模型名称（也可手动填写）", "provider/model-name", text: $model)
                 }
                 VStack(alignment: .leading, spacing: 5) {
-                    Text("API KEY").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
-                    SecureField(analyzer.configured ? "Saved in Keychain — enter a new key only to replace it" : "Paste or re-enter your API key", text: $apiKey)
+                    Text("API 密钥").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                    SecureField(analyzer.configured ? "密钥已保存；更换时填写新密钥" : "粘贴服务提供的 API 密钥", text: $apiKey)
                         .textFieldStyle(.plain).padding(10).background(raised, in: RoundedRectangle(cornerRadius: 8))
                 }
             }
 
-            if provider == .openRouter { openRouterModels }
+            openRouterModels
 
             HStack(alignment: .top, spacing: 9) {
                 Circle().fill(route.kind == .modelProvider || route.kind == .modelRelay ? green : amber)
@@ -84,18 +84,18 @@ struct AnalysisModelSettingsView: View {
                     .font(.system(size: 12)).foregroundStyle(amber)
             }
             if analyzer.connectionVerified {
-                Label("Connection verified · \(analyzer.model)", systemImage: "checkmark.seal.fill")
+                Label("连接已验证 · \(analyzer.model)", systemImage: "checkmark.seal.fill")
                     .font(.system(size: 12, weight: .semibold)).foregroundStyle(green)
             }
 
             HStack {
                 if analyzer.configured {
-                    Button("Remove configuration", role: .destructive) {
+                    Button("删除配置", role: .destructive) {
                         analyzer.removeConfiguration(); apiKey = ""
                     }
                 }
                 Spacer()
-                Button(analyzer.testingConnection ? "Testing…" : "Test & Save") {
+                Button(analyzer.testingConnection ? "正在测试…" : "测试并保存") {
                     Task {
                         if await analyzer.configureAndTest(baseURL: effectiveBaseURL, key: apiKey, model: model) {
                             apiKey = ""
@@ -116,20 +116,20 @@ struct AnalysisModelSettingsView: View {
             if provider == .openRouter { Task { await catalog.load(apiKey: nil) } }
         }
         .onChange(of: provider) { value in
-            if value == .openRouter { Task { await catalog.load(apiKey: apiKey) } }
+            model = ""; search = ""; apiKey = ""
         }
     }
 
     private var openRouterModels: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
-                Text("CHOOSE A MODEL").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
+                Text("选择模型").font(.system(size: 12, weight: .bold)).foregroundStyle(.secondary)
                 Spacer()
                 if catalog.loading { ProgressView().controlSize(.small) }
-                Button("Refresh") { Task { await catalog.load(apiKey: apiKey) } }
+                Button("获取 / 刷新模型") { Task { await catalog.load(apiKey: apiKey, baseURL: effectiveBaseURL) } }
                     .buttonStyle(.plain).foregroundStyle(cyan)
             }
-            TextField("Search GPT, Claude, Gemini, DeepSeek…", text: $search)
+            TextField("搜索模型名称，例如 DeepSeek、Claude…", text: $search)
                 .textFieldStyle(.plain).padding(9).background(raised, in: RoundedRectangle(cornerRadius: 8))
             ScrollView {
                 LazyVStack(spacing: 6) {
@@ -154,7 +154,7 @@ struct AnalysisModelSettingsView: View {
                 }
             }.frame(maxHeight: 310)
             if !model.isEmpty {
-                Text("Selected: \(model)").font(.system(size: 11, design: .monospaced)).foregroundStyle(green)
+                Text("已选择： \(model)").font(.system(size: 11, design: .monospaced)).foregroundStyle(green)
             }
         }
     }
