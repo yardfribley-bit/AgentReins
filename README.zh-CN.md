@@ -18,7 +18,7 @@
 
 证据留在这台 Mac 上。AgentReins 展示 Agent 正在做的任务、每一次外网访问，以及下载真正落到磁盘上的文件。它不改系统代理，也不改系统信任库。
 
-官网：[chuhaijian.com](https://www.chuhaijian.com/)
+官网：[chuhaijian.com](https://www.chuhaijian.com/) · X：[@agentreins](https://x.com/agentreins)
 
 ## 能看到什么
 

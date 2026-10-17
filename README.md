@@ -18,7 +18,7 @@
 
 AgentReins keeps the evidence on this Mac. It shows the task an agent is working on, each outbound visit, and the file a download actually wrote. It does not change the system proxy or the system trust store.
 
-Website: [chuhaijian.com](https://www.chuhaijian.com/)
+Website: [chuhaijian.com](https://www.chuhaijian.com/) · X: [@agentreins](https://x.com/agentreins)
 
 ## What you can look at
 
