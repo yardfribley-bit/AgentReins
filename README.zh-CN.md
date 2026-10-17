@@ -4,12 +4,11 @@
 
   <h1>AgentReins</h1>
 
-  <p><strong>让每个人都能看懂、验证并信任自己的 AI Agent。</strong></p>
+  <p><strong>看见这台电脑上的编程 Agent 送出了什么，又收回了什么。</strong></p>
 
-  <p>面向 macOS 个人 AI 编程 Agent 的本地优先安全与透明度工具。</p>
+  <p>面向 WorkBuddy、Codex、Cursor 的本地优先 macOS 应用。</p>
 
   <p>
-    <a href="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml/badge.svg"></a>
     <img alt="macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple">
     <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
     <img alt="Alpha" src="https://img.shields.io/badge/status-alpha-F59E0B">
@@ -17,226 +16,86 @@
   </p>
 </div>
 
----
+证据留在这台 Mac 上。AgentReins 展示 Agent 正在做的任务、每一次外网访问，以及下载真正落到磁盘上的文件。它不改系统代理，也不改系统信任库。
 
-企业审计管理端源码位于 [AgentReinsConsole](AgentReinsConsole/README.md)，与产品官网独立。显式注册后可通过 HTTPS 上传启用后的新任务完整证据；默认未注册客户端不上传。管理员可查看使用者、设备、内网 IP 与增量更新的审计记录。
+官网：[chuhaijian.com](https://www.chuhaijian.com/)
 
-AI 编程 Agent 可以在几秒钟内读取文件和记忆、调用工具、执行命令、修改代码，并将私人上下文发送给模型服务商。但任务结束后，普通日志往往无法回答真正重要的问题：
+## 能看到什么
 
-- 我让 Agent 做了什么？
-- Agent 向模型发送了哪些提示词、代码、记忆和 Skill？
-- 模型返回了什么，Agent 又调用了哪些工具或 MCP？
-- 哪些进程、网络连接和文件变更属于这次任务？
-- 我的数据最终发送到了哪里？中转服务是否可信？
-- Agent 声称“完成”的结果是否真的可以运行？
-- 如果 Agent 做错了，我能否安全恢复？
+实时窗口里先看这两处。
 
-AgentReins 将这些分散信号组织成一条可理解、可验证、由证据支撑的任务链。它不是另一个日志查看器，而是 AI Agent 的实时运行与安全控制台。
+**任务过程。** 原来的话、任务现在到了哪、模型问了什么、实际跑了什么。失败后的重试保留下来，不会被后来的成功盖掉。
 
-## 实时运行控制台
+**外网访问。** 列表只用来扫：
 
-界面按照“先看结论，再看证据”的方式分层：
-
-1. **Agent Fleet**：自动发现本机 Agent，显示运行、空闲、进程数量和当前任务。
-2. **Agent Internals**：根据真实 PID/PPID 关系构建 Runtime Map，将晦涩进程解释为 Agent Core、Storage Service、MCP Tool Server、Node REPL、Sandbox、Code Execution Host 和 Network Service 等职责。
-3. **Live Task**：从用户需求开始，持续展示上下文准备、模型请求、MCP/Skill、Shell、文件写入、编译、测试、Agent 报告完成和独立验证。
-4. **External Services**：展示模型服务商、中转节点、GitHub、SSH、外部 API 和网页内容，以及相关数据流向。
-5. **Security Summary 与 Evidence Inspector**：安全结论始终可见，用户可以点击任意阶段、进程、文件、工具或网络目标查看原始证据。
-
-## 状态语义
-
-AgentReins 严格区分“发生过”与“可信”：
-
-| 状态 | 含义 |
+| 列 | 内容 |
 | --- | --- |
-| **Running** | 进程或任务正在运行，不代表安全。 |
-| **Observed** | 采集器记录到了活动，但尚未完成验证。 |
-| **Agent reported complete** | Agent 自己声称任务完成，结果仍可能错误。 |
-| **Unverified** | 存在相关证据，但无法证明结果成功。 |
-| **Verified** | 独立检查确认结果有效，而不是采信 Agent 自己的结论。 |
-| **Confirmed / Inferred / Unknown** | 活动与 Agent、会话、轮次或工具之间的归属证据强度。 |
+| 时间 | 这次访问发生的时刻 |
+| 谁 | 工具或模型调用 |
+| 去了哪里 | 主机；远程工具写「远程访问工具」，模型写「模型服务」 |
+| 协议 | HTTP 版本、模型、工具调用、加密通道或安装包 |
+| 结果 | 发生了什么：通了、对方返回 502、证书没配好、下载了某文件、带走了某文件 |
 
-## 核心产品方向
+点「打开」。**送出**和**收回**出现在这一行下面。没有请求正文时写「没有送出正文」，没有响应正文时写「正文是空的」。网页显示为「网页《标题》」加一句摘录。证书英文、`CONNECT` 和凭据不进这两栏。协议行收在「协议原文」里，默认折起。
 
-| 能力 | AgentReins 要回答的问题 |
-| --- | --- |
-| **Trace** | 用户提出了什么需求，Agent 实际做了什么？ |
-| **Verify** | 产物是否通过了独立于 Agent 声明的检查？ |
-| **Recover** | 能否预览并安全撤销一轮 Agent 带来的变更？ |
-| **Provider Trust** | 哪个服务端点收到了提示词、代码、文件、记忆和敏感数据？ |
+wget、curl、brew 的下载显示落到磁盘的文件：名字、大小、SHA-256。校验的是磁盘上的文件。页面不把文件字节铺开。
 
-```mermaid
-flowchart LR
-    U[用户需求] --> A[AI 编程 Agent]
-    A --> C[上下文与模型交互]
-    A --> T[工具 / MCP / Skills]
-    T --> P[进程]
-    P --> N[网络连接]
-    P --> F[文件与代码]
-    C -. 原生适配器证据 .-> E[本地证据主干]
-    T -. 工具意图与结果 .-> E
-    P -. PID / PPID .-> E
-    N -. Socket 证据 .-> E
-    F -. 工作区与 Git 证据 .-> E
-    E --> R[Runtime Map 与 Live Task]
-    R --> V[独立验证]
-    V --> K[信任、复核或恢复]
-```
+WebFetch 这类远程工具显示的是这台机器和工具之间的往来：提交了什么，工具返回了什么。工具自己再去打开的网站，不是这台机器发出的连接。
 
-## 当前能力
+## 现在不承诺的事
 
-### Agent、任务与进程
+- 不走这个代理的流量、校验证书钉死的程序、QUIC，不会进入记录。
+- SSH、SCP、SFTP、rsync 的通道字节没有解密。结果写「看不到通道里的内容」。
+- 不还原 Git pack 字节。push 可以显示将要离开的文件名。
+- 不用时间去猜这次访问属于哪一次工具调用。对不上时写「还没对上哪次工具调用」。
+- 查询字符串在写入前去掉。
+- 大于 32 MB 的文件保留大小，不计算校验。
+- 已经打开的 WorkBuddy 和 Codex 要完全退出再打开，才会用上新的命令入口。
+- 这一页不判断编程任务是否完成，也不做记忆体投毒检测。
 
-- 原生 macOS 菜单栏应用和实时态势感知控制台。
-- 自动发现 Codex、Cursor、WorkBuddy、Qoder 等本地 Agent，并为其他已安装 Agent 提供存在性检测。
-- Agent 专属 Runtime Profile：保留原始进程名，同时解释组件职责与安全边界。
-- 每 750 毫秒采样 Agent 进程树，只关注 Agent 相关进程，而不是全机进程。
-- 串联用户需求、上下文、模型、工具、MCP、Shell、文件、构建、测试与验证结果。
-- 默认只加载实时证据和最近一次活动会话；历史还原需要用户明确触发，并采用节流处理。
+没有采到的内容就保持没有。应用不编造正文、主机或工具调用。
 
-### 模型上下文与中转安全
+## 隐私
 
-- 在 Agent 本地留下证据时，记录单轮用户输入、模型上下文、模型响应、模型名称、Token、成本、工具参数和工具结果。
-- 原生读取 ZCode 自己在 TLS 加密前写入的 Model I/O 记录，按原始顺序保留请求体、历史消息、工具定义、响应正文、已记录的推理内容、Token 用量以及 request/trace/turn 标识；无需安装 CA、修改系统信任库或让流量经过代理。
-- 只有在 ZCode 的 `model-io-*.jsonl` 记录实际存在时，AgentReins 才标记为“已确认的加密前证据”；记录被关闭或删除时，界面会明确显示 Model I/O 不可用，不会声称完整采集。
-- 区分已配置网关、实际网络候选目标和中转所声称的上游模型，避免把中转声明当成身份验证。
-- 展示向上游暴露的上下文类型：用户需求、Memory、Skills/Policy、代码、项目文件和工具结果。
-- 对已捕获正文检测 API Key、密码、私钥、银行卡号、身份证号和邮箱等敏感信息。
-- 明确显示内容检查覆盖范围；只捕获局部正文时，不会声称完成了全量上下文审计。
-- 支持 OpenAI 风格的可配置分析模型接口；未配置时不向外部模型发送本地证据。
+记录留在当前用户目录。审计代理只听 `127.0.0.1:18891`，由 AgentReins 启动，应用退出时一起退出。普通终端不会被指到这个代理。加载了 `~/.agentreins/audit.sh` 的 Agent 进程才使用它，以及本机的 mitmproxy 证书。系统代理和系统信任库保持原样。
 
-### 数据出境清单与上下文阅读器
+## 构建
 
-**Outbound（数据出境清单）**回答的不是“建立了多少条网络连接”，而是一个更直接的问题：**这次 Agent 调用大模型时，实际拼装并发送了哪些内容？**
-
-- 每次模型请求都可以打开独立的上下文阅读器，不会把几万字符直接铺在请求列表里。
-- 已捕获内容按照发送顺序展示，并保留实际原文；分类标签只负责解释内容，不会用数量或摘要替代正文。
-- 阅读器能够整理用户指令、系统指令、开发者指令、历史对话、身份与长期记忆、Agent 规则与 Skill、项目上下文、源代码、工具调用与参数、工具结果、设备环境、权限、连接器和附件。
-- 每段内容标明本地证据来源。左侧目录用于筛选同一份上下文，“捕获原文”模式则提供更接近原始证据的连续阅读视图。
-- 敏感内容发现和安全判断与实际上下文并列展示；Token、模型声明、路由和字节数只作为辅助技术证据。
-- AgentReins 只展示本地 Agent 或受支持证据源确实保存的内容。没有请求正文时会明确标记为未知，不会根据服务商报告的 Token 总量虚构或还原不可见文本。
-- WorkBuddy 首期网络正文集成为显式启用的“审计代理模式”，适用于单独启动并指定本地代理的 WorkBuddy CLI。内置 `workbuddy_network_capture.py` 只记录受支持的腾讯 Copilot 请求与响应正文，校验请求 SHA-256 和字节完整性，再送入同一上下文阅读器；它不会修改系统代理或系统信任库，也不会声称覆盖其他 WorkBuddy 桌面流量。
-- 使用内置 addon 启动 mitmproxy，并只让被审计的 WorkBuddy 进程连接该本地代理。采集文件以 `0600` 权限追加到 `~/Library/Application Support/AgentReins/workbuddy-network.jsonl`；AgentReins 只读取完整 JSONL 行，未写完的尾行会留到下一次轮询。
-
-### 工具、MCP 与外部内容
-
-- 按能力评估工具和 MCP：命令执行、文件修改、网络访问、凭据接触和外部内容。
-- 支持 Chrome/Edge 浏览器扩展，采集受支持 Web AI 的用户可见提示词、响应、联网搜索过程和上传文件元数据。
-- 检查外部网页内容中的提示注入、凭据窃取诱导、隐藏文本和混淆行为。
-- 可展示 ZCode、WorkBuddy 等 Agent 在本地实际保存的模型思考内容，并与“发送给模型的上下文”分开标明数据方向；不声称读取服务端从未返回、且本地从未保存的隐藏推理。
-
-### 网络与 SSH
-
-- 从 Agent 工具参数实时识别 HTTP(S)、Git、SSH、SCP、rsync、curl 和 wget 等网络意图。
-- Socket 证据记录 PID、本地端点、远端 IP/主机、端口和进程树归属。
-- 对公网 IP 异步补充国家、城市、ASN 和资产运营方信息。
-- 将 SSH 从单条 `IP:22` 重建为会话：Agent、用户名、认证方式、Host Key 策略、远程命令、SCP/rsync 传输和安全结论。
-- 检测 Root 登录、交互式凭据、自动接受新 Host Key 和缺少实际 Socket 等风险。
-- SSH 正文是加密的；命令和文件证据来自本机 Agent/工具层，Socket 只能证明连接存在。远端文件与进程需要服务器侧 Collector 才能完整证明。
-
-### 文件、代码与记忆
-
-- 将工具可见文件活动统一为 Create、Read、Update、Delete 和 Rename。
-- 展示“哪个 Agent 修改了什么文件”，并保留路径、参数、前后内容和 Diff 等证据。
-- 对变更文本和 AI 生成代码执行本地安全模式扫描。
-- 监控受保护文件的修改和删除，并可从本地备份恢复。
-- 识别持久化 Memory 的新增、修改和删除，展示写入内容、存储位置、Agent、Session/Turn 与归属置信度。
-- Git 快照保存 HEAD、暂存/未暂存 Diff、文件状态和验证上下文。
-
-### 证据可靠性
-
-- SQLite WAL 是本地持久化证据主干，实时 UI 状态与历史还原分离。
-- Raw Evidence 与派生安全结论分层存储。
-- 稳定 Evidence ID 支持后续工具结果补全已有请求，避免重复事件。
-- Collector Health 展示失败、延迟、丢弃样本和采集盲区。
-- 已包含模糊归属拒绝、幂等持久化、WAL 恢复、Runtime Profile、Git/SSH、文件生命周期和 10 万事件存储基准测试。
-
-## 当前边界
-
-以下能力仍在开发，不属于已经完成的产品承诺：
-
-- 将所有操作系统级文件变化完整归属到具体 Session、Turn、Tool Call 和进程。
-- 区分用户原有未提交代码与 Agent 新增变更。
-- 完整的独立构建、测试验证和任务级事务恢复。
-- 为更多 AI 编程 Agent 提供稳定原生适配器。
-- 在没有 Endpoint Security 权限的情况下捕获所有毫秒级短进程和短连接。
-- 对持续运行终端命令进行跨 Tool Call 的完整关联。
-- 在未安装远程 Collector 时证明 SSH 服务器上的文件与进程变化。
-- 通用的内核级执行拦截。
-
-遇到无法证明的事实时，AgentReins 会显示 **Unknown**，而不是猜测。
-
-## 下载
-
-正式签名并经过 Apple 公证的版本：
-
-- [Apple Silicon](https://www.chuhaijian.com/download/apple-silicon)
-- [Intel Mac](https://www.chuhaijian.com/download/intel)
-
-官网：[www.chuhaijian.com](https://www.chuhaijian.com/)
-
-## 构建与运行
-
-### 环境要求
-
-- macOS 13 或更高版本
-- Xcode Command Line Tools
-- Swift 6 工具链
+需要 macOS 13 或更高版本、Xcode Command Line Tools、Swift 6。要看 HTTPS 正文，再安装 `mitmdump`。
 
 ```bash
 git clone https://github.com/yardfribley-bit/AgentReins.git
 cd AgentReins
-swift build
-swift run AgentReins
+./scripts/package_realtime.sh
+open ".build/realtime-preview/AgentReins Realtime.app"
 ```
 
-打包应用：
+让 WorkBuddy、Codex、Cursor 里的 wget、curl、git、brew 等命令走进采集：
 
 ```bash
-./package_app.sh
-open AgentReins.app
+python3 scripts/install_codex_transport.py
 ```
 
-## 连接 Chrome 或 Edge 扩展
+然后把这些应用完全退出，再重新打开。已经在跑的 shell 仍用旧的命令函数。
 
-1. 将 `AgentReins.app` 放入 `/Applications`。
-2. 运行应用内的 Browser Extension 导出/安装流程。
-3. 在 `chrome://extensions` 或 `edge://extensions` 中开启开发者模式。
-4. 选择 **Load unpacked**，加载导出的扩展目录。
-5. 打开 Gemini、ChatGPT、Claude 或 Grok；收到第一条本地证据后，AgentReins 会显示 `Web AI`。
-
-扩展只申请受支持 Web AI 域名权限，证据通过 Native Messaging 保存在本地，不开放 localhost HTTP 服务。
-
-## 项目结构
+## 目录
 
 ```text
-.
-├── Sources/AgentReins/       macOS 应用、采集器、适配器与界面
-├── Tests/AgentReinsTests/    单元、关联和可靠性测试
-├── Assets/                   品牌和应用资产
-├── BrowserExtension/         Chrome/Edge Web AI 适配器
-├── Resources/                应用运行资源
-├── docs/                     架构、路线图和发布文档
-├── .github/workflows/        CI 与发布自动化
-├── Package.swift             Swift Package 配置
-└── package_app.sh            本地应用打包脚本
+Sources/AgentReins/                         macOS 应用
+Sources/AgentReins/Resources/RealtimeWorkspace/   任务过程与外网访问页面
+Sources/AgentReins/Resources/workbuddy_network_capture.py
+tools/transport-audit/                      curl、wget、git、brew、ssh 等命令采集
+scripts/package_realtime.sh                 打包实时应用
+scripts/install_codex_transport.py          安装只对 Agent 生效的审计环境
+docs/                                       架构与路线
 ```
 
-进一步阅读：
+深入阅读：[系统架构](docs/ARCHITECTURE.md)、[数据采集](docs/DATA-COLLECTION-ARCHITECTURE.md)、[Trace、Verify、Recover](docs/TRACE-VERIFY-RECOVER-ROADMAP.md)。
 
-- [系统架构](docs/ARCHITECTURE.md)
-- [数据采集架构](docs/DATA-COLLECTION-ARCHITECTURE.md)
-- [Trace、Verify、Recover 路线图](docs/TRACE-VERIFY-RECOVER-ROADMAP.md)
+## 许可
 
-## 隐私与信任模型
+仓库里还没有开源许可证。源码公开，供阅读。这不表示可以把代码复制进其他产品。
 
-- 监控证据默认保存在用户本机。
-- 用户配置分析模型前，不会启用可选的 AI 分析。
-- 外部分析启用时，敏感字段应先在本地识别并进行策略处理。
-- 原始证据与推断结论严格区分。
-- 无法采集的内容明确标记为 Unknown。
-- 客户端可以证明数据发送到了哪里，但无法证明远程服务商没有保留数据。
+## 问题
 
-## 反馈
-
-欢迎通过 [GitHub Issues](https://github.com/yardfribley-bit/AgentReins/issues/new) 提交问题、证据缺口和 Agent 适配需求。
+如果这台机器上的一次访问无法从页面上看出是谁发出、去了哪里、送出了什么、收回了什么，请开一个 issue。不要贴 API key、令牌或私人提示词。

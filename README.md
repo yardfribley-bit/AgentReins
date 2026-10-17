@@ -4,12 +4,11 @@
 
   <h1>AgentReins</h1>
 
-  <p><strong>Make every AI agent understandable, verifiable, and trustworthy.</strong></p>
+  <p><strong>See what a local coding agent sent out, and what came back.</strong></p>
 
-  <p>A local-first safety and transparency companion for personal AI coding agents on macOS.</p>
+  <p>A local-first macOS app for WorkBuddy, Codex, and Cursor.</p>
 
   <p>
-    <a href="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/yardfribley-bit/AgentReins/actions/workflows/ci.yml/badge.svg"></a>
     <img alt="Platform: macOS 13+" src="https://img.shields.io/badge/macOS-13%2B-111111?logo=apple">
     <img alt="Swift 6" src="https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white">
     <img alt="Status: Alpha" src="https://img.shields.io/badge/status-alpha-F59E0B">
@@ -17,286 +16,86 @@
   </p>
 </div>
 
----
+AgentReins keeps the evidence on this Mac. It shows the task an agent is working on, each outbound visit, and the file a download actually wrote. It does not change the system proxy or the system trust store.
 
-The separate [enterprise audit console](AgentReinsConsole/README.md) is included in this repository. Explicitly enrolled clients can upload complete evidence for tasks started after activation over HTTPS; unenrolled clients do not upload. The console provides device/account attribution and incremental audit updates, independently of the product website.
+Website: [chuhaijian.com](https://www.chuhaijian.com/)
 
-Coding agents can edit files, run commands, call tools, read memory, and send private context to model providers in seconds. Their logs contain activity, but often fail to answer the questions that matter after a task:
+## What you can look at
 
-- What did I ask the agent to do?
-- What context and instructions passed between the agent and the model?
-- Which tools, processes, and files were involved?
-- Did the result actually work?
-- Where did my code and private data go?
-- Can I recover safely if the agent made a mistake?
+The realtime window has two views that matter first.
 
-AgentReins turns those disconnected signals into one understandable, evidence-backed account of the task. It is designed as an operations console—not another log viewer. A developer should be able to open the app and immediately answer: **Which agents are running? What task is each agent executing? Which internal component is active? What changed, where did data go, and has the result been independently verified?**
+**任务过程.** The original request, where the task is now, what the model asked for, what actually ran, and retries that were kept.
 
-## The live operations console
+**外网访问.** A list you can scan:
 
-The current interface is deliberately layered so that useful conclusions appear before raw telemetry:
-
-1. **Agent Fleet** — automatically discovered local agents, their live/idle state, process count, and current task summary.
-2. **Agent Internals** — a readable Runtime Map derived from real PID/PPID lineage. Runtime Profiles translate opaque processes into stable responsibilities such as Agent Core, MCP Tool Server, Node REPL/Sandbox, Code Execution Host, Storage Service, and Network Service.
-3. **Live Task** — a continuously updated task path from user request to context preparation, model response, MCP/Skill calls, Shell execution, file writes, build, test, agent-reported completion, and independent verification.
-4. **External Services** — model providers, relays, GitHub, SSH destinations, APIs, and external content observed during the active task.
-5. **Security Summary and Evidence Inspector** — the conclusion remains visible while any process, stage, file, tool, or destination can be opened for its complete evidence.
-
-Repeated leaf processes are aggregated only when they have the same parent, Runtime Profile component, and responsibility. A row such as `MCP Tool Server ×3` remains expandable to the individual PIDs. Processes with children are never merged, so execution boundaries remain visible.
-
-### Result semantics
-
-AgentReins intentionally separates activity from trust:
-
-| UI state | Meaning |
+| Column | What it shows |
 | --- | --- |
-| **Running** | The process or task is active. It says nothing about safety. |
-| **Observed** | A collector recorded the activity. It has not necessarily been verified. |
-| **Agent reported complete** | The agent produced a completion response. The result may still be wrong. |
-| **Unverified** | Evidence exists, but success cannot be proven from the available result. |
-| **Verified** | An independent check—not the agent's own claim—confirmed the result. |
-| **Confirmed / Inferred / Unknown** | The strength of the evidence joining an activity to an agent, turn, or tool. |
+| 时间 | When this visit happened |
+| 谁 | The tool or model call |
+| 去了哪里 | Host, or “远程访问工具” / “模型服务” |
+| 协议 | HTTP version, model, tool call, encrypted channel, or package |
+| 结果 | What happened: 通了, 对方返回 502, 证书没配好, 下载了 name, 带走了 name |
 
-## The product direction
+Open a row. **送出** and **收回** appear directly under that row. An empty request is written as 没有送出正文. An empty response is 正文是空的. A web page is shown as 网页《title》 plus a short lead. Certificate text, `CONNECT`, and credentials stay out of those two panels. The raw protocol lines stay folded under 协议原文.
 
-| Pillar | Question AgentReins should answer |
-| --- | --- |
-| **Trace** | What did the user ask, and what did the agent actually do? |
-| **Verify** | Did the resulting code pass checks independent of the agent's own claim? |
-| **Recover** | Can the complete agent turn be previewed and undone safely? |
-| **Provider Trust** | Which endpoint received the user's prompts, code, files, and memory? |
+A download from wget, curl, or brew shows the file that landed: name, size, and SHA-256. The hash is of the file on disk. The page does not dump the file bytes.
 
-```mermaid
-flowchart LR
-    U[User request] --> A[Coding agent]
-    A --> C[Context and model exchange]
-    A --> T[Tools / MCP / Skills]
-    T --> P[Processes]
-    P --> N[Network sockets]
-    P --> F[Files and code]
+A remote tool such as WebFetch shows the exchange between this machine and the tool: what was submitted, and what the tool returned. The tool’s own later fetch of a website is not a connection from this Mac.
 
-    C -. native adapter evidence .-> E[Local evidence spine]
-    T -. tool intent and result .-> E
-    P -. PID / PPID snapshots .-> E
-    N -. socket evidence .-> E
-    F -. workspace and Git evidence .-> E
+## What is not claimed
 
-    E --> R[Runtime Map and Live Task]
-    R --> V[Independent verification]
-    V --> K[Trust, review, or recover]
-```
+- Traffic that ignores the agent proxy, pins a certificate, or uses QUIC never enters the record.
+- SSH, SCP, SFTP, and rsync channel bytes stay encrypted. The row says 看不到通道里的内容.
+- Git pack bytes are not reconstructed. A push can show the file names that would leave.
+- A visit is not assigned to a tool call by clock time. If the call is unknown, the panel says 还没对上哪次工具调用.
+- Query strings are removed before they are stored.
+- A file larger than 32 MB keeps its size and skips the hash.
+- WorkBuddy and Codex that are already running do not see a new command wrapper until they are fully quit and opened again.
+- AgentReins does not decide that a coding task is finished, and it does not scan memory for poisoning. Those stay off this page.
 
-## Latest progress
+Missing evidence stays missing. The app does not invent a body, a host, or a tool call.
 
-AgentReins is an early alpha. The repository is public so that the implementation and its limitations can be inspected directly.
+## Privacy
 
-### Live task and runtime visibility
+Records stay under this user account. The audit proxy listens only on `127.0.0.1:18891`. It is started by AgentReins and stops when AgentReins quits. Normal Terminal windows are not pointed at it. Agent processes that load `~/.agentreins/audit.sh` use that proxy and the local mitmproxy certificate. The system proxy and the system trust store are left alone.
 
-- Native macOS menu bar application and industrial-style operations console.
-- Automatic discovery of supported local agents, including Codex, Cursor, WorkBuddy, and Qoder adapters, with additional installed-agent presence detection.
-- Agent-specific Runtime Profiles that preserve original process names while explaining each component's responsibility and security surface.
-- Real PID/PPID process lineage sampled every 750 ms, scoped to Agent process trees rather than the entire machine.
-- Live task reconstruction across user request, context, model, tools, MCP, Shell, file changes, build, test, reported completion, and independent verification.
-- Clicking a task stage highlights its associated process ancestry; clicking a process pauses live-follow mode and exposes technical evidence.
-- Startup loads live evidence and the latest active conversation only. Historical reconstruction is explicit and throttled.
+## Build
 
-### Model and tool evidence
-
-- Per-turn user intent, model context, model response, model name, token usage, tool calls, tool arguments, and tool results when the local Agent records them.
-- Native WorkBuddy evidence plus local compatibility adapters for Codex, Qoder, and Cursor.
-- Native ZCode pre-encryption Model I/O collection from ZCode's own local rollout records. It preserves the ordered request body, conversation messages, tools, response text, recorded reasoning, usage, and request/trace/turn identifiers without installing a CA, changing the trust store, or routing traffic through a proxy.
-- Cursor Composer correlation across prompts, context-token composition, model responses, tool calls/results, and generated-file security scanning.
-- Tool and MCP security classification based on capability: command execution, filesystem mutation, network access, credential exposure, and external content.
-- A least-privilege Chrome/Edge adapter for confirmed Grok Imagine prompt, upload, and result evidence.
-
-### Outbound context inventory
-
-The **Outbound** workspace answers a narrower question than a conventional network log: **what content did the Agent assemble and send to the model for this request?**
-
-- Each model request opens in a dedicated context reader instead of expanding thousands of characters inside the request list.
-- Captured content remains in send order and keeps its original text. Labels explain the content without replacing it with counts or summaries.
-- The reader classifies user instructions, system and developer instructions, conversation history, identity and memory, Agent rules and skills, project context, source code, tool calls and arguments, tool results, device context, permissions, connectors, and attachments.
-- Every section names its local evidence source. A category directory filters the same underlying text, while a captured-text mode provides a minimally processed view for forensic review.
-- Sensitive-content findings and the safety verdict are shown beside the context they assess. Token totals, model claims, routes, and byte counts remain supporting technical evidence rather than the primary presentation.
-- AgentReins displays only content recorded by the local Agent or another supported evidence source. Missing request bodies remain unknown; provider-reported Token totals are never used to invent or reconstruct unseen text.
-- When ZCode's native `model-io-*.jsonl` records are present, AgentReins reads them incrementally and marks the request as confirmed pre-encryption evidence. If ZCode has disabled or removed those records, the UI reports that Model I/O evidence is unavailable instead of claiming complete capture.
-- AgentReins starts its loopback-only WorkBuddy audit proxy by default when `mitmdump` is installed. The bundled `workbuddy_network_capture.py` addon records only supported Tencent Copilot request and response bodies, verifies request SHA-256 and byte completeness, and binds each body to the domain, remote IP, port, and client endpoint observed in the same HTTPS flow. It does not alter the system proxy or trust store and does not claim coverage until WorkBuddy traffic actually reaches the proxy.
-- Launch mitmproxy with the bundled addon and point only the audited WorkBuddy process at that local proxy. Captures are appended with mode `0600` to `~/Library/Application Support/AgentReins/workbuddy-network.jsonl`; AgentReins tails complete JSONL records and leaves incomplete trailing records unread until the next poll.
-
-### Network activity
-
-AgentReins now combines two complementary sources instead of treating a periodic socket snapshot as complete truth:
-
-- **Network intent evidence** is produced immediately from native Agent tool arguments. It recognizes HTTP(S), `git push/fetch/pull/clone`, SSH, SCP, rsync, curl, and wget activity.
-- **Git remote resolution** reads the active workspace's `.git/config`, allowing a short `git push origin main` to be attributed to its configured host even when the socket closes between samples.
-- **Socket evidence** records the owning PID, local endpoint, remote IP/host, port, and Agent process-tree attribution.
-- **Proxy refinement** can replace a loopback proxy socket with the destination recorded by a supported local proxy access log.
-- Each projected activity can store requested, running, completed, failed, or unverified status together with start time, end time, and duration.
-- External destinations are classified as model provider, model relay, developer service, external content, telemetry, local infrastructure, or unknown.
-
-This allows the UI to explain flows such as:
-
-```text
-Codex → Shell → git push origin main → github.com:443 → result
-Codex → Shell → ssh deploy@example.com:22 → remote deployment → result
-```
-
-### File and generated-code activity
-
-- Tool-visible file activity is normalized as Create, Read, Update, Delete, or Rename.
-- File rows lead with a human-readable statement such as `Codex updated AgentOperationsCenterView.swift`, followed by a short description of the changed content.
-- Tool, time, result status, attribution confidence, complete path, rename destination, arguments, before/after content, and diff remain available in the evidence inspector.
-- Explicitly protected files are monitored in the background for modification or deletion, with optional restoration from a local backup.
-- Changed text and generated code can be scanned locally for common security patterns.
-- Git snapshots preserve repository head, staged and unstaged diff, file status, and verification context for recovery work.
-
-### Project understanding and supervision
-
-- Project Brief separates declared purpose, observed implementation, inferred meaning, and unknowns instead of presenting model guesses as facts.
-- A deterministic local structural index records source language, imports, symbols, content hashes, and import-based importance for Git-tracked files.
-- Existing [Atlas](https://github.com/pacifio/atlas) `.atlas/codebase-index/docs.json` indexes are imported directly when present; AgentReins' native fallback additionally understands Swift projects.
-- Requirements, code structure, agent memory, runtime activity, and security evidence are compared at project scope so users can see both the current implementation and where it has drifted from intent.
-- Indexing runs at utility priority, is bounded and cancellable, and yields between file batches to protect the live console.
-
-### Evidence reliability
-
-- SQLite WAL is the durable local evidence spine; live UI state is kept separate from historical reconstruction.
-- Stable evidence identifiers allow a tool request to be enriched with its later result without duplicating the live activity.
-- Raw evidence and derived assessments are separated, with collector health exposing failures, dropped samples, and blind spots.
-- Current regression coverage includes ambiguous-attribution rejection, idempotent persistence, WAL recovery, Runtime Profile classification, Git/SSH network projection, file lifecycle projection, and a 100,000-event storage benchmark.
-
-## What is not finished yet
-
-These are active roadmap items, not shipping claims:
-
-- Complete attribution from every operating-system file change to the responsible session, turn, tool call, and process.
-- Git-quality separation of pre-existing user work from agent-introduced changes.
-- Independent build and test verification.
-- Transactional preview and undo for a complete agent turn.
-- Native adapters for additional coding agents.
-- Event-driven socket capture for every short-lived connection without requiring privileged Endpoint Security entitlements.
-- Cross-call terminal-session correlation when a long command continues through later polling calls.
-- Complete remote-host command and file evidence for SSH deployments; local socket evidence alone cannot observe the remote filesystem.
-- Universal pre-execution interception or kernel-level enforcement.
-- Signed and notarized public distribution.
-
-See the [Trace, Verify, Recover roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) for acceptance criteria rather than aspirational feature names.
-
-## Build and run
-
-### Requirements
-
-- macOS 13 or later
-- Xcode Command Line Tools
-- Swift 6 toolchain
-
-### Development build
+Requirements: macOS 13 or later, Xcode Command Line Tools, and a Swift 6 toolchain. Install `mitmdump` if you want HTTPS bodies.
 
 ```bash
 git clone https://github.com/yardfribley-bit/AgentReins.git
 cd AgentReins
-swift build
-swift run AgentReins
+./scripts/package_realtime.sh
+open ".build/realtime-preview/AgentReins Realtime.app"
 ```
 
-### Package the app
+To wrap wget, curl, git, brew, and the other audited commands inside WorkBuddy, Codex, and Cursor:
 
 ```bash
-./package_app.sh
-open AgentReins.app
+python3 scripts/install_codex_transport.py
 ```
 
-The packaging script creates `AgentReins.app` in the repository root and applies an ad-hoc development signature. Distribution to other Macs without security warnings requires a Developer ID Application certificate and Apple notarization.
+Then quit those apps completely and open them again. A shell that is already running keeps its old functions.
 
-### Connect Grok Imagine in Chrome or Edge
-
-1. Package AgentReins and move `AgentReins.app` into `/Applications`.
-2. Run `/Applications/AgentReins.app/Contents/Resources/BrowserExtension/install-native-host.sh`.
-3. Open `chrome://extensions` or `edge://extensions`, enable Developer mode, choose **Load unpacked**, and select `AgentReins.app/Contents/Resources/BrowserExtension`.
-4. Open Gemini, ChatGPT, Claude, or Grok in Chrome. AgentReins will show `Web AI` after the first local evidence message arrives.
-
-The extension requests access only to `gemini.google.com`, `chatgpt.com`, `claude.ai`, and `grok.com`. It records prompt submissions, rendered model responses, user-visible reasoning/search progress, and uploaded file metadata and hashes. Evidence is delivered locally through Native Messaging; AgentReins does not expose a localhost HTTP listener. Server-side hidden reasoning that is never rendered in the browser is outside this evidence boundary.
-
-## How the repository is organized
+## Layout
 
 ```text
-.
-├── Sources/AgentReins/
-│   ├── AgentGuardApp.swift       App lifecycle and menu bar entry
-│   ├── ContentView.swift         Main product interface
-│   ├── AgentOperationsCenterView.swift  Live operations console
-│   ├── AgentEgressAudit.swift    Outbound context classification and verdicts
-│   ├── DevelopmentTrace.swift    Task-stage reconstruction
-│   ├── AgentRuntimeProfile.swift Agent-specific process responsibilities
-│   ├── WorkBuddySight.swift      WorkBuddy evidence adapter
-│   ├── CodexSight.swift          Codex local compatibility adapter
-│   ├── CursorSight.swift         Cursor Composer compatibility adapter
-│   ├── QoderSight.swift          Qoder local compatibility adapter
-│   ├── WebAgentSight.swift       Browser-extension evidence adapter
-│   ├── AgentSession.swift        Session and turn reconstruction
-│   ├── EventStore.swift          Local normalized event storage
-│   ├── EvidenceDatabase.swift    SQLite WAL evidence spine
-│   ├── ProcessGuard.swift        Process observation
-│   ├── NetworkSnapshotProvider.swift    PID-owned socket snapshots
-│   ├── ToolActivityEvidenceProjector.swift  Network/file intent projection
-│   ├── FileGuard.swift           Protected-file monitoring and recovery
-│   ├── CodeSecurityScanner.swift Changed-line security checks
-│   ├── MemoryScanManager.swift   Agent-memory discovery and scanning
-│   └── SemanticAnalyzer.swift    Optional redacted AI analysis
-├── Assets/                       Packaged application assets
-├── AppIcon.iconset/              Source application icons
-├── Resources/                    Runtime resources bundled with the app
-├── BrowserExtension/             Least-privilege Grok Chrome/Edge extension
-├── .github/workflows/            Universal 2 CI and release automation
-├── docs/                         Architecture, roadmaps, and launch plans
-├── Package.swift                 Swift Package Manager manifest
-└── package_app.sh                Local app packaging script
+Sources/AgentReins/                         macOS app
+Sources/AgentReins/Resources/RealtimeWorkspace/   task and network pages
+Sources/AgentReins/Resources/workbuddy_network_capture.py
+tools/transport-audit/                      command capture for curl, wget, git, brew, ssh
+scripts/package_realtime.sh                 build the realtime app
+scripts/install_codex_transport.py          install the agent-only audit shell
+docs/                                       architecture and roadmaps
 ```
 
-Read [Architecture](docs/ARCHITECTURE.md) for the runtime flow, trust model, source map, and adapter contract.
-See [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) for the evidence pipeline, the lightweight-native design decision, and why AgentReins adopts Beats-grade reliability patterns without embedding the full Beats stack.
+Further reading: [Architecture](docs/ARCHITECTURE.md), [Data collection](docs/DATA-COLLECTION-ARCHITECTURE.md), [Trace, verify, recover](docs/TRACE-VERIFY-RECOVER-ROADMAP.md).
 
-## Privacy and trust model
+## License
 
-- Monitoring records are stored locally.
-- Optional AI analysis is disabled until the user configures a provider key.
-- Common API keys, tokens, passwords, and private-key blocks are redacted locally before optional OpenRouter analysis.
-- Captured evidence and inferred correlation must be labeled separately.
-- Missing evidence is reported as unknown instead of being guessed.
-- AgentReins displays model reasoning actually recorded locally by agents such as ZCode and WorkBuddy, with its model-to-agent direction kept separate from outbound context. It does not claim access to server-side reasoning that was never returned or saved locally.
-- A client can identify where data was sent, but cannot prove that a remote server did not retain it.
+No open-source license is included yet. The source is public so it can be read. That does not grant the right to copy it into another product.
 
-## Documentation
+## Issues
 
-| Document | Purpose |
-| --- | --- |
-| [Architecture](docs/ARCHITECTURE.md) | Runtime flow, source map, trust model, and integration contract. |
-| [Atlas code-index attribution](docs/ATLAS_CODE_INDEX_ATTRIBUTION.md) | Upstream inspiration, compatibility boundary, license, and AgentReins-specific changes. |
-| [Data Collection Architecture](docs/DATA-COLLECTION-ARCHITECTURE.md) | Collection flow, reliability principles, and the native-versus-Beats architecture decision. |
-| [Collection Reliability Assessment](docs/COLLECTION-RELIABILITY-ASSESSMENT.md) | Measured gaps, honest product claims, and hardening acceptance gates. |
-| [Collection Acceptance — 2026-09-11](docs/COLLECTION-ACCEPTANCE-2026-09-11.md) | Latest measured short-term results, failures, blind spots, and deferred soak test. |
-| [Trace, Verify, Recover Roadmap](docs/TRACE-VERIFY-RECOVER-ROADMAP.md) | Prioritized engineering gaps and acceptance tests. |
-| [Provider Trust Roadmap](docs/PROVIDER-TRUST-ROADMAP.md) | Relay detection, outbound exposure, and model-identity boundaries. |
-| [Product Hunt Launch Plan](docs/PRODUCT-HUNT-LAUNCH.md) | Positioning, launch demo, claims, and readiness checklist. |
-| [Daily Development Plan](docs/DAILY-DEVELOPMENT-PLAN.md) | Today's completed work, afternoon priorities, and acceptance gates. |
-| [Community Launch Copy](docs/COMMUNITY-LAUNCH-COPY.md) | Platform-specific Reddit, Hacker News, and social copy. |
-| [Release Process](docs/RELEASING.md) | Universal 2 CI/CD, signing, notarization, and release instructions. |
-| [Capability Test Report](docs/CAPABILITY-TEST-REPORT.md) | Automated evidence, safety gates, and capabilities that are not yet proven. |
-
-## Contributing and feedback
-
-AgentReins is looking for real coding-agent failure cases more than generic feature requests. Useful contributions include:
-
-- Reproducible examples where an agent's activity log did not explain the outcome.
-- Adapter research for coding-agent lifecycle and tool events.
-- Tests for file attribution, Git state, interrupted turns, and safe recovery.
-- Security findings with a minimal reproduction and clear impact.
-- Feedback on whether a non-security expert can understand the result of one agent turn.
-
-Please open a GitHub issue before starting a large change so the evidence model and product scope can be agreed first. Never include real API keys, private prompts, personal data, or proprietary source code in an issue.
-
-## Project status
-
-AgentReins is under active development and is not yet a substitute for endpoint security, backups, code review, or Git. The immediate milestone is one trustworthy end-to-end workflow that can trace a supported agent turn, verify its result independently, and recover it without damaging pre-existing work.
-
-If this is a problem you have encountered, [open an issue](https://github.com/yardfribley-bit/AgentReins/issues) and describe the workflow you want AgentReins to make understandable.
+Open an issue when a visit on this machine cannot be explained from the page: who sent it, where it went, what left, and what came back. Do not paste API keys, tokens, or private prompts.
