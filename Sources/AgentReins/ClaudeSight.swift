@@ -2,14 +2,6 @@ import CryptoKit
 import Foundation
 import SwiftUI
 
-enum ClaudeSightError: LocalizedError {
-    case databaseUnavailable
-
-    var errorDescription: String? {
-        "Claude Code 本地证据数据库不可用"
-    }
-}
-
 struct ClaudeProjectionState: Sendable {
     var currentTurn: [String: String] = [:]
     var turnByUUID: [String: String] = [:]
@@ -47,7 +39,6 @@ final class ClaudeSight: ObservableObject {
     private var isInitialPoll = true
     private var isPolling = false
     private var projectionStates: [String: ClaudeProjectionState] = [:]
-    private let projectionRecoveryKey = "agr_claude_projection_recovery_v1"
 
     func start() {
         guard timer == nil else { return }
@@ -68,38 +59,21 @@ final class ClaudeSight: ObservableObject {
         let database = database
         let baselineOtherStreams = isInitialPoll
         let previousStates = projectionStates
-        let shouldRecover = isInitialPoll && !UserDefaults.standard.bool(forKey: projectionRecoveryKey)
         queue.async { [weak self] in
-            var recovered: [GuardEvent] = []
-            var recoveryError: String?
-            if shouldRecover {
-                do {
-                    guard let database else { throw ClaudeSightError.databaseUnavailable }
-                    recovered = Self.recoverProjection(from: try database.rawRecords(source: "claude"))
-                    try database.append(recovered)
-                } catch {
-                    recoveryError = error.localizedDescription
-                }
-            }
             let batch = Self.readRecentStateful(root: root, previousSizes: previous,
                 baselineOtherStreams: baselineOtherStreams, previousStates: previousStates)
-            var writeFailed = false
-            do { try database?.appendRaw(batch.raw) } catch { writeFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 let available = FileManager.default.fileExists(atPath: root)
                 self.isPolling = false
                 if available { self.isInitialPoll = false }
                 if self.connected != available { self.connected = available }
-                self.malformed += batch.malformed + (writeFailed || recoveryError != nil ? 1 : 0)
+                self.malformed += batch.malformed
                 self.projectionStates = batch.states
-                let fresh = Self.deduplicated(recovered + batch.events)
+                let fresh = Self.deduplicated(batch.events)
                     .filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
-                if shouldRecover && recoveryError == nil {
-                    UserDefaults.standard.set(true, forKey: self.projectionRecoveryKey)
-                }
                 for (stream, offset) in batch.sizes {
                     self.fileSizes[stream] = offset
                 }
@@ -107,9 +81,8 @@ final class ClaudeSight: ObservableObject {
                     SourceCheckpoint(source: "claude", stream: stream, offset: Int64(offset),
                                      fingerprint: nil, updatedAt: Date())
                 }
-                let detail = recoveryError.map { "Claude Code 投影恢复失败：\($0)" } ??
-                    (available ? "Claude Code local session evidence connected" :
-                        "Claude Code project evidence directory is unavailable")
+                let detail = available ? "Claude Code local session evidence connected" :
+                    "Claude Code project evidence directory is unavailable"
                 let health = CollectorHealthRecord(source: "claude",
                     state: !available ? .failed : self.malformed > 0 ? .degraded : .healthy,
                     lastSuccess: available ? Date() : nil, lagSeconds: nil, accepted: self.accepted,

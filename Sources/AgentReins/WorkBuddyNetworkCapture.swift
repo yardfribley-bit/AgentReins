@@ -98,7 +98,8 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         let url = captureURL
         let previous = offset
         queue.async { [weak self] in
-            let result = Self.read(url: url, offset: previous)
+            let compacted = Self.compactJournal(url: url)
+            let result = Self.read(url: url, offset: compacted ?? previous)
             // The jsonl file is already the durable capture. Copying every chunk into
             // the evidence database duplicated heartbeats and response bodies until
             // that database reached tens of gigabytes and this process was paused.
@@ -143,6 +144,33 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         return true
     }
 
+    /// The capture journal is the network record. Past 128MB only the newest
+    /// 64MB stays, so a long-running agent cannot fill the disk with bodies.
+    @discardableResult
+    nonisolated static func compactJournal(url: URL, maximum: UInt64 = 128 * 1024 * 1024, keep: UInt64 = 64 * 1024 * 1024) -> UInt64? {
+        let manager = FileManager.default
+        guard let attributes = try? manager.attributesOfItem(atPath: url.path),
+              let bytes = attributes[.size] as? NSNumber else { return nil }
+        let size = bytes.uint64Value
+        guard size > maximum, let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+        defer { try? handle.close() }
+        try? handle.seek(toOffset: size - keep)
+        guard var tail = try? handle.readToEnd(), !tail.isEmpty else { return nil }
+        if let newline = tail.firstIndex(of: 0x0A) {
+            tail = Data(tail.suffix(from: tail.index(after: newline)))
+        }
+        let temporary = url.appendingPathExtension("trim")
+        do {
+            try tail.write(to: temporary, options: .atomic)
+            try manager.setAttributes([.posixPermissions: 0o600], ofItemAtPath: temporary.path)
+            _ = try manager.replaceItemAt(url, withItemAt: temporary)
+            return UInt64(tail.count)
+        } catch {
+            try? manager.removeItem(at: temporary)
+            return nil
+        }
+    }
+
     nonisolated static func read(url: URL, offset: UInt64)
         -> (events: [GuardEvent], nextOffset: UInt64, malformed: Int,
             fileExists: Bool, raw: RawEvidenceRecord?) {
@@ -151,7 +179,10 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         }
         defer { try? handle.close() }
         let size = (try? handle.seekToEnd()) ?? offset
-        let start = min(offset, size)
+        // A compacted journal is shorter than the old cursor. That tail was the
+        // end of the previous file and has already been observed.
+        if offset > size { return ([], size, 0, true, nil) }
+        let start = offset
         try? handle.seek(toOffset: start)
         // Do not load an entire historic capture file on startup. Allow a large
         // single record, but keep replay and memory bounded.

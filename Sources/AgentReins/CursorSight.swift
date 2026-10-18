@@ -40,7 +40,6 @@ final class CursorSight: ObservableObject {
 
     private func poll() {
         let url = Self.databaseURL
-        let database = evidenceDatabase
         let previousFingerprint = databaseFingerprint
         let previousTranscriptURL = latestTranscriptURL
         let previousTranscriptFingerprint = transcriptFingerprint
@@ -58,9 +57,6 @@ final class CursorSight: ObservableObject {
             }
             let transcript = nextTranscriptFingerprint == previousTranscriptFingerprint
                 ? nil : transcriptURL.flatMap(Self.readTranscript)
-            let raw = (snapshots ?? []).map(\.rawEvidence) + (transcript.map { [$0.rawEvidence] } ?? [])
-            var rawWriteFailed = false
-            do { try database?.appendRaw(raw) } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.databaseFingerprint = fingerprint
@@ -71,7 +67,6 @@ final class CursorSight: ObservableObject {
                 if self.connected != isConnected { self.connected = isConnected }
                 if snapshots == nil { self.malformed += 1 }
                 let values = (snapshots ?? []) + (transcript.map { [$0] } ?? [])
-                if rawWriteFailed { self.malformed += 1 }
                 let fresh = values.flatMap(\.events).filter { self.seen.insert($0.id).inserted }
                 self.accepted += fresh.count
                 if !fresh.isEmpty { self.lastUpdate = Date(); self.onEvents?(fresh) }
@@ -160,10 +155,9 @@ final class CursorSight: ObservableObject {
                 }
             }
         }
-        let digest = SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
         let raw = RawEvidenceRecord(source: "cursor", stream: "cursor-transcript:\(session)",
-            offsetStart: 0, offsetEnd: Int64(data.count), fingerprint: digest,
-            observedAt: modified, payload: data)
+            offsetStart: 0, offsetEnd: Int64(data.count), fingerprint: nil,
+            observedAt: modified, payload: Data())
         return Snapshot(rawEvidence: raw, events: events)
     }
 
@@ -241,13 +235,9 @@ final class CursorSight: ObservableObject {
                     content[key] = scalar(db, sql: "SELECT value FROM cursorDiskKV WHERE key=? LIMIT 1", bind: key)
                 }
             }
-            let envelope: [String: Any] = ["schema": "cursor-state-v3", "header": headerObject,
-                "composer": composer, "bubbles": bubbles.map(\.1)]
-            guard let raw = try? JSONSerialization.data(withJSONObject: envelope, options: [.sortedKeys]) else { return nil }
-            let fingerprint = SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined()
             let observed = date(composer["lastUpdatedAt"] ?? updated) ?? Date()
             let rawRecord = RawEvidenceRecord(source: "cursor", stream: "cursor-composer:\(id)",
-                offsetStart: 0, offsetEnd: updated, fingerprint: fingerprint, observedAt: observed, payload: raw)
+                offsetStart: 0, offsetEnd: updated, fingerprint: nil, observedAt: observed, payload: Data())
             return Snapshot(rawEvidence: rawRecord,
                             events: project(composerId: id, composer: composer, bubbles: bubbles, content: content))
         }

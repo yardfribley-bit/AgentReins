@@ -42,7 +42,7 @@ final class QoderSight: ObservableObject {
                     SourceCheckpoint(source: "qoder", stream: stream, offset: Int64(offset),
                                      fingerprint: nil, updatedAt: Date())
                 }
-                try database.persistCollected(raw: batch.raw, events: batch.events, checkpoints: checkpoints)
+                try database.persistCollected(raw: [], events: batch.events, checkpoints: checkpoints)
             } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }

@@ -389,9 +389,7 @@ final class EvidenceDatabase: @unchecked Sendable {
     static func openRecovering(url: URL = defaultURL()) throws -> EvidenceDatabase {
         let backupURL = url.appendingPathExtension("backup")
         do {
-            let database = try EvidenceDatabase(url: url)
-            scheduleMaintenance(database: database, backupURL: backupURL)
-            return database
+            return try EvidenceDatabase(url: url)
         } catch {
             guard FileManager.default.fileExists(atPath: backupURL.path) else { throw error }
             let quarantined = url.appendingPathExtension("corrupt-\(Int(Date().timeIntervalSince1970))")
@@ -428,25 +426,10 @@ final class EvidenceDatabase: @unchecked Sendable {
         return recovered
     }
 
-    /// Full hash-chain verification and a 100+ MB SQLite backup are important
-    /// maintenance operations, not launch work. Run them at most weekly and
-    /// only after the app has been idle long enough to establish live capture.
-    private static func scheduleMaintenance(database: EvidenceDatabase, backupURL: URL) {
-        let modified = (try? backupURL.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
-        guard modified.map({ Date().timeIntervalSince($0) > 7 * 86_400 }) ?? true else { return }
-        DispatchQueue.global(qos: .background).asyncAfter(deadline: .now() + 300) {
-            guard (try? database.verifyIntegrity()) == true else { return }
-            let temporary = backupURL.appendingPathExtension("new")
-            try? FileManager.default.removeItem(at: temporary)
-            guard (try? database.backup(to: temporary)) != nil else { return }
-            if FileManager.default.fileExists(atPath: backupURL.path) {
-                try? FileManager.default.removeItem(at: backupURL)
-            }
-            try? FileManager.default.moveItem(at: temporary, to: backupURL)
-        }
-    }
-
-    /// Checkpoints may advance only after all three durable representations succeed.
+    /// Checkpoints may advance only after the projected events are durable.
+    /// Session transcripts stay in each agent's own session file. Copying those
+    /// bytes into this database, then backing the database up, is what made a
+    /// real machine spend tens of gigabytes on the same session twice.
     /// Each write is idempotent; interruption before the checkpoint replays safely.
     func persistCollected(raw: [RawEvidenceRecord], events: [GuardEvent],
                           checkpoints: [SourceCheckpoint] = [],

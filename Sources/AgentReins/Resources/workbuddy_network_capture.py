@@ -11,6 +11,7 @@ import hashlib
 import json
 import os
 import re
+import threading
 import time
 from urllib.parse import urlsplit, quote
 from pathlib import Path
@@ -35,6 +36,29 @@ ROUTE_OUTPUT = Path(os.environ.get(
     "AGENTREINS_WORKBUDDY_ROUTE_JSONL",
     "~/Library/Application Support/AgentReins/workbuddy-network-routes.jsonl",
 )).expanduser()
+# One machine-wide journal used to grow without a bound. Keep the recent tail.
+_JSONL_MAX = 128 * 1024 * 1024
+_JSONL_KEEP = 64 * 1024 * 1024
+_jsonl_lock = threading.Lock()
+
+
+def _trim_jsonl(path):
+    try:
+        size = path.stat().st_size
+    except FileNotFoundError:
+        return
+    if size <= _JSONL_MAX:
+        return
+    with open(path, "rb") as handle:
+        handle.seek(size - _JSONL_KEEP)
+        tail = handle.read()
+    newline = tail.find(b"\n")
+    if newline != -1:
+        tail = tail[newline + 1 :]
+    temporary = path.with_name(path.name + ".trim")
+    temporary.write_bytes(tail)
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, path)
 
 
 # Website scope is learned only from the audited Agent WebFetch request.
@@ -76,16 +100,19 @@ def _endpoint(value):
 
 def _append_jsonl(path, record):
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
-    try:
-        data = memoryview((json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
-        while data:
-            written = os.write(fd, data)
-            if written <= 0:
-                raise OSError("capture journal write made no progress")
-            data = data[written:]
-    finally:
-        os.close(fd)
+    payload = memoryview((json.dumps(record, ensure_ascii=False, separators=(",", ":")) + "\n").encode())
+    with _jsonl_lock:
+        _trim_jsonl(path)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            data = payload
+            while data:
+                written = os.write(fd, data)
+                if written <= 0:
+                    raise OSError("capture journal write made no progress")
+                data = data[written:]
+        finally:
+            os.close(fd)
 
 
 def request(flow):

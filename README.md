@@ -57,7 +57,7 @@ Missing evidence stays missing. The app does not invent a body, a host, or a too
 
 ## Privacy
 
-Records stay under this user account. The audit proxy listens only on `127.0.0.1:18891`. It is started by AgentReins and stops when AgentReins quits. Normal Terminal windows are not pointed at it. Agent processes that load `~/.agentreins/audit.sh` use that proxy and the local mitmproxy certificate. The system proxy and the system trust store are left alone.
+Records stay under this user account. The audit proxy listens only on `127.0.0.1:18891`. It is started by AgentReins and stops when AgentReins quits. While that port is not listening, an agent uses its own network instead of a dead local proxy. WorkBuddy's saved settings are not left pointing at it. Normal Terminal windows are not pointed at it. The system proxy and the system trust store are left alone.
 
 ## Build
 

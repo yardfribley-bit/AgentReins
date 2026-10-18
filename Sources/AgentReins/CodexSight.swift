@@ -233,7 +233,7 @@ final class CodexSight: ObservableObject {
                                      fingerprint: nil, updatedAt: Date())
                 }
                 if !batch.raw.isEmpty || !collectedEvents.isEmpty || !checkpoints.isEmpty {
-                    try database.persistCollected(raw: batch.raw, events: collectedEvents, checkpoints: checkpoints)
+                    try database.persistCollected(raw: [], events: collectedEvents, checkpoints: checkpoints)
                 }
                 if let liveCursorURL, cursorNeedsRetry || !batch.sizes.isEmpty || !collectedEvents.isEmpty {
                     var committedSizes = previousSizes

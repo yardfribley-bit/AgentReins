@@ -57,7 +57,7 @@ final class WebAgentSight: ObservableObject {
             if let record {
                 do {
                     guard let database else { throw EventStoreReadError.databaseUnavailable }
-                    try database.persistCollected(raw: [record], events: events,
+                    try database.persistCollected(raw: [], events: events,
                         checkpoints: [SourceCheckpoint(source: "web-agent", stream: url.path,
                             offset: Int64(RawLogCapture.safeCheckpoint(for: record)),
                             fingerprint: record.fingerprint, updatedAt: Date())])

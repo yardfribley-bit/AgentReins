@@ -57,7 +57,6 @@ final class ZCodeSight: ObservableObject {
             let snapshot = fingerprint == previousFingerprint ? nil : Self.readLatestDatabase()
             let logs = Self.readLogs(previousOffsets: previousOffsets)
             let modelIO = Self.readModelIO(previousOffsets: previousOffsets)
-            let raw = (snapshot.map { [$0.rawEvidence] } ?? []) + logs.raw + modelIO.raw
             let projected = (snapshot?.events ?? []) + logs.events + modelIO.events
             let checkpoints = logs.offsets.map { stream, offset in
                 SourceCheckpoint(source: "zcode", stream: stream, offset: Int64(offset),
@@ -69,7 +68,7 @@ final class ZCodeSight: ObservableObject {
             var rawWriteFailed = false
             do {
                 guard let evidenceDatabase else { throw CocoaError(.fileWriteUnknown) }
-                try evidenceDatabase.persistCollected(raw: raw, events: projected, checkpoints: checkpoints)
+                try evidenceDatabase.persistCollected(raw: [], events: projected, checkpoints: checkpoints)
             } catch { rawWriteFailed = true }
             DispatchQueue.main.async {
                 guard let self else { return }

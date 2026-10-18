@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """Launch only WorkBuddy through AgentReins' independent local audit proxy.
-Does not change system proxy settings or install certificates. Refuses to
-interrupt an already-running WorkBuddy instance; close it normally first.
+Does not change system proxy settings or install certificates. The proxy is
+applied to this launch only; a saved WorkBuddy proxy is not left behind.
+Refuses to interrupt an already-running WorkBuddy instance; close it normally first.
 """
 import argparse, pathlib, socket, subprocess, json, datetime, os, tempfile
 p=argparse.ArgumentParser()
@@ -26,23 +27,31 @@ processes=subprocess.check_output(['ps','-axo','comm='],text=True).splitlines()
 if any(s.strip()==str(app/'Contents/MacOS/Electron') for s in processes):
  raise SystemExit('WorkBuddy is running. Close it normally, then run this launcher; no task was interrupted.')
 with socket.create_connection(('127.0.0.1',18891),timeout=2):pass
-# WorkBuddy's own proxy preference overrides the inherited HTTP(S)_PROXY
-# variables in its backend. Keep both routes consistent, with a reversible
-# backup and a compare-before-replace check.
+# The proxy is passed only to this launch. WorkBuddy's saved http.proxy
+# overrides process environment and keeps pointing at 18891 after AgentReins
+# exits, which drops WorkBuddy's network. Clear that leftover.
 settings=pathlib.Path.home()/'.workbuddy/settings.json'
-original=settings.read_bytes() if settings.exists() else b'{}'
-data=json.loads(original)
-if data.get('http.proxy')!='http://127.0.0.1:18891':
- data['http.proxy']='http://127.0.0.1:18891'
- backup=settings.with_name(settings.name+'.agentreins-proxy-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
- if settings.exists():backup.write_bytes(original);backup.chmod(0o600)
- fd,temporary=tempfile.mkstemp(prefix='.agentreins-proxy-',dir=settings.parent)
- try:
-  with os.fdopen(fd,'w') as f:json.dump(data,f,ensure_ascii=False,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
-  if (settings.read_bytes() if settings.exists() else b'{}')!=original:raise SystemExit('WorkBuddy settings changed concurrently; no overwrite made')
-  os.replace(temporary,settings)
- finally:
-  if os.path.exists(temporary):os.unlink(temporary)
- print('WorkBuddy proxy setting updated; backup: '+str(backup))
+if settings.exists():
+ original=settings.read_bytes()
+ data=json.loads(original)
+ changed=False
+ if data.get('http.proxy') in ('http://127.0.0.1:18891','http://127.0.0.1:18893'):
+  data.pop('http.proxy',None); changed=True
+ env=data.get('terminal.integrated.env.osx')
+ if isinstance(env,dict):
+  for key in ('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy'):
+   if isinstance(env.get(key),str) and '127.0.0.1:1889' in env[key]:
+    env.pop(key,None); changed=True
+ if changed:
+  backup=settings.with_name(settings.name+'.agentreins-proxy-'+datetime.datetime.now().strftime('%Y%m%d-%H%M%S'))
+  backup.write_bytes(original); backup.chmod(0o600)
+  fd,temporary=tempfile.mkstemp(prefix='.agentreins-proxy-',dir=settings.parent)
+  try:
+   with os.fdopen(fd,'w') as f:json.dump(data,f,ensure_ascii=False,indent=2);f.write('\n');f.flush();os.fsync(f.fileno())
+   if settings.read_bytes()!=original:raise SystemExit('WorkBuddy settings changed concurrently; no overwrite made')
+   os.replace(temporary,settings)
+  finally:
+   if os.path.exists(temporary):os.unlink(temporary)
+  print('Removed leftover WorkBuddy audit proxy setting; backup: '+str(backup))
 subprocess.run(command,check=True)
 print('WorkBuddy launched with AgentReins audit proxy. Submit a new task to verify actual request-body capture.')

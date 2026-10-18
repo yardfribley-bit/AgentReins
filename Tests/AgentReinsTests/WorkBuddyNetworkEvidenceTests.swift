@@ -345,6 +345,20 @@ final class WorkBuddyNetworkEvidenceTests: XCTestCase {
         XCTAssertEqual(read.nextOffset, UInt64(line.count))
     }
 
+    func testCompactJournalKeepsTheTailAndDoesNotReplayIt() throws {
+        let url = FileManager.default.temporaryDirectory.appendingPathComponent("journal-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: url) }
+        let head = Data(repeating: 0x61, count: 80) + Data([0x0A])
+        let tail = Data("kept-line\n".utf8)
+        try (head + tail).write(to: url)
+        let kept = try XCTUnwrap(WorkBuddyNetworkCapture.compactJournal(url: url, maximum: 50, keep: 20))
+        XCTAssertEqual(try String(contentsOf: url, encoding: .utf8), "kept-line\n")
+        XCTAssertEqual(kept, UInt64("kept-line\n".utf8.count))
+        let read = WorkBuddyNetworkCapture.read(url: url, offset: 10_000)
+        XCTAssertTrue(read.events.isEmpty)
+        XCTAssertEqual(read.nextOffset, kept)
+    }
+
     private func captureRecord(request: Data, response: Data, observedAt: Date = Date()) -> WorkBuddyNetworkCaptureRecord {
         WorkBuddyNetworkCaptureRecord(
             observedAt: observedAt, host: "copilot.tencent.com", path: "/v2/chat/completions",

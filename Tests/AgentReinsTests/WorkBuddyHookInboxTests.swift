@@ -43,10 +43,23 @@ final class WorkBuddyHookInboxTests: XCTestCase {
         let handle = try FileHandle(forWritingTo: file);try handle.seekToEnd();try handle.write(contentsOf: Data(added.utf8));try handle.close()
         let second = WorkBuddySight(rootURL: projects, database: db, hookRoot: inbox)
         second.start(realtimeOnly: true);defer { second.stop() }
+        let full = UInt64((old + added).utf8.count)
         let nextDeadline = Date().addingTimeInterval(4)
-        while try db.rawRecords(source: "workbuddy").isEmpty, Date() < nextDeadline { try await Task.sleep(for: .milliseconds(25)) }
-        let raw = try db.rawRecords(source: "workbuddy")
-        XCTAssertEqual(raw.count, 1);XCTAssertEqual(raw.first?.payload, Data(added.utf8))
+        func cursor() throws -> UInt64 {
+            let states = try db.parserStates(source: "workbuddy-live")
+            return try states.compactMap { key, data -> UInt64? in
+                guard key.hasSuffix("session.jsonl") else { return nil }
+                return try JSONDecoder().decode(WorkBuddySight.ParserState.self, from: data).offset
+            }.max() ?? 0
+        }
+        while (try? cursor()) ?? 0 < full, Date() < nextDeadline {
+            try await Task.sleep(for: .milliseconds(25))
+        }
+        XCTAssertGreaterThanOrEqual(try cursor(), full)
+        XCTAssertTrue(try db.rawRecords(source: "workbuddy").isEmpty)
+        let kept = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(kept.contains("pre-install"))
+        XCTAssertTrue(kept.contains("new while stopped"))
     }
 
     func testLargeToolResultIsNotSilentlyDroppedAtOldOneMegabyteLimit() throws {

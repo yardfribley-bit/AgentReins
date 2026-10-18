@@ -211,7 +211,7 @@ final class WorkBuddySight: ObservableObject {
                         offset: Int64(state.offset), fingerprint: nil, updatedAt: Date())
                 }
                 if !liveHooks.isEmpty || !batch.raw.isEmpty || !collectedEvents.isEmpty || !checkpoints.isEmpty {
-                    try database.persistCollected(raw: liveHooks.map(\.raw) + batch.raw, events: collectedEvents,
+                    try database.persistCollected(raw: [], events: collectedEvents,
                         checkpoints: checkpoints, parserStates: states)
                 }
                 // Only acknowledge our own spool after the evidence transaction succeeds.

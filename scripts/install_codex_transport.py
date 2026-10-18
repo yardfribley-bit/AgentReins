@@ -36,22 +36,33 @@ if [ "$AGENTREINS_TRANSPORT_AGENT" != "WorkBuddy" ] && [ "$AGENTREINS_TRANSPORT_
   return 0 2>/dev/null || exit 0
 fi
 export AGENTREINS_TRANSPORT_AGENT
-export HTTP_PROXY={shlex.quote(proxy)} HTTPS_PROXY={shlex.quote(proxy)} ALL_PROXY={shlex.quote(proxy)}
-export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" all_proxy="$ALL_PROXY"
-export NO_PROXY=localhost,127.0.0.1,::1 no_proxy="$NO_PROXY"
-if [ -f {shlex.quote(str(ca))} ]; then
-  export CURL_CA_BUNDLE={shlex.quote(str(ca))} SSL_CERT_FILE="$CURL_CA_BUNDLE" GIT_SSL_CAINFO="$CURL_CA_BUNDLE"
-  export NODE_EXTRA_CA_CERTS="$CURL_CA_BUNDLE" REQUESTS_CA_BUNDLE="$CURL_CA_BUNDLE"
+# The audit proxy belongs to AgentReins. When that process is not listening,
+# leave the agent's own network alone instead of black-holing it.
+if /usr/bin/nc -z -G 1 127.0.0.1 18891 >/dev/null 2>&1; then
+  export HTTP_PROXY={shlex.quote(proxy)} HTTPS_PROXY={shlex.quote(proxy)} ALL_PROXY={shlex.quote(proxy)}
+  export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" all_proxy="$ALL_PROXY"
+  export NO_PROXY=localhost,127.0.0.1,::1 no_proxy="$NO_PROXY"
+  if [ -f {shlex.quote(str(ca))} ]; then
+    export CURL_CA_BUNDLE={shlex.quote(str(ca))} SSL_CERT_FILE="$CURL_CA_BUNDLE" GIT_SSL_CAINFO="$CURL_CA_BUNDLE"
+    export NODE_EXTRA_CA_CERTS="$CURL_CA_BUNDLE" REQUESTS_CA_BUNDLE="$CURL_CA_BUNDLE"
+  fi
+  if [ -z "${{GIT_CONFIG_COUNT:-}}" ]; then
+    export GIT_CONFIG_COUNT=2
+    export GIT_CONFIG_KEY_0=http.proxy GIT_CONFIG_VALUE_0="$HTTP_PROXY"
+    export GIT_CONFIG_KEY_1=http.sslCAInfo GIT_CONFIG_VALUE_1="${{CURL_CA_BUNDLE:-}}"
+  fi
+else
+  case "${{HTTP_PROXY:-}}${{HTTPS_PROXY:-}}${{ALL_PROXY:-}}${{http_proxy:-}}${{https_proxy:-}}${{all_proxy:-}}${{GIT_CONFIG_VALUE_0:-}}" in
+    *127.0.0.1:18891*|*127.0.0.1:18893*)
+      unset HTTP_PROXY HTTPS_PROXY ALL_PROXY http_proxy https_proxy all_proxy
+      unset GIT_CONFIG_COUNT GIT_CONFIG_KEY_0 GIT_CONFIG_VALUE_0 GIT_CONFIG_KEY_1 GIT_CONFIG_VALUE_1
+      ;;
+  esac
 fi
 case ":$PATH:" in
   *:{shlex.quote(str(bin_dir))}:*) ;;
   *) export PATH={shlex.quote(str(bin_dir))}:$PATH ;;
 esac
-if [ -z "${{GIT_CONFIG_COUNT:-}}" ]; then
-  export GIT_CONFIG_COUNT=2
-  export GIT_CONFIG_KEY_0=http.proxy GIT_CONFIG_VALUE_0="$HTTP_PROXY"
-  export GIT_CONFIG_KEY_1=http.sslCAInfo GIT_CONFIG_VALUE_1="${{CURL_CA_BUNDLE:-}}"
-fi
 {functions}
 ''')
 audit.chmod(0o700)
@@ -86,20 +97,22 @@ if settings_path.exists():
     settings = json.loads(original)
     env = settings.setdefault('terminal.integrated.env.osx', {})
     if isinstance(env, dict):
+        # Do not store the audit proxy in WorkBuddy settings. That value
+        # survives AgentReins and makes WorkBuddy fail open-network when the
+        # proxy process is gone. audit.sh applies the proxy only while it listens.
+        for key in ('HTTP_PROXY', 'HTTPS_PROXY', 'ALL_PROXY', 'http_proxy', 'https_proxy', 'all_proxy',
+                    'NO_PROXY', 'no_proxy', 'NODE_EXTRA_CA_CERTS', 'CURL_CA_BUNDLE', 'SSL_CERT_FILE',
+                    'GIT_SSL_CAINFO', 'REQUESTS_CA_BUNDLE'):
+            value = env.get(key)
+            if isinstance(value, str) and ('127.0.0.1:18891' in value or '127.0.0.1:18893' in value or value.endswith('mitmproxy-ca-cert.pem')):
+                env.pop(key, None)
         env.update({
             'AGENTREINS_TRANSPORT_AGENT': 'WorkBuddy',
             'BASH_ENV': str(audit),
             'ENV': str(audit),
-            'HTTP_PROXY': proxy,
-            'HTTPS_PROXY': proxy,
-            'ALL_PROXY': proxy,
-            'NO_PROXY': 'localhost,127.0.0.1,::1',
-            'NODE_EXTRA_CA_CERTS': str(ca),
-            'CURL_CA_BUNDLE': str(ca),
-            'SSL_CERT_FILE': str(ca),
-            'GIT_SSL_CAINFO': str(ca),
-            'REQUESTS_CA_BUNDLE': str(ca),
         })
+        if settings.get('http.proxy') in ('http://127.0.0.1:18891', 'http://127.0.0.1:18893'):
+            settings.pop('http.proxy', None)
         backup = settings_path.with_name(settings_path.name + '.agentreins-env-' + datetime.datetime.now().strftime('%Y%m%d%H%M%S'))
         backup.write_bytes(original)
         backup.chmod(0o600)
