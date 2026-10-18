@@ -112,6 +112,7 @@ enum CapturedNetworkArchive {
             "details": event.command ?? "",
             "networkBody": body
         ]
+        if let call = event.toolCallId, !call.isEmpty { row["call"] = call }
         if let resource = RealtimeDetailProjector.resource(event: event, input: event.command, output: event.modelResponse, kind: "network") {
             var detail: [String: Any] = [:]
             if let domain = resource.domain { detail["domain"] = domain }

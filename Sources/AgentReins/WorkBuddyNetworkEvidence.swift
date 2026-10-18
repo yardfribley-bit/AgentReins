@@ -53,6 +53,8 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
     let responseSHA256: String?
     /// model, remote-tool, or local-target. Absent on captures made before this field.
     let accessHop: String?
+    /// Execution id placed on the request by the transport entry and removed before it leaves this machine.
+    let transportCall: String?
 
     init(observedAt: Date, host: String, path: String, method: String, httpVersion: String,
          contentEncoding: String?, declaredContentLength: Int?, capturedWireBodyBytes: Int,
@@ -63,13 +65,14 @@ struct WorkBuddyNetworkCaptureRecord: Codable, Equatable, Sendable {
          websiteParentFlow: String? = nil, websiteURL: String? = nil,
          requestComplete: Bool? = nil, requestHeaders: [[String]]? = nil,
          responseHeaders: [[String]]? = nil, responseSHA256: String? = nil, securityAudit: NetworkSecurityAudit? = nil,
-         accessHop: String? = nil) {
+         accessHop: String? = nil, transportCall: String? = nil) {
         self.securityAudit = securityAudit
         self.requestComplete = requestComplete
         self.requestHeaders = requestHeaders
         self.responseHeaders = responseHeaders
         self.responseSHA256 = responseSHA256
         self.accessHop = accessHop
+        self.transportCall = transportCall
         self.websiteParentFlow = websiteParentFlow
         self.websiteURL = websiteURL
         self.flowID = flowID
@@ -173,7 +176,7 @@ enum WorkBuddyNetworkEvidence {
             agent: "workbuddy", op: isModelRoute ? "network_prompt" : (isMemoryRoute ? "memory_recall" : "tool_service_request"),
             severity: "info", ts: record.observedAt,
             action: requestComplete ? "captured_complete" : "captured_partial", sessionId: session,
-            traceId: "workbuddy-http:\(identity)", turnId: identity,
+            traceId: "workbuddy-http:\(identity)", turnId: identity, toolCallId: record.transportCall,
             userIntent: intent, modelPrompt: String(decoding: requestData, as: UTF8.self),
             model: model, source: "agentsight:workbuddy-network-body",
             attributionConfidence: .confirmed,
@@ -189,7 +192,8 @@ enum WorkBuddyNetworkEvidence {
                 agent: "workbuddy", op: record.captureStage == "error" ? "error" : "response",
                 severity: record.captureStage == "error" ? "warning" : "info", ts: record.observedAt,
                 action: record.captureStage == "error" ? "failed" : "received", sessionId: session,
-                traceId: "workbuddy-http:\(identity)", turnId: identity, userIntent: intent,
+                traceId: "workbuddy-http:\(identity)", turnId: identity, toolCallId: record.transportCall,
+                userIntent: intent,
                 source: "agentsight:workbuddy-network-body", attributionConfidence: .confirmed,
                 attributionMethod: "same HTTPS flow identifier", localAddress: record.clientAddress,
                 remoteHost: record.remoteHost, remotePort: record.remotePort ?? 443, remoteDomain: record.host)]
@@ -204,7 +208,7 @@ enum WorkBuddyNetworkEvidence {
                 severity: "info", ts: record.observedAt,
                 action: record.responseComplete ? "received_complete" : "received_partial",
                 sessionId: session, traceId: "workbuddy-http:\(identity)",
-                turnId: identity, userIntent: intent,
+                turnId: identity, toolCallId: record.transportCall, userIntent: intent,
                 modelDecision: isModelRoute ? parsed.toolInstructions : nil,
                 modelReasoning: isModelRoute ? parsed.reasoning : nil,
                 modelResponse: isModelRoute ? parsed.text : String(decoding: responseData, as: UTF8.self),

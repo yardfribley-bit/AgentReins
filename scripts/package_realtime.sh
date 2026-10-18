@@ -16,6 +16,7 @@ cp "$BIN_DIR/AgentReinsHook" "$APP_BUNDLE/Contents/MacOS/AgentReinsHook"
 cp "$BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
 cp "$PROJECT_DIR/Sources/AgentReins/Resources/workbuddy_network_capture.py" "$APP_BUNDLE/Contents/Resources/"
+cp "$PROJECT_DIR/Sources/AgentReins/Resources/content_audit.py" "$APP_BUNDLE/Contents/Resources/"
 # Direct app resources avoid SwiftPM's absolute development-path fallback.
 cp -R "$PROJECT_DIR/Sources/AgentReins/Resources/RealtimeWorkspace" "$APP_BUNDLE/Contents/Resources/"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'

@@ -115,10 +115,24 @@
    const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
    const statusLine=received.flatMap(block=>list(block.http).map(String)).filter(line=>/^HTTP\//.test(line)&&!/connection established/i.test(line)).pop();
    const statusMatch=statusLine&&statusLine.match(/\s(\d{3})\b/);
-   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,exitCode:run.exitCode,gap:run.gap||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
+   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
   }).filter(Boolean);
  }
  function localExchanges(){return projectLocal(localRuns);}
+ function foldCapturedIntoCalls(locals,exchanges){
+  const byCall=new Map();
+  for(const row of locals) if(row.call) byCall.set(String(row.call),row);
+  return exchanges.filter(row=>{
+   const call=row.call&&byCall.get(String(row.call));
+   if(!call) return true;
+   const body=row.networkBody||{}, local=call.networkBody;
+   if(body.response && (!local.response || String(body.response).length>String(local.response).length)) local.response=body.response;
+   if(body.request && (!local.request || String(body.request).length>String(local.request).length)) local.request=body.request;
+   if(body.responseStatus && !local.responseStatus) local.responseStatus=body.responseStatus;
+   if(body.securityAudit) local.securityAudit=mergeAudit(local.securityAudit, body.securityAudit);
+   return false;
+  });
+ }
  function cardObject(card){
   try{const value=JSON.parse(card&&card.input||'');if(value&&typeof value==='object'&&!Array.isArray(value))return value;}catch{}
   return {};
@@ -458,12 +472,76 @@
   if(String(value).trim()==='')return complete===true?'正文为空':'未采到';
   return readablePreview(value);
  }
+ const auditLabels={'credential-outbound':'发送正文疑似包含访问凭据','private-key-outbound':'发送正文包含私钥标记','instruction-override-inbound':'返回内容含覆盖指令的可疑文本','download-execute-inbound':'返回内容含下载后执行命令'};
+ function builtinFindings(request, response){
+  const rules=[
+   ['credential-outbound','request',/(?:sk-(?:proj-|or-v1-)[A-Za-z0-9_-]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{16})/g],
+   ['private-key-outbound','request',/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/g],
+   ['instruction-override-inbound','response',/ignore (?:all |the )?(?:previous|prior|system) instructions|忽略(?:之前|上述|系统)(?:的)?(?:指令|规则)/gi],
+   ['download-execute-inbound','response',/(?:curl|wget)[^\r\n]{0,400}\|\s*(?:bash|sh)\b/gi]
+  ];
+  const texts={request, response};
+  const findings=[];
+  for(const [rule, direction, pattern] of rules){
+   pattern.lastIndex=0;
+   let count=0, first=null, match;
+   const text=texts[direction]||'';
+   while((match=pattern.exec(text))){
+    count+=1;
+    if(first==null) first=match.index;
+    if(!match[0]) pattern.lastIndex+=1;
+   }
+   if(count) findings.push({rule, direction, count, characterOffset:first, basis:'captured_body_pattern', status:'needs_review'});
+  }
+  return findings;
+ }
+ function mergeAudit(left, right){
+  if(!left) return right;
+  if(!right) return left;
+  const findings=[];
+  const seen=new Set();
+  for(const item of [...list(left.findings), ...list(right.findings)]){
+   const key=(item.rule||'')+'|'+(item.direction||'');
+   if(seen.has(key)) continue;
+   seen.add(key);
+   findings.push(item);
+  }
+  return Object.assign({}, left, right, {findings, verdict:findings.length?'review':(right.verdict||left.verdict||'no_rule_match')});
+ }
+ function agentAudit(r){
+  if(/加密/.test(String(r.gap||''))) return {verdict:'no_body', findings:[], scope:'no_plaintext'};
+  const body=r.networkBody||{};
+  const request=String(body.request||'').replace(/^.*X-AgentReins-Call:.*$/gim,'').trim();
+  const response=String(body.response||'').replace(/^.*X-AgentReins-Call:.*$/gim,'').trim();
+  const stored=body.securityAudit&&typeof body.securityAudit==='object'?body.securityAudit:null;
+  const fresh=(request||response)?builtinFindings(request, response):[];
+  const merged=mergeAudit(stored, {findings:fresh, destinationHost:stored?.destinationHost||r.host||null});
+  const findings=list(merged.findings);
+  if(findings.length) return Object.assign({}, merged, {findings, verdict:'review'});
+  if(!request&&!response) return {verdict:'no_body', findings:[], scope:'no_plaintext', destinationHost:r.host||null};
+  return Object.assign({}, merged, {findings:[], verdict:'no_rule_match'});
+ }
+ function destinationSentence(audit){
+  const host=audit.destinationHost||'';
+  if(audit.destinationPolicy==='approved') return '接收方'+(host?' '+host:'')+' 在你配置的名单里。';
+  if(audit.destinationPolicy==='unapproved') return '接收方'+(host?' '+host:'')+' 不在你配置的名单里。';
+  if(audit.destinationPolicy==='not_configured') return '还没配置接收方。';
+  return '';
+ }
  function securityLine(r){
-  const audit=r.networkBody?.securityAudit;
-  if(!audit)return '';
+  const audit=agentAudit(r);
+  const who='这次 '+(r.tool||'工具')+' 发往 '+showWhere(r)+'。';
+  if(audit.verdict==='no_body') return '<p class="network-notice">'+esc(who+'这次没有正文可查。')+'</p>';
+  const dest=destinationSentence(audit);
   const findings=list(audit.findings);
-  if(!findings.length)return '';
-  return '<p class="network-notice">需核查 · '+esc(findings.map(item=>item.label||item.rule).filter(Boolean).join('、'))+'</p>';
+  if(!findings.length) return '<p class="network-notice">'+esc(who+'这次正文按现有规则看过，没有命中。'+dest)+'</p>';
+  const items=findings.map(item=>{
+   const name=item.label||auditLabels[item.rule]||item.rule;
+   const side=item.direction==='response'?'收回':'送出';
+   const advice=item.recommendation||(/credential|private-key|secret/.test(String(item.rule))?'如为有效密钥，请撤销或轮换。':'核对是不是这次任务要的内容。');
+   return name+'。'+side+'里 '+(item.count||1)+' 处，第一次在第 '+(item.characterOffset??0)+' 个字符。'+advice;
+  }).join('');
+  return '<p class="network-notice">需核查。'+esc(who+items+dest)+'</p>';
  }
  function showWhere(r){
   const hop=accessHop(r);
@@ -525,6 +603,10 @@
   return '—';
  }
  function verdict(r){
+  const text=connectionVerdict(r);
+  return list(agentAudit(r).findings).length?text+' · 需核查':text;
+ }
+ function connectionVerdict(r){
   const status=Number(r.networkBody?.responseStatus);
   const exit=r.exitCode!=null&&r.exitCode!==''?Number(r.exitCode):null;
   const back=broughtPhrase(r);
@@ -687,7 +769,7 @@
  function readableExchange(value){
   const raw=String(value||'');
   if(!raw.trim()||/certificate verify|error setting certificate|CAfile/i.test(raw))return '';
-  const text=readablePreview(raw).replace(/^(?:网页《[^》]*》|网页)\n?/,'').trim();
+  const text=readablePreview(raw).replace(/^(?:网页《[^》]*》|网页)\n?/,'').replace(/^.*X-AgentReins-Call:.*$/gim,'').trim();
   return text==='未采到'?'':text;
  }
  function sentView(r){
@@ -753,7 +835,7 @@
   const hop=accessHop(r);
   if(hop.kind==='remote-tool')return '本机和远程工具之间的交互。工具自己再去网站的那一段不在本机。';
   if(hop.kind==='model')return '本机和模型服务之间的交互。';
-  const call=r.call?'已对上这次工具调用。':'还没对上哪次工具调用。';
+  const call=r.call?'这次执行就是这次工具调用。':'还没对上哪次工具调用。';
   return '本机 '+(r.tool||'工具')+' 和 '+showWhere(r)+' 之间的交互。'+call;
  }
  function protocolRaw(r){
@@ -788,14 +870,14 @@
   let records,title,note,showAll;
   if(!activeTask){
    const locals=localExchanges().filter(record=>(agent==='all'||record.agent===agent)&&networkBehavior(record));
-   const exchanges=allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(agent==='all'||record.agent===agent));
+   const exchanges=foldCapturedIntoCalls(locals,allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(agent==='all'||record.agent===agent)));
    records=[...locals,...exchanges].sort((a,b)=>new Date(b.startedAt||b.timestamp)-new Date(a.startedAt||a.timestamp)).filter(matches).slice(0,40);
    title='全部外网访问';
    note='还没归进任务的，也列在这里。';
    showAll=true;
   }else{
    const taskLocals=localExchanges().filter(record=>record.agent===activeTask.agent&&activeTask.session&&(record.session===activeTask.session||record.codexThreadID===activeTask.session)&&networkBehavior(record));
-   const taskExchanges=allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(record.taskID===activeTask.id||taskForVisit(record,[activeTask])?.task));
+   const taskExchanges=foldCapturedIntoCalls(taskLocals,allRows.filter(record=>record.networkBody?.flow&&showOnAccessPage(record)&&(record.taskID===activeTask.id||taskForVisit(record,[activeTask])?.task)));
    const covered=new Set([...taskLocals,...taskExchanges].map(record=>visitSite(record)?toolName(record,[activeTask])+'\0'+visitSite(record):'').filter(Boolean));
    const toolVisits=taskToolVisits(activeTask).filter(record=>{const site=visitSite(record);return networkBehavior(record)&&!(site&&covered.has(toolName(record,[activeTask])+'\0'+site));});
    const byID=new Map();

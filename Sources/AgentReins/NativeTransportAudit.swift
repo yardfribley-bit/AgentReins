@@ -21,7 +21,7 @@ enum NativeTransportAudit {
                   let invocation = item["invocation"] as? [String: Any],
                   invocation["captureMode"] as? String == "agent-path" else { continue }
             var row: [String: Any] = ["runID": file.deletingLastPathComponent().lastPathComponent]
-            for key in ["agent", "tool", "args", "task", "startedAt", "pid", "exitCode", "captureMode", "gap", "codexThreadID", "session"] {
+            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "captureMode", "gap", "codexThreadID", "session"] {
                 row[key] = invocation[key] ?? NSNull()
             }
             for key in ["connections", "children", "blocks", "helpers", "packFiles"] { row[key] = item[key] as? [Any] ?? [] }
@@ -29,6 +29,7 @@ enum NativeTransportAudit {
             row["outboundFiles"] = item["outboundFiles"] as? [Any] ?? []
             row["downloads"] = item["downloads"] as? [Any] ?? []
             row["formulas"] = item["formulas"] as? [Any] ?? []
+            if let audit = item["securityAudit"] as? [String: Any] { row["securityAudit"] = audit }
             row["limitations"] = invocation["tool"] as? String == "git" ? ["只有独立 helper 日志并经 Trace2 核对的记录可确认子进程；同一 helper 的并发连接编号仍未提供。", "Git 文本追踪不能还原完整二进制正文；单独保存的对象包仅覆盖 clone/fetch 接收的 PACK 数据，不代表整个协议或 push 正文。"] : []
             records.append(row)
         }

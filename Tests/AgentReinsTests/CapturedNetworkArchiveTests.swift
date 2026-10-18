@@ -10,7 +10,7 @@ final class CapturedNetworkArchiveTests: XCTestCase {
         defer { try? FileManager.default.removeItem(at: live); try? FileManager.default.removeItem(at: archive) }
         let folder = live.appendingPathComponent("run-1")
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-        let item: [String: Any] = ["invocation": ["agent": "Cursor", "captureMode": "agent-path", "tool": "gh", "args": ["pr", "list"], "startedAt": "2026-10-17T10:00:00Z"]]
+        let item: [String: Any] = ["invocation": ["agent": "Cursor", "captureMode": "agent-path", "tool": "gh", "args": ["pr", "list"], "startedAt": "2026-10-17T10:00:00Z"], "securityAudit": ["verdict": "no_rule_match", "findings": []]]
         try JSONSerialization.data(withJSONObject: item).write(to: folder.appendingPathComponent("transport.json"))
         let first = CapturedNetworkArchive.commandRecords(liveRoot: live, archiveRoot: archive)
         XCTAssertEqual(first.first?["runID"] as? String, "run-1")
@@ -18,6 +18,7 @@ final class CapturedNetworkArchiveTests: XCTestCase {
         let second = CapturedNetworkArchive.commandRecords(liveRoot: live, archiveRoot: archive)
         XCTAssertEqual(second.first?["runID"] as? String, "run-1")
         XCTAssertEqual(second.first?["tool"] as? String, "gh")
+        XCTAssertEqual((second.first?["securityAudit"] as? [String: Any])?["verdict"] as? String, "no_rule_match")
     }
 
     func testHTTPSTailIncludesEarlierCapturesAndSkipsTelemetry() throws {
@@ -30,7 +31,8 @@ final class CapturedNetworkArchiveTests: XCTestCase {
             httpVersion: "HTTP/2", contentEncoding: nil, declaredContentLength: body.count, capturedWireBodyBytes: body.count,
             requestBodyBase64: body.base64EncodedString(), requestSHA256: sha256(body), responseStatus: 200,
             responseComplete: true, responseBodyBase64: response.base64EncodedString(), remoteHost: "39.156.68.124",
-            remotePort: 443, flowID: "old-baidu", requestComplete: true, responseSHA256: sha256(response), accessHop: "local-target")
+            remotePort: 443, flowID: "old-baidu", requestComplete: true, responseSHA256: sha256(response), accessHop: "local-target",
+            transportCall: "11111111-2222-3333-4444-555555555555")
         let noise = WorkBuddyNetworkCaptureRecord(
             observedAt: Date(), host: "galileotelemetry.tencent.com", path: "/collect", method: "POST",
             httpVersion: "HTTP/2", contentEncoding: nil, declaredContentLength: body.count, capturedWireBodyBytes: body.count,
@@ -43,6 +45,7 @@ final class CapturedNetworkArchiveTests: XCTestCase {
         try Data(text.utf8).write(to: log)
         let rows = CapturedNetworkArchive.httpsRecords(jsonl: log)
         XCTAssertTrue(rows.contains { ($0["resource"] as? [String: Any])?["domain"] as? String == "news.baidu.com" })
+        XCTAssertEqual(rows.first { ($0["resource"] as? [String: Any])?["domain"] as? String == "news.baidu.com" }?["call"] as? String, "11111111-2222-3333-4444-555555555555")
         XCTAssertFalse(rows.contains { ($0["resource"] as? [String: Any])?["domain"] as? String == "galileotelemetry.tencent.com" })
     }
 

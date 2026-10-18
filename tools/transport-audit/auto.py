@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Agent-only PATH entry. No permission decisions, shell parsing or proxy changes."""
-import datetime,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
+import datetime,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
 BASE=pathlib.Path(__file__).resolve().parent
 ENCRYPTED_TOOLS={'ssh','scp','sftp','rsync'}
 
@@ -46,6 +46,32 @@ def destination_from_args(args):
         elif '@' in item or re.fullmatch(host, item) or re.fullmatch(ipv4, item): peers.append(item)
     return (urls or peers or [None])[0]
 
+def content_audit(evidence):
+    """Check the text this execution retained. Encrypted channels have no plaintext to inspect."""
+    invocation=evidence.get('invocation') or {}
+    if '加密' in str(invocation.get('gap') or ''):
+        return {'version':'content-rules-v2','findings':[],'verdict':'no_body','scope':'no_plaintext','policyError':None,'destinationHost':None,'destinationPolicy':'not_configured','requestBytesInspected':0,'responseBytesInspected':None}
+    def side(direction):
+        chunks=[]
+        for block in evidence.get('blocks') or []:
+            if block.get('direction')!=direction: continue
+            http='\n'.join(str(line) for line in (block.get('http') or []))
+            preview=str(block.get('textPreview') or '')
+            chunks.append('\n'.join(part for part in (http, preview) if part))
+        return '\n\n'.join(chunks)
+    host=None
+    for conn in evidence.get('connections') or []:
+        detail=(conn.get('detail') or [None])[0]
+        if detail and not str(detail).startswith('127.'):
+            host=str(detail).split(' ')[0].split(':')[0]
+            break
+    path=pathlib.Path(__file__).resolve().parents[2]/'Sources'/'AgentReins'/'Resources'/'content_audit.py'
+    spec=importlib.util.spec_from_file_location('agentreins_content_audit', path)
+    module=importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    request, response=side('send'), side('receive')
+    return module.audit(request, response, bool(response), host, scope='transport_text')
+
 def main():
     tool=pathlib.Path(sys.argv[0]).name
     if not entry_allowed(tool):raise SystemExit('Invalid transport entry')
@@ -60,7 +86,8 @@ def main():
         manifest={'schema':1,'agent':agent,'tool':tool,'startedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'launcherPID':os.getpid(),'parentPID':os.getppid(),'captureMode':'agent-path',
                   'args':[redact_text(str(arg))[:500] for arg in args][:40],
-                  'task':None,'call':None,'codexThreadID':env.get('CODEX_THREAD_ID') if agent=='Codex' else None,'session':env.get('CODEX_THREAD_ID') if agent=='Codex' else env.get('CODEBUDDY_SESSION_ID') if agent=='WorkBuddy' else env.get('CURSOR_CONVERSATION_ID'),'nativeRequestID':env.get('CODEBUDDY_CONVERSATION_REQUEST_ID'),'nativeMessageID':env.get('CODEBUDDY_CONVERSATION_MESSAGE_ID'),'coverage':'PATH-resolved command; absolute paths and overwritten PATH bypass this entry'}
+                  'task':None,'call':run.name,'codexThreadID':env.get('CODEX_THREAD_ID') if agent=='Codex' else None,'session':env.get('CODEX_THREAD_ID') if agent=='Codex' else env.get('CODEBUDDY_SESSION_ID') if agent=='WorkBuddy' else env.get('CURSOR_CONVERSATION_ID'),'nativeRequestID':env.get('CODEBUDDY_CONVERSATION_REQUEST_ID'),'nativeMessageID':env.get('CODEBUDDY_CONVERSATION_MESSAGE_ID'),'coverage':'PATH-resolved command; absolute paths and overwritten PATH bypass this entry'}
+        env['AGENTREINS_TRANSPORT_CALL']=run.name
         def save(name,data):
             tmp=run/(name+'.tmp')
             fd=os.open(tmp,os.O_WRONLY|os.O_CREAT|os.O_TRUNC,0o600)
@@ -71,6 +98,7 @@ def main():
             fd=os.open(run/name,os.O_CREAT|os.O_WRONLY,0o600);os.close(fd)
         command=[real,*args]
         if tool=='git':
+            command=[real,'-c','http.extraHeader=X-AgentReins-Call: '+run.name,*args]
             if any(k in env for k in ('GIT_TRACE_CURL','GIT_TRACE2_EVENT')):
                 manifest['gap']='Existing Git trace configuration retained'
             else:
@@ -93,10 +121,14 @@ def main():
         elif tool=='curl':
             conflicts=any(x.startswith(('--trace','--verbose','--no-trace','--config','-K')) or (x.startswith('-') and not x.startswith('--') and 'v' in x[1:]) for x in args)
             # Do not override user curl tracing/config semantics.
-            if conflicts:manifest['gap']='Explicit curl trace/config options retained; body capture unavailable'
-            else:command=[real,'--trace',str(run/'curl.trace'),'--trace-time','--trace-ids',*args]
+            if conflicts:
+                manifest['gap']='Explicit curl trace/config options retained; body capture unavailable'
+                command=[real,'-H','X-AgentReins-Call: '+run.name,*args]
+            else:command=[real,'--trace',str(run/'curl.trace'),'--trace-time','--trace-ids','-H','X-AgentReins-Call: '+run.name,*args]
         elif tool=='wget' and '-d' not in args and '--debug' not in args:
-            command=[real,'-d',*args]
+            command=[real,'-d','--header=X-AgentReins-Call: '+run.name,*args]
+        elif tool=='wget':
+            command=[real,'--header=X-AgentReins-Call: '+run.name,*args]
         elif tool=='gh' and 'GH_DEBUG' not in env:
             env['GH_DEBUG']='api'
         elif tool in ENCRYPTED_TOOLS and not any(a in ('-v','-vv','-vvv') for a in args):
@@ -195,7 +227,11 @@ def main():
         if downloaded:evidence['downloads']=downloaded
         formulas=brew_formulas(args) if tool=='brew' else []
         if formulas:evidence['formulas']=formulas
-        evidence['attribution']='Agent launch environment; native task and call identity unconfirmed'
+        evidence['attribution']='这次执行的编号就是这次工具调用'
+        try:
+            evidence['securityAudit']=content_audit(evidence)
+        except Exception as audit_error:
+            evidence['securityAudit']={'version':'content-rules-v2','findings':[],'verdict':'no_body','scope':'no_plaintext','policyError':type(audit_error).__name__,'requestBytesInspected':0,'responseBytesInspected':None}
         save('transport.json',evidence)
     except Exception as error:
         manifest['projectionError']=type(error).__name__;save('manifest.json',manifest)
