@@ -47,11 +47,15 @@ def destination_from_args(args):
     return (urls or peers or [None])[0]
 
 def load_content_audit():
-    """The checker sits beside this entry, or in the app sources when running from the repo."""
+    """The checker sits beside this entry, or in the repo sources.
+
+    This file lives in tools/transport-audit. parents[1] of that directory is
+    the repository root. parents[2] is the directory above the repo.
+    """
     here=pathlib.Path(__file__).resolve().parent
     candidates=[here/'content_audit.py']
-    if len(here.parents)>2:
-        candidates.append(here.parents[2]/'Sources'/'AgentReins'/'Resources'/'content_audit.py')
+    if len(here.parents)>1:
+        candidates.append(here.parents[1]/'Sources'/'AgentReins'/'Resources'/'content_audit.py')
     for path in candidates:
         if path.is_file():
             spec=importlib.util.spec_from_file_location('agentreins_content_audit', path)
@@ -77,16 +81,43 @@ def proxy_endpoint_selected(env, tool, args):
             return False
     return True
 
-def audit_proxy_open():
+def selected_audit_port(env):
+    """The local audit proxy port named by the environment, if any."""
+    for key in ('HTTPS_PROXY','https_proxy','HTTP_PROXY','http_proxy','ALL_PROXY','all_proxy','GIT_CONFIG_VALUE_0'):
+        value=env.get(key) or ''
+        if '127.0.0.1:18893' in value: return 18893
+        if '127.0.0.1:18891' in value: return 18891
+    return None
+
+def command_bypasses_audit_proxy(tool, args):
+    """The command names its own proxy or turns proxying off. Do not add the call header."""
+    for index, arg in enumerate(args):
+        text=str(arg)
+        if tool=='curl' and (text in ('-x','--proxy','--noproxy') or text.startswith(('--proxy=','--noproxy=','--socks','--preproxy')) or (text.startswith('-x') and text not in ('-x','-X'))):
+            return True
+        if tool=='wget' and (text in ('--no-proxy','-Y') or text.startswith(('--no-proxy=','--proxy','-Y'))):
+            return True
+        if tool=='git':
+            lowered=text.lower()
+            if lowered.startswith('-c') and 'http.proxy' in lowered:
+                return True
+            if text=='-c' and index+1<len(args) and 'http.proxy' in str(args[index+1]).lower():
+                return True
+    return False
+
+def audit_proxy_open(port=18891):
     import socket
     try:
-        with socket.create_connection(('127.0.0.1',18891),timeout=1):
+        with socket.create_connection(('127.0.0.1',int(port)),timeout=1):
             return True
     except OSError:
         return False
 
 def through_audit_proxy(env, tool, args):
-    return proxy_endpoint_selected(env, tool, args) and audit_proxy_open()
+    if command_bypasses_audit_proxy(tool, args):
+        return False
+    port=selected_audit_port(env)
+    return port is not None and proxy_endpoint_selected(env, tool, args) and audit_proxy_open(port)
 
 def with_call_header(tool, real, args, call, include):
     """The call header leaves this machine only when the audit proxy will strip it."""

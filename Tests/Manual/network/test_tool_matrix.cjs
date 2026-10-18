@@ -229,6 +229,16 @@ assert.match(multi.innerHTML, /first-body-alpha/);
 assert.match(multi.innerHTML, /second-body-beta/);
 assert.match(multi.innerHTML, /2 处/);
 assert.match(multi.innerHTML, /第 10 个字符/);
+const sameCall = '33333333-4444-5555-6666-777777777777';
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'WorkBuddy', tool: 'curl', startedAt: '2026-10-17T08:33:00Z', pid: 43, exitCode: 0, runID: sameCall, call: sameCall, session: 'wb-1', args: ['https://one.example/a'], connections: [{ kind: 'connected', detail: ['one.example:443'] }], blocks: [{ direction: 'send', kind: 'data', http: ['GET /a HTTP/1.1', 'Host: one.example'] }], securityAudit: { verdict: 'review', findings: [{ rule: 'credential-outbound', direction: 'request', count: 1, characterOffset: 80 }] } }
+]);
+const once = { innerHTML: '' };
+api.render(once, { tasks: [task], collected: [
+  { id: 'same-1', agent: 'WorkBuddy', source: 'agentsight:workbuddy-network-body', kind: 'network', timestamp: '2026-10-17T08:33:01Z', session: 'wb-1', turn: 'turn-1', call: sameCall, details: JSON.stringify({ requestPath: '/a', method: 'GET' }), resource: { domain: 'one.example', method: 'GET', url: 'https://one.example/a', remoteIP: '9.9.9.9', remotePort: 443, evidenceType: 'http' }, networkBody: { flow: 'workbuddy-http:same-1', request: 'proxy-request-alpha', response: 'proxy-body-alpha', responseStatus: 200, securityAudit: { findings: [{ rule: 'credential-outbound', direction: 'request', count: 1, characterOffset: 80 }] } } }
+] }, { taskOnly: 'visit', selected: 'local-transport:' + sameCall });
+assert.match(once.innerHTML, /1 处/);
+assert.doesNotMatch(once.innerHTML, /2 处/);
 const failedAudit = { innerHTML: '' };
 api.setLocalTransports([
   { captureMode: 'agent-path', agent: 'WorkBuddy', tool: 'curl', startedAt: '2026-10-17T08:31:00Z', pid: 41, exitCode: 0, runID: 'audit-fail', session: 'wb-1', args: ['https://example.com/full'], connections: [{ kind: 'connected', detail: ['example.com:443'] }], blocks: [{ direction: 'send', kind: 'data', textPreview: 'hello', previewTruncated: true }], securityAudit: { verdict: 'audit_error', findings: [], inspectionTruncated: false } }

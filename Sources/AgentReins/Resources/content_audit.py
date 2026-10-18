@@ -78,6 +78,24 @@ def _scan_text(text, direction, found, base_offset=0):
             _remember(found, rule, direction, severity, base_offset + match.start())
 
 
+_HEX_DUMP = re.compile(r"^[0-9a-fA-F]+: ")
+
+
+def _trace_line_text(line):
+    """curl --trace stores each 16 payload bytes as hex, then a display column.
+
+    Git's textual trace has no such line, so it stays as written. The display
+    column is not scanned: the hex bytes already contain that text.
+    """
+    if not _HEX_DUMP.match(line):
+        return line
+    payload = line.split(": ", 1)[1][:48]
+    values = re.findall(r"(?<!\S)[0-9a-fA-F]{2}(?!\S)", payload)
+    if not values:
+        return line
+    return bytes.fromhex("".join(values)).decode("utf-8", "replace")
+
+
 def _split_trace(path):
     """Raw curl/git trace text, split by send and receive, before any redaction."""
     request, response, current = [], [], None
@@ -88,7 +106,7 @@ def _split_trace(path):
             elif "<= Recv" in line:
                 current = response
             if current is not None:
-                current.append(line)
+                current.append(_trace_line_text(line))
     return "".join(request), "".join(response)
 
 

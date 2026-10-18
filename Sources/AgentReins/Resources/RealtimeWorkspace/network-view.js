@@ -134,7 +134,11 @@
     if(body.request && (!local.request || String(body.request).length>String(local.request).length)) local.request=body.request;
     if(body.responseStatus && !local.responseStatus) local.responseStatus=body.responseStatus;
    }
-   if(body.securityAudit) call.networkBody.securityAudit=mergeAudit(call.networkBody.securityAudit, body.securityAudit);
+   if(call.traceAudit===undefined) call.traceAudit=call.networkBody.securityAudit||null;
+   if(body.securityAudit){
+    call.proxyAudit=mergeAudit(call.proxyAudit, body.securityAudit);
+    call.networkBody.securityAudit=mergeAudit(call.traceAudit, call.proxyAudit, 'overlap');
+   }
    return false;
   });
  }
@@ -500,7 +504,7 @@
   }
   return findings;
  }
- function mergeAudit(left, right){
+ function mergeAudit(left, right, overlap){
   if(!left) return right;
   if(!right) return left;
   const findings=[];
@@ -514,7 +518,8 @@
     findings.push(copy);
     continue;
    }
-   previous.count=(Number(previous.count)||1)+(Number(item.count)||1);
+   const count=Number(item.count)||1;
+   previous.count=overlap==='overlap'?Math.max(Number(previous.count)||1, count):(Number(previous.count)||1)+count;
    const offsets=[previous.characterOffset, item.characterOffset].filter(value=>value!=null);
    if(offsets.length) previous.characterOffset=Math.min(...offsets);
   }
