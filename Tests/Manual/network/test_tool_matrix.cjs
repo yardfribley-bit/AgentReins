@@ -213,6 +213,35 @@ assert.match(sshPage.innerHTML, /<td>看不到通道里的内容<\/td>/);
 const cleanPage = { innerHTML: '' };
 api.render(cleanPage, { tasks: [task], collected: [] }, { taskOnly: 'visit', selected: 'local-transport:curl-clean' });
 assert.match(cleanPage.innerHTML, /这次正文按现有规则看过，没有命中/);
+const multiCall = '22222222-3333-4444-5555-666666666666';
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'WorkBuddy', tool: 'curl', startedAt: '2026-10-17T08:30:00Z', pid: 40, exitCode: 0, runID: multiCall, call: multiCall, session: 'wb-1', args: ['https://one.example/a', 'https://two.example/b'], connections: [{ kind: 'connected', detail: ['one.example:443'] }], blocks: [{ direction: 'send', kind: 'data', http: ['GET /a HTTP/1.1', 'Host: one.example'] }] }
+]);
+api.setCapturedBodies([]);
+const multi = { innerHTML: '' };
+api.render(multi, { tasks: [task], collected: [
+  { id: 'sub-1', agent: 'WorkBuddy', source: 'agentsight:workbuddy-network-body', kind: 'network', timestamp: '2026-10-17T08:30:01Z', session: 'wb-1', turn: 'turn-1', call: multiCall, details: JSON.stringify({ requestPath: '/a', method: 'GET' }), resource: { domain: 'one.example', method: 'GET', url: 'https://one.example/a', remoteIP: '9.9.9.9', remotePort: 443, evidenceType: 'http' }, networkBody: { flow: 'workbuddy-http:sub-1', request: 'first-request-alpha', response: 'first-body-alpha', responseStatus: 200, securityAudit: { findings: [{ rule: 'credential-outbound', direction: 'request', count: 1, characterOffset: 80 }] } } },
+  { id: 'sub-2', agent: 'WorkBuddy', source: 'agentsight:workbuddy-network-body', kind: 'network', timestamp: '2026-10-17T08:30:02Z', session: 'wb-1', turn: 'turn-1', call: multiCall, details: JSON.stringify({ requestPath: '/b', method: 'GET' }), resource: { domain: 'two.example', method: 'GET', url: 'https://two.example/b', remoteIP: '9.9.9.10', remotePort: 443, evidenceType: 'http' }, networkBody: { flow: 'workbuddy-http:sub-2', request: 'second-request-beta', response: 'second-body-beta', responseStatus: 200, securityAudit: { findings: [{ rule: 'credential-outbound', direction: 'request', count: 1, characterOffset: 10 }] } } }
+] }, { taskOnly: 'visit', selected: 'local-transport:' + multiCall });
+assert.match(multi.innerHTML, /第 1 次/);
+assert.match(multi.innerHTML, /第 2 次/);
+assert.match(multi.innerHTML, /first-body-alpha/);
+assert.match(multi.innerHTML, /second-body-beta/);
+assert.match(multi.innerHTML, /2 处/);
+assert.match(multi.innerHTML, /第 10 个字符/);
+const failedAudit = { innerHTML: '' };
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'WorkBuddy', tool: 'curl', startedAt: '2026-10-17T08:31:00Z', pid: 41, exitCode: 0, runID: 'audit-fail', session: 'wb-1', args: ['https://example.com/full'], connections: [{ kind: 'connected', detail: ['example.com:443'] }], blocks: [{ direction: 'send', kind: 'data', textPreview: 'hello', previewTruncated: true }], securityAudit: { verdict: 'audit_error', findings: [], inspectionTruncated: false } }
+]);
+api.render(failedAudit, { tasks: [task], collected: [] }, { taskOnly: 'visit', selected: 'local-transport:audit-fail' });
+assert.match(failedAudit.innerHTML, /这次审计没跑成/);
+assert.doesNotMatch(failedAudit.innerHTML, /这次没有正文可查/);
+const partial = { innerHTML: '' };
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'WorkBuddy', tool: 'curl', startedAt: '2026-10-17T08:32:00Z', pid: 42, exitCode: 0, runID: 'audit-partial', session: 'wb-1', args: ['https://example.com/partial'], connections: [{ kind: 'connected', detail: ['example.com:443'] }], blocks: [{ direction: 'send', kind: 'data', textPreview: 'hello', previewTruncated: true }], securityAudit: { verdict: 'no_rule_match', findings: [], inspectionTruncated: true, requestBytesInspected: 4000 } }
+]);
+api.render(partial, { tasks: [task], collected: [] }, { taskOnly: 'visit', selected: 'local-transport:audit-partial' });
+assert.match(partial.innerHTML, /只看了前 4000 字节，没有命中/);
 assert.match(cleanPage.innerHTML, /local-transport:curl-clean" aria-pressed="true">收起<\/button><\/td><\/tr><tr class="network-read-row"[\s\S]*没有命中/);
 assert.doesNotMatch(cleanPage.innerHTML.match(/<tr class="network-read-row">[\s\S]*?<\/tr>/)[0], /需核查|安全/);
 console.log('tool matrix ok', rows);

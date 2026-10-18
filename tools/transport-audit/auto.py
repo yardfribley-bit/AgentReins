@@ -46,31 +46,79 @@ def destination_from_args(args):
         elif '@' in item or re.fullmatch(host, item) or re.fullmatch(ipv4, item): peers.append(item)
     return (urls or peers or [None])[0]
 
-def content_audit(evidence):
-    """Check the text this execution retained. Encrypted channels have no plaintext to inspect."""
+def load_content_audit():
+    """The checker sits beside this entry, or in the app sources when running from the repo."""
+    here=pathlib.Path(__file__).resolve().parent
+    candidates=[here/'content_audit.py']
+    if len(here.parents)>2:
+        candidates.append(here.parents[2]/'Sources'/'AgentReins'/'Resources'/'content_audit.py')
+    for path in candidates:
+        if path.is_file():
+            spec=importlib.util.spec_from_file_location('agentreins_content_audit', path)
+            module=importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            return module
+    raise FileNotFoundError('content_audit.py')
+
+def audit_error_record(error):
+    return {'version':'content-rules-v2','findings':[],'verdict':'audit_error','scope':'audit_error','policyError':type(error).__name__,'destinationHost':None,'destinationPolicy':None,'requestBytesInspected':0,'responseBytesInspected':None,'inspectionTruncated':False}
+
+def proxy_endpoint_selected(env, tool, args):
+    """True when this command is aimed at the local audit proxy and not a NO_PROXY host."""
+    blob=' '.join(env.get(key,'') for key in ('HTTP_PROXY','HTTPS_PROXY','ALL_PROXY','http_proxy','https_proxy','all_proxy','GIT_CONFIG_VALUE_0'))
+    if '127.0.0.1:18891' not in blob and '127.0.0.1:18893' not in blob:
+        return False
+    destination=command_destination(tool, args, env) or ''
+    host=destination.split('://',1)[-1].split('/',1)[0].split('@')[-1].split(':')[0].lower()
+    no_proxy=env.get('NO_PROXY') or env.get('no_proxy') or ''
+    for item in no_proxy.split(','):
+        item=item.strip().lower().lstrip('.')
+        if item and host and (item=='*' or host==item or host.endswith('.'+item)):
+            return False
+    return True
+
+def audit_proxy_open():
+    import socket
+    try:
+        with socket.create_connection(('127.0.0.1',18891),timeout=1):
+            return True
+    except OSError:
+        return False
+
+def through_audit_proxy(env, tool, args):
+    return proxy_endpoint_selected(env, tool, args) and audit_proxy_open()
+
+def with_call_header(tool, real, args, call, include):
+    """The call header leaves this machine only when the audit proxy will strip it."""
+    if tool=='curl':
+        return [real,'-H','X-AgentReins-Call: '+call,*args] if include else [real,*args]
+    if tool=='wget':
+        header=['--header=X-AgentReins-Call: '+call] if include else []
+        debug=['-d'] if '-d' not in args and '--debug' not in args else []
+        return [real,*debug,*header,*args]
+    if tool=='git':
+        return [real,'-c','http.extraHeader=X-AgentReins-Call: '+call,*args] if include else [real,*args]
+    return [real,*args]
+
+def content_audit(evidence, request_text='', response_text='', trace_dir=None):
+    """Audit the raw exchange. Redacted previews are for storage and display, not for this check."""
     invocation=evidence.get('invocation') or {}
     if '加密' in str(invocation.get('gap') or ''):
-        return {'version':'content-rules-v2','findings':[],'verdict':'no_body','scope':'no_plaintext','policyError':None,'destinationHost':None,'destinationPolicy':'not_configured','requestBytesInspected':0,'responseBytesInspected':None}
-    def side(direction):
-        chunks=[]
-        for block in evidence.get('blocks') or []:
-            if block.get('direction')!=direction: continue
-            http='\n'.join(str(line) for line in (block.get('http') or []))
-            preview=str(block.get('textPreview') or '')
-            chunks.append('\n'.join(part for part in (http, preview) if part))
-        return '\n\n'.join(chunks)
+        return {'version':'content-rules-v2','findings':[],'verdict':'no_body','scope':'no_plaintext','policyError':None,'destinationHost':None,'destinationPolicy':'not_configured','requestBytesInspected':0,'responseBytesInspected':None,'inspectionTruncated':False}
     host=None
     for conn in evidence.get('connections') or []:
         detail=(conn.get('detail') or [None])[0]
         if detail and not str(detail).startswith('127.'):
             host=str(detail).split(' ')[0].split(':')[0]
             break
-    path=pathlib.Path(__file__).resolve().parents[2]/'Sources'/'AgentReins'/'Resources'/'content_audit.py'
-    spec=importlib.util.spec_from_file_location('agentreins_content_audit', path)
-    module=importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    request, response=side('send'), side('receive')
-    return module.audit(request, response, bool(response), host, scope='transport_text')
+    module=load_content_audit()
+    traces=[]
+    if trace_dir:
+        root=pathlib.Path(trace_dir)
+        traces=[root/name for name in ('curl.trace','git-curl.trace') if (root/name).is_file()]
+        for helper in root.glob('git-helper-*.trace'):
+            traces.append(helper)
+    return module.audit(request_text, response_text, bool(response_text) or bool(traces), host, scope='transport_text', trace_files=traces)
 
 def main():
     tool=pathlib.Path(sys.argv[0]).name
@@ -97,8 +145,9 @@ def main():
         for name in ('curl.trace','git-curl.trace','git-processes.jsonl'):
             fd=os.open(run/name,os.O_CREAT|os.O_WRONLY,0o600);os.close(fd)
         command=[real,*args]
+        include_call_header=through_audit_proxy(env, tool, args)
         if tool=='git':
-            command=[real,'-c','http.extraHeader=X-AgentReins-Call: '+run.name,*args]
+            command=with_call_header('git', real, args, run.name, include_call_header)
             if any(k in env for k in ('GIT_TRACE_CURL','GIT_TRACE2_EVENT')):
                 manifest['gap']='Existing Git trace configuration retained'
             else:
@@ -123,12 +172,11 @@ def main():
             # Do not override user curl tracing/config semantics.
             if conflicts:
                 manifest['gap']='Explicit curl trace/config options retained; body capture unavailable'
-                command=[real,'-H','X-AgentReins-Call: '+run.name,*args]
-            else:command=[real,'--trace',str(run/'curl.trace'),'--trace-time','--trace-ids','-H','X-AgentReins-Call: '+run.name,*args]
-        elif tool=='wget' and '-d' not in args and '--debug' not in args:
-            command=[real,'-d','--header=X-AgentReins-Call: '+run.name,*args]
+                command=with_call_header('curl', real, args, run.name, include_call_header)
+            else:
+                command=[real,'--trace',str(run/'curl.trace'),'--trace-time','--trace-ids',*with_call_header('curl', real, args, run.name, include_call_header)[1:]]
         elif tool=='wget':
-            command=[real,'--header=X-AgentReins-Call: '+run.name,*args]
+            command=with_call_header('wget', real, args, run.name, include_call_header)
         elif tool=='gh' and 'GH_DEBUG' not in env:
             env['GH_DEBUG']='api'
         elif tool in ENCRYPTED_TOOLS and not any(a in ('-v','-vv','-vvv') for a in args):
@@ -192,12 +240,15 @@ def main():
     try:
         from parse import parse
         from results import file_result,repo_result
+        raw_request=' '.join(args)
+        raw_response=''
         if tool in ('curl','git'):
             evidence=parse(run)
         else:
             raw=session.read_bytes() if session and session.exists() else b''
-            text=redact_text(raw.decode('utf-8','replace'))
-            sent=redact_text(' '.join(args))
+            raw_response=raw.decode('utf-8','replace')
+            text=redact_text(raw_response)
+            sent=redact_text(raw_request)
             target=command_destination(tool,args,env)
             from results import session_http_lines, brew_download_host
             request_http, response_http=session_http_lines(text)
@@ -229,9 +280,9 @@ def main():
         if formulas:evidence['formulas']=formulas
         evidence['attribution']='这次执行的编号就是这次工具调用'
         try:
-            evidence['securityAudit']=content_audit(evidence)
+            evidence['securityAudit']=content_audit(evidence, request_text=raw_request, response_text=raw_response, trace_dir=run)
         except Exception as audit_error:
-            evidence['securityAudit']={'version':'content-rules-v2','findings':[],'verdict':'no_body','scope':'no_plaintext','policyError':type(audit_error).__name__,'requestBytesInspected':0,'responseBytesInspected':None}
+            evidence['securityAudit']=audit_error_record(audit_error)
         save('transport.json',evidence)
     except Exception as error:
         manifest['projectionError']=type(error).__name__;save('manifest.json',manifest)

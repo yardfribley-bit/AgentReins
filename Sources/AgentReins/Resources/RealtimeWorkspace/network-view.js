@@ -125,11 +125,16 @@
   return exchanges.filter(row=>{
    const call=row.call&&byCall.get(String(row.call));
    if(!call) return true;
-   const body=row.networkBody||{}, local=call.networkBody;
-   if(body.response && (!local.response || String(body.response).length>String(local.response).length)) local.response=body.response;
-   if(body.request && (!local.request || String(body.request).length>String(local.request).length)) local.request=body.request;
-   if(body.responseStatus && !local.responseStatus) local.responseStatus=body.responseStatus;
-   if(body.securityAudit) local.securityAudit=mergeAudit(local.securityAudit, body.securityAudit);
+   const body=row.networkBody||{};
+   if(!call.subrequests) call.subrequests=[];
+   call.subrequests.push({id:row.id,host:row.host,url:row.url,networkBody:body});
+   if(call.subrequests.length===1){
+    const local=call.networkBody;
+    if(body.response && (!local.response || String(body.response).length>String(local.response).length)) local.response=body.response;
+    if(body.request && (!local.request || String(body.request).length>String(local.request).length)) local.request=body.request;
+    if(body.responseStatus && !local.responseStatus) local.responseStatus=body.responseStatus;
+   }
+   if(body.securityAudit) call.networkBody.securityAudit=mergeAudit(call.networkBody.securityAudit, body.securityAudit);
    return false;
   });
  }
@@ -499,14 +504,22 @@
   if(!left) return right;
   if(!right) return left;
   const findings=[];
-  const seen=new Set();
+  const seen=new Map();
   for(const item of [...list(left.findings), ...list(right.findings)]){
    const key=(item.rule||'')+'|'+(item.direction||'');
-   if(seen.has(key)) continue;
-   seen.add(key);
-   findings.push(item);
+   const previous=seen.get(key);
+   if(!previous){
+    const copy=Object.assign({}, item);
+    seen.set(key, copy);
+    findings.push(copy);
+    continue;
+   }
+   previous.count=(Number(previous.count)||1)+(Number(item.count)||1);
+   const offsets=[previous.characterOffset, item.characterOffset].filter(value=>value!=null);
+   if(offsets.length) previous.characterOffset=Math.min(...offsets);
   }
-  return Object.assign({}, left, right, {findings, verdict:findings.length?'review':(right.verdict||left.verdict||'no_rule_match')});
+  const verdict=left.verdict==='audit_error'||right.verdict==='audit_error'?'audit_error':(findings.length?'review':(right.verdict||left.verdict||'no_rule_match'));
+  return Object.assign({}, left, right, {findings, verdict});
  }
  function agentAudit(r){
   if(/加密/.test(String(r.gap||''))) return {verdict:'no_body', findings:[], scope:'no_plaintext'};
@@ -514,10 +527,13 @@
   const request=String(body.request||'').replace(/^.*X-AgentReins-Call:.*$/gim,'').trim();
   const response=String(body.response||'').replace(/^.*X-AgentReins-Call:.*$/gim,'').trim();
   const stored=body.securityAudit&&typeof body.securityAudit==='object'?body.securityAudit:null;
+  if(stored&&stored.verdict==='audit_error') return Object.assign({}, stored, {findings:list(stored.findings)});
   const fresh=(request||response)?builtinFindings(request, response):[];
   const merged=mergeAudit(stored, {findings:fresh, destinationHost:stored?.destinationHost||r.host||null});
   const findings=list(merged.findings);
   if(findings.length) return Object.assign({}, merged, {findings, verdict:'review'});
+  const truncated=stored?stored.inspectionTruncated===true:(body.requestTruncated||body.responseTruncated);
+  if(truncated) return Object.assign({}, merged, {findings:[], verdict:'truncated', requestBytesInspected:stored?.requestBytesInspected??String(body.request||'').length});
   if(!request&&!response) return {verdict:'no_body', findings:[], scope:'no_plaintext', destinationHost:r.host||null};
   return Object.assign({}, merged, {findings:[], verdict:'no_rule_match'});
  }
@@ -531,7 +547,9 @@
  function securityLine(r){
   const audit=agentAudit(r);
   const who='这次 '+(r.tool||'工具')+' 发往 '+showWhere(r)+'。';
+  if(audit.verdict==='audit_error') return '<p class="network-notice">'+esc(who+'这次审计没跑成。')+'</p>';
   if(audit.verdict==='no_body') return '<p class="network-notice">'+esc(who+'这次没有正文可查。')+'</p>';
+  if(audit.verdict==='truncated') return '<p class="network-notice">'+esc(who+'只看了前 '+(audit.requestBytesInspected||0)+' 字节，没有命中。')+'</p>';
   const dest=destinationSentence(audit);
   const findings=list(audit.findings);
   if(!findings.length) return '<p class="network-notice">'+esc(who+'这次正文按现有规则看过，没有命中。'+dest)+'</p>';
@@ -844,8 +862,13 @@
   const files=downloadLines(r);
   return [...lines.slice(0,12),...files].join('\n')||'没有留下协议行。';
  }
+ function exchangePair(record){
+  return '<div class="network-exchange-pair"><section class="network-out"><h3>送出</h3><p>'+esc(sentLabel(record))+'</p><pre class="network-readable">'+esc(redact(sentView(record)))+'</pre></section><section class="network-in"><h3>收回</h3><p>'+esc(backLabel(record))+'</p><pre class="network-readable">'+esc(redact(backView(record)))+'</pre></section></div>';
+ }
  function exchangeMarkupFor(r,tasks){
-  return '<section class="network-read"><h3>'+esc(toolName(r,tasks)+' · '+showWhere(r))+'</h3><p>'+esc(relationLine(r))+'</p><div class="network-exchange-pair"><section class="network-out"><h3>送出</h3><p>'+esc(sentLabel(r))+'</p><pre class="network-readable">'+esc(redact(sentView(r)))+'</pre></section><section class="network-in"><h3>收回</h3><p>'+esc(backLabel(r))+'</p><pre class="network-readable">'+esc(redact(backView(r)))+'</pre></section></div><details><summary>协议原文</summary><pre class="network-readable">'+esc(redact(protocolRaw(r)))+'</pre></details>'+securityLine(r)+'</section>';
+  const subs=list(r.subrequests);
+  const pairs=subs.length>1?subs.map((sub,index)=>'<h4>第 '+(index+1)+' 次</h4>'+exchangePair(Object.assign({}, r, {networkBody:sub.networkBody,host:sub.host||r.host,url:sub.url||r.url}))).join(''):exchangePair(r);
+  return '<section class="network-read"><h3>'+esc(toolName(r,tasks)+' · '+showWhere(r))+'</h3><p>'+esc(relationLine(r))+'</p>'+pairs+'<details><summary>协议原文</summary><pre class="network-readable">'+esc(redact(protocolRaw(r)))+'</pre></details>'+securityLine(r)+'</section>';
  }
  function tableMarkup(records,tasks,{all=false,selected=null}={}){
   const headers=all?['任务','时间','谁','去了哪里','协议','结果','']:['时间','谁','去了哪里','协议','结果',''];
