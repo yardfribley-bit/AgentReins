@@ -588,6 +588,32 @@
   const body=r.networkBody||{};
   return String(body.response!=null?body.response:body.toolInstructions||'');
  }
+ function tlsFailureText(raw){
+  return /error setting certificate|certificate verify failed|SSL certificate problem|alert certificate unknown/i.test(String(raw||''));
+ }
+ function readableText(raw){
+  return String(raw||'').split('\n').filter(line=>!/certificate verify ok|error setting certificate|certificate verify failed|SSL certificate problem|CAfile:/i.test(line)).join('\n').trim();
+ }
+ function tlsFailed(r){
+  const exit=r.exitCode!=null&&r.exitCode!==''?Number(r.exitCode):null;
+  if(exit===60||exit===35)return true;
+  return tlsFailureText(responseText(r));
+ }
+ function bypassedAudit(r){
+  const args=list(r.args).map(String);
+  if(args.some(a=>a==='--noproxy'||a==='--no-proxy'||a.startsWith('--noproxy=')||a.startsWith('--socks')))return true;
+  const inline=args.find(a=>/^(?:-x|--proxy|--preproxy)=/.test(a));
+  const flag=args.findIndex(a=>a==='-x'||a==='--proxy'||a==='--preproxy');
+  const value=inline?inline.split('=').slice(1).join('='):(flag>=0?args[flag+1]:'');
+  if(value&&!/127\.0\.0\.1:(18891|18893)/.test(value))return true;
+  return args.some(a=>/^http\.proxy=/.test(a)&&!/127\.0\.0\.1:(18891|18893)/.test(a));
+ }
+ function associationStrength(r){
+  if(r.call)return {name:'已确认',note:'执行编号对得上'};
+  if(r.taskConfidence==='candidate')return {name:'候选关联',note:'不是按执行编号对上的'};
+  if(r.accessKind==='local-tool')return {name:'缺口',note:'还没有执行编号'};
+  return {name:'说明',note:'这条记录本身'};
+ }
  function headRequest(r){
   const args=list(r.args).map(String);
   if(args.includes('-I')||args.includes('--head'))return true;
@@ -596,13 +622,13 @@
  }
  function broughtPhrase(r){
   const raw=responseText(r);
-  if(/certificate verify|error setting certificate|CAfile/i.test(raw))return '';
+  if(tlsFailureText(raw))return '';
   if(/<!doctype html|<html[\s>]/i.test(raw)){
    const title=raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
    const name=title?title[1].replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim():'';
    return name?'网页《'+name+'》':'一个网页';
   }
-  const lines=raw.split('\n').map(line=>line.trim()).filter(line=>line&&!/^HTTP\//i.test(line)&&!/^CONNECT\s/i.test(line)&&!/connection established/i.test(line)&&!/^(?:>|<)?\s*(host|user-agent|accept|content-type|content-length|date|server|cache-control|pragma|age|cf-|alt-svc|allow|last-modified|accept-ranges)\s*:/i.test(line)&&!line.startsWith('* ')&&line!=='外传文件名'&&line!=='下载文件名'&&!/^(curl|git|wget|gh|ssh|scp|sftp|rsync)\b/.test(line));
+  const lines=raw.split('\n').map(line=>line.trim()).filter(line=>line&&!/^HTTP\//i.test(line)&&!/^CONNECT\s/i.test(line)&&!/connection established/i.test(line)&&!/certificate verify ok|error setting certificate|certificate verify failed/i.test(line)&&!/^(?:>|<)?\s*(host|user-agent|accept|content-type|content-length|date|server|cache-control|pragma|age|cf-|alt-svc|allow|last-modified|accept-ranges)\s*:/i.test(line)&&!line.startsWith('* ')&&line!=='外传文件名'&&line!=='下载文件名'&&!/^(curl|git|wget|gh|ssh|scp|sftp|rsync)\b/.test(line));
   const text=lines.join(' ').replace(/\s+/g,' ').trim();
   if(text.length<2)return '';
   if(/^[{[]/.test(text)){
@@ -627,7 +653,8 @@
  }
  function verdict(r){
   const text=connectionVerdict(r);
-  return list(agentAudit(r).findings).length?text+' · 需核查':text;
+  const review=list(agentAudit(r).findings).length?text+' · 需核查':text;
+  return bypassedAudit(r)?review+' · 绕过了审计代理':review;
  }
  function connectionVerdict(r){
   const status=Number(r.networkBody?.responseStatus);
@@ -636,7 +663,7 @@
   const files=list(r.outboundFiles).filter(Boolean);
   const saved=list(r.downloads).filter(item=>item&&(item.state==='verified'||item.bytes!=null||item.state==='tooLarge'));
   const savedNames=saved.map(item=>String(item.path||'').split(/[/\\]/).pop()).filter(Boolean);
-  if(/certificate verify|error setting certificate|CAfile/i.test(responseText(r)))return '证书没配好';
+  if(tlsFailed(r))return '证书没配好';
   if(/加密/.test(String(r.gap||'')))return '看不到通道里的内容';
   if(status>=400)return '对方返回 '+status;
   if(r.accessKind==='remote-tool'||accessHop(r).kind==='remote-tool'){
@@ -656,7 +683,7 @@
  function connectionBrief(r){
   const status=Number(r.networkBody?.responseStatus);
   if(r.accessKind==='remote-tool'&&!externalConnections(r).length)return '工具代办';
-  if(/certificate verify|error setting certificate|CAfile/i.test(responseText(r)))return '没完成';
+  if(tlsFailed(r))return '没完成';
   if(callFailed(r)&&!(status>=100))return '没通';
   if(status>=400)return '通到了';
   return '通了';
@@ -790,8 +817,8 @@
   return '<div class="network-stats"><div><strong>'+records.length+'</strong><span>出去了</span></div><div'+(failed?' class="is-fail"':'')+'><strong>'+failed+'</strong><span>没成</span></div></div>';
  }
  function readableExchange(value){
-  const raw=String(value||'');
-  if(!raw.trim()||/certificate verify|error setting certificate|CAfile/i.test(raw))return '';
+  const raw=readableText(value);
+  if(!raw.trim()||tlsFailureText(value))return '';
   const text=readablePreview(raw).replace(/^(?:网页《[^》]*》|网页)\n?/,'').replace(/^.*X-AgentReins-Call:.*$/gim,'').trim();
   return text==='未采到'?'':text;
  }
@@ -832,11 +859,11 @@
   }).filter(Boolean);
  }
  function backView(r){
-  if(/certificate verify|error setting certificate|CAfile/i.test(responseText(r)))return '连上了。对方没有返回内容。本机证书没配好。';
+  if(tlsFailed(r))return '证书没有通过。';
   if(/加密/.test(String(r.gap||'')))return '通道里的正文没采到。';
   const files=downloadLines(r);
   const hop=accessHop(r);
-  const raw=responseText(r);
+  const raw=readableText(responseText(r));
   const text=/<!doctype html|<html[\s>]/i.test(raw)?readablePreview(raw):readableExchange(raw);
   if(hop.kind==='remote-tool')return text||'工具没有带回内容。';
   if(headRequest(r))return '没有正文。只收回了头信息。';
@@ -844,8 +871,7 @@
   if(status>=400)return '对方返回 '+status+'。'+(text?'\n'+text:'');
   if(files.length)return files.join('\n\n');
   if(text)return text;
-  if(status>=200&&status<300||r.exitCode===0)return '正文是空的。';
-  return '没有收回正文。';
+  return '没有采到响应正文。';
  }
  function backLabel(r){
   const hop=accessHop(r);
@@ -863,7 +889,7 @@
  }
  function protocolRaw(r){
   const blob=[r.networkBody?.request,r.networkBody?.response].filter(value=>value!=null).join('\n');
-  const lines=blob.split('\n').map(line=>line.trim()).filter(line=>line&&!/connection established/i.test(line)&&!/^CONNECT\s/i.test(line)&&!/certificate verify|error setting certificate|CAfile/i.test(line)&&!/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(line)&&(/^(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s/i.test(line)||/^HTTP\//i.test(line)||/^(?:>|<)?\s*host:/i.test(line)));
+  const lines=blob.split('\n').map(line=>line.trim()).filter(line=>line&&!/connection established/i.test(line)&&!/^CONNECT\s/i.test(line)&&!/certificate verify ok|error setting certificate|certificate verify failed|SSL certificate problem|CAfile:/i.test(line)&&!/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(line)&&(/^(?:GET|HEAD|POST|PUT|PATCH|DELETE)\s/i.test(line)||/^HTTP\//i.test(line)||/^(?:>|<)?\s*host:/i.test(line)));
   const files=downloadLines(r);
   return [...lines.slice(0,12),...files].join('\n')||'没有留下协议行。';
  }
@@ -873,7 +899,9 @@
  function exchangeMarkupFor(r,tasks){
   const subs=list(r.subrequests);
   const pairs=subs.length>1?subs.map((sub,index)=>'<h4>第 '+(index+1)+' 次</h4>'+exchangePair(Object.assign({}, r, {networkBody:sub.networkBody,host:sub.host||r.host,url:sub.url||r.url}))).join(''):exchangePair(r);
-  return '<section class="network-read"><h3>'+esc(toolName(r,tasks)+' · '+showWhere(r))+'</h3><p>'+esc(relationLine(r))+'</p>'+pairs+'<details><summary>协议原文</summary><pre class="network-readable">'+esc(redact(protocolRaw(r)))+'</pre></details>'+securityLine(r)+'</section>';
+  const strength=associationStrength(r);
+  const bypass=bypassedAudit(r)?'<p class="network-notice">这次命令直接连接，绕过了审计代理。</p>':'';
+  return '<section class="network-read"><h3>'+esc(toolName(r,tasks)+' · '+showWhere(r))+'</h3><p>'+esc(relationLine(r))+'</p><p class="strength-'+esc(strength.name)+'">'+esc(strength.name)+' · '+esc(strength.note)+'</p>'+bypass+pairs+'<details><summary>协议原文</summary><pre class="network-readable">'+esc(redact(protocolRaw(r)))+'</pre></details>'+securityLine(r)+'</section>';
  }
  function tableMarkup(records,tasks,{all=false,selected=null}={}){
   const headers=all?['任务','时间','谁','去了哪里','协议','结果','']:['时间','谁','去了哪里','协议','结果',''];

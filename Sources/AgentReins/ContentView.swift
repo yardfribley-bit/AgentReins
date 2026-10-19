@@ -6,13 +6,14 @@ struct ContentView: View {
     @EnvironmentObject private var fileGuard: FileGuard
     @EnvironmentObject private var processGuard: ProcessGuard
     @EnvironmentObject private var eventStore: EventStore
+    @EnvironmentObject private var workBuddyNetworkCapture: WorkBuddyNetworkCapture
     @State private var showingSensitiveRules = false
     @StateObject private var geolocation = IPGeolocationStore()
     @StateObject private var realtime = RealtimeWorkspaceState(checkpointURL: RealtimeWorkspaceState.checkpointLocation(), backgroundProjection: true)
     private let healthTimer = Timer.publish(every: 5, on: .main, in: .common).autoconnect()
     var body: some View {
         RealtimeWorkspaceView(payload: realtime.payload(processes: processGuard.processInventory,
-            health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running,
+            health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running || workBuddyNetworkCapture.proxyRunning,
             error: eventStore.persistenceError, geolocation: geolocation), onMarkRead: { realtime.markRead($0) }, onRefreshArtifacts: { realtime.refreshArtifacts() }, onResolveIP: { geolocation.resolve([$0]) })
         .frame(minWidth: 900, minHeight: 600)
         .toolbar {

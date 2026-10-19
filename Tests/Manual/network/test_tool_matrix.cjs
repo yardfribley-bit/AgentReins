@@ -254,4 +254,28 @@ api.render(partial, { tasks: [task], collected: [] }, { taskOnly: 'visit', selec
 assert.match(partial.innerHTML, /只看了前 4000 字节，没有命中/);
 assert.match(cleanPage.innerHTML, /local-transport:curl-clean" aria-pressed="true">收起<\/button><\/td><\/tr><tr class="network-read-row"[\s\S]*没有命中/);
 assert.doesNotMatch(cleanPage.innerHTML.match(/<tr class="network-read-row">[\s\S]*?<\/tr>/)[0], /需核查|安全/);
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T11:28:00Z', pid: 9, exitCode: 0, runID: 'verify-ok', session: '3ab77d48', args: ['https://example.com/'], connections: [{ kind: 'proxyTunnel', detail: ['example.com:443'] }], blocks: [{ direction: 'receive', kind: 'header', http: ['HTTP/2 200 '] }, { direction: 'receive', kind: 'data', textPreview: 'SSL certificate verify ok.\n<!doctype html><html><head><title>Example Domain</title></head><body><p>hello</p></body></html>' }] }
+]);
+const verifyOk = { innerHTML: '' };
+api.render(verifyOk, { tasks: [], collected: [] });
+assert.match(verifyOk.innerHTML, /example\.com<\/td><td>HTTP\/2<\/td><td>通了/);
+assert.doesNotMatch(verifyOk.innerHTML, /证书没配好|本机证书没配好|对方没有返回内容/);
+api.render(verifyOk, { tasks: [], collected: [] }, { selected: 'local-transport:verify-ok' });
+assert.match(verifyOk.innerHTML, /网页《Example Domain》/);
+assert.match(verifyOk.innerHTML, /已确认/);
+assert.doesNotMatch(verifyOk.innerHTML, /certificate verify ok/);
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T11:28:10Z', pid: 10, exitCode: 60, runID: 'verify-bad', session: '3ab77d48', args: ['https://expired.example/'], connections: [{ kind: 'connected', detail: ['expired.example:443'] }], blocks: [{ direction: 'receive', kind: 'data', textPreview: 'curl: (60) SSL certificate problem' }] }
+]);
+const verifyBad = { innerHTML: '' };
+api.render(verifyBad, { tasks: [], collected: [] });
+assert.match(verifyBad.innerHTML, /expired\.example<\/td><td>连接<\/td><td>证书没配好/);
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T11:28:20Z', pid: 11, exitCode: 0, runID: 'bypass', session: '3ab77d48', args: ['--noproxy', '*', 'https://example.com/'], connections: [{ kind: 'connected', detail: ['example.com:443'] }], blocks: [{ direction: 'receive', kind: 'header', http: ['HTTP/2 200 '] }, { direction: 'receive', kind: 'data', textPreview: 'ok' }] }
+]);
+const bypass = { innerHTML: '' };
+api.render(bypass, { tasks: [], collected: [] }, { selected: 'local-transport:bypass' });
+assert.match(bypass.innerHTML, /绕过了审计代理/);
+assert.match(bypass.innerHTML, /这次命令直接连接，绕过了审计代理/);
 console.log('tool matrix ok', rows);
