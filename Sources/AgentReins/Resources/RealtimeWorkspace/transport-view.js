@@ -23,7 +23,7 @@
   area.querySelector('[data-close]').onclick=()=>{area.hidden=true;window.agentreinsCommandsOpen=false;const active=document.querySelector('nav [data-view].active span');const name=document.getElementById('view-name');if(name&&active)name.textContent=active.textContent;};
   area.querySelectorAll('[data-run]').forEach(b=>b.onclick=()=>{selected=Number(b.dataset.run);render();});
  }
- function publish(records){runs=list(records).filter(r=>r.captureMode==='agent-path');window.AgentReinsNetwork?.setLocalTransports(runs);window.agentreinsRenderNetwork?.();}
+ function publish(records){runs=list(records).filter(r=>r.captureMode==='agent-path');window.AgentReinsNetwork?.setLocalTransports(runs);window.agentreinsRenderNetwork?.();window.agentreinsRenderRisk?.();}
  const list=v=>Array.isArray(v)?v:[];
  window.agentreinsTransportReceive=payload=>{
   const commands=Array.isArray(payload)?payload:list(payload&&payload.commands);
@@ -34,5 +34,7 @@
  };
  window.agentreinsLoadLocalTransports=async()=>{try{if(window.webkit?.messageHandlers?.agentreins){window.webkit.messageHandlers.agentreins.postMessage({action:'loadTransportAudit'});return;}const response=await fetch('/transport-audit.json',{cache:'no-store'});if(!response.ok)throw Error('证据读取失败');publish(await response.json());}catch(e){if(!area.hidden)area.textContent=e.message;}};
  button.onclick=async()=>{window.agentreinsCommandsOpen=true;const name=document.getElementById('view-name');if(name)name.textContent='命令外联';area.hidden=false;area.textContent='正在读取连接证据…';await window.agentreinsLoadLocalTransports();render();};
-if(new URLSearchParams(location.search).get('audit')==='commands')button.click();
+ if(new URLSearchParams(location.search).get('audit')==='commands')button.click();
+ // live.js may have rendered the risk home before this file defined the loader.
+ queueMicrotask(()=>window.agentreinsRenderRisk?.());
 })();

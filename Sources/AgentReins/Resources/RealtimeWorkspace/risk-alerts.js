@@ -282,17 +282,34 @@ function coverageModel(payload){
  ]};
 }
 
+function applyDecisions(alerts,decisions){
+ const map=new Map(list(decisions).map(d=>[d.id,d]));
+ return alerts.map(a=>{
+  const d=map.get(a.id);if(!d)return a;
+  const status=d.state==='accepted'||d.state==='dismissed'||d.state==='returned'?'done':d.state==='need_evidence'?'ask':a.status;
+  return {...a,status,decision:d};
+ });
+}
+function statusLabel(a){
+ if(a.status==='done'){
+  if(a.decision?.state==='accepted')return '已确认';
+  if(a.decision?.state==='returned')return '已退回';
+  return '已处置';
+ }
+ return a.status==='todo'?'待处置':'待确认';
+}
 function renderStats(alerts,cov){
  const crit=alerts.filter(a=>a.severity==='critical').length;
  const high=alerts.filter(a=>a.severity==='high').length;
  const pending=alerts.filter(a=>a.status==='todo'||a.status==='ask').length;
+ const done=alerts.filter(a=>a.status==='done').length;
  const chips=cov.chips.map(c=>`<span class="risk-chip ${c.level==='full'?'ok':c.level==='part'?'warn':'bad'}"><i></i>${esc(c.a)} ${esc(c.label)}</span>`).join('')
   +`<span class="risk-chip ${cov.proxyUp?'ok':'bad'}"><i></i>${cov.proxyUp?'代理在听':'未走代理流量：看不到'}</span>`;
  return `<div class="risk-stats">
   <div class="risk-stat crit"><b>${crit}</b><span>今日 Critical</span></div>
   <div class="risk-stat high"><b>${high}</b><span>今日 High</span></div>
   <div class="risk-stat ask"><b>${pending}</b><span>待你确认</span></div>
-  <div class="risk-stat done"><b>0</b><span>已处置<small>本版只告警，不做通过/退回</small></span></div>
+  <div class="risk-stat done"><b>${done}</b><span>已处置<small>本机持久化，重启仍在</small></span></div>
   <div class="risk-cov"><div class="risk-cov-t"><span>覆盖度 · 告警只来自看得到的部分</span><button type="button" data-view="coverage">看不到什么 →</button></div><div class="risk-chips">${chips}</div></div>
  </div>`;
 }
@@ -318,13 +335,13 @@ function rowHTML(a,selected){
   <td class="ag"><b>${esc(a.agent)}</b><div class="t2 mono">${esc(cut(a.session,28))}</div></td>
   <td><span class="risk-rule">${esc(a.rule)}</span></td>
   <td><span class="risk-conf ${c.c}">${esc(c.t)}</span></td>
-  <td><span class="risk-st ${esc(a.status)}">${a.status==='todo'?'待处置':'待确认'}</span></td>
+  <td><span class="risk-st ${esc(a.status)}">${esc(statusLabel(a))}</span></td>
   <td class="mono">${esc(time(a.timestamp))}</td>
  </tr>`;
 }
 
 function renderList(holder,payload,state){
- const alerts=buildAlerts(payload);
+ const alerts=applyDecisions(buildAlerts(payload),state.decisions||[]);
  const cov=coverageModel(payload);
  state.alerts=alerts;
  const f=state.filter||{sev:'all',rule:'all',agent:'all',q:''};
@@ -354,10 +371,15 @@ function renderDetail(a,payload){
   <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span></p></header>
   <p class="risk-why">${esc(a.why||'')}</p>
   <div class="risk-actions">
+   <button type="button" class="primary" data-risk-decide="accepted" data-risk-id="${esc(a.id)}">确认无风险</button>
+   <button type="button" class="quiet" data-risk-decide="dismissed" data-risk-id="${esc(a.id)}">标记已处置</button>
+   <button type="button" class="quiet" data-risk-decide="need_evidence" data-risk-id="${esc(a.id)}">标记待补证据</button>
+   <button type="button" class="quiet" data-risk-export="${esc(a.id)}">导出证据包</button>
    ${a.call?`<button type="button" class="quiet" data-network-record-jump="${esc(r?.id||'')}">在外网访问中打开</button>`:''}
    <button type="button" class="quiet" data-view="network">外网访问</button>
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
+  ${a.decision?`<p class="note">本机处置：${esc(statusLabel(a))} · ${esc(a.decision.decidedAt||'')}${a.decision.note?' · '+esc(a.decision.note):''}${a.decision.evidenceHash?' · sha256 '+esc(cut(a.decision.evidenceHash,16)):''}</p>`:''}
   <h3>送出 / 收回</h3>
   ${exchange||'<p class="empty">这条告警还没有可展示的交换正文。</p>'}
   <div class="risk-gapbox"><b>证据缺口</b><br>${esc(RULES.find(x=>x.id===a.rule)?.cant||'未采到的部分不会补成已确认。')}${a.call?'':'<br>· 还没有执行编号，工具调用归属未知。'}</div>
@@ -396,5 +418,22 @@ function renderCoverage(holder,payload){
  </div>`;
 }
 
-window.AgentReinsRisk={RULES,buildAlerts,renderList,renderRules,renderCoverage,coverageModel};
+function evidenceTextFor(a){
+ const r=a.record||{};
+ const body=r.networkBody||{};
+ return [
+  'rule='+a.rule,'title='+a.title,'agent='+a.agent,'session='+a.session,'call='+(a.call||''),
+  'why='+(a.why||''),'host='+hostOf(r),'args='+list(r.args).join(' '),
+  'request='+String(body.request||'').slice(0,8000),'response='+String(body.response||'').slice(0,8000),
+  'audit='+JSON.stringify(auditOf(r)||{})
+ ].join('\n');
+}
+function packFields(a){
+ return {
+  id:a.id,title:a.title,summary:a.sub||a.why||'',rule:a.rule,agent:a.agent,session:a.session||'',
+  call:a.call||null,state:a.decision?.state||null,note:a.decision?.note||null,
+  decidedAt:a.decision?.decidedAt||null,evidenceText:evidenceTextFor(a)
+ };
+}
+window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor};
 })();

@@ -8,7 +8,7 @@ const statuses={running:'进行中',awaiting_confirmation:'等我确认',complet
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null;
-const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[]};
+const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false};
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
 let objects=new Map(),runtimeExchangeID=null,runtimeCallID=null,runtimeTaskID=null,timelineMode='tools',runtimeProjection=null;
@@ -224,14 +224,41 @@ function collectorPhrase(){
  if(health.length)return '已收到采集源状态';
  return '采集未启动';
 }
+function ensureReviewDecisions(){
+ if(riskState.decisionsLoaded)return;
+ const handler=window.webkit?.messageHandlers?.agentreins;
+ if(!handler){riskState.decisionsLoaded=true;return;}
+ handler.postMessage({action:'loadReviewDecisions'});
+ riskState.decisionsLoaded=true;
+}
+function requestRiskTransports(){
+ if(riskState.transportsRequested)return;
+ if(typeof window.agentreinsLoadLocalTransports!=='function')return;
+ const handler=window.webkit?.messageHandlers?.agentreins;
+ if(!handler&&location.protocol==='file:')return;
+ riskState.transportsRequested=true;
+ window.agentreinsLoadLocalTransports();
+ // Retry once if the host ignored an early call (payload not ready yet).
+ setTimeout(()=>{
+  if((window.AgentReinsNetwork?.localExchanges?.()||[]).length)return;
+  riskState.transportsRequested=false;
+  if(typeof window.agentreinsLoadLocalTransports==='function'){
+   riskState.transportsRequested=true;
+   window.agentreinsLoadLocalTransports();
+  }
+ },1500);
+}
 function renderRisk(){
  const api=window.AgentReinsRisk;if(!api){$('alerts-view').innerHTML=empty('风险告警模块未加载。');return;}
+ ensureReviewDecisions();
+ if(view==='alerts'||view==='rules'||view==='coverage')requestRiskTransports();
  if(view==='alerts')api.renderList($('alerts-view'),shown,riskState);
  else if(view==='rules')api.renderRules($('rules-view'),shown);
  else if(view==='coverage')api.renderCoverage($('coverage-view'),shown);
- const n=(riskState.alerts||api.buildAlerts(shown)||[]).filter(a=>a.status==='todo'||a.status==='ask').length;
+ const n=(riskState.alerts||api.applyDecisions?.(api.buildAlerts(shown),riskState.decisions)||api.buildAlerts(shown)||[]).filter(a=>a.status==='todo'||a.status==='ask').length;
  const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}
 }
+window.agentreinsRenderRisk=()=>{if(view==='alerts'||view==='rules'||view==='coverage'){riskState.transportsRequested=true;renderRisk();}};
 function render(animate=false){
  if(following)taskID=newest();if(task()?.detailsLoaded===false)requestTask(taskID);rebuildObjects();renderTasks();renderHeading();
  document.querySelectorAll('nav [data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
@@ -323,13 +350,20 @@ async function requestTask(id){
  }catch(error){if(taskID===id)toast('读取任务详情失败：'+error.message);}finally{pendingTasks.delete(id);}
 }
 window.agentreinsReceive=receive;
-window.agentreinsHostResult=result=>{if(result?.message)toast(result.message);if(view==='collection')renderCollectionDetail();else if(view==='process')renderDetail(true);};
+window.agentreinsHostResult=result=>{
+ if(result?.action==='reviewDecisions'&&Array.isArray(result.decisions)){
+  riskState.decisions=result.decisions;riskState.decisionsLoaded=true;
+  if(view==='alerts'||view==='rules'||view==='coverage')renderRisk();
+ }
+ if(result?.message)toast(result.message);
+ if(view==='collection')renderCollectionDetail();else if(view==='process')renderDetail(true);
+};
 document.addEventListener('click',e=>{
  const el=e.target.closest('button');if(!el)return;
  if(el.hasAttribute('data-graph-focus')){window.AgentReinsFlow.focus();}
  else if(el.dataset.action==='toggle-details'){const collapsed=document.body.classList.toggle('details-collapsed');$('toggle-details').textContent=collapsed?'显示详情':'收起详情';}
  else if(el.dataset.zoom){window.AgentReinsFlow.zoom(el.dataset.zoom);}
- else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;window.agentreinsLoadLocalTransports?.();}render();}
+ else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage')riskState.transportsRequested=false;render();}
  else if(el.dataset.graphMode){graphMode=el.dataset.graphMode;renderGraph();}
  else if(el.dataset.networkScope){networkTask=el.dataset.networkScope;taskID=networkTask;following=false;networkQuery='';networkSelected=null;view='network';if(shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);render();}
  else if(el.hasAttribute('data-network-all')){networkTask=null;renderNetwork();}
@@ -355,6 +389,18 @@ document.addEventListener('click',e=>{
  else if(el.id==='pause'){paused=!paused;if(!paused)shown=latest;render();}
  else if(el.dataset.riskAlert){riskState.selected=el.dataset.riskAlert;renderRisk();}
  else if(el.dataset.riskFilter){riskState.filter[el.dataset.riskFilter]=el.dataset.riskValue;riskState.selected=null;renderRisk();}
+ else if(el.dataset.riskDecide){
+  const api=window.AgentReinsRisk;const alert=(riskState.alerts||[]).find(a=>a.id===el.dataset.riskId)||api?.buildAlerts?.(shown)?.find(a=>a.id===el.dataset.riskId);
+  if(!alert){toast('找不到这条告警');return;}
+  const evidenceText=api?.evidenceTextFor?.(alert)||'';
+  bridge('saveReviewDecision',{id:alert.id,state:el.dataset.riskDecide,note:'',evidenceText,evidenceCount:evidenceText.length});
+  riskState.selected=alert.id;
+ }
+ else if(el.dataset.riskExport){
+  const api=window.AgentReinsRisk;const alert=(riskState.alerts||[]).find(a=>a.id===el.dataset.riskExport);
+  if(!alert||!api?.packFields){toast('找不到这条告警');return;}
+  bridge('exportEvidencePack',api.packFields(alert));
+ }
  else if(el.dataset.networkRecordJump){networkSelected=el.dataset.networkRecordJump||null;view='network';render();}
 });
 document.addEventListener('input',e=>{if(e.target.id==='network-search'){const position=e.target.selectionStart;networkQuery=e.target.value;renderNetwork();const input=$('network-search');input.focus();input.setSelectionRange(position,position);}else if(e.target.id==='risk-search'){riskState.filter.q=e.target.value;renderRisk();}});

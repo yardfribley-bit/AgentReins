@@ -636,7 +636,9 @@
  }
  function broughtPhrase(r){
   const raw=responseText(r);
-  if(tlsFailureText(raw))return '';
+  // Only curl diagnostic lines count as TLS failures; body text that mentions
+  // "SSL certificate problem" (docs, troubleshooting pages) must still render.
+  if(tlsFailureText(curlDiagText(r)))return '';
   if(/<!doctype html|<html[\s>]/i.test(raw)){
    const title=raw.match(/<title[^>]*>([\s\S]*?)<\/title>/i);
    const name=title?title[1].replace(/<[^>]+>/g,' ').replace(/\s+/g,' ').trim():'';
