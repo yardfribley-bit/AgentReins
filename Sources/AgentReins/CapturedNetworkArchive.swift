@@ -4,11 +4,18 @@ import Foundation
 /// working set; it is not this archive, and the network page does not use it.
 enum CapturedNetworkArchive {
     static func commandRecords(
-        liveRoot: URL = URL(fileURLWithPath: "/private/tmp/agentreins-transport-audit"),
+        liveRoot: URL = NativeTransportAudit.defaultLiveRoot,
         archiveRoot: URL = defaultArchiveRoot
     ) -> [[String: Any]] {
-        let live = NativeTransportAudit.records(root: liveRoot)
+        let live = liveRoot == NativeTransportAudit.defaultLiveRoot
+            ? NativeTransportAudit.liveRecords()
+            : NativeTransportAudit.records(root: liveRoot)
         copyCommands(live, from: liveRoot, to: archiveRoot)
+        copyCommands(
+            NativeTransportAudit.records(root: NativeTransportAudit.legacyLiveRoot),
+            from: NativeTransportAudit.legacyLiveRoot,
+            to: archiveRoot
+        )
         return merged(live + NativeTransportAudit.records(root: archiveRoot))
     }
 

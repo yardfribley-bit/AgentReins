@@ -67,6 +67,21 @@ cp "$INTEL_BIN_DIR/AgentReins_AgentReins.bundle/Resources/workbuddy_network_capt
   "$APP_BUNDLE/Contents/Resources/"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
 cp -R "$PROJECT_DIR/BrowserExtension" "$APP_BUNDLE/Contents/Resources/BrowserExtension"
+# Shared RealtimeWorkspace JS rule engine + supervisor MCP (same engine as live UI).
+cp -R "$PROJECT_DIR/Sources/AgentReins/Resources/RealtimeWorkspace" "$APP_BUNDLE/Contents/Resources/"
+mkdir -p "$APP_BUNDLE/Contents/Resources/agentreins-mcp"
+cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
+   "$PROJECT_DIR/tools/agentreins-mcp/evidence.py" \
+   "$PROJECT_DIR/tools/agentreins-mcp/alerts_bridge.cjs" \
+   "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
+   "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
+# Point Codex example at the packaged server path placeholder.
+printf '%s\n' \
+  '# Packaged with AgentReins.app — replace APP with the installed bundle path.' \
+  '[mcp_servers.agentreins]' \
+  'command = "python3"' \
+  'args = ["APP/Contents/Resources/agentreins-mcp/server.py"]' \
+  > "$APP_BUNDLE/Contents/Resources/agentreins-mcp/codex-config.example.toml"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF
 <?xml version="1.0" encoding="UTF-8"?>

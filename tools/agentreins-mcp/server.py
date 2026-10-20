@@ -26,8 +26,8 @@ from evidence import (
     get_execution,
     list_agents,
     list_alerts,
+    list_mcp_audit,
     list_network,
-    recent_audit,
 )
 
 PROTOCOL = "2024-11-05"
@@ -137,7 +137,7 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         return get_coverage()
     if name == "list_mcp_audit":
         limit = int(arguments.get("limit") or 30)
-        return {"entries": recent_audit(limit=limit), "confidence": "Observed"}
+        return list_mcp_audit(limit=limit)
     raise ValueError(name)
 
 

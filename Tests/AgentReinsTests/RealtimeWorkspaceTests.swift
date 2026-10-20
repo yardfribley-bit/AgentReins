@@ -297,10 +297,18 @@ final class RealtimeWorkspaceTests: XCTestCase {
             if contextText?.contains("XSS-PROBE-原文") == true { break }
             _ = try? await browser.evaluateJavaScript("document.querySelector('[data-select=user]')?.click(); document.querySelector('[data-flow-node=\"user\"]')?.dispatchEvent(new MouseEvent('click',{bubbles:true}))")
         }
-        // Tight XSS assertion: escaped injection must appear in detail-code as text (no || title fallback).
-        XCTAssertTrue(contextText?.contains("XSS-PROBE-原文") == true, "detail-code must contain escaped XSS probe; got=\(contextText ?? "nil")")
+        // Exact XSS assertions: escaped probe text in detail-code; raw HTML must not contain the injection tag.
+        XCTAssertEqual(contextText?.contains("XSS-PROBE-原文"), true, "detail-code must contain XSS probe text; got=\(contextText ?? "nil")")
         let rawHTML = try await browser.evaluateJavaScript("document.getElementById('detail-code')?.innerHTML || ''") as? String
-        XCTAssertFalse(rawHTML?.contains("<img src=x") == true, "injection must be escaped in detail-code HTML")
+        XCTAssertEqual(rawHTML?.contains("<img src=x"), false, "injection must be escaped in detail-code HTML")
+        let escapedExact = try await browser.evaluateJavaScript(
+            #"(function(){const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));return esc("<img src=x onerror='window.hacked=1'>XSS-PROBE-原文");})()"#
+        ) as? String
+        XCTAssertEqual(escapedExact, "&lt;img src=x onerror=&#39;window.hacked=1&#39;&gt;XSS-PROBE-原文")
+        _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=rules]')?.click()")
+        try await Task.sleep(for: .milliseconds(200))
+        let rulesBody = try await browser.evaluateJavaScript("document.body.innerHTML") as? String
+        XCTAssertEqual(rulesBody?.contains("阻断"), false, "rule cards must not show 阻断")
         let graphVisible = try await browser.evaluateJavaScript("!document.getElementById('graph-screen').hidden") as? Bool
         XCTAssertEqual(graphVisible, true)
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool

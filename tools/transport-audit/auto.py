@@ -159,13 +159,20 @@ def main():
     if pathlib.Path(real).resolve().parent==BASE/'bin':raise SystemExit('Recursive transport entry')
     agent=env.get('AGENTREINS_TRANSPORT_AGENT')
     if agent not in ('WorkBuddy','Codex','Cursor'):os.execv(real,[real,*args])
-    root=pathlib.Path(env.get('AGENTREINS_TRANSPORT_ROOT','/private/tmp/agentreins-transport-audit'))
+    default_root=pathlib.Path.home()/'Library'/'Application Support'/'AgentGuard'/'transport-audit'
+    root=pathlib.Path(env.get('AGENTREINS_TRANSPORT_ROOT') or default_root)
     try:
+        root.mkdir(parents=True,mode=0o700,exist_ok=True)
+        try:os.chmod(root,0o700)
+        except OSError:pass
         run=root/str(uuid.uuid4());run.mkdir(parents=True,mode=0o700)
+        test_capture=env.get('AGENTREINS_TEST_CAPTURE','').strip() in ('1','true','yes')
+        provenance='test' if test_capture else (env.get('AGENTREINS_PROVENANCE') or 'live')
         manifest={'schema':1,'agent':agent,'tool':tool,'startedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'launcherPID':os.getpid(),'parentPID':os.getppid(),'captureMode':'agent-path',
                   'args':[redact_text(str(arg))[:500] for arg in args][:40],
-                  'task':None,'call':run.name,'codexThreadID':env.get('CODEX_THREAD_ID') if agent=='Codex' else None,'session':env.get('CODEX_THREAD_ID') if agent=='Codex' else env.get('CODEBUDDY_SESSION_ID') if agent=='WorkBuddy' else env.get('CURSOR_CONVERSATION_ID'),'nativeRequestID':env.get('CODEBUDDY_CONVERSATION_REQUEST_ID'),'nativeMessageID':env.get('CODEBUDDY_CONVERSATION_MESSAGE_ID'),'coverage':'PATH-resolved command; absolute paths and overwritten PATH bypass this entry'}
+                  'task':None,'call':run.name,'codexThreadID':env.get('CODEX_THREAD_ID') if agent=='Codex' else None,'session':env.get('CODEX_THREAD_ID') if agent=='Codex' else env.get('CODEBUDDY_SESSION_ID') if agent=='WorkBuddy' else env.get('CURSOR_CONVERSATION_ID'),'nativeRequestID':env.get('CODEBUDDY_CONVERSATION_REQUEST_ID'),'nativeMessageID':env.get('CODEBUDDY_CONVERSATION_MESSAGE_ID'),'coverage':'PATH-resolved command; absolute paths and overwritten PATH bypass this entry',
+                  'provenance':provenance,'testCapture':test_capture}
         env['AGENTREINS_TRANSPORT_CALL']=run.name
         def save(name,data):
             tmp=run/(name+'.tmp')

@@ -3,8 +3,20 @@ import Foundation
 /// Reads only evidence produced by the explicit live command collector, on demand.
 /// No shell execution or history discovery is performed by the UI bridge.
 enum NativeTransportAudit {
-    static func records(root: URL = URL(fileURLWithPath: "/private/tmp/agentreins-transport-audit")) -> [[String: Any]] {
+    /// User-owned 0700 directory (not world-writable /private/tmp).
+    static var defaultLiveRoot: URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AgentGuard/transport-audit")
+    }
+
+    /// Legacy world-writable root kept readable during migration.
+    static var legacyLiveRoot: URL {
+        URL(fileURLWithPath: "/private/tmp/agentreins-transport-audit")
+    }
+
+    static func records(root: URL = defaultLiveRoot) -> [[String: Any]] {
         let fm = FileManager.default
+        try? fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let canonical = root.resolvingSymlinksInPath().path + "/"
         let directories = (try? fm.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey])) ?? []
         let files = directories.map { $0.appendingPathComponent("transport.json") }.filter {
@@ -21,7 +33,7 @@ enum NativeTransportAudit {
                   let invocation = item["invocation"] as? [String: Any],
                   invocation["captureMode"] as? String == "agent-path" else { continue }
             var row: [String: Any] = ["runID": file.deletingLastPathComponent().lastPathComponent]
-            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "captureMode", "gap", "auditBypass", "codexThreadID", "session"] {
+            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "captureMode", "gap", "auditBypass", "codexThreadID", "session", "parentPID", "launcherPID", "provenance", "testCapture"] {
                 row[key] = invocation[key] ?? NSNull()
             }
             for key in ["connections", "children", "blocks", "helpers", "packFiles"] { row[key] = item[key] as? [Any] ?? [] }
@@ -34,5 +46,15 @@ enum NativeTransportAudit {
             records.append(row)
         }
         return records.sorted { ($0["startedAt"] as? String ?? "") > ($1["startedAt"] as? String ?? "") }
+    }
+
+    /// Primary user dir plus legacy /private/tmp (migration).
+    static func liveRecords() -> [[String: Any]] {
+        var byID: [String: [String: Any]] = [:]
+        for record in records(root: defaultLiveRoot) + records(root: legacyLiveRoot) {
+            guard let runID = record["runID"] as? String else { continue }
+            if byID[runID] == nil { byID[runID] = record }
+        }
+        return byID.values.sorted { ($0["startedAt"] as? String ?? "") > ($1["startedAt"] as? String ?? "") }
     }
 }

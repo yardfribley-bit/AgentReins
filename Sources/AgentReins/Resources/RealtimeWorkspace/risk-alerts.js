@@ -16,8 +16,8 @@ const RULES=[
   cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。'},
  {id:'S03',name:'下载后执行',mode:'告警',severity:'critical',
   desc:'curl / wget 下载的文件在 5 分钟内被 chmod +x、sh、bash 或 open 执行。',
-  cond:'下载路径或 SHA-256 与随后执行命令对得上 ∧ Δt ≤ 300s（执行编号可不同）',
-  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。哈希对上为 Correlated；仅路径/时间接近为 Inferred。'},
+  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s（执行编号可不同）；进程血缘（parentPID）对上为 Correlated',
+  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 chmod/sh。'},
  {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
   cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）',
@@ -47,7 +47,6 @@ const DEFAULT_ALLOW=new Set([
 ]);
 
 const CRED_PATH=/(\.ssh\/|\/\.aws\/|\.env(?:\.|$)|id_rsa|id_ed25519|credentials\.json|keychain|\.pem$|secrets?\.)/i;
-const TEST_HOST=/(^|\.)example\.com$|^uploads\.example\.com$/i;
 
 function hostOf(r){
  const raw=r.host||r.resource?.domain||'';
@@ -79,17 +78,15 @@ function confOf(kind){
 function sevOf(level){return ({critical:'crit',high:'high',medium:'med',low:'low'})[level]||'med';}
 function sevLabel(level){return ({critical:'CRITICAL',high:'HIGH',medium:'MEDIUM',low:'LOW'})[level]||'MEDIUM';}
 
-/** Seed / 测试采集不得混进「真实采集」告警视图。 */
+/** Seed / 测试采集：仅认显式来源标记，不再按主机名（example.com / 127.0.0.1）推断。 */
 function isTestCapture(r){
+ if(!r||typeof r!=='object')return false;
+ if(r.testCapture===true||r.provenance==='test'||r.provenance==='seed')return true;
+ const inv=r.invocation;
+ if(inv&&typeof inv==='object'&&(inv.testCapture===true||inv.provenance==='test'||inv.provenance==='seed'))return true;
  const sess=String(r.session||r.codexThreadID||'');
- const host=hostOf(r);
- const args=list(r.args).join(' ');
- const run=String(r.runID||r.call||r.id||'');
- if(/seed-session/i.test(sess))return true;
- if(/seed[-_]?call|seed[-_]?/i.test(run)&&/seed/i.test(sess+run))return true;
- if(TEST_HOST.test(host)||/uploads\.example\.com/i.test(host+args))return true;
- if(/^(127\.0\.0\.1|localhost|::1)$/i.test(host))return true;
- if(/\bexample\.(com|org|net)\b/i.test(args)&&/test|fixture|seed|p5|probe/i.test(sess+run+args))return true;
+ if(/^(seed-session|test-capture)([:._-]|$)/i.test(sess))return true;
+ if(String(r.agent||'')==='__test__')return true;
  return false;
 }
 
@@ -121,8 +118,32 @@ function commandCards(tasks){
    const cmd=String(c.execution?.command||c.input||'');
    if(!cmd)continue;
    const sha=String(c.resource?.sha256||c.execution?.sha256||c.sha256||'').toLowerCase();
-   out.push({task:t,card:c,cmd,sha,call:c.call||c.execution?.call||null,at:c.timestamp||c.execution?.startAt});
+   out.push({task:t,card:c,cmd,sha,call:c.call||c.execution?.call||null,at:c.timestamp||c.execution?.startAt,pid:c.pid||c.execution?.pid,parentPID:c.parentPID||c.execution?.parentPID,agent:t.agent,fromTransport:false});
   }
+ }
+ return out;
+}
+
+/** 真实运输审计里的 chmod / sh / bash / open —— 与任务卡片同等作为 S03 执行侧证据。 */
+function transportExecCommands(){
+ const net=window.AgentReinsNetwork;
+ const locals=typeof net?.localExchanges==='function'?net.localExchanges():[];
+ const out=[];
+ for(const r of locals){
+  if(isTestCapture(r))continue;
+  const tool=String(r.tool||'');
+  const args=list(r.args).map(String);
+  const cmd=[tool,...args].join(' ').trim();
+  if(!cmd)continue;
+  const isExecTool=/^(chmod|sh|bash|open)$/.test(tool);
+  const isExecCmd=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(cmd);
+  if(!isExecTool&&!isExecCmd)continue;
+  if(list(r.downloads).some(d=>d&&d.path))continue;
+  out.push({
+   task:{agent:r.agent,session:r.session},card:null,cmd,sha:'',
+   call:r.call||r.runID||null,at:r.startedAt||r.timestamp,
+   pid:r.pid,parentPID:r.parentPID||r.launcherPID,agent:r.agent,fromTransport:true,record:r
+  });
  }
  return out;
 }
@@ -146,7 +167,7 @@ function buildAlerts(payload){
   }else exchanges.push(r);
  }
  const allRaw=[...byCall.values(),...exchanges].sort((a,b)=>new Date(b.timestamp||b.startedAt)-new Date(a.timestamp||a.startedAt));
- // 「真实采集」视图：排除 seed / example.com / 本机测试服务
+ // 「真实采集」视图：只排除显式测试/种子来源标记
  const all=allRaw.filter(r=>!isTestCapture(r));
  const alerts=[];
  const seenHosts=new Set();
@@ -162,7 +183,7 @@ function buildAlerts(payload){
  }
 
  const reads=credentialReadCards(payload.tasks);
- const cmds=commandCards(payload.tasks);
+ const cmds=[...commandCards(payload.tasks),...transportExecCommands()];
 
  for(const r of all){
   const host=hostOf(r);
@@ -238,7 +259,7 @@ function buildAlerts(payload){
    }
   }
 
-  // S03: 用下载路径 / SHA-256 关联后续执行（执行编号可不同；chmod 可未包装）
+  // S03: 路径 + 时间窗（≤300s）+ 进程血缘；不依赖命令侧从未填写的 sha256
   const downloads=list(r.downloads).filter(d=>d&&d.path);
   for(const d of downloads){
    const fullPath=String(d.path);
@@ -246,16 +267,20 @@ function buildAlerts(payload){
    const sha=d.sha256?String(d.sha256).toLowerCase():'';
    const start=new Date(when).getTime();
    if(isNaN(start))continue;
+   const dlPid=r.pid;
    for(const c of cmds){
     if(!c.at)continue;
     const dt=(new Date(c.at).getTime()-start)/1000;
     if(dt<0||dt>300)continue;
-    const isExec=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(c.cmd);
+    const isExec=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(c.cmd)||/^(chmod|sh|bash|open)\b/.test(c.cmd);
     if(!isExec)continue;
     const pathHit=c.cmd.includes(fullPath)||(name&&(new RegExp('(?:^|[\\s\'"`/=])'+name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:$|[\\s\'"`;|&])')).test(c.cmd));
     if(!pathHit)continue;
-    const hashHit=!!(sha&&(c.sha===sha||c.cmd.toLowerCase().includes(sha)));
-    const confidence=hashHit?'cor':'inf';
+    const lineageHit=!!(dlPid&&c.parentPID&&String(c.parentPID)===String(dlPid));
+    const transportPair=!!(c.fromTransport&&agent&&c.agent&&c.agent===agent);
+    const hashHit=!!(sha&&c.sha&&c.sha===sha);
+    // Correlated：路径 +（进程血缘或同 agent 的真实运输执行记录）；不再要求命令侧 sha256
+    const confidence=(lineageHit||transportPair||hashHit)?'cor':'inf';
     const dlCall=call||'缺口';
     const cmdCall=c.call||'缺口';
     alerts.push({
@@ -263,9 +288,13 @@ function buildAlerts(payload){
      title:'下载后在 5 分钟内执行',
      sub:`${name}${sha?' · SHA-256 '+sha.slice(0,12)+'…':''}`,
      agent,session:sess,call:c.call||call,record:r,timestamp:c.at||when,status:'open',
-     why:hashHit
-      ?`SHA-256 对上（${sha.slice(0,12)}…）：下载与命令「${cut(c.cmd,80)}」关联（Δt ${Math.round(dt)}s）。可信度 Correlated。下载执行编号 ${dlCall} · 命令执行编号 ${cmdCall}。`
-      :`路径对上「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）。可信度 Inferred（无哈希互证）。下载执行编号 ${dlCall} · 命令执行编号 ${cmdCall}。`
+     why:lineageHit
+      ?`路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」对上，且 parentPID=${c.parentPID} 指向下载进程 ${dlPid}（Δt ${Math.round(dt)}s）。可信度 Correlated。下载 ${dlCall} · 命令 ${cmdCall}。`
+      :transportPair
+       ?`路径「${cut(fullPath,60)}」与运输审计执行「${cut(c.cmd,80)}」对上（同 agent，Δt ${Math.round(dt)}s）。可信度 Correlated。下载 ${dlCall} · 命令 ${cmdCall}。`
+       :hashHit
+        ?`SHA-256 与路径均对上（Δt ${Math.round(dt)}s）。可信度 Correlated。下载 ${dlCall} · 命令 ${cmdCall}。`
+        :`路径对上「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）。可信度 Inferred（无进程血缘）。下载 ${dlCall} · 命令 ${cmdCall}。`
     });
    }
   }
@@ -419,14 +448,14 @@ function renderRules(holder,payload){
  const alerts=buildAlerts(payload);
  const cards=RULES.map(r=>{
   const hit=alerts.filter(a=>a.rule===r.id).length;
-  return `<div class="risk-rc"><div class="h"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.name)}</span><div class="seg"><span class="on">告警</span><span>阻断</span></div></div>
+  return `<div class="risk-rc"><div class="h"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.name)}</span><div class="seg"><span class="on">告警</span></div></div>
    <div class="d">${esc(r.desc)}</div><div class="cond mono">${esc(r.cond)}</div>
    <div class="m"><span><b>${hit}</b>今日命中</span><span><b>—</b>近 7 天</span></div>
    <div class="cant"><b>看不到：</b>${esc(r.cant)}</div></div>`;
  }).join('');
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${RULES.length} 条</div><h1>规则</h1><p>少而准：命中时尽量拿出送出/收回或命令证据。默认只告警；验收流与阻断已撤掉。</p></div></div>
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${RULES.length} 条</div><h1>规则</h1><p>少而准：命中时尽量拿出送出/收回或命令证据。默认只告警；验收流已撤掉。</p></div></div>
  <div class="risk-rules">${cards}</div>
- <p class="note" style="margin:16px 28px">S01 无真实文件读取证据时不报。S03 按路径/SHA-256 关联（执行编号可不同）。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
+ <p class="note" style="margin:16px 28px">S01 无真实文件读取证据时不报。S03 按路径/进程血缘/时间窗关联（执行编号可不同）。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
 }
 
 function renderCoverage(holder,payload,riskState){

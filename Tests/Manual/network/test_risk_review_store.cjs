@@ -43,15 +43,16 @@ const pack = risk.packFields(hit);
 assert.equal(pack.id, id);
 assert.match(pack.evidenceText, /credential-outbound/);
 
-// uploads.example.com / seed-session stay out of real-capture view
+// Explicit testCapture / seed-session stay out of real-capture view
 net.setLocalTransports([{
   captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T01:10:00Z',
   pid: 10, exitCode: 0, runID: 'seed-call', call: 'seed-call', session: 'seed-session',
+  testCapture: true, provenance: 'test',
   args: ['https://uploads.example.com/'],
   connections: [{ kind: 'connected', detail: ['uploads.example.com:443'] }],
   blocks: [{ direction: 'send', kind: 'data', textPreview: 'Authorization: Bearer ' + secret }],
   securityAudit: { verdict: 'review', findings: [{ rule: 'credential-outbound', direction: 'request', count: 1, characterOffset: 20 }] },
 }]);
 const seedAlerts = risk.buildAlerts({ tasks: [], collected: [], health: [] });
-assert.equal(seedAlerts.length, 0, 'seed/example must not appear as 真实采集');
+assert.equal(seedAlerts.length, 0, 'explicit test provenance must not appear as 真实采集');
 console.log('risk review store ok');

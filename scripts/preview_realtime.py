@@ -4,10 +4,19 @@ import argparse
 import json
 import gzip
 import hashlib
+import os
 from urllib.parse import urlparse, parse_qs
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+
+def transport_roots():
+    primary = Path(os.environ.get('AGENTREINS_TRANSPORT_ROOT') or (Path.home() / 'Library/Application Support/AgentGuard/transport-audit'))
+    legacy = Path('/private/tmp/agentreins-transport-audit')
+    roots = [primary]
+    if legacy.resolve() != primary.resolve():
+        roots.append(legacy)
+    return roots
 
 CLIENT = r"""(()=>{let last=null,etag=null,busy=false;async function update(){if(busy)return;busy=true;try{const r=await fetch('/live-payload.json',{cache:'no-store',headers:etag?{'If-None-Match':etag}:{},signal:AbortSignal.timeout(10000)});if(r.status===304)return;etag=r.headers.get('ETag');if(!r.ok)throw Error('尚未收到原生实时数据');const p=await r.json();last=p;p.continuityNotice=['本页与 AgentReins 原生应用共用实时采集数据；文件打开等操作请在原生应用使用。',p.continuityNotice].filter(Boolean).join(' · ');window.agentreinsReceive(p);if(p.previewFreshness==='unconfirmed'&&p.observing){const label=document.getElementById('live-label');if(label)label.textContent='实时状态待核验';}}catch(e){if(last)window.agentreinsReceive({...last,observing:false,continuityNotice:'实时数据连接中断，当前保留最后一次采集画面。'+String(e.message)});else{const w=document.getElementById('workspace-warning');w.hidden=false;w.textContent='实时数据尚未连接：'+String(e.message);}}finally{busy=false;}}update();setInterval(update,1000);})();"""
 
@@ -63,8 +72,12 @@ def main():
                 run=query.get('run',[''])[0];line=query.get('line',[''])[0]
                 import re
                 if not re.fullmatch(r'[0-9a-f-]{36}',run) or not line.isdigit():self.send_error(400);return
-                root=Path('/private/tmp/agentreins-transport-audit').resolve()
-                folder=root/run
+                folder=None; root=None
+                for candidate in transport_roots():
+                    try_folder=candidate.resolve()/run
+                    if (try_folder/'transport.json').is_file():
+                        folder=try_folder; root=candidate.resolve(); break
+                if not folder:self.send_error(404);return
                 try:
                     metadata=folder/'transport.json'
                     if root not in metadata.resolve().parents:raise ValueError('Invalid path')
@@ -88,7 +101,12 @@ def main():
                 query=parse_qs(urlparse(self.path).query);run=query.get('run',[''])[0];name=query.get('file',[''])[0]
                 import re
                 if not re.fullmatch(r'[0-9a-f-]{36}',run) or not re.fullmatch(r'git-packfile(?:-\d+)?\.pack',name):self.send_error(400);return
-                root=Path('/private/tmp/agentreins-transport-audit').resolve();folder=root/run
+                folder=None; root=None
+                for candidate in transport_roots():
+                    try_folder=candidate.resolve()/run
+                    if (try_folder/'transport.json').is_file():
+                        folder=try_folder; root=candidate.resolve(); break
+                if not folder:self.send_error(404);return
                 try:
                     metadata=folder/'transport.json'
                     if root not in metadata.resolve().parents or metadata.stat().st_size>4_000_000:raise ValueError('Invalid metadata')
@@ -110,16 +128,30 @@ def main():
                 return
             if route=='/transport-audit.json':
                 records=[]
-                root=Path('/private/tmp/agentreins-transport-audit')
-                for file in sorted(root.glob('*/transport.json'),key=lambda p:p.stat().st_mtime,reverse=True)[:50]:
-                    if file.is_symlink() or root.resolve() not in file.resolve().parents:continue
+                seen=set()
+                files=[]
+                for root in transport_roots():
+                    if not root.is_dir():continue
+                    for file in root.glob('*/transport.json'):
+                        if file.is_symlink() or root.resolve() not in file.resolve().parents:continue
+                        files.append((file, root))
+                for file, root in sorted(files, key=lambda item: item[0].stat().st_mtime, reverse=True)[:80]:
+                    run_id=file.parent.name
+                    if run_id in seen:continue
+                    seen.add(run_id)
                     try:
                         if file.stat().st_size>4_000_000:continue
                         item=json.loads(file.read_text())
                         manifest=item.get('invocation',{})
-                        record={k:manifest.get(k) for k in ['agent','tool','task','startedAt','pid','exitCode','captureMode','gap','codexThreadID','session']}
+                        if manifest.get('testCapture') is True or manifest.get('provenance') in ('test','seed'):
+                            continue
+                        record={k:manifest.get(k) for k in ['agent','tool','task','call','startedAt','pid','parentPID','launcherPID','exitCode','captureMode','gap','auditBypass','codexThreadID','session','provenance','testCapture','args']}
                         record['runID']=file.parent.name
+                        record['call']=record.get('call') or record['runID']
                         record.update({k:item.get(k,[]) for k in ['connections','children','blocks','helpers','packFiles']})
+                        record['downloads']=item.get('downloads') or []
+                        record['outboundFiles']=item.get('outboundFiles') or []
+                        record['securityAudit']=item.get('securityAudit')
                         record['fileResult']=item.get('fileResult')
                         record['repoResult']=item.get('repoResult')
                         record['gitOperation']=item.get('gitOperation')

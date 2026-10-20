@@ -91,11 +91,14 @@
    const tunnelHost=externalDetail(tunnel?.detail?.[0]);
    const connectedHost=externalDetail(connected?.detail?.[0]);
    const headerHost=hostsFromBlocks(blocks);
-   const asked=externalDetail(askedDestination(run));
+   const askedRaw=askedDestination(run);
+   const asked=externalDetail(askedRaw);
+   // 显式访问本机回环仍保留（不再被当成「无外连」丢掉）；代理隧道里的 127.0.0.1 仍不当作站点。
+   const askedLoopback=(!asked&&askedRaw&&loopbackHost(askedRaw))?hostToken(askedRaw):null;
+   const connectedLoopback=(!connectedHost&&connected&&loopbackHost(connected.detail?.[0])&&!tunnelHost)?hostToken(connected.detail?.[0]):null;
    const formula=list(run.formulas).find(Boolean);
-   const target=tunnelHost||headerHost||connectedHost||asked||(run.tool==='brew'&&formula?'Homebrew':null);
+   const target=tunnelHost||headerHost||connectedHost||asked||askedLoopback||connectedLoopback||(run.tool==='brew'&&formula?'Homebrew':null);
    // 127.0.0.1 is the local proxy or a local port, never the external site.
-   if(!target)return null;
    const proxied=!!tunnelHost||(!!(connected&&loopbackHost(connected.detail?.[0]))&&!!headerHost);
    const side=direction=>blocks.filter(b=>b.direction===direction);
    const hideLine=line=>/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(String(line).trim())||/connection established/i.test(String(line));
@@ -115,10 +118,15 @@
    const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
    const statusLine=received.flatMap(block=>list(block.http).map(String)).filter(line=>/^HTTP\//.test(line)&&!/connection established/i.test(line)).pop();
    const statusMatch=statusLine&&statusLine.match(/\s(\d{3})\b/);
-   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,auditBypass:run.auditBypass===true?true:run.auditBypass===false?false:undefined,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
+   // chmod/sh/bash/open 无外连主机，仍保留为本地执行证据（S03）
+   const isLocalExec=/^(chmod|sh|bash|open)$/.test(String(run.tool||''));
+   if(!target&&!isLocalExec&&!downloadRecords.length)return null;
+   const host=target||(isLocalExec?'local-exec':null);
+   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host,pid:run.pid,parentPID:run.parentPID||run.launcherPID||null,launcherPID:run.launcherPID||null,runID:run.runID,provenance:run.provenance,testCapture:run.testCapture===true,accessKind:isLocalExec?'local-exec':'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:isLocalExec?'local_tool_exec':'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,auditBypass:run.auditBypass===true?true:run.auditBypass===false?false:undefined,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:isLocalExec?(run.tool+' 本地执行'):(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
   }).filter(Boolean);
  }
  function localExchanges(){return projectLocal(localRuns);}
+ function rawLocalTransports(){return list(localRuns);}
  function foldCapturedIntoCalls(locals,exchanges){
   const byCall=new Map();
   for(const row of locals) if(row.call) byCall.set(String(row.call),row);
@@ -968,5 +976,5 @@
   const back=activeTask?'<button type="button" data-task="'+esc(activeTask.id)+'">返回任务过程</button>':'';
   holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id}):'<p>'+(activeTask?'这次任务还没有归上的外网访问。':'还没有采到外网访问。')+'</p>');
  }
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,localExchanges,bypassedAudit,tlsFailed,tlsHandshakeFailed};
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,localExchanges,rawLocalTransports,bypassedAudit,tlsFailed,tlsHandshakeFailed};
 })();

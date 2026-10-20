@@ -1,0 +1,68 @@
+{
+  "download": {
+    "run": "a1dd5ddb-2859-4654-b274-da1bcd7b452c",
+    "call": "a1dd5ddb-2859-4654-b274-da1bcd7b452c",
+    "startedAt": "2026-10-20T21:44:36.822725+00:00",
+    "tool": "curl",
+    "pid": 3910,
+    "parentPID": 3900,
+    "auditBypass": false,
+    "args": [
+      "-fsSL",
+      "-o",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_f27b746b-evidence/s03-downloaded.sh",
+      "https://httpbin.org/base64/IyEvYmluL3NoCmVjaG8gYWdlbnRyZWlucy1zMDMtb2sK"
+    ],
+    "downloads": [
+      {
+        "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_f27b746b-evidence/s03-downloaded.sh",
+        "bytes": 33,
+        "sha256": "c1fdfb85edd1b83d6a74099caf62f9f5d56a834059aa9f9bc4a4b07b375e39fc",
+        "state": "verified",
+        "source": null
+      }
+    ]
+  },
+  "chmod": {
+    "run": "c2ff54fd-87d3-48ce-a301-717847b00772",
+    "call": "c2ff54fd-87d3-48ce-a301-717847b00772",
+    "startedAt": "2026-10-20T21:44:38.593030+00:00",
+    "tool": "chmod",
+    "pid": 3929,
+    "parentPID": 3900,
+    "auditBypass": false,
+    "args": [
+      "+x",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_f27b746b-evidence/s03-downloaded.sh"
+    ]
+  },
+  "sh": {
+    "run": "6d76f94f-ffd3-4b2d-9600-b053161d2c39",
+    "call": "6d76f94f-ffd3-4b2d-9600-b053161d2c39",
+    "startedAt": "2026-10-20T21:44:38.970155+00:00",
+    "tool": "sh",
+    "pid": 3931,
+    "parentPID": 3900,
+    "auditBypass": false,
+    "args": [
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_f27b746b-evidence/s03-downloaded.sh"
+    ]
+  },
+  "s07": {
+    "run": "75d4954b-29e6-4667-b7f4-a747dbafae80",
+    "call": "75d4954b-29e6-4667-b7f4-a747dbafae80",
+    "startedAt": "2026-10-20T21:44:39.394592+00:00",
+    "tool": "curl",
+    "pid": 3933,
+    "parentPID": 3900,
+    "auditBypass": true,
+    "args": [
+      "--noproxy",
+      "*",
+      "-fsSL",
+      "-o",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_f27b746b-evidence/s07-body.json",
+      "https://httpbin.org/get?agentreins=s07-f27b746b"
+    ]
+  }
+}

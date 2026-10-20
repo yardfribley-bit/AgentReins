@@ -1,0 +1,42 @@
+{
+  "engine": "js-bridge",
+  "s03": 2,
+  "validation_ok": true,
+  "alerts_sample": [
+    {
+      "id": "S03:a1dd5ddb-2859-4654-b274-da1bcd7b452c:s03-downloaded.sh:6d76f94f-ffd3-4b2d-9600-b",
+      "rule": "S03",
+      "title": "下载后在 5 分钟内执行",
+      "agent": "Cursor",
+      "session": "7bb20cc2-5dec-4183-80de-0c3e8551070b",
+      "executionId": "6d76f94f-ffd3-4b2d-9600-b053161d2c39",
+      "confidence": "Correlated",
+      "timestamp": "2026-10-20T21:44:38.970155+00:00",
+      "sub": "s03-downloaded.sh · SHA-256 c1fdfb85edd1…",
+      "finding": null
+    },
+    {
+      "id": "S03:a1dd5ddb-2859-4654-b274-da1bcd7b452c:s03-downloaded.sh:c2ff54fd-87d3-48ce-a301-7",
+      "rule": "S03",
+      "title": "下载后在 5 分钟内执行",
+      "agent": "Cursor",
+      "session": "7bb20cc2-5dec-4183-80de-0c3e8551070b",
+      "executionId": "c2ff54fd-87d3-48ce-a301-717847b00772",
+      "confidence": "Correlated",
+      "timestamp": "2026-10-20T21:44:38.593030+00:00",
+      "sub": "s03-downloaded.sh · SHA-256 c1fdfb85edd1…",
+      "finding": null
+    }
+  ],
+  "validation": {
+    "mode": "keyed-HMAC-SHA256 append-only",
+    "keyPath": "/Users/jatsmith/Library/Application Support/AgentGuard/mcp-supervisor-hmac.key",
+    "logPath": "/Users/jatsmith/Library/Application Support/AgentGuard/mcp-supervisor-audit.jsonl",
+    "ok": true,
+    "entriesChecked": 2,
+    "tampered": [],
+    "deletedOrGap": [],
+    "confidence": "Observed",
+    "limitation": "持有本机 HMAC 密钥的进程仍可重写整条链；MCP 不提供删除接口。"
+  }
+}

@@ -3,7 +3,22 @@
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const root = path.resolve(__dirname, '../../Sources/AgentReins/Resources/RealtimeWorkspace');
+const candidates = [
+  process.env.AGENTREINS_WORKSPACE_JS,
+  path.join(__dirname, '../RealtimeWorkspace'),
+  path.resolve(__dirname, '../../Sources/AgentReins/Resources/RealtimeWorkspace'),
+].filter(Boolean);
+let root = null;
+for (const c of candidates) {
+  if (fs.existsSync(path.join(c, 'risk-alerts.js')) && fs.existsSync(path.join(c, 'network-view.js'))) {
+    root = c;
+    break;
+  }
+}
+if (!root) {
+  process.stderr.write('alerts_bridge: RealtimeWorkspace JS not found\n');
+  process.exit(2);
+}
 const window = {};
 vm.runInNewContext(fs.readFileSync(path.join(root, 'network-view.js'), 'utf8'), { window });
 vm.runInNewContext(fs.readFileSync(path.join(root, 'risk-alerts.js'), 'utf8'), { window });
@@ -32,5 +47,5 @@ process.stdin.on('end', () => {
     timestamp: a.timestamp,
     why: a.why,
   }));
-  process.stdout.write(JSON.stringify({ alerts }));
+  process.stdout.write(JSON.stringify({ alerts, engine: 'js-bridge', workspace: root }));
 });

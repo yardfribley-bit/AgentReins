@@ -31,6 +31,18 @@ jobs:
       - name: Run unit tests
         run: swift test
 
+      - name: Run JS risk / XSS tests
+        run: |
+          set -euo pipefail
+          node Tests/Manual/network/test_risk_p5_association.cjs
+          node Tests/Manual/network/test_risk_review_store.cjs
+          node Tests/Manual/network/test_xss_escape.cjs
+          echo "JS_TESTS_PASSED=3"
+
+      - name: Run MCP supervisor unit tests
+        run: |
+          python3 -m unittest discover -s tools/agentreins-mcp -p 'test_*.py' -v
+
       - name: Build release app
         env:
           AGENTREINS_ARCHS: universal
@@ -38,11 +50,16 @@ jobs:
           AGENTREINS_BUILD_NUMBER: ${{ github.run_number }}
         run: ./package_app.sh
 
-      - name: Verify architectures and signature
+      - name: Verify architectures, signature, and packaged MCP
         run: |
           lipo -archs AgentReins.app/Contents/MacOS/AgentReins | grep arm64
           lipo -archs AgentReins.app/Contents/MacOS/AgentReins | grep x86_64
           codesign --verify --deep --strict --verbose=2 AgentReins.app
+          test -f AgentReins.app/Contents/Resources/agentreins-mcp/server.py
+          test -f AgentReins.app/Contents/Resources/agentreins-mcp/evidence.py
+          test -f AgentReins.app/Contents/Resources/agentreins-mcp/alerts_bridge.cjs
+          test -f AgentReins.app/Contents/Resources/RealtimeWorkspace/risk-alerts.js
+          echo "PACKAGED_MCP_OK=1"
 
       - name: Create CI artifact
         run: ditto -c -k --sequesterRsrc --keepParent AgentReins.app AgentReins-ci-universal.zip
