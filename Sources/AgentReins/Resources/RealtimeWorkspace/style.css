@@ -169,7 +169,10 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 .risk-ph .k{font-size:11px;color:var(--muted);margin-bottom:4px}
 .risk-ph h1{font-size:22px}
 .risk-ph p{color:#67645f;font-size:13px;margin-top:6px;max-width:720px}
-.risk-stats{display:grid;grid-template-columns:repeat(4,minmax(0,1fr)) minmax(220px,1.4fr);gap:10px;margin:8px 28px 14px}
+.risk-stats{display:grid;grid-template-columns:repeat(3,minmax(0,1fr)) minmax(220px,1.4fr);gap:10px;margin:8px 28px 14px}
+.risk-table tr.acked,.risk-detail.acked{opacity:.72}
+.risk-st.acked{color:var(--muted)}
+.risk-st.open{color:var(--red)}
 .risk-stats.cov-only{grid-template-columns:repeat(4,minmax(0,1fr))}
 .risk-stat,.risk-cov{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .risk-stat b{display:block;font-size:28px;font-weight:600;line-height:1.1}
@@ -203,8 +206,7 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 .risk-rule{font:11px ui-monospace,monospace;background:var(--tint);padding:2px 6px;border-radius:4px}
 .risk-conf{font-size:10px;padding:3px 6px;border-radius:4px;white-space:nowrap}
 .risk-conf.obs{background:var(--green-bg);color:var(--green)}.risk-conf.cor{background:#eef2ff;color:#4d5ea8}.risk-conf.inf{background:var(--orange-bg);color:var(--orange)}.risk-conf.unk{background:var(--tint);color:var(--muted)}
-.risk-st.todo{color:var(--red)}.risk-st.ask{color:var(--purple)}.risk-st.done{color:var(--green)}
-.risk-stat.done b{color:var(--green)}
+.risk-st.todo{color:var(--red)}.risk-st.ask{color:var(--purple)}.risk-st.done{color:var(--green)}.risk-st.acked{color:var(--muted)}
 .risk-actions .primary{padding:7px 12px;font-size:12px}
 .risk-ft{display:flex;justify-content:space-between;gap:10px;padding:10px 12px;font-size:10px;color:var(--muted)}
 .risk-empty{padding:36px 28px;background:var(--surface);border:1px solid var(--line);border-radius:10px}

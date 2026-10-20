@@ -69,9 +69,10 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 return
             }
             if action == "saveReviewDecision" {
+                // Style-only ack — acceptance / disposition / evidence-pack export removed.
                 guard let id = body["id"] as? String, !id.isEmpty, id.count <= 200,
                       let state = body["state"] as? String,
-                      ["accepted", "dismissed", "need_evidence", "returned"].contains(state) else { return }
+                      ["acked", "acknowledged", "known"].contains(state) else { return }
                 let note = (body["note"] as? String).map { String($0.prefix(2000)) }
                 let evidenceText = String((body["evidenceText"] as? String ?? "").prefix(200_000))
                 let evidenceHash = evidenceText.isEmpty
@@ -81,59 +82,11 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 let decidedAt = (body["decidedAt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     ?? ISO8601DateFormatter().string(from: Date())
                 let decision = RealtimeReviewStore.Decision(
-                    id: id, state: state, note: note, decidedAt: decidedAt,
+                    id: id, state: "acked", note: note, decidedAt: decidedAt,
                     evidenceHash: evidenceHash, evidenceCount: evidenceCount
                 )
                 _ = RealtimeReviewStore.save(decision)
-                pushReviewDecisions(to: message.webView, message: state == "accepted" ? "已确认并写入本机" : "已处置并写入本机")
-                return
-            }
-            if action == "exportEvidencePack" {
-                guard let id = body["id"] as? String, !id.isEmpty, id.count <= 200 else { return }
-                let title = String((body["title"] as? String ?? "risk-alert").prefix(200))
-                let summary = String((body["summary"] as? String ?? "").prefix(4000))
-                let rule = String((body["rule"] as? String ?? "").prefix(32))
-                let agent = String((body["agent"] as? String ?? "").prefix(64))
-                let session = String((body["session"] as? String ?? "").prefix(200))
-                let call = (body["call"] as? String).map { String($0.prefix(128)) }
-                let note = (body["note"] as? String).map { String($0.prefix(2000)) }
-                let state = (body["state"] as? String).map { String($0.prefix(32)) }
-                let decidedAt = (body["decidedAt"] as? String).map { String($0.prefix(64)) }
-                let evidenceText = String((body["evidenceText"] as? String ?? "").prefix(200_000))
-                let data = RealtimeReviewStore.packJSON(
-                    alertID: id, title: title, summary: summary, rule: rule, agent: agent,
-                    session: session, call: call, decidedAt: decidedAt, state: state, note: note,
-                    evidenceText: evidenceText
-                )
-                let panel = NSSavePanel()
-                panel.canCreateDirectories = true
-                panel.nameFieldStringValue = "agentreins-risk-\(rule.isEmpty ? "alert" : rule)-\(id.split(separator: ":").last.map(String.init) ?? "pack").json"
-                panel.allowedContentTypes = [.json]
-                let reply = panel.runModal()
-                var saved = false
-                var path = ""
-                if reply == .OK, let url = panel.url {
-                    do {
-                        try data.write(to: url, options: [.atomic])
-                        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-                        saved = true
-                        path = url.path
-                    } catch {
-                        saved = false
-                    }
-                }
-                Task { @MainActor in
-                    _ = try? await message.webView?.callAsyncJavaScript(
-                        "window.agentreinsHostResult && window.agentreinsHostResult(result)",
-                        arguments: ["result": [
-                            "action": "exportEvidencePack",
-                            "success": saved,
-                            "path": path,
-                            "message": saved ? "证据包已保存到 \(path)" : (reply == .cancel ? "已取消导出" : "证据包未能写入磁盘"),
-                        ]],
-                        in: nil, contentWorld: .page
-                    )
-                }
+                pushReviewDecisions(to: message.webView, message: "已标记已知悉（仅样式）")
                 return
             }
             guard let latest else { return }
@@ -268,6 +221,7 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
             decisionHandler(action.request.url?.isFileURL == true ? .allow : .cancel)
         }
         private func pushReviewDecisions(to webView: WKWebView?, message: String? = nil) {
+            _ = RealtimeReviewStore.clearSeedAndTestDecisions()
             let decisions = RealtimeReviewStore.load().map { item -> [String: Any] in
                 var row: [String: Any] = [
                     "id": item.id,

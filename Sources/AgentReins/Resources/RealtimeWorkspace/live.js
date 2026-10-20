@@ -263,7 +263,7 @@ function renderRisk(){
  if(view==='alerts')api.renderList($('alerts-view'),shown,riskState);
  else if(view==='rules')api.renderRules($('rules-view'),shown);
  else if(view==='coverage')api.renderCoverage($('coverage-view'),shown,riskState);
- const n=(riskState.alerts||api.applyDecisions?.(api.buildAlerts(shown),riskState.decisions)||api.buildAlerts(shown)||[]).filter(a=>a.status==='todo'||a.status==='ask').length;
+ const n=(riskState.alerts||api.applyDecisions?.(api.buildAlerts(shown),riskState.decisions)||api.buildAlerts(shown)||[]).filter(a=>!a.acked).length;
  const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}
 }
 window.agentreinsRenderRisk=()=>{if(view==='alerts'||view==='rules'||view==='coverage'){riskState.transportsRequested=true;renderRisk();}};
@@ -404,16 +404,14 @@ document.addEventListener('click',e=>{
  else if(el.dataset.riskAlert){riskState.selected=el.dataset.riskAlert;renderRisk();}
  else if(el.dataset.riskFilter){riskState.filter[el.dataset.riskFilter]=el.dataset.riskValue;riskState.selected=null;renderRisk();}
  else if(el.dataset.riskDecide){
+  // 仅「标记已知悉」：样式回执，不做验收处置、不导出证据包。
+  const state=el.dataset.riskDecide;
+  if(!['acked','acknowledged','known'].includes(state))return;
   const api=window.AgentReinsRisk;const alert=(riskState.alerts||[]).find(a=>a.id===el.dataset.riskId)||api?.buildAlerts?.(shown)?.find(a=>a.id===el.dataset.riskId);
   if(!alert){toast('找不到这条告警');return;}
   const evidenceText=api?.evidenceTextFor?.(alert)||'';
-  bridge('saveReviewDecision',{id:alert.id,state:el.dataset.riskDecide,note:'',evidenceText,evidenceCount:evidenceText.length});
+  bridge('saveReviewDecision',{id:alert.id,state:'acked',note:'',evidenceText,evidenceCount:evidenceText.length});
   riskState.selected=alert.id;
- }
- else if(el.dataset.riskExport){
-  const api=window.AgentReinsRisk;const alert=(riskState.alerts||[]).find(a=>a.id===el.dataset.riskExport);
-  if(!alert||!api?.packFields){toast('找不到这条告警');return;}
-  bridge('exportEvidencePack',api.packFields(alert));
  }
  else if(el.dataset.networkRecordJump){networkSelected=el.dataset.networkRecordJump||null;view='network';render();}
 });

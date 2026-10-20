@@ -8,16 +8,16 @@ const dayKey=v=>{const d=new Date(v);return isNaN(d)?'':d.toLocaleDateString('zh
 const RULES=[
  {id:'S01',name:'凭证读取后外联',mode:'告警',severity:'critical',
   desc:'agent 读取 ~/.ssh、~/.aws、.env、钥匙串导出文件后，同一执行编号下出现外联。',
-  cond:'读取路径命中凭证清单 ∧ 同一执行编号 ∧ 目的地非白名单',
-  cant:'当前没有 Endpoint Security 级文件监控；仅会话时间窗凑出来的关联不当证据，覆盖度页标为盲区。'},
+  cond:'真实文件读取证据（resource.path）∧ 路径命中凭证清单 ∧ 同一执行编号 ∧ 目的地非白名单',
+  cant:'当前没有 Endpoint Security 级文件监控；仅会话描述文本或时间窗凑出来的关联不当证据，覆盖度页标为盲区。'},
  {id:'S02',name:'出站含密钥',mode:'告警',severity:'critical',
   desc:'出站请求头或正文里出现 API Key、Token、私钥片段。命中即打码展示。',
   cond:'content_audit：credential-outbound / private-key-outbound',
   cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。'},
  {id:'S03',name:'下载后执行',mode:'告警',severity:'critical',
   desc:'curl / wget 下载的文件在 5 分钟内被 chmod +x、sh、bash 或 open 执行。',
-  cond:'同一执行编号（call）∧ 下载路径/SHA-256 与随后执行命令对得上 ∧ Δt ≤ 300s',
-  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。没有执行编号时不会按会话时间窗硬凑。'},
+  cond:'下载路径或 SHA-256 与随后执行命令对得上 ∧ Δt ≤ 300s（执行编号可不同）',
+  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。哈希对上为 Correlated；仅路径/时间接近为 Inferred。'},
  {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
   cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）',
@@ -47,6 +47,7 @@ const DEFAULT_ALLOW=new Set([
 ]);
 
 const CRED_PATH=/(\.ssh\/|\/\.aws\/|\.env(?:\.|$)|id_rsa|id_ed25519|credentials\.json|keychain|\.pem$|secrets?\.)/i;
+const TEST_HOST=/(^|\.)example\.com$|^uploads\.example\.com$/i;
 
 function hostOf(r){
  const raw=r.host||r.resource?.domain||'';
@@ -61,7 +62,8 @@ function bypassed(r){
  return r.auditBypass===true;
 }
 function associationOf(a){
- if(a.call)return {name:'已确认',note:'执行编号对得上',kind:'confirmed'};
+ // 关联强度不用「已确认」；弱关联更不能冒充已确认。
+ if(a.call)return {name:'按执行编号',note:'执行编号对得上',kind:'by-call'};
  if(a.record?.taskConfidence==='candidate')return {name:'候选关联',note:'不是按执行编号对上的',kind:'candidate'};
  return {name:'缺口',note:'还没有执行编号',kind:'gap'};
 }
@@ -77,14 +79,35 @@ function confOf(kind){
 function sevOf(level){return ({critical:'crit',high:'high',medium:'med',low:'low'})[level]||'med';}
 function sevLabel(level){return ({critical:'CRITICAL',high:'HIGH',medium:'MEDIUM',low:'LOW'})[level]||'MEDIUM';}
 
+/** Seed / 测试采集不得混进「真实采集」告警视图。 */
+function isTestCapture(r){
+ const sess=String(r.session||r.codexThreadID||'');
+ const host=hostOf(r);
+ const args=list(r.args).join(' ');
+ const run=String(r.runID||r.call||r.id||'');
+ if(/seed-session/i.test(sess))return true;
+ if(/seed[-_]?call|seed[-_]?/i.test(run)&&/seed/i.test(sess+run))return true;
+ if(TEST_HOST.test(host)||/uploads\.example\.com/i.test(host+args))return true;
+ if(/^(127\.0\.0\.1|localhost|::1)$/i.test(host))return true;
+ if(/\bexample\.(com|org|net)\b/i.test(args)&&/test|fixture|seed|p5|probe/i.test(sess+run+args))return true;
+ return false;
+}
+
+/** 真实文件读取证据：必须有 resource.path，不能只用工具描述文本凑。 */
 function credentialReadCards(tasks){
  const out=[];
  for(const t of list(tasks)){
   for(const c of list(t.cards)){
-   const path=String(c.resource?.path||c.input||c.summary||c.title||'');
+   const path=String(c.resource?.path||'');
+   if(!path||!CRED_PATH.test(path))continue;
    const kind=String(c.kind||c.detailType||'');
-   if(!CRED_PATH.test(path))continue;
-   if(!/file|read|Read|cat/i.test(kind+c.title+path)&&!/read_file|Read|打开|读取/.test(String(c.title||'')))continue;
+   const title=String(c.title||'');
+   const op=String(c.op||c.action||'');
+   const realRead=
+    /^(file|read)$/i.test(kind)||
+    /file[_-]?read|read_file|ReadFile/i.test(kind+title+op)||
+    ((/^(file)$/i.test(kind)||/文件/.test(kind+title))&&/read|Read|打开|读取|cat/i.test(kind+title+op));
+   if(!realRead)continue;
    out.push({task:t,card:c,path,call:c.call||c.execution?.call||(String(c.id||'').startsWith('call:')?String(c.id).slice(5):null),at:c.timestamp});
   }
  }
@@ -97,7 +120,8 @@ function commandCards(tasks){
   for(const c of list(t.cards)){
    const cmd=String(c.execution?.command||c.input||'');
    if(!cmd)continue;
-   out.push({task:t,card:c,cmd,call:c.call||c.execution?.call||null,at:c.timestamp||c.execution?.startAt});
+   const sha=String(c.resource?.sha256||c.execution?.sha256||c.sha256||'').toLowerCase();
+   out.push({task:t,card:c,cmd,sha,call:c.call||c.execution?.call||null,at:c.timestamp||c.execution?.startAt});
   }
  }
  return out;
@@ -121,7 +145,9 @@ function buildAlerts(payload){
    byCall.set(String(r.call),merged);
   }else exchanges.push(r);
  }
- const all=[...byCall.values(),...exchanges].sort((a,b)=>new Date(b.timestamp||b.startedAt)-new Date(a.timestamp||a.startedAt));
+ const allRaw=[...byCall.values(),...exchanges].sort((a,b)=>new Date(b.timestamp||b.startedAt)-new Date(a.timestamp||a.startedAt));
+ // 「真实采集」视图：排除 seed / example.com / 本机测试服务
+ const all=allRaw.filter(r=>!isTestCapture(r));
  const alerts=[];
  const seenHosts=new Set();
  const today=dayKey(new Date());
@@ -152,7 +178,7 @@ function buildAlerts(payload){
      id:alertId('S02',(call||r.id)+':'+f.rule),rule:'S02',severity:'critical',confidence:'obs',
      title:f.rule==='private-key-outbound'?'出站请求含私钥片段（已打码）':'出站请求体含疑似密钥（已打码）',
      sub:`${tool} · ${host||'未知主机'} · ${f.direction==='response'?'收回':'送出'}第 ${f.characterOffset??0} 字符`,
-     agent,session:sess,call,record:r,timestamp:when,status:'todo',
+     agent,session:sess,call,record:r,timestamp:when,status:'open',
      why:'content_audit 命中 '+f.rule+'。展示正文已打码，原始匹配文本不会写入告警。'
     });
    }
@@ -161,7 +187,7 @@ function buildAlerts(payload){
      id:alertId('INB',(call||r.id)+':inj'),rule:'INB',severity:'high',confidence:'obs',
      title:'收回内容含提示覆盖指令',
      sub:`${tool} · ${host||'未知主机'} · 入站正文`,
-     agent,session:sess,call,record:r,timestamp:when,status:'ask',
+     agent,session:sess,call,record:r,timestamp:when,status:'open',
      why:'content_audit 命中 instruction-override-inbound。这是入站告警，不证明本机已执行该指令。'
     });
    }
@@ -170,7 +196,7 @@ function buildAlerts(payload){
      id:alertId('S03',(call||r.id)+':pipe'),rule:'S03',severity:'critical',confidence:'obs',
      title:'收回内容含「下载后管道执行」写法',
      sub:`${tool} · ${host||'未知主机'}`,
-     agent,session:sess,call,record:r,timestamp:when,status:'ask',
+     agent,session:sess,call,record:r,timestamp:when,status:'open',
      why:'响应正文命中 curl|bash / wget|sh 一类写法。是否真的执行了，还要看本机命令证据。'
     });
    }
@@ -181,7 +207,7 @@ function buildAlerts(payload){
     id:alertId('S07',call||r.id),rule:'S07',severity:'high',confidence:'obs',
     title:'命令绕过了审计代理',
     sub:`${tool} · ${host||'目标未解析'} · 后端 auditBypass`,
-    agent,session:sess,call,record:r,timestamp:when,status:'ask',
+    agent,session:sess,call,record:r,timestamp:when,status:'open',
     why:'后端写入了 auditBypass=true。前端不根据 --noproxy 等参数自行推断。'
    });
   }
@@ -191,7 +217,7 @@ function buildAlerts(payload){
     id:alertId('S05',call||r.id),rule:'S05',severity:'high',confidence:call?'cor':'obs',
     title:`向新域名上传 ${(bytesOut(r)/1048576).toFixed(1)} MB`,
     sub:`${tool} · ${host}`,
-    agent,session:sess,call,record:r,timestamp:when,status:'ask',
+    agent,session:sess,call,record:r,timestamp:when,status:'open',
     why:'本会话视角下该域名首次出现，且单次送出超过 1 MB。'
    });
   }
@@ -206,38 +232,46 @@ function buildAlerts(payload){
     alerts.push({
      id:alertId('S04',(call||r.id)+':'+dest),rule:'S04',severity:r.tool==='ssh'?'medium':'high',
      confidence:call?'obs':(/加密/.test(String(r.gap||''))?'inf':'obs'),
-     title,sub:`${tool} · ${dest}`,agent,session:sess,call,record:r,timestamp:when,status:'ask',
+     title,sub:`${tool} · ${dest}`,agent,session:sess,call,record:r,timestamp:when,status:'open',
      why:r.tool==='ssh'?'只看到连到了哪里；通道内传了什么看不到。':'目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。'
     });
    }
   }
 
-  // S03: download then execute — same execution id only (never session-wide)
+  // S03: 用下载路径 / SHA-256 关联后续执行（执行编号可不同；chmod 可未包装）
   const downloads=list(r.downloads).filter(d=>d&&d.path);
-  if(!call){
-   // no execution id → do not invent S03 from session/time proximity
-  }else for(const d of downloads){
-   const name=String(d.path).split(/[/\\]/).pop();
+  for(const d of downloads){
+   const fullPath=String(d.path);
+   const name=fullPath.split(/[/\\]/).pop();
+   const sha=d.sha256?String(d.sha256).toLowerCase():'';
    const start=new Date(when).getTime();
+   if(isNaN(start))continue;
    for(const c of cmds){
-    if(!c.call||String(c.call)!==String(call))continue;
     if(!c.at)continue;
     const dt=(new Date(c.at).getTime()-start)/1000;
     if(dt<0||dt>300)continue;
-    const hit=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(c.cmd)&&c.cmd.includes(name);
-    if(!hit)continue;
+    const isExec=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(c.cmd);
+    if(!isExec)continue;
+    const pathHit=c.cmd.includes(fullPath)||(name&&(new RegExp('(?:^|[\\s\'"`/=])'+name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:$|[\\s\'"`;|&])')).test(c.cmd));
+    if(!pathHit)continue;
+    const hashHit=!!(sha&&(c.sha===sha||c.cmd.toLowerCase().includes(sha)));
+    const confidence=hashHit?'cor':'inf';
+    const dlCall=call||'缺口';
+    const cmdCall=c.call||'缺口';
     alerts.push({
-     id:alertId('S03',call+':'+name),rule:'S03',severity:'critical',confidence:'cor',
+     id:alertId('S03',dlCall+':'+name+':'+cmdCall),rule:'S03',severity:'critical',confidence,
      title:'下载后在 5 分钟内执行',
-     sub:`${name}${d.sha256?' · SHA-256 '+String(d.sha256).slice(0,12)+'…':''}`,
-     agent,session:sess,call,record:r,timestamp:c.at||when,status:'ask',
-     why:`同一执行编号 ${call}：下载与命令「${cut(c.cmd,80)}」对得上（Δt ${Math.round(dt)}s）。不按会话时间窗凑。`
+     sub:`${name}${sha?' · SHA-256 '+sha.slice(0,12)+'…':''}`,
+     agent,session:sess,call:c.call||call,record:r,timestamp:c.at||when,status:'open',
+     why:hashHit
+      ?`SHA-256 对上（${sha.slice(0,12)}…）：下载与命令「${cut(c.cmd,80)}」关联（Δt ${Math.round(dt)}s）。可信度 Correlated。下载执行编号 ${dlCall} · 命令执行编号 ${cmdCall}。`
+      :`路径对上「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）。可信度 Inferred（无哈希互证）。下载执行编号 ${dlCall} · 命令执行编号 ${cmdCall}。`
     });
    }
   }
  }
 
- // S01: only same execution id — never session time-window alone
+ // S01: 仅真实文件读取证据 + 同一执行编号；无真实读取时不报（盲区见覆盖度）
  for(const read of reads){
   if(!read.call)continue;
   const r=all.find(x=>x.call&&String(x.call)===String(read.call));
@@ -248,8 +282,8 @@ function buildAlerts(payload){
    id:alertId('S01',read.call),rule:'S01',severity:'critical',confidence:'cor',
    title:`读取凭证相关路径后外联${host?' '+host:''}`,
    sub:`${cut(read.path,48)} → ${r.tool||'访问'} · 同一执行编号`,
-   agent:r.agent||read.task?.agent||'未对上 Agent',session:r.session||read.task?.session||'',call:read.call,record:r,timestamp:r.timestamp||r.startedAt,status:'todo',
-   why:'文件读取与外联共用执行编号。没有执行编号时不会用时间窗硬凑 S01。'
+   agent:r.agent||read.task?.agent||'未对上 Agent',session:r.session||read.task?.session||'',call:read.call,record:r,timestamp:r.timestamp||r.startedAt,status:'open',
+   why:'文件读取证据来自 resource.path，并与外联共用执行编号。描述文本或无路径证据不会触发 S01。'
   });
  }
 
@@ -276,41 +310,36 @@ function coverageModel(payload){
  const proxyUp=!!(proxy&&proxy.state!=='failed'&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||/18891|proxy is running|records received/i.test(String(proxy.detail||''))));
  return {chips,proxyUp,proxyDetail:proxy?.detail||'',blind:[
   {t:'未走代理的流量',s:'不读 HTTPS_PROXY 的程序、agent 内置直连',v:'看不到，也不估算比例'},
-  {t:'文件读取（S01）',s:'不经 agent 会话 / 执行编号的读文件',v:'未接 Endpoint Security，不声称文件级监控'},
+  {t:'文件读取（S01）',s:'不经 agent 会话 / 执行编号的读文件；无 resource.path 的描述文本不算读取证据',v:'未接 Endpoint Security，不声称文件级监控；无真实读取证据时 S01 不报'},
   {t:'安全设置变更（S06）',s:'各 agent 配置文件关键字段',v:'本版未监看，规则页仅说明'},
   {t:'SSH 加密通道',s:'ssh、git over ssh 内部传输',v:'只看到连到了哪台主机'},
   {t:'证书固定 / QUIC',s:'拒绝本机根证书或走 UDP 443',v:'可能只有元数据，或完全看不到'}
  ]};
 }
 
+/** 已知悉只影响显示样式，不改变告警本身、不做验收处置。 */
 function applyDecisions(alerts,decisions){
  const map=new Map(list(decisions).map(d=>[d.id,d]));
  return alerts.map(a=>{
   const d=map.get(a.id);if(!d)return a;
-  const status=d.state==='accepted'||d.state==='dismissed'||d.state==='returned'?'done':d.state==='need_evidence'?'ask':a.status;
-  return {...a,status,decision:d};
+  const acked=d.state==='acked'||d.state==='acknowledged'||d.state==='known';
+  return {...a,acked,decision:d};
  });
 }
 function statusLabel(a){
- if(a.status==='done'){
-  if(a.decision?.state==='accepted')return '已确认';
-  if(a.decision?.state==='returned')return '已退回';
-  return '已处置';
- }
- return a.status==='todo'?'待处置':'待确认';
+ if(a.acked)return '已知悉';
+ return '未读';
 }
 function renderStats(alerts,cov){
  const crit=alerts.filter(a=>a.severity==='critical').length;
  const high=alerts.filter(a=>a.severity==='high').length;
- const pending=alerts.filter(a=>a.status==='todo'||a.status==='ask').length;
- const done=alerts.filter(a=>a.status==='done').length;
+ const unread=alerts.filter(a=>!a.acked).length;
  const chips=cov.chips.map(c=>`<span class="risk-chip ${c.level==='full'?'ok':c.level==='part'?'warn':'bad'}"><i></i>${esc(c.a)} ${esc(c.label)}</span>`).join('')
   +`<span class="risk-chip ${cov.proxyUp?'ok':'bad'}"><i></i>${cov.proxyUp?'代理在听':'未走代理流量：看不到'}</span>`;
  return `<div class="risk-stats">
   <div class="risk-stat crit"><b>${crit}</b><span>今日 Critical</span></div>
   <div class="risk-stat high"><b>${high}</b><span>今日 High</span></div>
-  <div class="risk-stat ask"><b>${pending}</b><span>待你确认</span></div>
-  <div class="risk-stat done"><b>${done}</b><span>已处置<small>本机持久化，重启仍在</small></span></div>
+  <div class="risk-stat ask"><b>${unread}</b><span>未读</span></div>
   <div class="risk-cov"><div class="risk-cov-t"><span>覆盖度 · 告警只来自看得到的部分</span><button type="button" data-view="coverage">看不到什么 →</button></div><div class="risk-chips">${chips}</div></div>
  </div>`;
 }
@@ -331,13 +360,13 @@ function renderFilters(alerts,filter){
 function rowHTML(a,selected){
  const c=confOf(a.confidence);
  const assoc=associationOf(a);
- return `<tr class="${selected===a.id?'sel':''}" data-risk-alert="${esc(a.id)}">
+ return `<tr class="${selected===a.id?'sel':''}${a.acked?' acked':''}" data-risk-alert="${esc(a.id)}">
   <td><span class="risk-sev ${sevOf(a.severity)}">${sevLabel(a.severity)}</span></td>
   <td><button type="button" class="risk-link" data-risk-alert="${esc(a.id)}"><div class="t1">${esc(a.title)}</div><div class="t2">${esc(a.sub)}</div></button></td>
-  <td class="ag"><b>${esc(a.agent)}</b><div class="t2 mono">${esc(cut(a.session,28))}</div><div class="t2 strength-${esc(assoc.name)}">关联：${esc(assoc.name)}</div></td>
+  <td class="ag"><b>${esc(a.agent)}</b><div class="t2 mono">${esc(cut(a.session,28))}</div><div class="t2 strength-${esc(assoc.kind)}">关联：${esc(assoc.name)}</div></td>
   <td><span class="risk-rule">${esc(a.rule)}</span></td>
   <td><span class="risk-conf ${c.c}">${esc(c.t)}</span></td>
-  <td><span class="risk-st ${esc(a.status)}">${esc(statusLabel(a))}</span></td>
+  <td><span class="risk-st ${a.acked?'acked':'open'}">${esc(statusLabel(a))}</span></td>
   <td class="mono">${esc(time(a.timestamp))}</td>
  </tr>`;
 }
@@ -351,7 +380,7 @@ function renderList(holder,payload,state){
  if(f.q){const q=f.q.toLowerCase();shown=shown.filter(a=>[a.title,a.sub,a.agent,a.session,a.rule,hostOf(a.record||{})].join('\n').toLowerCase().includes(q));}
  const selected=state.selected&&shown.find(a=>a.id===state.selected)||null;
  const table=shown.length?`<div class="risk-table-wrap"><table class="risk-table"><thead><tr><th>级别</th><th>告警</th><th>Agent · 会话</th><th>规则</th><th>证据可信度</th><th>状态</th><th>时间</th></tr></thead><tbody>${shown.map(a=>rowHTML(a,selected?.id)).join('')}</tbody></table>
- <div class="risk-ft"><span>可信度：Observed / Correlated / Inferred / Unknown · 关联强度：已确认（执行编号）/ 候选 / 缺口</span><span>仅真实采集 · ${shown.length} 条</span></div></div>`
+ <div class="risk-ft"><span>可信度：Observed / Correlated / Inferred / Unknown · 关联强度：按执行编号 / 候选 / 缺口</span><span>仅真实采集 · ${shown.length} 条</span></div></div>`
   :`<div class="risk-empty"><h2>今天还没有风险告警</h2><p>没有告警不等于安全。未走代理的流量、文件级读取和配置变更仍可能是盲区。</p><ol><li>看覆盖度，确认代理是否在听。</li><li>用真实工具调用触发 S02 / S03 / S07 后再回到这里。</li></ol><button type="button" data-view="coverage">打开覆盖度</button><button type="button" data-view="network">打开外网访问</button></div>`;
  const detail=selected?renderDetail(selected,payload):'';
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机 · WorkBuddy / Codex / Cursor</div><h1>风险告警</h1><p>这台 Mac 上的编码 agent 今天有没有做危险的事。每条告警都能点开看送出和收回的证据。</p></div></div>
@@ -369,20 +398,17 @@ function renderDetail(a,payload){
  }):'';
  const c=confOf(a.confidence);
  const assoc=associationOf(a);
- return `<article class="risk-detail">
+ return `<article class="risk-detail${a.acked?' acked':''}">
   <header><span class="risk-sev ${sevOf(a.severity)}">${sevLabel(a.severity)}</span><h2>${esc(a.title)}</h2>
-  <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.name)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')}</p></header>
+  <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.kind)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')}</p></header>
   <p class="risk-why">${esc(a.why||'')}</p>
   <div class="risk-actions">
-   <button type="button" class="primary" data-risk-decide="accepted" data-risk-id="${esc(a.id)}">确认无风险</button>
-   <button type="button" class="quiet" data-risk-decide="dismissed" data-risk-id="${esc(a.id)}">标记已处置</button>
-   <button type="button" class="quiet" data-risk-decide="need_evidence" data-risk-id="${esc(a.id)}">标记待补证据</button>
-   <button type="button" class="quiet" data-risk-export="${esc(a.id)}">导出证据包</button>
+   ${a.acked?'':`<button type="button" class="quiet" data-risk-decide="acked" data-risk-id="${esc(a.id)}">标记已知悉</button>`}
    ${a.call?`<button type="button" class="quiet" data-network-record-jump="${esc(r?.id||'')}">在外网访问中打开</button>`:''}
    <button type="button" class="quiet" data-view="network">外网访问</button>
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
-  ${a.decision?`<p class="note">本机处置：${esc(statusLabel(a))} · ${esc(a.decision.decidedAt||'')}${a.decision.note?' · '+esc(a.decision.note):''}${a.decision.evidenceHash?' · sha256 '+esc(cut(a.decision.evidenceHash,16)):''}</p>`:''}
+  ${a.acked?`<p class="note">已知悉（仅样式）· ${esc(a.decision?.decidedAt||'')} · 告警本身未改</p>`:''}
   <h3>送出 / 收回</h3>
   ${exchange||'<p class="empty">这条告警还没有可展示的交换正文。</p>'}
   <div class="risk-gapbox"><b>证据缺口</b><br>${esc(RULES.find(x=>x.id===a.rule)?.cant||'未采到的部分不会补成已确认。')}${a.call?'':'<br>· 还没有执行编号，工具调用归属未知。'}</div>
@@ -398,9 +424,9 @@ function renderRules(holder,payload){
    <div class="m"><span><b>${hit}</b>今日命中</span><span><b>—</b>近 7 天</span></div>
    <div class="cant"><b>看不到：</b>${esc(r.cant)}</div></div>`;
  }).join('');
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${RULES.length} 条</div><h1>规则</h1><p>少而准：命中时尽量拿出送出/收回或命令证据。默认只告警；验收流与阻断先冻结。</p></div></div>
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${RULES.length} 条</div><h1>规则</h1><p>少而准：命中时尽量拿出送出/收回或命令证据。默认只告警；验收流与阻断已撤掉。</p></div></div>
  <div class="risk-rules">${cards}</div>
- <p class="note" style="margin:16px 28px">S01/S03 没有执行编号时不会按会话时间窗硬凑。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
+ <p class="note" style="margin:16px 28px">S01 无真实文件读取证据时不报。S03 按路径/SHA-256 关联（执行编号可不同）。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
 }
 
 function renderCoverage(holder,payload,riskState){
@@ -447,6 +473,5 @@ function packFields(a){
   decidedAt:a.decision?.decidedAt||null,evidenceText:evidenceTextFor(a)
  };
 }
-window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed};
+window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture};
 })();
-

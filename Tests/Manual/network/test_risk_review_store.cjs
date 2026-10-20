@@ -15,8 +15,8 @@ net.setLocalTransports([
   {
     captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T01:00:00Z',
     pid: 9, exitCode: 0, runID: 'call-s02', call: 'call-s02', session: 's1',
-    args: ['https://uploads.example.com/'],
-    connections: [{ kind: 'connected', detail: ['uploads.example.com:443'] }],
+    args: ['https://cdn.agentreins-field.net/upload'],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
     blocks: [
       { direction: 'send', kind: 'data', textPreview: 'Authorization: Bearer ' + secret },
       { direction: 'receive', kind: 'header', http: ['HTTP/2 200 '] },
@@ -29,19 +29,29 @@ const payload = { tasks: [], collected: [], health: [] };
 const alerts = risk.buildAlerts(payload);
 assert.ok(alerts.some(a => a.rule === 'S02'), 'S02 alert from credential-outbound');
 const id = alerts.find(a => a.rule === 'S02').id;
-const decided = risk.applyDecisions(alerts, [{ id, state: 'accepted', decidedAt: '2026-10-21T01:05:00Z', evidenceHash: 'abc', note: 'fixture' }]);
+const decided = risk.applyDecisions(alerts, [{ id, state: 'acked', decidedAt: '2026-10-21T01:05:00Z', evidenceHash: 'abc', note: 'fixture' }]);
 const hit = decided.find(a => a.id === id);
-assert.equal(hit.status, 'done');
-assert.equal(hit.decision.state, 'accepted');
+assert.equal(hit.acked, true);
+assert.equal(hit.decision.state, 'acked');
 const holder = { innerHTML: '' };
-risk.renderList(holder, payload, { filter: { sev: 'all', rule: 'all', agent: 'all', q: '' }, selected: id, decisions: [{ id, state: 'accepted', decidedAt: '2026-10-21T01:05:00Z' }] });
-assert.match(holder.innerHTML, /已确认/);
-assert.match(holder.innerHTML, /已处置/);
-assert.match(holder.innerHTML, /确认无风险/);
-assert.match(holder.innerHTML, /导出证据包/);
-assert.match(holder.innerHTML, /本机持久化/);
+risk.renderList(holder, payload, { filter: { sev: 'all', rule: 'all', agent: 'all', q: '' }, selected: id, decisions: [{ id, state: 'acked', decidedAt: '2026-10-21T01:05:00Z' }] });
+assert.match(holder.innerHTML, /已知悉/);
+assert.doesNotMatch(holder.innerHTML, /确认无风险|标记已处置|标记待补证据|导出证据包|已处置|已退回/);
+assert.match(holder.innerHTML, /仅样式|已知悉（仅样式）|风险告警/);
+assert.doesNotMatch(holder.innerHTML, /待我处理/);
 const pack = risk.packFields(hit);
 assert.equal(pack.id, id);
 assert.match(pack.evidenceText, /credential-outbound/);
-assert.doesNotMatch(holder.innerHTML, /待我处理/);
+
+// uploads.example.com / seed-session stay out of real-capture view
+net.setLocalTransports([{
+  captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T01:10:00Z',
+  pid: 10, exitCode: 0, runID: 'seed-call', call: 'seed-call', session: 'seed-session',
+  args: ['https://uploads.example.com/'],
+  connections: [{ kind: 'connected', detail: ['uploads.example.com:443'] }],
+  blocks: [{ direction: 'send', kind: 'data', textPreview: 'Authorization: Bearer ' + secret }],
+  securityAudit: { verdict: 'review', findings: [{ rule: 'credential-outbound', direction: 'request', count: 1, characterOffset: 20 }] },
+}]);
+const seedAlerts = risk.buildAlerts({ tasks: [], collected: [], health: [] });
+assert.equal(seedAlerts.length, 0, 'seed/example must not appear as 真实采集');
 console.log('risk review store ok');

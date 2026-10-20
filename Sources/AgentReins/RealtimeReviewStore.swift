@@ -1,8 +1,9 @@
 import CryptoKit
 import Foundation
 
-/// Durable human dispositions for realtime risk alerts.
-/// Kept outside WKWebView's non-persistent websiteDataStore so decisions survive relaunch.
+/// Durable style-only acknowledgements for realtime risk alerts ("已知悉").
+/// Kept outside WKWebView's non-persistent websiteDataStore so acks survive relaunch.
+/// Storage path is injectable so XCTest never writes into Application Support.
 enum RealtimeReviewStore {
     struct Decision: Codable, Equatable {
         var id: String
@@ -14,10 +15,29 @@ enum RealtimeReviewStore {
     }
 
     private static let fileName = "realtime-review-decisions-v1.json"
+    private static let lock = NSLock()
+    private static var overrideDirectory: URL?
+
+    /// Production Application Support root (never used by XCTest).
+    static var defaultDirectory: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+            .appendingPathComponent("AgentGuard", isDirectory: true)
+    }
+
+    /// Inject a temporary directory for tests. Pass `nil` to restore the default.
+    static func useDirectory(_ directory: URL?) {
+        lock.lock()
+        defer { lock.unlock() }
+        overrideDirectory = directory
+        if let directory {
+            try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        }
+    }
 
     static var url: URL {
-        let root = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-            .appendingPathComponent("AgentGuard", isDirectory: true)
+        lock.lock()
+        let root = overrideDirectory ?? defaultDirectory
+        lock.unlock()
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         return root.appendingPathComponent(fileName)
     }
@@ -39,49 +59,26 @@ enum RealtimeReviewStore {
         return ordered
     }
 
+    /// Drop seed / fixture acknowledgements from the production store.
+    @discardableResult
+    static func clearSeedAndTestDecisions() -> [Decision] {
+        let kept = load().filter { decision in
+            let id = decision.id.lowercased()
+            let note = (decision.note ?? "").lowercased()
+            if id.contains("seed") || note.contains("seed") { return false }
+            if id.contains("fixture") || note.contains("fixture") { return false }
+            if note.contains("packaged-app persistence probe") { return false }
+            return true
+        }
+        if let data = try? JSONEncoder().encode(kept) {
+            try? data.write(to: url, options: [.atomic])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        return kept
+    }
+
     static func evidenceHash(for text: String) -> String {
         let digest = SHA256.hash(data: Data(text.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
-    }
-
-    static func packJSON(
-        alertID: String,
-        title: String,
-        summary: String,
-        rule: String,
-        agent: String,
-        session: String,
-        call: String?,
-        decidedAt: String?,
-        state: String?,
-        note: String?,
-        evidenceText: String
-    ) -> Data {
-        let hash = evidenceHash(for: evidenceText)
-        let body: [String: Any] = [
-            "schema": 1,
-            "kind": "agentreins-risk-evidence-pack",
-            "exportedAt": ISO8601DateFormatter().string(from: Date()),
-            "alert": [
-                "id": alertID,
-                "title": title,
-                "summary": summary,
-                "rule": rule,
-                "agent": agent,
-                "session": session,
-                "call": call as Any,
-            ],
-            "decision": [
-                "state": state as Any,
-                "note": note as Any,
-                "decidedAt": decidedAt as Any,
-            ],
-            "evidence": [
-                "sha256": hash,
-                "bytes": evidenceText.utf8.count,
-                "text": evidenceText,
-            ],
-        ]
-        return (try? JSONSerialization.data(withJSONObject: body, options: [.prettyPrinted, .sortedKeys])) ?? Data("{}".utf8)
     }
 }
