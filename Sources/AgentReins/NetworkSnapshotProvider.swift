@@ -22,7 +22,21 @@ struct NetworkConnectionRecord: Sendable, Equatable {
 
     /// Local ephemeral ports change frequently for the same logical destination.
     /// Preserve them as evidence, but deduplicate on the owning process and remote endpoint.
-    var identity: String { "\(pid)|\(localAddress)|\(remoteHost)|\(remotePort)|\(state ?? "unknown")" }
+    var identity: String {
+        "\(pid)|\(Self.stableLocalEndpoint(localAddress))|\(remoteHost)|\(remotePort)|\(state ?? "unknown")"
+    }
+
+    /// Drop the ephemeral local port while keeping IPv6 bracketed hosts intact.
+    static func stableLocalEndpoint(_ address: String) -> String {
+        if address.hasPrefix("["), let close = address.firstIndex(of: "]") {
+            return String(address[...close])
+        }
+        if let colon = address.lastIndex(of: ":"),
+           address[address.index(after: colon)...].allSatisfy(\.isNumber) {
+            return String(address[..<colon])
+        }
+        return address
+    }
 }
 
 struct NetworkSnapshotResult: Sendable {

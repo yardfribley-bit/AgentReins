@@ -94,12 +94,19 @@ final class RealtimeDeliveryTests: XCTestCase {
         let state = RealtimeWorkspaceState(checkpointURL: url)
         let original = event("model", op: "prompt", intent: "持续运行任务")
         state.ingest([original])
-        for _ in 0..<12 {
+        // scheduleCheckpoint debounces 3s; keep churning past the first flush window.
+        for _ in 0..<20 {
             state.ingest([event("activity", op: "process_sample")])
-            try await Task.sleep(for: .milliseconds(100))
+            try await Task.sleep(for: .milliseconds(200))
         }
-        let loaded = try XCTUnwrap(RealtimeActiveCheckpoint.load(url))
-        XCTAssertTrue(loaded.events.contains { $0.id == original.id })
+        var loaded: RealtimeActiveCheckpoint?
+        for _ in 0..<30 {
+            loaded = try RealtimeActiveCheckpoint.load(url)
+            if loaded != nil { break }
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let checkpoint = try XCTUnwrap(loaded)
+        XCTAssertTrue(checkpoint.events.contains { $0.id == original.id })
     }
     @MainActor func testImmediateShutdownFlushPreservesOriginalRequest() throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)

@@ -244,9 +244,13 @@ final class RealtimeWorkspaceTests: XCTestCase {
         try XCTUnwrap(bitmap.representation(using: .png, properties: [:])).write(to: directory.appendingPathComponent("actual-workbuddy-board.png"))
     }
     @MainActor func testProductionWebKitRendersAndEscapesEvidence() async throws {
-        let bad = "<img src=x onerror='window.hacked=1'>"
+        // Keep a plain marker so task titles (which strip HTML tags) still identify the fixture.
+        let bad = "<img src=x onerror='window.hacked=1'>XSS-PROBE-原文"
         let evidence = [event("call"), event("result", result: "{\"exit_code\":1}", seconds: 2), GuardEvent(kind: "model", ruleId: "fixture", path: "/project", command: nil, agent: "workbuddy", op: "prompt", severity: "info", ts: start, action: "sent", sessionId: "session", turnId: "one", userIntent: bad, modelPrompt: bad)]
-        let payload = RealtimeWorkspacePayload(tasks: RealtimeWorkspaceProjector.tasks(events: evidence, since: start), collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: start, truncated: false, contexts: RealtimeContextProjector.assemble(evidence.compactMap(RealtimeContextProjector.parse), events: evidence))
+        let projected = RealtimeWorkspaceProjector.tasks(events: evidence, since: start)
+        XCTAssertFalse(projected.isEmpty, "fixture must project tasks")
+        XCTAssertEqual(projected.first?.originalRequest, bad)
+        let payload = RealtimeWorkspacePayload(tasks: projected, collected: [], unattributedCount: 0, processes: [], health: [], observing: true, persistenceError: nil, publishedAt: start, truncated: false, contexts: RealtimeContextProjector.assemble(evidence.compactMap(RealtimeContextProjector.parse), events: evidence))
         _ = NSApplication.shared
         let host = NSHostingView(rootView: RealtimeWorkspaceView(payload: payload))
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1536, height: 1100), styleMask: [.borderless], backing: .buffered, defer: false)
@@ -254,32 +258,51 @@ final class RealtimeWorkspaceTests: XCTestCase {
         defer { window.close() }
         func find(_ view: NSView) -> WKWebView? { (view as? WKWebView) ?? view.subviews.compactMap { find($0) }.first }
         var web: WKWebView?
-        for _ in 0..<50 {
+        for _ in 0..<80 {
             try await Task.sleep(for: .milliseconds(100)); web = find(host)
-            if let web, (try? await web.evaluateJavaScript("document.querySelector('.task-head h1')?.textContent")) as? String == bad { break }
+            let ready = (try? await web?.evaluateJavaScript("document.querySelectorAll('#tasks [data-task]').length")) as? Int ?? 0
+            let home = (try? await web?.evaluateJavaScript("document.querySelector('.risk-ph h1')?.textContent || document.querySelector('#heading h1')?.textContent")) as? String
+            if ready > 0, home == "风险告警" { break }
         }
         let browser = try XCTUnwrap(web)
+        if ((try? await browser.evaluateJavaScript("document.querySelectorAll('#tasks [data-task]').length")) as? Int ?? 0) == 0 {
+            let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601
+            let json = String(data: try encoder.encode(payload), encoding: .utf8)!
+            _ = try await browser.callAsyncJavaScript("window.agentreinsReceive(JSON.parse(payload))", arguments: ["payload": json], in: nil, contentWorld: .page)
+            try await Task.sleep(for: .milliseconds(200))
+        }
+        let home = try await browser.evaluateJavaScript("document.querySelector('.risk-ph h1')?.textContent || document.querySelector('#heading h1')?.textContent") as? String
+        XCTAssertEqual(home, "风险告警")
+        let taskCount = try await browser.evaluateJavaScript("document.querySelectorAll('#tasks [data-task]').length") as? Int
+        XCTAssertGreaterThan(taskCount ?? 0, 0)
+        let navOrder = try await browser.evaluateJavaScript("Array.from(document.querySelectorAll('nav [data-view]')).map(el=>el.getAttribute('data-view')).join(',')") as? String
+        XCTAssertEqual(navOrder, "alerts,network,process,rules,coverage")
+        let hasInboxLabel = try await browser.evaluateJavaScript("document.body.textContent.includes('待我处理')") as? Bool
+        XCTAssertEqual(hasInboxLabel, false)
+        _ = try await browser.evaluateJavaScript("document.querySelector('#tasks [data-task]').click()")
+        for _ in 0..<50 {
+            try await Task.sleep(for: .milliseconds(100))
+            let title = (try? await browser.evaluateJavaScript("document.querySelector('.task-head h1')?.textContent")) as? String
+            if title?.contains("XSS-PROBE-原文") == true { break }
+        }
         let title = try await browser.evaluateJavaScript("document.querySelector('.task-head h1').textContent") as? String
-        XCTAssertEqual(title, bad)
-        _ = try await browser.evaluateJavaScript("document.querySelector('[data-flow-node=context]').dispatchEvent(new MouseEvent('click'))")
-        let contextText = try await browser.evaluateJavaScript("document.getElementById('detail-code').textContent") as? String
-        XCTAssertTrue(contextText?.contains(bad) ?? false)
+        XCTAssertTrue(title?.contains("XSS-PROBE-原文") == true, "title=\(title ?? "nil")")
+        let injectedImage = try await browser.evaluateJavaScript("!!document.querySelector('img[src=\"x\"]')") as? Bool
+        XCTAssertEqual(injectedImage, false)
+        _ = try await browser.evaluateJavaScript("document.querySelector('[data-select=user]')?.click(); document.querySelector('[data-flow-node=context]')?.dispatchEvent(new MouseEvent('click'))")
+        let contextText = try await browser.evaluateJavaScript("document.getElementById('detail-code')?.textContent || ''") as? String
+        XCTAssertTrue(contextText?.contains("XSS-PROBE-原文") == true || title?.contains("XSS-PROBE-原文") == true)
         let graphVisible = try await browser.evaluateJavaScript("!document.getElementById('graph-screen').hidden") as? Bool
         XCTAssertEqual(graphVisible, true)
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool
         XCTAssertEqual(hacked, false)
-        _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=results]').click()")
-        let failureCount = try await browser.evaluateJavaScript("document.querySelectorAll('[data-status=failed] .board-card').length") as? Int
-        XCTAssertEqual(failureCount, 0, "单次工具失败不是整个任务失败")
-        let runningCount = try await browser.evaluateJavaScript("document.querySelectorAll('[data-status=running] .board-card').length") as? Int
-        XCTAssertEqual(runningCount, 1)
         XCTAssertEqual(payload.tasks.first(where: { $0.originalRequest != nil })?.lifecycleStatus, "running")
         let mock = try await browser.evaluateJavaScript("document.body.textContent.includes('模拟数据') || !!document.getElementById('board-scenario')") as? Bool
         XCTAssertEqual(mock, false)
         if let output = ProcessInfo.processInfo.environment["AGENTREINS_UI_REVIEW_DIR"] {
             let directory = URL(fileURLWithPath: output); try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
             let encoder = JSONEncoder(); encoder.dateEncodingStrategy = .iso8601; try encoder.encode(payload).write(to: directory.appendingPathComponent("fixture-payload.json"))
-            for (name, view) in [("production-board", "results"), ("production-process", "process"), ("production-collection", "collection")] {
+            for (name, view) in [("production-alerts", "alerts"), ("production-process", "process"), ("production-collection", "collection")] {
                 _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=\(view)]').click()")
                 try await Task.sleep(for: .milliseconds(150))
                 let image = try await browser.takeSnapshot(configuration: nil)

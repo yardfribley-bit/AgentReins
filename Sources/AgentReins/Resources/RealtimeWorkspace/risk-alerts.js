@@ -16,8 +16,8 @@ const RULES=[
   cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。'},
  {id:'S03',name:'下载后执行',mode:'告警',severity:'critical',
   desc:'curl / wget 下载的文件在 5 分钟内被 chmod +x、sh、bash 或 open 执行。',
-  cond:'下载路径/SHA-256 与随后执行命令对得上 ∧ Δt ≤ 300s',
-  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。'},
+  cond:'同一执行编号（call）∧ 下载路径/SHA-256 与随后执行命令对得上 ∧ Δt ≤ 300s',
+  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。没有执行编号时不会按会话时间窗硬凑。'},
  {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
   cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）',
@@ -32,8 +32,8 @@ const RULES=[
   cant:'当前未接入配置文件监看；运行时临时放开（不写配置）也看不到。'},
  {id:'S07',name:'绕过审计代理',mode:'告警',severity:'high',
   desc:'命令显式 --noproxy / 自选代理，导致不经本机审计代理。',
-  cond:'后端 auditBypass 标记，或命令参数写明绕过',
-  cant:'不读 HTTPS_PROXY 的内置直连仍可能完全看不到。'}
+  cond:'后端写入 auditBypass=true（前端不再自行根据参数推断）',
+  cant:'不读 HTTPS_PROXY 的内置直连仍可能完全看不到；后端未打标时本页不报 S07。'}
 ];
 
 const DEFAULT_ALLOW=new Set([
@@ -57,14 +57,13 @@ function bytesOut(r){return Number(r.networkBody?.requestBytes)||0;}
 function auditOf(r){return r.networkBody?.securityAudit||r.securityAudit||null;}
 function findingsOf(r){return list(auditOf(r)?.findings);}
 function bypassed(r){
- if(r.auditBypass===true)return true;
- if(r.auditBypass===false)return false;
- if(/绕过|bypass/i.test(String(r.gap||'')))return true;
- const net=window.AgentReinsNetwork;
- if(typeof net?.bypassedAudit==='function')return !!net.bypassedAudit(r);
- const args=list(r.args).map(String);
- if(args.some(a=>a==='--noproxy'||a==='--no-proxy'||a.startsWith('--noproxy=')||a.startsWith('--socks')))return true;
- return false;
+ // S07 完全以后端 auditBypass 为准，前端不再根据 --noproxy 等参数自行判断。
+ return r.auditBypass===true;
+}
+function associationOf(a){
+ if(a.call)return {name:'已确认',note:'执行编号对得上',kind:'confirmed'};
+ if(a.record?.taskConfidence==='candidate')return {name:'候选关联',note:'不是按执行编号对上的',kind:'candidate'};
+ return {name:'缺口',note:'还没有执行编号',kind:'gap'};
 }
 function isAllowedHost(host){
  if(!host)return false;
@@ -179,11 +178,11 @@ function buildAlerts(payload){
 
   if(bypassed(r)){
    alerts.push({
-    id:alertId('S07',call||r.id),rule:'S07',severity:'high',confidence:r.auditBypass===true?'obs':'inf',
+    id:alertId('S07',call||r.id),rule:'S07',severity:'high',confidence:'obs',
     title:'命令绕过了审计代理',
-    sub:`${tool} · ${host||'目标未解析'} · ${r.auditBypass===true?'后端标记':'参数推断'}`,
+    sub:`${tool} · ${host||'目标未解析'} · 后端 auditBypass`,
     agent,session:sess,call,record:r,timestamp:when,status:'ask',
-    why:r.auditBypass===true?'后端写入了 auditBypass。':'命令参数含 --noproxy / 自选代理；未走 127.0.0.1:18891 时正文可能采不到。'
+    why:'后端写入了 auditBypass=true。前端不根据 --noproxy 等参数自行推断。'
    });
   }
 
@@ -213,24 +212,26 @@ function buildAlerts(payload){
    }
   }
 
-  // S03: download path then execute
+  // S03: download then execute — same execution id only (never session-wide)
   const downloads=list(r.downloads).filter(d=>d&&d.path);
-  for(const d of downloads){
+  if(!call){
+   // no execution id → do not invent S03 from session/time proximity
+  }else for(const d of downloads){
    const name=String(d.path).split(/[/\\]/).pop();
    const start=new Date(when).getTime();
    for(const c of cmds){
+    if(!c.call||String(c.call)!==String(call))continue;
     if(!c.at)continue;
     const dt=(new Date(c.at).getTime()-start)/1000;
     if(dt<0||dt>300)continue;
-    if(c.task?.agent&&r.agent&&c.task.agent!==r.agent)continue;
     const hit=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(c.cmd)&&c.cmd.includes(name);
     if(!hit)continue;
     alerts.push({
-     id:alertId('S03',(call||r.id)+':'+name),rule:'S03',severity:'critical',confidence:call&&c.call&&call===c.call?'cor':'cor',
+     id:alertId('S03',call+':'+name),rule:'S03',severity:'critical',confidence:'cor',
      title:'下载后在 5 分钟内执行',
      sub:`${name}${d.sha256?' · SHA-256 '+String(d.sha256).slice(0,12)+'…':''}`,
      agent,session:sess,call,record:r,timestamp:c.at||when,status:'ask',
-     why:`下载记录与命令「${cut(c.cmd,80)}」按文件名和时间窗关联（Δt ${Math.round(dt)}s）。`
+     why:`同一执行编号 ${call}：下载与命令「${cut(c.cmd,80)}」对得上（Δt ${Math.round(dt)}s）。不按会话时间窗凑。`
     });
    }
   }
@@ -329,10 +330,11 @@ function renderFilters(alerts,filter){
 
 function rowHTML(a,selected){
  const c=confOf(a.confidence);
+ const assoc=associationOf(a);
  return `<tr class="${selected===a.id?'sel':''}" data-risk-alert="${esc(a.id)}">
   <td><span class="risk-sev ${sevOf(a.severity)}">${sevLabel(a.severity)}</span></td>
   <td><button type="button" class="risk-link" data-risk-alert="${esc(a.id)}"><div class="t1">${esc(a.title)}</div><div class="t2">${esc(a.sub)}</div></button></td>
-  <td class="ag"><b>${esc(a.agent)}</b><div class="t2 mono">${esc(cut(a.session,28))}</div></td>
+  <td class="ag"><b>${esc(a.agent)}</b><div class="t2 mono">${esc(cut(a.session,28))}</div><div class="t2 strength-${esc(assoc.name)}">关联：${esc(assoc.name)}</div></td>
   <td><span class="risk-rule">${esc(a.rule)}</span></td>
   <td><span class="risk-conf ${c.c}">${esc(c.t)}</span></td>
   <td><span class="risk-st ${esc(a.status)}">${esc(statusLabel(a))}</span></td>
@@ -349,7 +351,7 @@ function renderList(holder,payload,state){
  if(f.q){const q=f.q.toLowerCase();shown=shown.filter(a=>[a.title,a.sub,a.agent,a.session,a.rule,hostOf(a.record||{})].join('\n').toLowerCase().includes(q));}
  const selected=state.selected&&shown.find(a=>a.id===state.selected)||null;
  const table=shown.length?`<div class="risk-table-wrap"><table class="risk-table"><thead><tr><th>级别</th><th>告警</th><th>Agent · 会话</th><th>规则</th><th>证据可信度</th><th>状态</th><th>时间</th></tr></thead><tbody>${shown.map(a=>rowHTML(a,selected?.id)).join('')}</tbody></table>
- <div class="risk-ft"><span>可信度：Observed 亲眼采到 · Correlated 执行编号对上 · Inferred 推断 · Unknown 未知</span><span>仅真实采集 · ${shown.length} 条</span></div></div>`
+ <div class="risk-ft"><span>可信度：Observed / Correlated / Inferred / Unknown · 关联强度：已确认（执行编号）/ 候选 / 缺口</span><span>仅真实采集 · ${shown.length} 条</span></div></div>`
   :`<div class="risk-empty"><h2>今天还没有风险告警</h2><p>没有告警不等于安全。未走代理的流量、文件级读取和配置变更仍可能是盲区。</p><ol><li>看覆盖度，确认代理是否在听。</li><li>用真实工具调用触发 S02 / S03 / S07 后再回到这里。</li></ol><button type="button" data-view="coverage">打开覆盖度</button><button type="button" data-view="network">打开外网访问</button></div>`;
  const detail=selected?renderDetail(selected,payload):'';
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机 · WorkBuddy / Codex / Cursor</div><h1>风险告警</h1><p>这台 Mac 上的编码 agent 今天有没有做危险的事。每条告警都能点开看送出和收回的证据。</p></div></div>
@@ -366,9 +368,10 @@ function renderDetail(a,payload){
   evidenceType:r.evidenceType,networkBody:r.networkBody,gap:r.gap,auditBypass:r.auditBypass
  }):'';
  const c=confOf(a.confidence);
+ const assoc=associationOf(a);
  return `<article class="risk-detail">
   <header><span class="risk-sev ${sevOf(a.severity)}">${sevLabel(a.severity)}</span><h2>${esc(a.title)}</h2>
-  <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span></p></header>
+  <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.name)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')}</p></header>
   <p class="risk-why">${esc(a.why||'')}</p>
   <div class="risk-actions">
    <button type="button" class="primary" data-risk-decide="accepted" data-risk-id="${esc(a.id)}">确认无风险</button>
@@ -397,7 +400,7 @@ function renderRules(holder,payload){
  }).join('');
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${RULES.length} 条</div><h1>规则</h1><p>少而准：命中时尽量拿出送出/收回或命令证据。默认只告警；验收流与阻断先冻结。</p></div></div>
  <div class="risk-rules">${cards}</div>
- <p class="note" style="margin:16px 28px">S01 没有执行编号级文件证据时不会告警。S06 本版未监看配置文件。S07 优先读后端 auditBypass。</p>`;
+ <p class="note" style="margin:16px 28px">S01/S03 没有执行编号时不会按会话时间窗硬凑。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
 }
 
 function renderCoverage(holder,payload){
@@ -435,5 +438,6 @@ function packFields(a){
   decidedAt:a.decision?.decidedAt||null,evidenceText:evidenceTextFor(a)
  };
 }
-window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor};
+window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed};
 })();
+
