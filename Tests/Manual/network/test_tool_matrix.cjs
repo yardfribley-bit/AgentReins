@@ -161,10 +161,22 @@ const live = shown.innerHTML;
 assert.match(live, /no-such-agentreins\.example<\/td><td>HTTP\/2<\/td><td>对方返回 502/);
 assert.match(live, /api\.github\.com<\/td><td>HTTP\/2<\/td><td>网站回了 200，命令失败/);
 assert.doesNotMatch(live, /未连通|命令退出|Connection established/);
-assert.match(live, /github.com<\/td><td>连接<\/td><td>证书没配好/);
+// P3: non-curl body text mentioning certificates is not a cert failure; exit 128 with no HTTP status → 没连上.
+assert.match(live, /github.com<\/td><td>连接<\/td><td>没连上/);
 assert.doesNotMatch(live, /certificate verify locations/);
 assert.match(live, /WebFetch<\/td><td>远程访问工具<\/td><td>工具调用<\/td><td>收回了 Example Domain/);
 assert.match(live, /example\.com<\/td><td>HTTP\/2<\/td><td>通了/);
+// P3/P4: exit 0 + HTTP 200 with cert words in body ≠ 证书失败; exit 60 = 证书; exit 35 = TLS 握手失败.
+api.setLocalTransports([
+  { captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T11:28:01Z', pid: 5, exitCode: 0, runID: 'ok-body', session: '3ab77d48', args: ['https://docs.example/ssl'], connections: [{ kind: 'proxyTunnel', detail: ['docs.example:443'] }], blocks: [{ direction: 'receive', kind: 'header', http: ['HTTP/2 200 '] }, { direction: 'receive', kind: 'data', textPreview: 'SSL certificate problem troubleshooting' }] },
+  { captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T11:28:02Z', pid: 6, exitCode: 60, runID: 'cert-60', session: '3ab77d48', args: ['https://bad-cert.example/'], connections: [{ kind: 'attempt', detail: ['bad-cert.example:443'] }], blocks: [{ direction: 'receive', kind: 'data', textPreview: '* SSL certificate problem: self signed\ncurl: (60) SSL certificate problem' }] },
+  { captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-17T11:28:03Z', pid: 7, exitCode: 35, runID: 'tls-35', session: '3ab77d48', args: ['https://tls-fail.example/'], connections: [{ kind: 'attempt', detail: ['tls-fail.example:443'] }], blocks: [{ direction: 'receive', kind: 'data', textPreview: 'curl: (35) SSL_ERROR_SYSCALL' }] }
+]);
+const tlsPage = { innerHTML: '' };
+api.render(tlsPage, { tasks: [{ id: 'now', agent: 'Cursor', session: '3ab77d48', turn: 't', title: '这次', originalRequest: '这次', cards: [] }] }, { taskOnly: 'now' });
+assert.match(tlsPage.innerHTML, /docs\.example<\/td><td>HTTP\/2<\/td><td>通了/);
+assert.match(tlsPage.innerHTML, /bad-cert\.example[\s\S]*证书没配好/);
+assert.match(tlsPage.innerHTML, /tls-fail\.example[\s\S]*TLS 握手失败/);
 const fetchDetail = { innerHTML: '' };
 api.render(fetchDetail, { tasks: [{ id: 'now', agent: 'Cursor', session: '3ab77d48', turn: 't', title: '这次', originalRequest: '这次', cards: [{ id: 'fetch-live', kind: 'web', title: 'WebFetch', status: 'returned', phase: 'returned', timestamp: '2026-10-17T11:26:00Z', input: JSON.stringify({ url: 'https://example.com/' }), output: 'Example Domain' }] }] }, { taskOnly: 'now', selected: 'task-tool:fetch-live' });
 assert.match(fetchDetail.innerHTML, /送出/);

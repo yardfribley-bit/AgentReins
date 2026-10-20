@@ -177,6 +177,10 @@ def main():
             fd=os.open(run/name,os.O_CREAT|os.O_WRONLY,0o600);os.close(fd)
         command=[real,*args]
         include_call_header=through_audit_proxy(env, tool, args)
+        if command_bypasses_audit_proxy(tool, args):
+            manifest['auditBypass']=True
+        elif include_call_header:
+            manifest['auditBypass']=False
         if tool=='git':
             command=with_call_header('git', real, args, run.name, include_call_header)
             if any(k in env for k in ('GIT_TRACE_CURL','GIT_TRACE2_EVENT')):

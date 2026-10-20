@@ -115,7 +115,7 @@
    const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
    const statusLine=received.flatMap(block=>list(block.http).map(String)).filter(line=>/^HTTP\//.test(line)&&!/connection established/i.test(line)).pop();
    const statusMatch=statusLine&&statusLine.match(/\s(\d{3})\b/);
-   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
+   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,host:target,accessKind:'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,auditBypass:run.auditBypass===true?true:run.auditBypass===false?false:undefined,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
   }).filter(Boolean);
  }
  function localExchanges(){return projectLocal(localRuns);}
@@ -591,15 +591,29 @@
  function tlsFailureText(raw){
   return /error setting certificate|certificate verify failed|SSL certificate problem|alert certificate unknown/i.test(String(raw||''));
  }
+ function curlDiagText(r){
+  return responseText(r).split('\n').filter(line=>/^\*\s|curl:\s*\(/.test(line.trim())).join('\n');
+ }
  function readableText(raw){
   return String(raw||'').split('\n').filter(line=>!/certificate verify ok|error setting certificate|certificate verify failed|SSL certificate problem|CAfile:/i.test(line)).join('\n').trim();
  }
  function tlsFailed(r){
   const exit=r.exitCode!=null&&r.exitCode!==''?Number(r.exitCode):null;
-  if(exit===60||exit===35)return true;
-  return tlsFailureText(responseText(r));
+  const status=Number(r.networkBody?.responseStatus);
+  if(exit===0&&Number.isFinite(status)&&status>=100)return false;
+  if(exit===60||exit===77||exit===58)return true;
+  if(exit===35)return false;
+  if(exit!=null&&exit!==0)return tlsFailureText(curlDiagText(r));
+  return false;
+ }
+ function tlsHandshakeFailed(r){
+  const exit=r.exitCode!=null&&r.exitCode!==''?Number(r.exitCode):null;
+  return exit===35;
  }
  function bypassedAudit(r){
+  if(r.auditBypass===true)return true;
+  if(r.auditBypass===false)return false;
+  if(/绕过|bypass/i.test(String(r.gap||'')))return true;
   const args=list(r.args).map(String);
   if(args.some(a=>a==='--noproxy'||a==='--no-proxy'||a.startsWith('--noproxy=')||a.startsWith('--socks')))return true;
   const inline=args.find(a=>/^(?:-x|--proxy|--preproxy)=/.test(a));
@@ -664,6 +678,7 @@
   const saved=list(r.downloads).filter(item=>item&&(item.state==='verified'||item.bytes!=null||item.state==='tooLarge'));
   const savedNames=saved.map(item=>String(item.path||'').split(/[/\\]/).pop()).filter(Boolean);
   if(tlsFailed(r))return '证书没配好';
+  if(tlsHandshakeFailed(r))return 'TLS 握手失败';
   if(/加密/.test(String(r.gap||'')))return '看不到通道里的内容';
   if(status>=400)return '对方返回 '+status;
   if(r.accessKind==='remote-tool'||accessHop(r).kind==='remote-tool'){
@@ -683,7 +698,7 @@
  function connectionBrief(r){
   const status=Number(r.networkBody?.responseStatus);
   if(r.accessKind==='remote-tool'&&!externalConnections(r).length)return '工具代办';
-  if(tlsFailed(r))return '没完成';
+  if(tlsFailed(r)||tlsHandshakeFailed(r))return '没完成';
   if(callFailed(r)&&!(status>=100))return '没通';
   if(status>=400)return '通到了';
   return '通了';
@@ -860,6 +875,7 @@
  }
  function backView(r){
   if(tlsFailed(r))return '证书没有通过。';
+  if(tlsHandshakeFailed(r))return 'TLS 握手失败。';
   if(/加密/.test(String(r.gap||'')))return '通道里的正文没采到。';
   const files=downloadLines(r);
   const hop=accessHop(r);
@@ -950,5 +966,5 @@
   const back=activeTask?'<button type="button" data-task="'+esc(activeTask.id)+'">返回任务过程</button>':'';
   holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id}):'<p>'+(activeTask?'这次任务还没有归上的外网访问。':'还没有采到外网访问。')+'</p>');
  }
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,localExchanges};
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,localExchanges,bypassedAudit,tlsFailed,tlsHandshakeFailed};
 })();

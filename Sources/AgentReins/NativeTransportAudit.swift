@@ -21,7 +21,7 @@ enum NativeTransportAudit {
                   let invocation = item["invocation"] as? [String: Any],
                   invocation["captureMode"] as? String == "agent-path" else { continue }
             var row: [String: Any] = ["runID": file.deletingLastPathComponent().lastPathComponent]
-            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "captureMode", "gap", "codexThreadID", "session"] {
+            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "captureMode", "gap", "auditBypass", "codexThreadID", "session"] {
                 row[key] = invocation[key] ?? NSNull()
             }
             for key in ["connections", "children", "blocks", "helpers", "packFiles"] { row[key] = item[key] as? [Any] ?? [] }
