@@ -19,6 +19,13 @@ cp "$PROJECT_DIR/Sources/AgentReins/Resources/workbuddy_network_capture.py" "$AP
 cp "$PROJECT_DIR/Sources/AgentReins/Resources/content_audit.py" "$APP_BUNDLE/Contents/Resources/"
 # Direct app resources avoid SwiftPM's absolute development-path fallback.
 cp -R "$PROJECT_DIR/Sources/AgentReins/Resources/RealtimeWorkspace" "$APP_BUNDLE/Contents/Resources/"
+# Supervisor MCP (stdio) for Codex — copy next to the app for local discovery.
+mkdir -p "$APP_BUNDLE/Contents/Resources/agentreins-mcp"
+cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
+   "$PROJECT_DIR/tools/agentreins-mcp/evidence.py" \
+   "$PROJECT_DIR/tools/agentreins-mcp/alerts_bridge.cjs" \
+   "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
+   "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
 cat > "$APP_BUNDLE/Contents/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">

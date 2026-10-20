@@ -403,10 +403,15 @@ function renderRules(holder,payload){
  <p class="note" style="margin:16px 28px">S01/S03 没有执行编号时不会按会话时间窗硬凑。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
 }
 
-function renderCoverage(holder,payload){
+function renderCoverage(holder,payload,riskState){
  const cov=coverageModel(payload);
  const rows=cov.chips.map(c=>`<tr><td><b>${esc(c.a)}</b></td><td><span class="risk-lvl ${esc(c.level)}">${esc(c.label)}</span></td><td colspan="3" class="t2">以采集源健康状态为准；会话/工具调用是否齐全见外网访问页的关联强度。</td></tr>`).join('');
  const blind=cov.blind.map(b=>`<tr><td><b>${esc(b.t)}</b><div class="t2">${esc(b.s)}</div></td><td>${esc(b.v)}</td></tr>`).join('');
+ const audit=Array.isArray(riskState?.mcpAudit)?riskState.mcpAudit:[];
+ const auditRows=audit.length
+  ?audit.slice().reverse().map(e=>`<tr><td>${esc(e.at||'')}</td><td>${esc(e.actor||'')}</td><td><b>${esc(e.tool||'')}</b></td><td class="t2 mono">${esc(cut(e.argsDigest||'',16))}</td><td class="t2 mono">${esc(cut(e.hash||'',12))}</td></tr>`).join('')
+  :`<tr><td colspan="5" class="t2">尚无 Codex/supervisor 只读调用记录。配置 tools/agentreins-mcp/server.py 后会出现哈希链审计。</td></tr>`;
+ const auditPath=esc(cut(riskState?.mcpAuditPath||'~/Library/Application Support/AgentGuard/mcp-supervisor-audit.jsonl',120));
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">告警只来自看得到的部分</div><h1>覆盖度 · 看不到什么</h1><p>没有告警不等于安全。下面写清盲区。</p></div></div>
  <div class="risk-stats cov-only">
   <div class="risk-stat"><b class="${cov.proxyUp?'ok':''}">${cov.proxyUp?'在听':'未确认'}</b><span>审计代理 18891</span></div>
@@ -418,6 +423,10 @@ function renderCoverage(holder,payload){
   <section class="risk-card"><h3>Agent 接入情况</h3><table class="risk-table"><thead><tr><th>Agent</th><th>接入</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>
   <p class="note">代理 ${cov.proxyUp?'在线':'状态未确认'} · ${esc(cut(cov.proxyDetail,120)||'127.0.0.1:18891')}</p></section>
   <section class="risk-card"><h3>盲区</h3><table class="risk-table"><thead><tr><th>盲区</th><th>现在能看到多少</th></tr></thead><tbody>${blind}</tbody></table></section>
+  <section class="risk-card"><h3>Supervisor MCP 只读审计</h3>
+   <p class="note">Codex 经 stdio MCP 的每次只读查询会追加哈希链日志（本页只展示，不可改写）。路径：${auditPath}</p>
+   <table class="risk-table"><thead><tr><th>时间</th><th>调用方</th><th>工具</th><th>参数摘要</th><th>hash</th></tr></thead><tbody>${auditRows}</tbody></table>
+  </section>
  </div>`;
 }
 

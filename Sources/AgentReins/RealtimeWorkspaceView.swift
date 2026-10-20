@@ -64,6 +64,10 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 pushReviewDecisions(to: message.webView, message: nil)
                 return
             }
+            if action == "loadMCPAudit" {
+                pushMCPAudit(to: message.webView)
+                return
+            }
             if action == "saveReviewDecision" {
                 guard let id = body["id"] as? String, !id.isEmpty, id.count <= 200,
                       let state = body["state"] as? String,
@@ -277,6 +281,22 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
             }
             var result: [String: Any] = ["action": "reviewDecisions", "decisions": decisions]
             if let message { result["message"] = message }
+            Task { @MainActor in
+                _ = try? await webView?.callAsyncJavaScript(
+                    "window.agentreinsHostResult && window.agentreinsHostResult(result)",
+                    arguments: ["result": result],
+                    in: nil, contentWorld: .page
+                )
+            }
+        }
+
+        private func pushMCPAudit(to webView: WKWebView?) {
+            let entries = RealtimeMCPAuditStore.recent()
+            let result: [String: Any] = [
+                "action": "mcpAudit",
+                "path": RealtimeMCPAuditStore.url.path,
+                "entries": entries,
+            ]
             Task { @MainActor in
                 _ = try? await webView?.callAsyncJavaScript(
                     "window.agentreinsHostResult && window.agentreinsHostResult(result)",

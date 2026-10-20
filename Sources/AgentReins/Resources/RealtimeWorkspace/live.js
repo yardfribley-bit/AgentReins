@@ -8,7 +8,7 @@ const statuses={running:'进行中',awaiting_confirmation:'等我确认',complet
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null;
-const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false};
+const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
 let objects=new Map(),runtimeExchangeID=null,runtimeCallID=null,runtimeTaskID=null,timelineMode='tools',runtimeProjection=null;
@@ -231,6 +231,13 @@ function ensureReviewDecisions(){
  handler.postMessage({action:'loadReviewDecisions'});
  riskState.decisionsLoaded=true;
 }
+function ensureMCPAudit(){
+ if(riskState.mcpAuditLoaded)return;
+ const handler=window.webkit?.messageHandlers?.agentreins;
+ if(!handler){riskState.mcpAuditLoaded=true;riskState.mcpAudit=[];return;}
+ handler.postMessage({action:'loadMCPAudit'});
+ riskState.mcpAuditLoaded=true;
+}
 function requestRiskTransports(){
  if(riskState.transportsRequested)return;
  if(typeof window.agentreinsLoadLocalTransports!=='function')return;
@@ -251,10 +258,11 @@ function requestRiskTransports(){
 function renderRisk(){
  const api=window.AgentReinsRisk;if(!api){$('alerts-view').innerHTML=empty('风险告警模块未加载。');return;}
  ensureReviewDecisions();
+ if(view==='coverage')ensureMCPAudit();
  if(view==='alerts'||view==='rules'||view==='coverage')requestRiskTransports();
  if(view==='alerts')api.renderList($('alerts-view'),shown,riskState);
  else if(view==='rules')api.renderRules($('rules-view'),shown);
- else if(view==='coverage')api.renderCoverage($('coverage-view'),shown);
+ else if(view==='coverage')api.renderCoverage($('coverage-view'),shown,riskState);
  const n=(riskState.alerts||api.applyDecisions?.(api.buildAlerts(shown),riskState.decisions)||api.buildAlerts(shown)||[]).filter(a=>a.status==='todo'||a.status==='ask').length;
  const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}
 }
@@ -354,6 +362,12 @@ window.agentreinsHostResult=result=>{
  if(result?.action==='reviewDecisions'&&Array.isArray(result.decisions)){
   riskState.decisions=result.decisions;riskState.decisionsLoaded=true;
   if(view==='alerts'||view==='rules'||view==='coverage')renderRisk();
+ }
+ if(result?.action==='mcpAudit'&&Array.isArray(result.entries)){
+  riskState.mcpAudit=result.entries;
+  riskState.mcpAuditPath=result.path||'';
+  riskState.mcpAuditLoaded=true;
+  if(view==='coverage')renderRisk();
  }
  if(result?.message)toast(result.message);
  if(view==='collection')renderCollectionDetail();else if(view==='process')renderDetail(true);
