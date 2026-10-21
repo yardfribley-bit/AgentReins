@@ -17,8 +17,10 @@ class TamperBTests(unittest.TestCase):
         self.tmp = pathlib.Path(tempfile.mkdtemp(prefix="ar-tamper-"))
         self.audit = self.tmp / "audit"
         self.transport = self.tmp / "transport"
+        self.integrity = self.tmp / "integrity"
         self.audit.mkdir()
         self.transport.mkdir()
+        self.integrity.mkdir()
         self.patches = [
             mock.patch.object(evidence, "AUDIT_DIR", self.audit),
             mock.patch.object(evidence, "DEFAULT_TRANSPORT", self.transport),
@@ -26,7 +28,10 @@ class TamperBTests(unittest.TestCase):
             mock.patch.object(evidence, "AUDIT_SEAL", self.audit / "mcp-supervisor-audit.seal"),
             mock.patch.object(evidence, "HMAC_KEY_FILE", self.audit / "mcp-supervisor-hmac.key"),
             mock.patch.object(evidence, "RUN_INVENTORY", self.audit / "transport-run-inventory.jsonl"),
-            mock.patch.object(evidence, "PROTECTED_SEAL_DIR", self.audit / "seals"),
+            mock.patch.object(evidence, "INTEGRITY_DIR", self.integrity),
+            mock.patch.object(evidence, "PROTECTED_SEAL_DIR", self.integrity / "seals"),
+            mock.patch.object(evidence, "SIGNED_ERA_FLAG", self.integrity / "signed-era"),
+            mock.patch.object(evidence, "RUN_INVENTORY_MAC", self.integrity / "transport-run-inventory.mac"),
         ]
         for p in self.patches:
             p.start()

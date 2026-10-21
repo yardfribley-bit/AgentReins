@@ -37,8 +37,11 @@ AUDIT_LOG = AUDIT_DIR / "mcp-supervisor-audit.jsonl"
 AUDIT_SEAL = AUDIT_DIR / "mcp-supervisor-audit.seal"
 HMAC_KEY_FILE = AUDIT_DIR / "mcp-supervisor-hmac.key"
 RUN_INVENTORY = AUDIT_DIR / "transport-run-inventory.jsonl"
-# Seal copy outside the agent-writable transport tree (still same uid — document B6).
-PROTECTED_SEAL_DIR = AUDIT_DIR / "seals"
+# Integrity anchors live OUTSIDE the main audit wipe path (B9/B10). Still same uid (B6).
+INTEGRITY_DIR = pathlib.Path.home() / "Library/Application Support/AgentReinsIntegrity"
+PROTECTED_SEAL_DIR = INTEGRITY_DIR / "seals"
+SIGNED_ERA_FLAG = INTEGRITY_DIR / "signed-era"
+RUN_INVENTORY_MAC = INTEGRITY_DIR / "transport-run-inventory.mac"
 KEYCHAIN_LIMITATION = (
     "HMAC 密钥位于用户目录 0600 文件（非 Keychain）。同一 uid 的被监督进程可读密钥并伪造 MAC；"
     "相关完整性结论标为 Unknown，除非改用 Keychain/独立特权守护。"
@@ -707,6 +710,76 @@ def evidence_file_mac(path: pathlib.Path, key: bytes) -> str:
     return hmac.new(key, data, hashlib.sha256).hexdigest()
 
 
+def _ensure_integrity_dir() -> None:
+    try:
+        INTEGRITY_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(INTEGRITY_DIR, 0o700)
+    except OSError:
+        pass
+
+
+def mark_signed_era() -> None:
+    """Persist that a signed era has started (survives wiping AUDIT_DIR)."""
+    _ensure_integrity_dir()
+    if not SIGNED_ERA_FLAG.is_file():
+        SIGNED_ERA_FLAG.write_text(
+            json.dumps(
+                {
+                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+                    "schema": 1,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
+        try:
+            os.chmod(SIGNED_ERA_FLAG, 0o600)
+        except OSError:
+            pass
+
+
+def signed_era_active() -> bool:
+    return SIGNED_ERA_FLAG.is_file() or (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file()
+
+
+def sign_run_inventory(key: bytes | None = None) -> None:
+    """HMAC the run inventory; MAC stored outside AUDIT_DIR (B8)."""
+    if not RUN_INVENTORY.is_file():
+        return
+    _ensure_integrity_dir()
+    key = key or load_or_create_hmac_key()
+    mac = evidence_file_mac(RUN_INVENTORY, key)
+    RUN_INVENTORY_MAC.write_text(mac + "\n", encoding="utf-8")
+    try:
+        os.chmod(RUN_INVENTORY_MAC, 0o600)
+    except OSError:
+        pass
+    mark_signed_era()
+
+
+def validate_run_inventory(key: bytes | None = None) -> dict[str, Any]:
+    """Detect B8: deleting inventory rows without the external MAC."""
+    result: dict[str, Any] = {"ok": True, "tampered": []}
+    key = key or load_or_create_hmac_key()
+    if RUN_INVENTORY_MAC.is_file():
+        if not RUN_INVENTORY.is_file():
+            result["ok"] = False
+            result["tampered"].append({"reason": "inventory_missing_after_signed"})
+            return result
+        expected = RUN_INVENTORY_MAC.read_text(encoding="utf-8").strip()
+        actual = evidence_file_mac(RUN_INVENTORY, key)
+        if not hmac.compare_digest(expected, actual):
+            result["ok"] = False
+            result["tampered"].append({"reason": "inventory_mac_mismatch"})
+    elif RUN_INVENTORY.is_file() and signed_era_active():
+        # Signed era but inventory MAC wiped with the inventory edits.
+        result["ok"] = False
+        result["tampered"].append({"reason": "inventory_mac_missing_after_signed_era"})
+    return result
+
+
 def register_run_id(run_id: str, run_path: pathlib.Path | None = None) -> None:
     """Append run ID to durable inventory so deleted runs are detectable."""
     ensure_audit_dir()
@@ -719,6 +792,10 @@ def register_run_id(run_id: str, run_path: pathlib.Path | None = None) -> None:
         fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
     try:
         os.chmod(RUN_INVENTORY, 0o600)
+    except OSError:
+        pass
+    try:
+        sign_run_inventory()
     except OSError:
         pass
 
@@ -738,12 +815,17 @@ def known_run_ids() -> set[str]:
     return out
 
 
-def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool = True) -> dict[str, Any]:
-    """HMAC-sign transport.json + manifest.json. Collection-time only — readers must not resign."""
+def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool = False) -> dict[str, Any]:
+    """HMAC-sign transport.json + manifest.json. Default allow_resign=False (B7).
+
+    If a MAC already exists and does not match current bytes, refuse to wash — return
+    tamper marker and do not overwrite.
+    """
     ensure_audit_dir()
     key = load_or_create_hmac_key()
     base = root or DEFAULT_TRANSPORT
     signed = 0
+    refused: list[dict[str, Any]] = []
     # Single run directory (contains transport.json directly) or transport root.
     if (base / "transport.json").is_file() or (base / "manifest.json").is_file():
         candidates = [p for p in (base / "transport.json", base / "manifest.json") if p.is_file()]
@@ -751,13 +833,18 @@ def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool =
         candidates = list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json"))
     for path in candidates:
         mac_path = path.with_suffix(path.suffix + ".mac")
-        if mac_path.is_file() and not allow_resign:
-            continue
-        if mac_path.is_file() and allow_resign:
-            # Never overwrite an existing MAC during read paths; collection may refresh.
-            pass
-        mac = evidence_file_mac(path, key)
-        mac_path.write_text(mac + "\n", encoding="utf-8")
+        actual = evidence_file_mac(path, key)
+        if mac_path.is_file():
+            expected = mac_path.read_text(encoding="utf-8").strip()
+            if hmac.compare_digest(expected, actual):
+                # Already correctly signed — skip.
+                continue
+            if not allow_resign:
+                # B7: tampered content + existing MAC → refuse wash.
+                refused.append({"path": str(path), "reason": "refuse_resign_mac_mismatch"})
+                continue
+            # Explicit allow_resign=True still overwrites (collection repair only).
+        mac_path.write_text(actual + "\n", encoding="utf-8")
         try:
             os.chmod(mac_path, 0o600)
         except OSError:
@@ -767,11 +854,16 @@ def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool =
             register_run_id(path.parent.name, path.parent)
         except OSError:
             pass
-    return {"signedFiles": signed, "root": str(base)}
+    mark_signed_era()
+    return {"signedFiles": signed, "root": str(base), "refused": refused, "ok": not refused}
 
 
 def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
-    """Detect tampering of transport/manifest evidence. Missing MAC is always failure once inventory exists."""
+    """Detect tampering of transport/manifest evidence.
+
+    MAC is required only for inventory-registered runs (not every historical folder).
+    External signed-era flag makes wipe-everything look like tamper (B9/B10), not 'unsigned'.
+    """
     ensure_audit_dir()
     key = load_or_create_hmac_key()
     base = root or DEFAULT_TRANSPORT
@@ -784,29 +876,51 @@ def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
         "confidence": "Observed",
         "keyLimitation": KEYCHAIN_LIMITATION,
     }
+    inv = validate_run_inventory(key)
+    if not inv.get("ok", True):
+        result["ok"] = False
+        result["tampered"].extend(inv.get("tampered") or [])
+        result["confidence"] = "Unknown"
+
+    # B9/B10: signed era existed, then audit/evidence wiped → tamper, not 'never signed'.
+    if signed_era_active():
+        seal_primary = AUDIT_SEAL.is_file()
+        seal_mirror = (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file()
+        if not seal_primary and not seal_mirror and not RUN_INVENTORY.is_file() and not (base.is_dir() and any(base.glob("*/*"))):
+            result["ok"] = False
+            result["tampered"].append({"reason": "signed_era_evidence_wiped"})
+            result["confidence"] = "Unknown"
+            return result
+        if not seal_primary and not seal_mirror and AUDIT_LOG.is_file() is False and known_run_ids():
+            # Inventory remains but seals gone.
+            result["ok"] = False
+            result["tampered"].append({"reason": "seal_missing_after_signed_era"})
+            result["confidence"] = "Unknown"
+
     if not base.is_dir():
         result["note"] = "无运输审计目录"
-        # Inventory without on-disk runs → deleted evidence (B5).
         known = known_run_ids()
-        if known:
+        if known or signed_era_active():
             result["ok"] = False
             result["missingRuns"] = sorted(known)
             result["confidence"] = "Unknown"
             result["tampered"].append({"reason": "run_directory_missing", "runs": sorted(known)})
         return result
+
+    known = known_run_ids()
     files = list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json"))
-    # Signing era: inventory or any .mac or seal means MACs are required.
-    signing_era = bool(known_run_ids()) or any(
-        p.with_suffix(p.suffix + ".mac").is_file() for p in files
-    ) or AUDIT_SEAL.is_file()
     for path in files:
-        result["checked"] += 1
+        run_id = path.parent.name
         mac_path = path.with_suffix(path.suffix + ".mac")
+        # Enforce MAC for inventory-registered runs OR any file that already has a .mac.
+        enforce = run_id in known or mac_path.is_file()
+        if not enforce:
+            continue
+        result["checked"] += 1
         if not mac_path.is_file():
-            if signing_era:
-                result["ok"] = False
-                result["missingMac"].append(str(path))
-                result["tampered"].append({"path": str(path), "reason": "missing_mac"})
+            result["ok"] = False
+            result["missingMac"].append(str(path))
+            result["tampered"].append({"path": str(path), "reason": "missing_mac"})
             continue
         expected = mac_path.read_text(encoding="utf-8").strip()
         actual = evidence_file_mac(path, key)
@@ -815,7 +929,7 @@ def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
             result["tampered"].append({"path": str(path), "reason": "evidence_mac_mismatch"})
     # Deleted runs listed in inventory
     on_disk = {p.parent.name for p in base.glob("*/transport.json")}
-    missing = sorted(known_run_ids() - on_disk)
+    missing = sorted(known - on_disk)
     if missing:
         result["ok"] = False
         result["missingRuns"] = missing
@@ -825,7 +939,10 @@ def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
 
 
 def _write_seal(head_hash: str, count: int, key: bytes) -> None:
-    body = {"headHash": head_hash, "count": count, "schema": 1}
+    body: dict[str, Any] = {"headHash": head_hash, "count": count, "schema": 1}
+    # Anchor inventory hash inside seal when inventory exists (B8).
+    if RUN_INVENTORY.is_file():
+        body["inventorySha256"] = sha256_bytes(RUN_INVENTORY.read_bytes())
     body["mac"] = entry_hmac(body, key)
     text = canonical_json(body) + "\n"
     AUDIT_SEAL.write_text(text, encoding="utf-8")
@@ -833,13 +950,16 @@ def _write_seal(head_hash: str, count: int, key: bytes) -> None:
         os.chmod(AUDIT_SEAL, 0o600)
     except OSError:
         pass
-    # Mirror seal outside transport tree; still same uid (B6 limitation documented).
+    # Mirror seal OUTSIDE AUDIT_DIR (B9/B10); still same uid (B6).
     try:
+        _ensure_integrity_dir()
         PROTECTED_SEAL_DIR.mkdir(parents=True, exist_ok=True)
         os.chmod(PROTECTED_SEAL_DIR, 0o700)
         mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
         mirror.write_text(text, encoding="utf-8")
         os.chmod(mirror, 0o600)
+        mark_signed_era()
+        sign_run_inventory(key)
     except OSError:
         pass
 
@@ -897,6 +1017,14 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
     if not log.is_file():
         result["ok"] = True
         result["note"] = "尚无审计日志"
+        if signed_era_active():
+            # B9/B10: signed era then wipe log (+ often seals) is tamper, not a fresh install.
+            result["ok"] = False
+            result["tampered"].append({"reason": "audit_log_missing_after_signed_era"})
+            result["confidence"] = "Unknown"
+            mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
+            if not AUDIT_SEAL.is_file() and not mirror.is_file():
+                result["tampered"].append({"reason": "seal_missing_after_signed_era"})
         # Still check evidence / inventory.
         ev = validate_evidence_files()
         result["evidenceFiles"] = ev
@@ -952,16 +1080,28 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
     seal_path = AUDIT_SEAL if path is None else path.with_suffix(".seal")
     mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
     # Seal once present is mandatory (B1: truncate + delete seal). Prefer primary, fall back to mirror.
-    seal_required = seen_signed or result["entriesChecked"] > 0 or mirror.is_file()
+    # B9/B10: external signed-era flag also requires a seal to still exist somewhere.
+    seal_required = (
+        seen_signed
+        or result["entriesChecked"] > 0
+        or mirror.is_file()
+        or signed_era_active()
+    )
     active_seal = seal_path if seal_path.is_file() else (mirror if mirror.is_file() else None)
     if seal_required and active_seal is None:
         result["ok"] = False
-        result["tampered"].append({"reason": "seal_missing_required"})
+        result["tampered"].append(
+            {"reason": "seal_missing_after_signed_era" if signed_era_active() else "seal_missing_required"}
+        )
         result["confidence"] = "Unknown"
     elif active_seal is not None:
         try:
             seal = json.loads(active_seal.read_text(encoding="utf-8"))
-            seal_body = {k: seal[k] for k in ("headHash", "count", "schema") if k in seal}
+            seal_body = {
+                k: seal[k]
+                for k in ("headHash", "count", "schema", "inventorySha256")
+                if k in seal
+            }
             if seal.get("mac") != entry_hmac(seal_body, key):
                 result["ok"] = False
                 result["tampered"].append({"reason": "seal_mac_mismatch"})
@@ -976,9 +1116,19 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
                         "actualHead": head,
                     }
                 )
+            elif "inventorySha256" in seal and RUN_INVENTORY.is_file():
+                actual_inv = sha256_bytes(RUN_INVENTORY.read_bytes())
+                if seal.get("inventorySha256") != actual_inv:
+                    result["ok"] = False
+                    result["tampered"].append({"reason": "inventory_seal_anchor_mismatch"})
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             result["ok"] = False
             result["tampered"].append({"reason": "seal_unreadable", "error": type(exc).__name__})
+    # B9/B10: log wiped but signed-era flag remains.
+    if signed_era_active() and not log.is_file() and result["entriesChecked"] == 0:
+        result["ok"] = False
+        result["tampered"].append({"reason": "audit_log_missing_after_signed_era"})
+        result["confidence"] = "Unknown"
     ev = validate_evidence_files()
     result["evidenceFiles"] = ev
     if not ev.get("ok", True):

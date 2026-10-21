@@ -10,9 +10,9 @@ import re
 from pathlib import Path
 from typing import Any
 
-# curl -u / -uX / --user= / --user 'a:b c' (including glued -uX:Y)
+# curl -u / -ualice:pass / -uX / --user= / --user 'a:b c' (generic glued -uUSER:PASS)
 RE_USERPASS_EQ = re.compile(r"(?i)(-uX?|--user|--username)(=)(\S+:\S+)")
-RE_USERPASS_GLUED = re.compile(r"(?i)(-uX)([^\s:=][^:\s]*:[^\s]+)")
+RE_USERPASS_GLUED = re.compile(r"(?i)(-u)([^\s:=/-][^:\s]*:[^\s]+)")
 RE_USERPASS_SPACE = re.compile(
     r"(?i)(-uX?|--user|--username)(\s+)(['\"])([^'\"]+:[^'\"]+)\3"
 )
@@ -42,8 +42,8 @@ RE_AWS_SECRET = re.compile(
     r"(?i)((?:aws_)?secret(?:_?access)?_?key\s*[=:]\s*)([A-Za-z0-9/+=]{40})"
 )
 
-# Bearer (including short) + Authorization: Basic + Cookie + x-api-key
-RE_BEARER = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-+/=]{4,})")
+# Bearer (including short tokens) + Authorization: Basic + Cookie + x-api-key
+RE_BEARER = re.compile(r"(?i)(Bearer\s+)(\S+)")
 RE_BASIC = re.compile(r"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)")
 RE_COOKIE = re.compile(r"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)")
 RE_X_API_KEY = re.compile(r"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)")
@@ -53,10 +53,13 @@ RE_URL_USERINFO = re.compile(
     r"((?:https?|postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://)([^/\s]+)@"
 )
 
-# --password x  OR  mysql/sshpass -pSECRET (NOT mkdir -p / ssh -p PORT / git add -p / find -print)
+# --password x  OR  mysql/sshpass -pSECRET / sshpass -p 'x' (NOT mkdir -p / ssh -p PORT / git add -p / find -print)
 RE_PASSWORD_FLAG = re.compile(r"(?i)(--password)(\s+|=)(\S+)")
-RE_MYSQL_SSHPASS_P = re.compile(
+RE_MYSQL_SSHPASS_P_GLUED = re.compile(
     r"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)([^\s\-]+)"
+)
+RE_MYSQL_SSHPASS_P_SPACE = re.compile(
+    r"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)(\s+)(?:'([^']*)'|\"([^\"]*)\"|(\S+))"
 )
 
 RE_PEM = re.compile(
@@ -103,7 +106,16 @@ def redact_text(text: str) -> str:
     out = RE_API_TOKEN_EQ.sub(lambda m: m.group(1) + _mask("token"), out)
     out = RE_PASSWORD.sub(lambda m: m.group(1) + _mask("password"), out)
     out = RE_PASSWORD_FLAG.sub(lambda m: m.group(1) + m.group(2) + _mask("password"), out)
-    out = RE_MYSQL_SSHPASS_P.sub(lambda m: m.group(1) + _mask("password"), out)
+    def _sshpass_space(m: re.Match[str]) -> str:
+        # groups: 1=prefix -p, 2=spaces, 3=single-quoted, 4=double-quoted, 5=bare
+        if m.group(3) is not None:
+            return m.group(1) + m.group(2) + "'" + _mask("password") + "'"
+        if m.group(4) is not None:
+            return m.group(1) + m.group(2) + '"' + _mask("password") + '"'
+        return m.group(1) + m.group(2) + _mask("password")
+
+    out = RE_MYSQL_SSHPASS_P_SPACE.sub(_sshpass_space, out)
+    out = RE_MYSQL_SSHPASS_P_GLUED.sub(lambda m: m.group(1) + _mask("password"), out)
     out = RE_COOKIE.sub(lambda m: m.group(1) + _mask("cookie"), out)
     out = RE_X_API_KEY.sub(lambda m: m.group(1) + _mask("api_key"), out)
     out = RE_BASIC.sub(lambda m: m.group(1) + _mask("basic"), out)

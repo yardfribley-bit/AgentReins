@@ -7,12 +7,20 @@
     "must_keep": ["https://example.com/"]
   },
   {
+    "name": "curl_u_glued_generic",
+    "kind": "text",
+    "input": "curl -ualice:s3cret https://example.com/",
+    "must_absent": ["s3cret", "alice:s3cret"],
+    "must_keep": ["https://example.com/"]
+  },
+  {
     "name": "curl_u_space",
     "kind": "text",
     "input": "curl -u alice:s3cret https://h/path",
     "must_absent": ["s3cret"],
     "must_keep": ["https://h/path"]
   },
+
   {
     "name": "user_quoted_space",
     "kind": "text",
@@ -27,6 +35,21 @@
     "must_absent": ["abcd"],
     "must_keep": ["Bearer"]
   },
+  {
+    "name": "short_bearer_3",
+    "kind": "text",
+    "input": "Authorization: Bearer abc",
+    "must_absent": ["abc"],
+    "must_keep": ["Bearer"]
+  },
+  {
+    "name": "short_bearer_1",
+    "kind": "text",
+    "input": "Authorization: Bearer x",
+    "must_absent": ["Bearer x"],
+    "must_keep": ["Bearer"]
+  },
+
   {
     "name": "url_password_with_at",
     "kind": "text",
@@ -97,6 +120,21 @@
     "must_absent": ["SecretPass"],
     "must_keep": ["mysql", "127.0.0.1"]
   },
+  {
+    "name": "sshpass_p_space",
+    "kind": "text",
+    "input": "sshpass -p secret123 ssh host",
+    "must_absent": ["secret123"],
+    "must_keep": ["sshpass", "ssh host"]
+  },
+  {
+    "name": "sshpass_p_quoted_space",
+    "kind": "text",
+    "input": "sshpass -p 'my pass' ssh host",
+    "must_absent": ["my pass"],
+    "must_keep": ["sshpass", "ssh host"]
+  },
+
   {
     "name": "keep_mkdir_p",
     "kind": "text",

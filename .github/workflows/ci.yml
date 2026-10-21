@@ -53,6 +53,7 @@ jobs:
           node Tests/Manual/network/test_risk_review_store.cjs
           node Tests/Manual/network/test_xss_escape.cjs
           echo "JS_TESTS_PASSED=3"
+          # XSS_MUTATION_KILLED line is emitted by test_xss_escape.cjs (must be N/N).
 
       - name: Run MCP supervisor unit tests
         run: |

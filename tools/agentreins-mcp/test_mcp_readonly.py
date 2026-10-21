@@ -30,7 +30,12 @@ class MCPReadonlyTests(unittest.TestCase):
         evidence.AUDIT_SEAL = self.audit_dir / "mcp-supervisor-audit.seal"
         evidence.HMAC_KEY_FILE = self.audit_dir / "mcp-supervisor-hmac.key"
         evidence.RUN_INVENTORY = self.audit_dir / "transport-run-inventory.jsonl"
-        evidence.PROTECTED_SEAL_DIR = self.audit_dir / "seals"
+        integrity = pathlib.Path(self.tmp.name) / "integrity"
+        integrity.mkdir(exist_ok=True)
+        evidence.INTEGRITY_DIR = integrity
+        evidence.PROTECTED_SEAL_DIR = integrity / "seals"
+        evidence.SIGNED_ERA_FLAG = integrity / "signed-era"
+        evidence.RUN_INVENTORY_MAC = integrity / "transport-run-inventory.mac"
         self.evidence = evidence
         run = self.transport / "exec-s02"
         run.mkdir()
