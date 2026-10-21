@@ -358,6 +358,38 @@ def main():
     if operation and operation['operation']!='clone' and beforeState and beforeState.get('state')=='observed':
         repositoryPath=beforeState['path']
     manifest['operation']=operation
+    # en_4088c393: hash the execution target BEFORE exec (Correlated basis=exec_hash).
+    exec_target = None
+    exec_sha = None
+    try:
+        import hashlib as _hashlib
+        cand = None
+        if tool in ('sh', 'bash', 'zsh', 'dash') and args:
+            p0 = pathlib.Path(args[0])
+            if p0.is_file():
+                cand = p0
+        elif tool == 'open' and args:
+            for a in args:
+                if a.startswith('-'):
+                    continue
+                p0 = pathlib.Path(a)
+                if p0.is_file():
+                    cand = p0
+                    break
+        elif args and pathlib.Path(args[0]).is_file() and str(args[0]).startswith(('/', './')):
+            cand = pathlib.Path(args[0])
+        if cand is not None and cand.is_file() and cand.stat().st_size < 32 * 1024 * 1024:
+            h = _hashlib.sha256()
+            with cand.open('rb') as fh:
+                for chunk in iter(lambda: fh.read(65536), b''):
+                    h.update(chunk)
+            exec_sha = h.hexdigest()
+            exec_target = str(cand.resolve())
+            manifest['execPath'] = exec_target
+            manifest['execSha256'] = exec_sha
+            save('manifest.json', manifest)
+    except OSError:
+        pass
     session=None
     stderr_copy=None
     cache_before=None
@@ -440,24 +472,34 @@ def main():
             evidence['securityAudit']=content_audit(evidence, request_text=raw_request, response_text=raw_response, trace_dir=run)
         except Exception as audit_error:
             evidence['securityAudit']=audit_error_record(audit_error)
-        # Hash executed file when command points at a local path (enables S03 exec_hash).
-        try:
-            import hashlib
-            for token in list(args)[:8]:
-                p=pathlib.Path(token)
-                if p.is_file() and p.stat().st_size < 32*1024*1024:
-                    h=hashlib.sha256()
-                    with p.open('rb') as fh:
-                        for chunk in iter(lambda: fh.read(65536), b''):
-                            h.update(chunk)
-                    evidence.setdefault('fileResult', {})
-                    if isinstance(evidence['fileResult'], dict):
-                        evidence['fileResult'].setdefault('path', str(p.resolve()))
-                        evidence['fileResult'].setdefault('sha256', h.hexdigest())
-                    evidence['sha256']=h.hexdigest()
-                    break
-        except OSError:
-            pass
+        # Prefer pre-exec hash (playbook); fall back to post-exec path scan.
+        if exec_sha and exec_target:
+            evidence.setdefault('fileResult', {})
+            if isinstance(evidence['fileResult'], dict):
+                evidence['fileResult']['path'] = exec_target
+                evidence['fileResult']['sha256'] = exec_sha
+                evidence['fileResult']['hashedAt'] = 'pre-exec'
+            evidence['sha256'] = exec_sha
+            evidence['execSha256'] = exec_sha
+            evidence['execPath'] = exec_target
+        else:
+            try:
+                import hashlib
+                for token in list(args)[:8]:
+                    p=pathlib.Path(token)
+                    if p.is_file() and p.stat().st_size < 32*1024*1024:
+                        h=hashlib.sha256()
+                        with p.open('rb') as fh:
+                            for chunk in iter(lambda: fh.read(65536), b''):
+                                h.update(chunk)
+                        evidence.setdefault('fileResult', {})
+                        if isinstance(evidence['fileResult'], dict):
+                            evidence['fileResult'].setdefault('path', str(p.resolve()))
+                            evidence['fileResult'].setdefault('sha256', h.hexdigest())
+                        evidence['sha256']=h.hexdigest()
+                        break
+            except OSError:
+                pass
         save('transport.json',evidence)
         # Redact session log and any captured bodies before signing.
         redact_file_inplace(run/'session.log')

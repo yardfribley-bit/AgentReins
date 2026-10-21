@@ -29,7 +29,10 @@ jobs:
         run: bash -n package_app.sh
 
       - name: Shared redaction vectors (Python)
-        run: python3 tools/redact_secrets.py
+        run: |
+          set -euo pipefail
+          python3 tools/redact_secrets.py
+          # Playbook self-check line: REDACT leaks=0 over=0 total=N
 
       - name: Run unit tests
         run: |
@@ -52,8 +55,8 @@ jobs:
           node Tests/Manual/network/test_risk_p5_association.cjs
           node Tests/Manual/network/test_risk_review_store.cjs
           node Tests/Manual/network/test_xss_escape.cjs
+          node tools/mutate_esc_calls.cjs
           echo "JS_TESTS_PASSED=3"
-          # XSS_MUTATION_KILLED line is emitted by test_xss_escape.cjs (must be N/N).
 
       - name: Run MCP supervisor unit tests
         run: |

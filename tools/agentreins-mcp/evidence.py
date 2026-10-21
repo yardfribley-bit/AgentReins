@@ -815,11 +815,11 @@ def known_run_ids() -> set[str]:
     return out
 
 
-def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool = False) -> dict[str, Any]:
-    """HMAC-sign transport.json + manifest.json. Default allow_resign=False (B7).
+def sign_evidence_tree(root: pathlib.Path | None = None) -> dict[str, Any]:
+    """HMAC-sign transport.json + manifest.json. Collection-time only.
 
-    If a MAC already exists and does not match current bytes, refuse to wash — return
-    tamper marker and do not overwrite.
+    en_4088c393: allow_resign removed entirely. Existing MAC that does not match
+    current bytes → refuse wash (TAMPER), never overwrite.
     """
     ensure_audit_dir()
     key = load_or_create_hmac_key()
@@ -837,13 +837,10 @@ def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool =
         if mac_path.is_file():
             expected = mac_path.read_text(encoding="utf-8").strip()
             if hmac.compare_digest(expected, actual):
-                # Already correctly signed — skip.
                 continue
-            if not allow_resign:
-                # B7: tampered content + existing MAC → refuse wash.
-                refused.append({"path": str(path), "reason": "refuse_resign_mac_mismatch"})
-                continue
-            # Explicit allow_resign=True still overwrites (collection repair only).
+            # B7: never re-sign over a mismatched MAC.
+            refused.append({"path": str(path), "reason": "refuse_resign_mac_mismatch"})
+            continue
         mac_path.write_text(actual + "\n", encoding="utf-8")
         try:
             os.chmod(mac_path, 0o600)
@@ -1025,6 +1022,11 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
             mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
             if not AUDIT_SEAL.is_file() and not mirror.is_file():
                 result["tampered"].append({"reason": "seal_missing_after_signed_era"})
+        elif not SIGNED_ERA_FLAG.is_file() and not (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file():
+            # Playbook: never anchored → Unknown(never_anchored), not ok=true success claim.
+            result["confidence"] = "Unknown"
+            result["note"] = "never_anchored"
+            result["neverAnchored"] = True
         # Still check evidence / inventory.
         ev = validate_evidence_files()
         result["evidenceFiles"] = ev

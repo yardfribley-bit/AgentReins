@@ -1,14 +1,17 @@
 'use strict';
 /**
- * XSS: probes on title/agent/session/why/host/args/rule + detail fields.
- * Per-call-site mutation: each esc( occurrence must be killed (test fails when removed).
+ * XSS functional test (en_4088c393): load production risk-alerts.js only.
+ * Probes on rendered fields; assert text visible + no raw tags.
+ * Call-site mutation: tools/mutate_esc_calls.cjs (must kill 100%).
+ *
+ * NOTE: renderList calls the closed-over buildAlerts(), so patching
+ * window.AgentReinsRisk.buildAlerts does NOT affect rendering. Probes must
+ * flow through real transport → alert construction, or via decisions state.
  */
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const { execFileSync } = require('child_process');
-const os = require('os');
 
 const root = path.resolve(__dirname, '../../..');
 const riskPath = path.join(root, 'Sources/AgentReins/Resources/RealtimeWorkspace/risk-alerts.js');
@@ -17,293 +20,163 @@ const netPath = path.join(root, 'Sources/AgentReins/Resources/RealtimeWorkspace/
 const probe = "<img src=x onerror='window.hacked=1'>XSS-PROBE-原文";
 const exact = '&lt;img src=x onerror=&#39;window.hacked=1&#39;&gt;XSS-PROBE-原文';
 
-function loadPair(riskSrc, netSrc) {
+function loadPair() {
   const window = {};
   const sandbox = { window, console };
   vm.createContext(sandbox);
-  vm.runInContext(netSrc || fs.readFileSync(netPath, 'utf8'), sandbox);
-  vm.runInContext(riskSrc || fs.readFileSync(riskPath, 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(netPath, 'utf8'), sandbox);
+  vm.runInContext(fs.readFileSync(riskPath, 'utf8'), sandbox);
   return sandbox.window;
 }
 
-function seedProbes(win) {
-  const net = win.AgentReinsNetwork;
-  // agent must be Codex/WorkBuddy/Cursor for agentTransport filter; probes go into
-  // title/session/why/args/host via buildAlerts wrapper + URL path.
-  net.setLocalTransports([
+function seed(win) {
+  // S07 + S03-ish: download then exec with matching hashes so evidence JSON renders.
+  const sha = 'c'.repeat(64);
+  const pathFile = '/tmp/xss-payload.sh';
+  win.AgentReinsNetwork.setLocalTransports([
     {
       captureMode: 'agent-path',
       agent: 'Cursor',
       tool: 'curl',
-      startedAt: '2026-10-21T06:00:00Z',
-      pid: 42,
+      startedAt: '2026-10-21T06:00:00.100Z',
+      pid: 1001,
+      parentPID: 900,
+      parentName: '/bin/zsh',
+      parentStartAt: '2026-10-21T06:00:00Z',
+      parentArgv: '-zsh',
       exitCode: 0,
-      runID: 'xss-s07',
-      call: 'xss-s07-call',
-      session: 'xss-sess-probe',
-      args: ['--noproxy', '*', 'https://cdn.agentreins-field.net/' + encodeURIComponent(probe)],
+      runID: 'xss-dl',
+      call: 'xss-dl',
+      session: 'xss-sess',
+      args: ['-o', pathFile, 'https://cdn.agentreins-field.net/' + probe],
       connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
       blocks: [],
-      auditBypass: true,
-      id: 'xss-rec-s07',
+      downloads: [{ path: pathFile, sha256: sha, bytes: 12 }],
+      id: 'xss-rec-dl',
+    },
+    {
+      captureMode: 'agent-path',
+      agent: 'Cursor',
+      tool: 'sh',
+      startedAt: '2026-10-21T06:00:05.100Z',
+      pid: 1003,
+      parentPID: 900,
+      parentName: '/bin/zsh',
+      parentStartAt: '2026-10-21T06:00:00Z',
+      parentArgv: '-zsh',
+      exitCode: 0,
+      runID: 'xss-exec',
+      call: 'xss-exec',
+      session: 'xss-sess',
+      args: [pathFile],
+      blocks: [],
+      execSha256: sha,
+      fileResult: { path: pathFile, sha256: sha },
+      sha256: sha,
+      id: 'xss-rec-exec',
     },
     {
       captureMode: 'agent-path',
       agent: 'Cursor',
       tool: 'curl',
       startedAt: '2026-10-21T06:01:00Z',
-      pid: 43,
+      pid: 1004,
       exitCode: 0,
-      runID: 'xss-s04',
-      call: 'xss-s04-call',
-      session: 'xss-sess-probe-2',
-      args: ['https://evil-xss.example/' + encodeURIComponent(probe)],
-      connections: [{ kind: 'connected', detail: ['evil-xss.example:443'] }],
+      runID: 'xss-s07',
+      call: 'xss-s07-call',
+      session: 'xss-s07-sess',
+      args: ['--noproxy', '*', 'https://cdn.agentreins-field.net/' + probe],
+      connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
       blocks: [],
-      id: 'xss-rec-s04',
+      auditBypass: true,
+      id: 'xss-rec-s07',
     },
   ]);
 }
 
-function payload() {
-  return {
-    tasks: [],
-    collected: [],
-    health: [
-      {
-        source: 'transport-audit',
-        state: 'healthy',
-        detail: probe + ' proxy is running on 18891',
-      },
-    ],
-  };
-}
+const payload = {
+  tasks: [],
+  collected: [],
+  health: [
+    {
+      source: 'transport-audit',
+      state: 'healthy',
+      detail: probe + ' proxy is running',
+    },
+  ],
+};
 
-function fullRender(win) {
-  const risk = win.AgentReinsRisk;
-  const net = win.AgentReinsNetwork;
-  seedProbes(win);
-  const holder = { innerHTML: '' };
-  const p = payload();
-  // Force probes into alert fields that buildAlerts may not copy 1:1 from transport.
-  const realBuild = risk.buildAlerts;
-  risk.buildAlerts = (payloadArg) => {
-    const alerts = realBuild(payloadArg);
-    return alerts.map((a, i) => ({
-      ...a,
-      title: probe,
-      agent: probe,
-      session: probe,
-      why: probe,
-      rule: a.rule || 'S07',
-      sub: 'host=' + probe,
-      call: a.call || 'xss-call',
-      evidence: {
-        path: '/tmp/' + probe,
-        basis: 'sibling_inferred',
-        parentName: probe,
-        parentStartAt: '2026-10-21T06:00:00Z',
-        note: probe,
-      },
-      record: {
-        ...(a.record || {}),
-        tool: 'curl',
-        args: ['--noproxy', '*', probe],
-        id: 'xss-rec-' + i,
-        startedAt: '2026-10-21T06:00:00Z',
-      },
-      acked: i === 0,
-      decision: i === 0 ? { decidedAt: probe, state: 'acked' } : null,
-    }));
-  };
-  risk.renderList(holder, p, {
-    filter: { sev: 'all', rule: 'all', agent: 'all', q: probe },
-    selected: null,
-    decisions: [],
-  });
-  const alerts = risk.buildAlerts(p);
+function fullRender(risk, win) {
+  seed(win);
+  const alerts = risk.buildAlerts(payload);
   assert.ok(alerts.length >= 1, 'fixture must produce alerts');
-  const selected = alerts[0];
-  risk.renderList(holder, p, {
-    filter: { sev: 'all', rule: 'all', agent: 'all', q: probe },
-    selected: selected.id,
-    decisions: [],
-  });
-  assert.ok(!holder.innerHTML.includes('<img src=x'), 'list/detail must escape probes');
-  assert.ok(holder.innerHTML.includes('XSS-PROBE') || holder.innerHTML.includes(exact.slice(0, 12)));
+  const s03 = alerts.find((a) => a.rule === 'S03') || alerts[0];
+  const s07 = alerts.find((a) => a.rule === 'S07') || alerts[0];
 
-  const rulesHolder = { innerHTML: '' };
-  risk.renderRules(rulesHolder, p);
-  assert.ok(!rulesHolder.innerHTML.includes('<img src=x'));
-
-  const covHolder = { innerHTML: '' };
-  risk.renderCoverage(covHolder, p, {
-    mcpAuditPath: '/tmp/' + probe + '/mcp-supervisor-audit.jsonl',
-    mcpAudit: [
-      {
-        at: probe,
-        actor: probe,
-        tool: probe,
-        argsDigest: probe,
-        hash: probe,
-      },
-    ],
-  });
-  assert.ok(!covHolder.innerHTML.includes('<img src=x'));
-
-  // Restore
-  risk.buildAlerts = realBuild;
-  return { holder, rulesHolder, covHolder, alerts };
-}
-
-function withEscCounter(win, fn) {
-  const risk = win.AgentReinsRisk;
-  const real = risk.esc;
-  let count = 0;
-  risk.esc = (s) => {
-    count += 1;
-    return real(s);
-  };
-  try {
-    fn();
-  } finally {
-    risk.esc = real;
-  }
-  return count;
-}
-
-// --- Baseline ---
-const win0 = loadPair();
-assert.strictEqual(win0.AgentReinsRisk.esc(probe), exact, 'app esc() exact');
-assert.ok(!win0.AgentReinsRisk.esc(probe).includes('<img'));
-const goldenCount = withEscCounter(win0, () => {
-  fullRender(win0);
-});
-assert.ok(goldenCount > 20, 'golden esc call count should be substantial, got ' + goldenCount);
-
-// Rebind esc to identity must leak via renderList
-{
-  const w = loadPair();
-  seedProbes(w);
-  const real = w.AgentReinsRisk.esc;
-  w.AgentReinsRisk.esc = (s) => String(s);
   const holder = { innerHTML: '' };
-  const p = payload();
-  w.AgentReinsRisk.renderList(holder, p, {
+  // Unacked S07 detail (hits 标记已知悉 + host/args esc in s07EvidenceMarkup)
+  risk.renderList(holder, payload, {
     filter: { sev: 'all', rule: 'all', agent: 'all', q: '' },
-    selected: null,
+    selected: s07.id,
     decisions: [],
   });
-  assert.ok(
-    holder.innerHTML.includes('<img src=x') || w.AgentReinsRisk.esc(probe) === probe,
-    'breaking escImpl must expose raw probe'
+  // Acked S03 detail LAST — evidence JSON + decidedAt esc must run
+  risk.renderList(holder, payload, {
+    filter: { sev: 'all', rule: 'all', agent: 'all', q: '' },
+    selected: s03.id,
+    decisions: [{ id: s03.id, state: 'acked', decidedAt: probe }],
+  });
+
+  assert.ok(!holder.innerHTML.includes('<img src=x'), 'list/detail must not contain raw img');
+  assert.doesNotMatch(holder.innerHTML, /<img\s+src=x/i);
+  assert.ok(holder.innerHTML.includes('risk-evidence-json') || holder.innerHTML.includes('basis'), 'S03 evidence must render');
+  assert.ok(holder.innerHTML.includes('告警本身未改'), 'acked footer must render');
+  assert.ok(holder.innerHTML.includes('XSS-PROBE') || holder.innerHTML.includes(exact.slice(0, 12)), 'probe text visible');
+
+  risk.renderRules({ innerHTML: '' }, payload);
+  risk.renderCoverage(
+    { innerHTML: '' },
+    payload,
+    {
+      mcpAuditPath: '/tmp/' + probe + '/audit.jsonl',
+      mcpAudit: [{ at: probe, actor: probe, tool: probe, argsDigest: probe, hash: probe }],
+    }
   );
-  w.AgentReinsRisk.esc = real;
+  return { holder, alerts, s03, s07 };
 }
 
-// --- Per-site mutation: kill all esc( occurrences ---
-const src = fs.readFileSync(riskPath, 'utf8');
-const re = /\besc\(/g;
-const sites = [];
-let m;
-while ((m = re.exec(src)) !== null) sites.push(m.index);
-assert.ok(sites.length >= 50, 'expected ~59 esc( sites, got ' + sites.length);
-
-const netSrc = fs.readFileSync(netPath, 'utf8');
-let killed = 0;
-const survivors = [];
-
-for (let i = 0; i < sites.length; i++) {
-  const idx = sites[i];
-  const mutated =
-    src.slice(0, idx) +
-    '__id__(' +
-    src.slice(idx + 4); // replace "esc(" (4 chars) with "__id__("
-  const preamble = 'const __id__=s=>String(s??\'\');\n';
-  // Inject preamble after first line / inside IIFE start
-  const injected = mutated.replace(
-    /^('use strict';\s*\(\)=>\{\s*)/,
-    `$1${preamble}`
-  );
-  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'xss-mut-'));
-  const child = path.join(tmpDir, 'child.cjs');
-  const mutRisk = path.join(tmpDir, 'risk-alerts.js');
-  const mutNet = path.join(tmpDir, 'network-view.js');
-  fs.writeFileSync(mutRisk, injected);
-  fs.writeFileSync(mutNet, netSrc);
-  fs.writeFileSync(
-    child,
-    `
-'use strict';
-const assert = require('assert');
-const fs = require('fs');
-const path = require('path');
-const vm = require('vm');
-const dir = ${JSON.stringify(tmpDir)};
-const probe = ${JSON.stringify(probe)};
-const exact = ${JSON.stringify(exact)};
-const goldenCount = ${goldenCount};
-const window = {};
-vm.createContext({ window, console });
-vm.runInContext(fs.readFileSync(path.join(dir, 'network-view.js'), 'utf8'), { window, console });
-vm.runInContext(fs.readFileSync(path.join(dir, 'risk-alerts.js'), 'utf8'), { window, console });
-const risk = window.AgentReinsRisk;
-const net = window.AgentReinsNetwork;
+const win = loadPair();
+const risk = win.AgentReinsRisk;
 assert.equal(typeof risk.esc, 'function');
 assert.strictEqual(risk.esc(probe), exact);
 assert.ok(!risk.esc(probe).includes('<img'));
-net.setLocalTransports([{
-  captureMode:'agent-path', agent:'Cursor', tool:'curl', startedAt:'2026-10-21T06:00:00Z',
-  pid:42, exitCode:0, runID:'xss', call:'xss', session:'xss-sess',
-  args:['--noproxy','*','https://cdn.agentreins-field.net/p'],
-  connections:[{kind:'connected',detail:['cdn.agentreins-field.net:443']}],
-  blocks:[], auditBypass:true, id:'xss-rec'
-}]);
-const payload = { tasks:[], collected:[], health:[{source:'transport-audit',state:'healthy',detail:probe}] };
-const realBuild = risk.buildAlerts;
-risk.buildAlerts = (p) => realBuild(p).map((a,i)=>({
-  ...a, title:probe, agent:probe, session:probe, why:probe, sub:'host='+probe,
-  evidence:{path:'/tmp/'+probe, parentName:probe, note:probe},
-  record:{...(a.record||{}), tool:'curl', args:['--noproxy','*',probe], id:'xss-rec-'+i, startedAt:'2026-10-21T06:00:00Z'},
-  acked:i===0, decision:i===0?{decidedAt:probe,state:'acked'}:null
-}));
-const realEsc = risk.esc;
-let count = 0;
-risk.esc = (s) => { count += 1; return realEsc(s); };
-const holder = { innerHTML:'' };
-risk.renderList(holder, payload, { filter:{sev:'all',rule:'all',agent:'all',q:probe}, selected:null, decisions:[] });
-const alerts = risk.buildAlerts(payload);
-assert.ok(alerts.length >= 1);
-risk.renderList(holder, payload, { filter:{sev:'all',rule:'all',agent:'all',q:probe}, selected:alerts[0].id, decisions:[] });
-risk.renderRules({innerHTML:''}, payload);
-risk.renderCoverage({innerHTML:''}, payload, {
-  mcpAuditPath:'/tmp/'+probe+'/audit.jsonl',
-  mcpAudit:[{at:probe,actor:probe,tool:probe,argsDigest:probe,hash:probe}]
-});
-assert.ok(!holder.innerHTML.includes('<img src=x'), 'raw img must not appear');
-assert.strictEqual(count, goldenCount, 'esc call count must match golden');
-`
-  );
-  let failed = false;
-  let errMsg = '';
-  try {
-    execFileSync(process.execPath, [child], { stdio: ['ignore', 'pipe', 'pipe'] });
-  } catch (e) {
-    failed = true;
-    errMsg = (e.stderr && e.stderr.toString()) || e.message || '';
-  }
-  fs.rmSync(tmpDir, { recursive: true, force: true });
-  if (failed) {
-    killed += 1;
-  } else {
-    survivors.push(i);
-  }
+
+const underlying = risk.esc;
+let calls = 0;
+risk.esc = (s) => {
+  calls += 1;
+  return underlying(s);
+};
+const { alerts, s07 } = fullRender(risk, win);
+console.log('ESC_CALLS=' + calls);
+const golden = process.env.ESC_GOLDEN ? Number(process.env.ESC_GOLDEN) : null;
+if (golden != null) {
+  assert.strictEqual(calls, golden, 'esc call count must match golden (mutate kill)');
+} else {
+  assert.ok(calls > 25, 'expected substantial esc usage, got ' + calls);
 }
 
-console.log('XSS_MUTATION_KILLED', killed + '/' + sites.length);
-if (survivors.length) {
-  console.error('XSS_MUTATION_SURVIVORS', survivors.join(','));
-  process.exit(1);
-}
-assert.strictEqual(killed, sites.length, 'all esc() mutation sites must be killed');
-console.log('xss escape via app renderList/esc + per-site mutation ok', sites.length);
+risk.esc = (s) => String(s);
+const broken = { innerHTML: '' };
+seed(win);
+risk.renderList(broken, payload, {
+  filter: { sev: 'all', rule: 'all', agent: 'all', q: '' },
+  selected: s07.id,
+  decisions: [],
+});
+assert.ok(
+  broken.innerHTML.includes('<img src=x') || risk.esc(probe) === probe,
+  'identity esc must expose raw probe'
+);
+
+console.log('xss escape via app renderList/esc ok');

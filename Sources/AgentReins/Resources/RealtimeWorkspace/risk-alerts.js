@@ -159,8 +159,10 @@ function transportExecCommands(){
   const cmd=[tool,...args].join(' ').trim();
   if(!cmd)continue;
   if(!isActualExecution(cmd,tool))continue;
-  if(list(r.downloads).some(d=>d&&d.path))continue;
-  const sha=String(r.fileResult?.sha256||r.resource?.sha256||r.sha256||'').toLowerCase();
+  // Skip downloaders that only wrote a file; do NOT skip sh/bash/open even if
+  // projectLocal attached a downloads[] hint from a sibling curl (S03 needs them).
+  if(list(r.downloads).some(d=>d&&d.path) && !/^(sh|bash|zsh|dash|open)$/.test(tool))continue;
+  const sha=String(r.execSha256||r.fileResult?.sha256||r.resource?.sha256||r.sha256||'').toLowerCase();
   out.push({
    task:{agent:r.agent,session:r.session},card:null,cmd,sha,
    call:r.call||r.runID||null,at:r.startedAt||r.timestamp,
@@ -292,9 +294,8 @@ function buildAlerts(payload){
    }
   }
 
-  // S03: 路径 + 时间窗（≤300s）。Correlated 仅：直接父子血缘(pid+启动时间) 或 执行文件哈希。
-  // 同父兄弟进程 → Inferred；same_shell_proven 需父进程 shell 证据(名+argv+启动时间)+同会话。
-  // chmod +x 不算执行；同一路径只保留一条，配对「该文件最近一次写入者」。
+  // S03 (en_4088c393): Correlated 只来自执行前 sha256==下载 sha256（basis=exec_hash）。
+  // 同父兄弟进程一律 Inferred(same_parent_shell)；不把 curl→sh 合成血缘当成 Correlated。
   const downloads=list(r.downloads).filter(d=>d&&d.path);
   for(const d of downloads){
    const fullPath=String(d.path);
@@ -313,33 +314,27 @@ function buildAlerts(payload){
     if(!isActualExecution(c.cmd,c.card?.execution?.tool||c.record?.tool||(c.cmd||'').split(/\s+/)[0]))continue;
     const pathHit=c.cmd.includes(fullPath)||(name&&(new RegExp('(?:^|[\\s\'"`/=])'+name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:$|[\\s\'"`;|&])')).test(c.cmd));
     if(!pathHit)continue;
-    // Direct parent→child lineage: exec's parentPID is the download pid, and start times are recorded.
     const lineageHit=!!(dlPid&&c.parentPID&&String(c.parentPID)===String(dlPid)&&dlStart&&(c.parentStartAt||c.processStartAt||c.at));
     const siblingSameParent=!!(c.parentPID&&r.parentPID&&String(c.parentPID)===String(r.parentPID||r.launcherPID)&&c.pid&&dlPid&&String(c.pid)!==String(dlPid));
-    const sameShellProven=!!(siblingSameParent&&isProvenShellParent(c)&&r.session&&c.task?.session&&String(r.session)===String(c.task.session));
     const hashHit=!!(sha&&c.sha&&c.sha===sha);
     let basis='path_only';
-    if(lineageHit)basis='lineage';
-    else if(hashHit)basis='exec_hash';
-    else if(sameShellProven)basis='same_shell_proven';
-    else if(siblingSameParent)basis='sibling_inferred';
-    // Correlated only for direct lineage or exec file hash (bot item 2).
-    const confidence=(basis==='lineage'||basis==='exec_hash')?'cor':'inf';
+    if(hashHit)basis='exec_hash';
+    else if(siblingSameParent)basis='same_parent_shell';
+    else if(lineageHit)basis='lineage_observed';
+    const confidence=basis==='exec_hash'?'cor':'inf';
     const cmdCall=c.call||'缺口';
-    const rank=(confidence==='cor'?3:1)+(basis==='same_shell_proven'?1:0)+(hashHit?1:0)+(lineageHit?1:0);
+    const rank=(confidence==='cor'?3:1)+(basis==='same_parent_shell'?1:0)+(hashHit?1:0);
     const evidence={
      downloadCall:dlCall,execCall:cmdCall,path:fullPath,basis,lineage:lineageHit,hashMatch:hashHit,
-     sameShellProven,dtSec:Math.round(dt),parentPID:c.parentPID||null,downloadPID:dlPid||null,
+     sameParentShell:basis==='same_parent_shell',dtSec:Math.round(dt),parentPID:c.parentPID||null,downloadPID:dlPid||null,
      parentName:c.parentName||null,parentArgv:c.parentArgv||null,parentStartAt:c.parentStartAt||null,
-     downloadStartAt:dlStart||null
+     downloadStartAt:dlStart||null,execSha256:c.sha||null,downloadSha256:sha||null
     };
-    const why=basis==='lineage'
-     ?`分级依据 Correlated（basis=lineage）：路径「${cut(fullPath,60)}」与执行「${cut(c.cmd,80)}」对上，parentPID=${c.parentPID} 指向下载进程 ${dlPid}（启动时间已记录，Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
-     :basis==='exec_hash'
-      ?`分级依据 Correlated（basis=exec_hash）：被执行文件 SHA-256 与下载哈希一致（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
-      :basis==='same_shell_proven'
-       ?`分级依据 Inferred（basis=same_shell_proven）：同父 shell 会话有进程名/argv/启动时间证据，但非直接父子血缘、无文件哈希（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
-       :`分级依据 Inferred（basis=${basis}）：路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）；无直接血缘、无执行哈希。下载 ${dlCall} · 命令 ${cmdCall}。`;
+    const why=basis==='exec_hash'
+      ?`分级依据 Correlated（basis=exec_hash）：执行前目标文件 SHA-256 与下载哈希一致（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+      :basis==='same_parent_shell'
+       ?`分级依据 Inferred（basis=same_parent_shell）：curl 与 sh 同属父 shell 兄弟进程（parentPID=${c.parentPID}），无执行哈希对齐（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+       :`分级依据 Inferred（basis=${basis}）：路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）；无执行哈希。下载 ${dlCall} · 命令 ${cmdCall}。`;
     const candidate={
      id:alertId('S03',fullPath),rule:'S03',severity:'critical',confidence,basis,rank,
      title:'下载后在 5 分钟内执行',

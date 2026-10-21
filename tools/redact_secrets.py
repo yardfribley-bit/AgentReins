@@ -1,4 +1,4 @@
-"""Shared secret redaction for MCP evidence.py, Swift MCP, and transport-audit auto.py.
+"""Shared secret redaction — shlex tokenize then tool-aware parse (en_4088c393).
 
 Masks omit sha256 prefixes and lengths. Shared vectors live in
 tools/redact_vectors.json — Python and Swift must both pass them.
@@ -7,18 +7,16 @@ from __future__ import annotations
 
 import json
 import re
+import shlex
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
-# curl -u / -ualice:pass / -uX / --user= / --user 'a:b c' (generic glued -uUSER:PASS)
-RE_USERPASS_EQ = re.compile(r"(?i)(-uX?|--user|--username)(=)(\S+:\S+)")
-RE_USERPASS_GLUED = re.compile(r"(?i)(-u)([^\s:=/-][^:\s]*:[^\s]+)")
-RE_USERPASS_SPACE = re.compile(
-    r"(?i)(-uX?|--user|--username)(\s+)(['\"])([^'\"]+:[^'\"]+)\3"
-)
-RE_USERPASS_SIMPLE = re.compile(r"(?i)(-uX?|--user|--username)(\s+)(\S+:\S+)")
-
-# Env / JSON-ish assignments
+# Free-text fallbacks (after tool-aware pass)
+RE_BEARER = re.compile(r"(?i)(Bearer\s+)(\S+)")
+RE_BASIC = re.compile(r"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)")
+RE_COOKIE = re.compile(r"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)")
+RE_X_API_KEY = re.compile(r"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)")
 RE_API_TOKEN_EQ = re.compile(
     r"(?i)((?:export\s+)?(?:API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|TOKEN)\s*=\s*)([^\s'\"&,;]+)"
 )
@@ -32,8 +30,6 @@ RE_PASSWORD_QUOTED = re.compile(
 RE_JSON_SECRET = re.compile(
     r'(?i)("(?:password|passwd|pwd|secret|client_secret|db_password)"\s*:\s*")([^"\\]*(?:\\.[^"\\]*)*)(")'
 )
-
-# AWS
 RE_AWS_AKIA = re.compile(r"\b(AKIA[0-9A-Z]{16})\b")
 RE_AWS_SECRET_QUOTED = re.compile(
     r"(?i)((?:aws_)?secret(?:_?access)?_?key\s*[=:]\s*)(['\"])([A-Za-z0-9/+=]{20,})\2"
@@ -41,32 +37,19 @@ RE_AWS_SECRET_QUOTED = re.compile(
 RE_AWS_SECRET = re.compile(
     r"(?i)((?:aws_)?secret(?:_?access)?_?key\s*[=:]\s*)([A-Za-z0-9/+=]{40})"
 )
-
-# Bearer (including short tokens) + Authorization: Basic + Cookie + x-api-key
-RE_BEARER = re.compile(r"(?i)(Bearer\s+)(\S+)")
-RE_BASIC = re.compile(r"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)")
-RE_COOKIE = re.compile(r"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)")
-RE_X_API_KEY = re.compile(r"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)")
-
-# URL userinfo — password may contain @; greedy takes last @ before host. Include mongodb+srv.
 RE_URL_USERINFO = re.compile(
     r"((?:https?|postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://)([^/\s]+)@"
 )
-
-# --password x  OR  mysql/sshpass -pSECRET / sshpass -p 'x' (NOT mkdir -p / ssh -p PORT / git add -p / find -print)
-RE_PASSWORD_FLAG = re.compile(r"(?i)(--password)(\s+|=)(\S+)")
-RE_MYSQL_SSHPASS_P_GLUED = re.compile(
-    r"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)([^\s\-]+)"
-)
-RE_MYSQL_SSHPASS_P_SPACE = re.compile(
-    r"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)(\s+)(?:'([^']*)'|\"([^\"]*)\"|(\S+))"
-)
-
 RE_PEM = re.compile(
     r"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"
 )
 RE_GENERIC_TOKEN = re.compile(
     r"(?i)(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"
+)
+RE_PASSWORD_FLAG = re.compile(r"(?i)(--password)(\s+|=)(\S+)")
+# Conservative glued userpass when shlex fails
+RE_USERPASS_FALLBACK = re.compile(
+    r"(?i)(-u|--user|--username)(=|\s+)?(\S+:\S+)"
 )
 
 SENSITIVE_KEYS = re.compile(
@@ -74,15 +57,140 @@ SENSITIVE_KEYS = re.compile(
     r"client_secret|authorization|credential|cookie|x-api-key|db_password|.*_pass|.*_secret)$"
 )
 
+HEADER_PREFIXES = (
+    "authorization:",
+    "proxy-authorization:",
+    "cookie:",
+)
+
 
 def _mask(kind: str, _raw: str = "") -> str:
     return f"[{kind}:REDACTED]"
+
+
+def _redact_url(token: str) -> str:
+    try:
+        parts = urlsplit(token)
+    except ValueError:
+        return token
+    if not parts.scheme or not parts.netloc or "@" not in parts.netloc:
+        return token
+    host = parts.netloc.rsplit("@", 1)[-1]
+    return urlunsplit((parts.scheme, _mask("url_userinfo") + "@" + host, parts.path, parts.query, parts.fragment))
+
+
+def _is_sensitive_header(value: str) -> bool:
+    low = value.lower().lstrip()
+    if any(low.startswith(p) for p in HEADER_PREFIXES):
+        return True
+    if re.match(r"(?i)x-[\w-]*(key|token)\s*:", low):
+        return True
+    return False
+
+
+def _redact_header_value(value: str) -> str:
+    # Keep scheme / key name; wipe the credential portion. No minimum length.
+    if ":" in value:
+        name, rest = value.split(":", 1)
+        return name + ": " + _mask("header")
+    return _mask("header")
+
+
+def _tool_name(argv: list[str]) -> str:
+    if not argv:
+        return ""
+    base = Path(argv[0]).name.lower()
+    return base
+
+
+def redact_argv_tokens(argv: list[str]) -> list[str]:
+    """Tool-aware argv redaction after shlex.split."""
+    if not argv:
+        return argv
+    out = list(argv)
+    tool = _tool_name(out)
+    i = 0
+    while i < len(out):
+        tok = out[i]
+        # URL userinfo anywhere
+        if "://" in tok and "@" in tok:
+            out[i] = _redact_url(tok)
+        if tool == "curl":
+            if tok in ("-u", "--user", "--username") and i + 1 < len(out):
+                out[i + 1] = _mask("userpass")
+                i += 2
+                continue
+            if tok.startswith("-u") and tok != "-u" and ":" in tok[2:]:
+                out[i] = "-u" + _mask("userpass")
+                i += 1
+                continue
+            if tok.startswith("--user=") or tok.startswith("--username="):
+                key, _, _ = tok.partition("=")
+                out[i] = key + "=" + _mask("userpass")
+                i += 1
+                continue
+            if tok in ("-H", "--header") and i + 1 < len(out):
+                if _is_sensitive_header(out[i + 1]):
+                    out[i + 1] = _redact_header_value(out[i + 1])
+                i += 2
+                continue
+            if tok.startswith("--header=") or tok.startswith("-H="):
+                key, _, val = tok.partition("=")
+                if _is_sensitive_header(val):
+                    out[i] = key + "=" + _redact_header_value(val)
+                i += 1
+                continue
+        if tool == "sshpass":
+            if tok == "-p" and i + 1 < len(out):
+                out[i + 1] = _mask("password")
+                i += 2
+                continue
+            if tok.startswith("-p") and tok != "-p":
+                out[i] = "-p" + _mask("password")
+                i += 1
+                continue
+        if tool in ("mysql", "mysqldump", "mariadb"):
+            # Only glued -pSECRET and --password=X (space form is DB name / prompt).
+            if tok.startswith("-p") and tok != "-p" and not tok.startswith("--"):
+                out[i] = "-p" + _mask("password")
+                i += 1
+                continue
+            if tok.startswith("--password="):
+                out[i] = "--password=" + _mask("password")
+                i += 1
+                continue
+        i += 1
+    return out
+
+
+def redact_command_line(text: str) -> str:
+    """shlex-first command redaction; on failure use conservative regex wipe."""
+    try:
+        argv = shlex.split(text, posix=True)
+    except ValueError:
+        # Unbalanced quotes — wipe anything that looks like a secret.
+        out = text
+        out = RE_USERPASS_FALLBACK.sub(lambda m: (m.group(1) + (m.group(2) or "") + _mask("userpass")), out)
+        out = RE_BEARER.sub(lambda m: m.group(1) + _mask("bearer"), out)
+        out = RE_PASSWORD_FLAG.sub(lambda m: m.group(1) + m.group(2) + _mask("password"), out)
+        return out
+    if not argv:
+        return text
+    red = redact_argv_tokens(argv)
+    # Prefer joining with spaces (lossy vs original quoting, but secrets gone).
+    return " ".join(shlex.quote(t) if any(c in t for c in " \t\n\"'") else t for t in red)
 
 
 def redact_text(text: str) -> str:
     if not text:
         return text
     out = text
+    # If it looks like a shell command line, prefer tool-aware pass first.
+    stripped = text.lstrip()
+    if stripped.startswith(("curl ", "sshpass ", "mysql ", "mysqldump ", "mariadb ")) or re.match(
+        r"^(?:/usr/bin/|/bin/)?(?:curl|sshpass|mysql)\b", stripped
+    ):
+        out = redact_command_line(text)
 
     def sub_url_userinfo(m: re.Match[str]) -> str:
         creds = m.group(2)
@@ -92,13 +200,27 @@ def redact_text(text: str) -> str:
 
     out = RE_PEM.sub(_mask("pem"), out)
     out = RE_URL_USERINFO.sub(sub_url_userinfo, out)
-    out = RE_USERPASS_EQ.sub(lambda m: m.group(1) + m.group(2) + _mask("userpass"), out)
-    out = RE_USERPASS_GLUED.sub(lambda m: m.group(1) + _mask("userpass"), out)
-    out = RE_USERPASS_SPACE.sub(
+    # Generic glued -uUSER:PASS (covers cases outside full command parse)
+    out = re.sub(
+        r"(?i)(-u)([^\s:=/-][^:\s]*:[^\s]+)",
+        lambda m: m.group(1) + _mask("userpass"),
+        out,
+    )
+    out = re.sub(
+        r"(?i)(-uX?|--user|--username)(=)(\S+:\S+)",
+        lambda m: m.group(1) + m.group(2) + _mask("userpass"),
+        out,
+    )
+    out = re.sub(
+        r"(?i)(-uX?|--user|--username)(\s+)(['\"])([^'\"]+:[^'\"]+)\3",
         lambda m: m.group(1) + m.group(2) + m.group(3) + _mask("userpass") + m.group(3),
         out,
     )
-    out = RE_USERPASS_SIMPLE.sub(lambda m: m.group(1) + m.group(2) + _mask("userpass"), out)
+    out = re.sub(
+        r"(?i)(-uX?|--user|--username)(\s+)(\S+:\S+)",
+        lambda m: m.group(1) + m.group(2) + _mask("userpass"),
+        out,
+    )
     out = RE_JSON_SECRET.sub(lambda m: m.group(1) + _mask("password") + m.group(3), out)
     out = RE_PASSWORD_QUOTED.sub(
         lambda m: m.group(1) + m.group(2) + _mask("password") + m.group(2), out
@@ -106,16 +228,24 @@ def redact_text(text: str) -> str:
     out = RE_API_TOKEN_EQ.sub(lambda m: m.group(1) + _mask("token"), out)
     out = RE_PASSWORD.sub(lambda m: m.group(1) + _mask("password"), out)
     out = RE_PASSWORD_FLAG.sub(lambda m: m.group(1) + m.group(2) + _mask("password"), out)
+
     def _sshpass_space(m: re.Match[str]) -> str:
-        # groups: 1=prefix -p, 2=spaces, 3=single-quoted, 4=double-quoted, 5=bare
         if m.group(3) is not None:
             return m.group(1) + m.group(2) + "'" + _mask("password") + "'"
         if m.group(4) is not None:
             return m.group(1) + m.group(2) + '"' + _mask("password") + '"'
         return m.group(1) + m.group(2) + _mask("password")
 
-    out = RE_MYSQL_SSHPASS_P_SPACE.sub(_sshpass_space, out)
-    out = RE_MYSQL_SSHPASS_P_GLUED.sub(lambda m: m.group(1) + _mask("password"), out)
+    out = re.sub(
+        r"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)(\s+)(?:'([^']*)'|\"([^\"]*)\"|(\S+))",
+        _sshpass_space,
+        out,
+    )
+    out = re.sub(
+        r"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)([^\s\-]+)",
+        lambda m: m.group(1) + _mask("password"),
+        out,
+    )
     out = RE_COOKIE.sub(lambda m: m.group(1) + _mask("cookie"), out)
     out = RE_X_API_KEY.sub(lambda m: m.group(1) + _mask("api_key"), out)
     out = RE_BASIC.sub(lambda m: m.group(1) + _mask("basic"), out)
@@ -169,8 +299,10 @@ def load_vectors() -> list[dict[str, Any]]:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def run_vector_checks() -> list[str]:
-    """Return list of failure messages (empty = pass)."""
+def run_vector_checks() -> tuple[int, int, list[str]]:
+    """Return (leaks, over_redactions, failure messages)."""
+    leaks = 0
+    overs = 0
     failures: list[str] = []
     for i, case in enumerate(load_vectors()):
         kind = case.get("kind", "text")
@@ -180,24 +312,28 @@ def run_vector_checks() -> list[str]:
             out = redact_text(raw)
             for secret in case.get("must_absent", []):
                 if secret and secret in out:
+                    leaks += 1
                     failures.append(f"{name}: secret still present: {secret!r}")
             for keep in case.get("must_keep", []):
                 if keep and keep not in out:
+                    overs += 1
                     failures.append(f"{name}: false positive removed: {keep!r}")
         elif kind == "obj":
             out = redact_obj(case["input"])
             blob = json.dumps(out, ensure_ascii=False)
             for secret in case.get("must_absent", []):
                 if secret and secret in blob:
+                    leaks += 1
                     failures.append(f"{name}: obj secret still present: {secret!r}")
-    return failures
+    return leaks, overs, failures
 
 
 if __name__ == "__main__":
-    fails = run_vector_checks()
+    leaks, overs, fails = run_vector_checks()
+    total = len(load_vectors())
+    print(f"REDACT leaks={leaks} over={overs} total={total}")
     if fails:
-        print("REDACT_VECTOR_FAIL", len(fails))
         for f in fails:
             print(f)
         raise SystemExit(1)
-    print("REDACT_VECTOR_OK", len(load_vectors()))
+    print("REDACT_VECTOR_OK", total)
