@@ -1,0 +1,12 @@
+{
+  "id": "S03:/private/tmp/ar-en26-s03-payload.sh",
+  "rule": "S03",
+  "title": "下载后在 5 分钟内执行",
+  "agent": "Cursor",
+  "session": "62e43f56-c0e4-4846-bde1-58d3b7efc270",
+  "executionId": "85a2abaf-2e76-4fb4-ab1a-94068a689ca4",
+  "confidence": "Inferred",
+  "timestamp": "2026-10-21T15:01:24.428596+00:00",
+  "sub": "ar-en26-s03-payload.sh · SHA-256 f0f34a2126fa…",
+  "finding": null
+}

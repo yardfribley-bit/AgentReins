@@ -1,0 +1,59 @@
+=== self_check en_26fd4180 ===
+cwd=/Users/jatsmith/AgentSpec/AgentGuardApp
+git=3d554f0f2d765b4e44e617932252fc7161570b00
+--- 0 red lines: no production XSS hooks / no unsigned quarantine ---
+OK  no TEST_PROBE/setTestProbe/withProbe in shipped JS
+OK  no quarantine wash API
+OK  Keychain via keychain_helper (no security -A)
+--- 1 redaction ---
+REDACT leaks=0 over=0 total=36
+REDACT_VECTOR_OK 36
+OK  REDACT python
+--- 2 XSS mutation (data-driven, no hooks) ---
+ESC_MUTANTS total=59 killed=58 survived=1
+SURVIVED (equivalence notes required if ≤2):
+  line 554: esc(a.id)
+OK  ESC_MUTANTS >=57/59 and <=2 survivors
+--- 3 tamper B1–B16 ---
+test_b11_wipe_both_dirs_detected_via_keychain (test_tamper_b11_b12.TamperB11B12Tests.test_b11_wipe_both_dirs_detected_via_keychain) ... ok
+test_b12_wipe_and_rebuild_under_new_key_detected (test_tamper_b11_b12.TamperB11B12Tests.test_b12_wipe_and_rebuild_under_new_key_detected) ... ok
+test_b14_delete_keychain_and_wipe_dirs_rebuild_unknown (test_tamper_b14_b16.TamperB14B16Tests.test_b14_delete_keychain_and_wipe_dirs_rebuild_unknown)
+B14: delete Keychain items + clear dirs, then rebuild → must not be Observed. ... ok
+test_b15_exfil_key_rewrite_history_detected (test_tamper_b14_b16.TamperB14B16Tests.test_b15_exfil_key_rewrite_history_detected)
+B15: read HMAC key and rewrite audit history → mac/seal mismatch or key replace. ... ok
+test_b16_unsigned_quarantine_cannot_wash (test_tamper_b14_b16.TamperB14B16Tests.test_b16_unsigned_quarantine_cannot_wash)
+B16: alter a row and drop an unsigned quarantine file → still ok=false. ... ok
+test_b1_truncate_and_delete_seal (test_tamper_b1_b6.TamperBTests.test_b1_truncate_and_delete_seal) ... ok
+test_b2_strip_macs_rewrite_chain_delete_seal (test_tamper_b1_b6.TamperBTests.test_b2_strip_macs_rewrite_chain_delete_seal) ... ok
+test_b3_modify_transport_mcp_does_not_wash (test_tamper_b1_b6.TamperBTests.test_b3_modify_transport_mcp_does_not_wash) ... ok
+test_b4_delete_all_mac_files (test_tamper_b1_b6.TamperBTests.test_b4_delete_all_mac_files) ... ok
+test_b5_rm_run_directory (test_tamper_b1_b6.TamperBTests.test_b5_rm_run_directory) ... ok
+test_b6_same_uid_forge_documented_unknown (test_tamper_b1_b6.TamperBTests.test_b6_same_uid_forge_documented_unknown) ... ok
+test_clean_ok (test_tamper_b1_b6.TamperBTests.test_clean_ok) ... ok
+test_b7_allow_resign_default_refuses_wash (test_tamper_b7_b10.TamperB7B10Tests.test_b7_allow_resign_default_refuses_wash) ... ok
+test_b8_deleting_inventory_row_breaks_mac (test_tamper_b7_b10.TamperB7B10Tests.test_b8_deleting_inventory_row_breaks_mac) ... ok
+test_b9_b10_wipe_all_treated_as_tamper_not_unsigned (test_tamper_b7_b10.TamperB7B10Tests.test_b9_b10_wipe_all_treated_as_tamper_not_unsigned) ... ok
+test_clean_ok (test_tamper_b7_b10.TamperB7B10Tests.test_clean_ok) ... ok
+
+----------------------------------------------------------------------
+Ran 16 tests in 0.257s
+
+OK
+OK  tamper suite
+--- 4 screenshots (if present) ---
+/Users/jatsmith/AgentSpec/AgentGuardApp/docs/evidence/en_26fd4180/screenshots/01-home-desk.png md5=809b8effbedbfdd6990bbe5014ca8ac1 colors=11644 std=36.0 OK
+OK  shot 01-home-desk.png
+/Users/jatsmith/AgentSpec/AgentGuardApp/docs/evidence/en_26fd4180/screenshots/01-home.png md5=f7682309b8ba1a1d11651a33f9667159 colors=2302 std=22.8 OK
+OK  shot 01-home.png
+screenshot_md5s [('01-home-desk.png', '809b8effbedbfdd6990bbe5014ca8ac1'), ('01-home.png', 'f7682309b8ba1a1d11651a33f9667159')]
+OK distinct screenshot md5
+--- 5 real-machine validate_audit (honest; ok=false expected if historical mac_mismatch remain) ---
+validate_audit ok= False confidence= Unknown observedBlockedBy= None
+tampered_sample= [{'index': 0, 'reason': 'mac_mismatch', 'tool': 'list_alerts', 'at': '2026-10-20T22:12:23Z'}, {'index': 1, 'reason': 'mac_mismatch', 'tool': 'list_mcp_audit', 'at': '2026-10-20T22:12:23Z'}, {'index': 2, 'reason': 'mac_mismatch', 'tool': 'list_alerts', 'at': '2026-10-21T05:14:35Z'}, {'index': 3, 'reason': 'mac_mismatch', 'tool': 'get_coverage', 'at': '2026-10-21T05:14:36Z'}, {'index': 4, 'reason': 'mac_mismatch', 'tool': 'list_mcp_audit', 'at': '2026-10-21T05:14:36Z'}, {'index': 5, 'reason': 'mac_mismatch', 'tool': 'list_alerts', 'at': '2026-10-21T07:37:55Z'}, {'index': 6, 'reason': 'mac_mismatch', 'tool': 'list_mcp_audit', 'at': '2026-10-21T07:37:55Z'}, {'index': 7, 'reason': 'mac_mismatch', 'tool': 'list_agents', 'at': '2026-10-21T09:40:23Z'}]
+entriesChecked= 66
+REAL_MACHINE_HONEST=true
+=== self_check done fail=0 git=3d554f0f2d765b4e44e617932252fc7161570b00 ===
+/Users/jatsmith/AgentSpec/AgentGuardApp/tools/check_screenshot.py:19: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  colors = len(set(body.resize((max(1, w // 4), max(1, h // 4))).getdata()))
+/Users/jatsmith/AgentSpec/AgentGuardApp/tools/check_screenshot.py:19: DeprecationWarning: Image.Image.getdata is deprecated and will be removed in Pillow 14 (2027-10-15). Use get_flattened_data instead.
+  colors = len(set(body.resize((max(1, w // 4), max(1, h // 4))).getdata()))

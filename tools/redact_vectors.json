@@ -334,5 +334,73 @@
       "listsecret1",
       "listsecret2"
     ]
+  },
+  {
+    "name": "curl_b_sessionid",
+    "kind": "text",
+    "input": "curl -b 'sessionid=rawsessABC' https://example.com/x",
+    "must_absent": [
+      "rawsessABC"
+    ],
+    "must_keep": [
+      "https://example.com/x"
+    ]
+  },
+  {
+    "name": "curl_cookie_jsession",
+    "kind": "text",
+    "input": "curl --cookie JSESSIONID=rawJSess99 https://h/path",
+    "must_absent": [
+      "rawJSess99"
+    ],
+    "must_keep": [
+      "https://h/path"
+    ]
+  },
+  {
+    "name": "json_mcp_session_id",
+    "kind": "text",
+    "input": "{\"Mcp-Session-Id\": \"sess-json-raw-1\", \"ok\": true}",
+    "must_absent": [
+      "sess-json-raw-1"
+    ],
+    "must_keep": [
+      "Mcp-Session-Id",
+      "ok"
+    ]
+  },
+  {
+    "name": "url_session_id_query",
+    "kind": "text",
+    "input": "GET https://api.example/v1?session_id=rawQuerySess&x=1",
+    "must_absent": [
+      "rawQuerySess"
+    ],
+    "must_keep": [
+      "https://api.example/v1",
+      "x=1"
+    ]
+  },
+  {
+    "name": "cookie_keeps_trailing_url",
+    "kind": "text",
+    "input": "Cookie: sessionid=rawcookieval https://example.com/keep",
+    "must_absent": [
+      "rawcookieval"
+    ],
+    "must_keep": [
+      "https://example.com/keep"
+    ]
+  },
+  {
+    "name": "obj_mcp_session_id",
+    "kind": "obj",
+    "input": {
+      "Mcp-Session-Id": "sess-obj-raw",
+      "note": "ok"
+    },
+    "must_absent": [
+      "sess-obj-raw"
+    ]
   }
 ]

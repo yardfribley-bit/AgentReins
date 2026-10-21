@@ -42,16 +42,16 @@ INTEGRITY_DIR = pathlib.Path.home() / "Library/Application Support/AgentReinsInt
 PROTECTED_SEAL_DIR = INTEGRITY_DIR / "seals"
 SIGNED_ERA_FLAG = INTEGRITY_DIR / "signed-era"
 RUN_INVENTORY_MAC = INTEGRITY_DIR / "transport-run-inventory.mac"
-# Acknowledged historical broken audit rows (never re-signed). JSONL of {index,at,tool,cause}.
-HISTORICAL_MAC_QUARANTINE = INTEGRITY_DIR / "historical-mac-mismatch.jsonl"
 KEYCHAIN_SERVICE = "com.agentreins.mcp-integrity"
 KEYCHAIN_ACCOUNT_HMAC = "hmac-key"
 KEYCHAIN_ACCOUNT_ERA = "signed-era"
+KEYCHAIN_HELPER = ROOT / "keychain_helper"
 # In-memory Keychain for unit tests (survives wiping AUDIT_DIR + INTEGRITY_DIR).
 _MEMORY_KEYCHAIN: dict[str, bytes] = {}
 KEYCHAIN_LIMITATION = (
-    "HMAC 密钥与安装锚点优先存 Keychain（security generic-password / kSecClassGenericPassword）。"
-    "文件副本仅作同机迁移回退；被监督进程读文件拿不到 Keychain 项时无法伪造 Observed。"
+    "HMAC 密钥与安装锚点经 Security.framework（tools/agentreins-mcp/keychain_helper）写入 Keychain，"
+    "不经 `security -A`、不把密钥放进 argv。旧明文 hmac 文件在迁入后删除。"
+    "无无签名豁免清单：mac_mismatch 一律 ok=false。"
 )
 # Prefer packaged RealtimeWorkspace next to this MCP copy; fall back to repo Sources.
 _PACKAGED_JS = ROOT.parent / "RealtimeWorkspace"
@@ -773,33 +773,47 @@ def _keychain_backend() -> str:
     return "file"
 
 
+def _run_keychain_helper(args: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
+    helper = KEYCHAIN_HELPER
+    if not helper.is_file():
+        # Dev tree: try compiling once.
+        src = ROOT / "keychain_helper.swift"
+        if src.is_file():
+            subprocess.run(
+                ["swiftc", "-O", "-o", str(helper), str(src)],
+                capture_output=True,
+                timeout=120,
+                check=False,
+            )
+    return subprocess.run(
+        [str(helper), *args],
+        input=stdin,
+        capture_output=True,
+        timeout=15,
+        check=False,
+    )
+
+
 def keychain_get(account: str) -> bytes | None:
     backend = _keychain_backend()
     if backend == "memory":
         return _MEMORY_KEYCHAIN.get(account)
     if backend == "security":
         try:
-            proc = subprocess.run(
-                [
-                    "security",
-                    "find-generic-password",
-                    "-s",
-                    KEYCHAIN_SERVICE,
-                    "-a",
-                    account,
-                    "-w",
-                ],
-                capture_output=True,
-                text=True,
-                timeout=8,
-                check=False,
-            )
+            proc = _run_keychain_helper(["get", account])
             if proc.returncode == 0 and proc.stdout.strip():
-                raw = proc.stdout.strip()
+                raw = proc.stdout.decode("utf-8", "replace").strip()
                 try:
-                    return bytes.fromhex(raw)
+                    data = bytes.fromhex(raw)
                 except ValueError:
-                    return raw.encode("utf-8")
+                    data = raw.encode("utf-8")
+                # Legacy `security -A -w <hex>` stored ASCII hex digits as the secret.
+                if len(data) == 64 and all(chr(b) in "0123456789abcdef" for b in data):
+                    try:
+                        return bytes.fromhex(data.decode("ascii"))
+                    except ValueError:
+                        return data
+                return data
         except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
             return None
         return None
@@ -812,40 +826,23 @@ def keychain_set(account: str, value: bytes) -> bool:
         _MEMORY_KEYCHAIN[account] = value
         return True
     if backend == "security":
-        hex_secret = value.hex()
+        # Never put the secret on argv; never use `security -A`.
         try:
-            subprocess.run(
-                [
-                    "security",
-                    "delete-generic-password",
-                    "-s",
-                    KEYCHAIN_SERVICE,
-                    "-a",
-                    account,
-                ],
-                capture_output=True,
-                timeout=5,
-                check=False,
-            )
-            # -A: allow all apps to read (unsigned MCP/python still needs non-interactive read).
-            # Item lives in login Keychain (not a world-readable file). Timeout avoids UI hangs.
-            proc = subprocess.run(
-                [
-                    "security",
-                    "add-generic-password",
-                    "-U",
-                    "-s",
-                    KEYCHAIN_SERVICE,
-                    "-a",
-                    account,
-                    "-w",
-                    hex_secret,
-                    "-A",
-                ],
-                capture_output=True,
-                timeout=8,
-                check=False,
-            )
+            proc = _run_keychain_helper(["set", account], stdin=value.hex().encode("ascii"))
+            return proc.returncode == 0
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            return False
+    return False
+
+
+def keychain_delete(account: str) -> bool:
+    backend = _keychain_backend()
+    if backend == "memory":
+        _MEMORY_KEYCHAIN.pop(account, None)
+        return True
+    if backend == "security":
+        try:
+            proc = _run_keychain_helper(["delete", account])
             return proc.returncode == 0
         except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
             return False
@@ -860,33 +857,42 @@ def keychain_has_install_anchor() -> bool:
     return False
 
 
+def _delete_hmac_key_file() -> None:
+    """Remove plaintext key material once Keychain holds the secret."""
+    try:
+        if HMAC_KEY_FILE.is_file():
+            HMAC_KEY_FILE.unlink()
+    except OSError:
+        pass
+
+
 def load_or_create_hmac_key() -> bytes:
-    """HMAC key: Keychain first, then 0600 file fallback (migrated into Keychain when possible)."""
+    """HMAC key: Keychain first, then one-time file migrate (file deleted after)."""
     ensure_audit_dir()
     existing = keychain_get(KEYCHAIN_ACCOUNT_HMAC)
     if existing and len(existing) >= 16:
+        _delete_hmac_key_file()
         return existing
     if HMAC_KEY_FILE.is_file():
-        key = HMAC_KEY_FILE.read_bytes()
-        if len(key) >= 16:
-            keychain_set(KEYCHAIN_ACCOUNT_HMAC, key)
-            return key
+        raw = HMAC_KEY_FILE.read_bytes()
+        # Ignore non-secret marker left by older builds.
+        if len(raw) >= 16 and raw.strip() not in (b"keychain", b"keychain\n"):
+            if keychain_set(KEYCHAIN_ACCOUNT_HMAC, raw):
+                _delete_hmac_key_file()
+                return raw
+            return raw
     key = os.urandom(32)
-    if not keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
-        fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(key)
-        try:
-            os.chmod(HMAC_KEY_FILE, 0o600)
-        except OSError:
-            pass
-    else:
-        # Keep a non-secret marker file so operators see Keychain is in use.
-        try:
-            HMAC_KEY_FILE.write_text("keychain\n", encoding="utf-8")
-            os.chmod(HMAC_KEY_FILE, 0o600)
-        except OSError:
-            pass
+    if keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
+        _delete_hmac_key_file()
+        return key
+    # Last resort: file backend (non-Darwin / helper missing). Still 0600.
+    fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "wb") as fh:
+        fh.write(key)
+    try:
+        os.chmod(HMAC_KEY_FILE, 0o600)
+    except OSError:
+        pass
     return key
 
 
@@ -1024,38 +1030,6 @@ def sign_run_inventory(key: bytes | None = None) -> None:
         except (OSError, json.JSONDecodeError, TypeError, ValueError):
             pass
     mark_signed_era()
-
-
-def load_historical_mac_quarantine() -> dict[int, dict[str, Any]]:
-    out: dict[int, dict[str, Any]] = {}
-    if not HISTORICAL_MAC_QUARANTINE.is_file():
-        return out
-    for line in HISTORICAL_MAC_QUARANTINE.read_text(encoding="utf-8").splitlines():
-        if not line.strip():
-            continue
-        try:
-            row = json.loads(line)
-            out[int(row["index"])] = row
-        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
-            continue
-    return out
-
-
-def quarantine_historical_mac_mismatch(rows: list[dict[str, Any]]) -> None:
-    """Record historically broken MAC rows without re-signing them."""
-    _ensure_integrity_dir()
-    existing = load_historical_mac_quarantine()
-    for row in rows:
-        existing[int(row["index"])] = row
-    lines = [
-        json.dumps(existing[i], ensure_ascii=False, sort_keys=True)
-        for i in sorted(existing)
-    ]
-    HISTORICAL_MAC_QUARANTINE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
-    try:
-        os.chmod(HISTORICAL_MAC_QUARANTINE, 0o600)
-    except OSError:
-        pass
 
 
 def validate_run_inventory(key: bytes | None = None) -> dict[str, Any]:
@@ -1383,22 +1357,17 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
             seen_signed = True
             expected_mac = entry_hmac(body, key)
             if entry.get("mac") != expected_mac:
-                quarantined = load_historical_mac_quarantine()
-                if idx in quarantined:
-                    result.setdefault("historicalMacMismatch", []).append(
-                        {
-                            "index": idx,
-                            "reason": "historical_mac_mismatch_quarantined",
-                            "tool": entry.get("tool"),
-                            "cause": quarantined[idx].get("cause"),
-                            "at": entry.get("at"),
-                        }
-                    )
-                else:
-                    result["ok"] = False
-                    result["tampered"].append(
-                        {"index": idx, "reason": "mac_mismatch", "tool": entry.get("tool")}
-                    )
+                # en_26fd4180: no unsigned quarantine / allowlist can wash this to ok=true.
+                result["ok"] = False
+                result["tampered"].append(
+                    {
+                        "index": idx,
+                        "reason": "mac_mismatch",
+                        "tool": entry.get("tool"),
+                        "at": entry.get("at"),
+                    }
+                )
+                result["confidence"] = "Unknown"
         prev = entry.get("hash") or prev
         head = prev
     seal_path = AUDIT_SEAL if path is None else path.with_suffix(".seal")
@@ -1459,12 +1428,17 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         result["ok"] = False
         result["tampered"].extend(ev.get("tampered") or [])
         result["confidence"] = "Unknown"
-    # Same-uid key forgeability (B6): never claim Observed for integrity against same-uid attacker.
+    # Same-uid key forgeability (B6/B15): an attacker who can read the Keychain item
+    # can rewrite log+seal under the stolen key. Without an external (root/remote)
+    # anchor, local MACs alone must never claim Observed — even when ok=true.
     result["b6"] = {
         "sameUidCanForge": True,
         "confidence": "Unknown",
         "note": KEYCHAIN_LIMITATION,
     }
+    if result.get("confidence") == "Observed":
+        result["confidence"] = "Unknown"
+        result["observedBlockedBy"] = "same_uid_no_external_anchor"
     return result
 
 

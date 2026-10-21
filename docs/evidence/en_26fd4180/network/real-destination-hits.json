@@ -1,0 +1,57 @@
+[
+  {
+    "id": null,
+    "host": null,
+    "realDestination": "httpbin.org",
+    "destinationSource": "proxy_observed",
+    "agent": "Cursor",
+    "tool": "curl",
+    "call": null,
+    "session": null,
+    "transportPeer": "127.0.0.1"
+  },
+  {
+    "id": null,
+    "host": null,
+    "realDestination": "raw.githubusercontent.com",
+    "destinationSource": "proxy_observed",
+    "agent": "Cursor",
+    "tool": "curl",
+    "call": null,
+    "session": null,
+    "transportPeer": "127.0.0.1"
+  },
+  {
+    "id": null,
+    "host": null,
+    "realDestination": "50.118.187.180",
+    "destinationSource": "proxy_observed",
+    "agent": "Cursor",
+    "tool": "curl",
+    "call": null,
+    "session": null,
+    "transportPeer": null
+  },
+  {
+    "id": null,
+    "host": null,
+    "realDestination": "50.118.187.180",
+    "destinationSource": "proxy_observed",
+    "agent": "Cursor",
+    "tool": "curl",
+    "call": null,
+    "session": null,
+    "transportPeer": null
+  },
+  {
+    "id": null,
+    "host": null,
+    "realDestination": "50.118.187.180",
+    "destinationSource": "proxy_observed",
+    "agent": "Codex",
+    "tool": "curl",
+    "call": null,
+    "session": null,
+    "transportPeer": null
+  }
+]

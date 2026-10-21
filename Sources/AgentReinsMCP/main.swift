@@ -200,7 +200,11 @@ enum Redact {
             (#"(?i)(--password)(\s+|=)(\S+)"#, "$1$2[password:REDACTED]"),
             (#"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)(\s+)(?:'([^']*)'|\"([^\"]*)\"|(\S+))"#, "$1$2[password:REDACTED]"),
             (#"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)([^\s\-]+)"#, "$1[password:REDACTED]"),
-            (#"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)"#, "$1[cookie:REDACTED]"),
+            (#"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]*?)(?=(?:\s+https?://)|\s*$|\r|\n)"#, "$1[cookie:REDACTED]"),
+            (#"(?i)\b((?:sessionid|jsessionid|phpsessid|mcp-session-id|session_id)=)([^;\s&]+)"#, "$1[session:REDACTED]"),
+            (#"(?i)(\"(?:Mcp-Session-Id|X-Session-Id|Session-Id|session[_-]?id)\"\s*:\s*\")([^\"\\]*(?:\\.[^\"\\]*)*)(\")"#, "$1[session:REDACTED]$3"),
+            (#"(?i)([?&](?:session[_-]?id|jsessionid|phpsessid|sid)=)([^&\s\"']+)"#, "$1[session:REDACTED]"),
+            (#"(?i)(-b|--cookie)(=|\s+)(\S+)"#, "$1$2[cookie:REDACTED]"),
             (#"(?i)((?:Mcp-Session-Id|X-Session-Id|Session-Id|X-CSRF-Token|CSRF-Token|X-XSRF-Token)\s*[:=]\s*)(\S+)"#, "$1[session:REDACTED]"),
             (#"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)"#, "$1[api_key:REDACTED]"),
             (#"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)"#, "$1[basic:REDACTED]"),
@@ -226,7 +230,8 @@ enum Redact {
             for (k, v) in dict {
                 let key = k.lowercased()
                 if key.contains("password") || key.contains("secret") || key == "token"
-                    || key == "authorization" || key == "cookie" || key == "x-api-key" || key == "pwd" {
+                    || key == "authorization" || key == "cookie" || key == "x-api-key" || key == "pwd"
+                    || key == "mcp-session-id" || key == "session-id" || key == "session_id" || key == "jsessionid" {
                     if let list = v as? [Any] {
                         out[k] = list.map { $0 is String ? "[key:\(k):REDACTED]" : any($0) }
                     } else if v is String {

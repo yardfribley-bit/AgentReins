@@ -1,0 +1,56 @@
+{
+  "validate_audit": {
+    "ok": false,
+    "confidence": "Unknown",
+    "observedBlockedBy": null,
+    "tampered_count": 4,
+    "entriesChecked": 66
+  },
+  "historical_corruption": [
+    {
+      "index": 0,
+      "at": "2026-10-20T22:12:23Z",
+      "actor": "Codex",
+      "tool": "list_alerts",
+      "reason": "historical_corruption",
+      "validate_reason": "mac_mismatch",
+      "conclusion": "HMAC key material changed when the signed-era / Keychain integrity system was first introduced on 2026-10-20. These two Codex audit rows were MAC-signed under the prior key and were never re-signed (re-sign is refused by design).",
+      "repro": "1) Keep audit lines 0–1 from 2026-10-20T22:12:23Z. 2) Load current Keychain hmac-key (fp f235926a…). 3) entry_hmac(body, current_key) != entry[\"mac\"]. Script: python3 -c \"import evidence,json; …\"",
+      "code_locus": "tools/agentreins-mcp/evidence.py:entry_hmac / validate_audit mac check"
+    },
+    {
+      "index": 1,
+      "at": "2026-10-20T22:12:23Z",
+      "actor": "Codex",
+      "tool": "list_mcp_audit",
+      "reason": "historical_corruption",
+      "validate_reason": "mac_mismatch",
+      "conclusion": "HMAC key material changed when the signed-era / Keychain integrity system was first introduced on 2026-10-20. These two Codex audit rows were MAC-signed under the prior key and were never re-signed (re-sign is refused by design).",
+      "repro": "1) Keep audit lines 0–1 from 2026-10-20T22:12:23Z. 2) Load current Keychain hmac-key (fp f235926a…). 3) entry_hmac(body, current_key) != entry[\"mac\"]. Script: python3 -c \"import evidence,json; …\"",
+      "code_locus": "tools/agentreins-mcp/evidence.py:entry_hmac / validate_audit mac check"
+    },
+    {
+      "index": 5,
+      "at": "2026-10-21T07:37:55Z",
+      "actor": "Codex CLI/0.45.0-ci-en11",
+      "tool": "list_alerts",
+      "reason": "historical_corruption",
+      "validate_reason": "mac_mismatch",
+      "conclusion": "CI-packaged AgentReinsMCP (actor Codex CLI/0.45.0-ci-en11) wrote these rows while resolving a different AUDIT_DIR/HMAC view than the interactive Keychain key now in use. MACs verify only under that ephemeral CI key; current Keychain key rejects them. Not a race guess — actor string and timestamps identify the CI package session.",
+      "repro": "1) Locate lines with actor containing \"ci-en11\" at 2026-10-21T07:37:55Z. 2) Validate with interactive Keychain key → mac_mismatch. 3) No allow_resign path exists (sign_evidence_tree refuses mismatch).",
+      "code_locus": "tools/agentreins-mcp/evidence.py:entry_hmac / validate_audit mac check"
+    },
+    {
+      "index": 6,
+      "at": "2026-10-21T07:37:55Z",
+      "actor": "Codex CLI/0.45.0-ci-en11",
+      "tool": "list_mcp_audit",
+      "reason": "historical_corruption",
+      "validate_reason": "mac_mismatch",
+      "conclusion": "CI-packaged AgentReinsMCP (actor Codex CLI/0.45.0-ci-en11) wrote these rows while resolving a different AUDIT_DIR/HMAC view than the interactive Keychain key now in use. MACs verify only under that ephemeral CI key; current Keychain key rejects them. Not a race guess — actor string and timestamps identify the CI package session.",
+      "repro": "1) Locate lines with actor containing \"ci-en11\" at 2026-10-21T07:37:55Z. 2) Validate with interactive Keychain key → mac_mismatch. 3) No allow_resign path exists (sign_evidence_tree refuses mismatch).",
+      "code_locus": "tools/agentreins-mcp/evidence.py:entry_hmac / validate_audit mac check"
+    }
+  ],
+  "note": "ok must stay false while these rows remain; no unsigned quarantine wash."
+}

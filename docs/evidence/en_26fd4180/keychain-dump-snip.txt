@@ -1,0 +1,7 @@
+4280:    0x00000007 <blob>="com.agentreins.mcp-integrity"
+4282:    "acct"<blob>="hmac-key"
+4294:    "svce"<blob>="com.agentreins.mcp-integrity"
+4300:    0x00000007 <blob>="com.agentreins.mcp-integrity"
+4302:    "acct"<blob>="signed-era"
+4314:    "svce"<blob>="com.agentreins.mcp-integrity"
+4404:    "path"<blob>="/v1/access-token"

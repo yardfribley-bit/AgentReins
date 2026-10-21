@@ -1,0 +1,17 @@
+{
+  "CGPreflightScreenCaptureAccess": true,
+  "CGSSessionScreenIsLocked": null,
+  "raw_session_keys": [
+    "CGSSessionUniqueSessionUUID",
+    "kCGSSessionAuditIDKey",
+    "kCGSSessionGroupIDKey",
+    "kCGSSessionLoginwindowSafeLogin",
+    "kCGSSessionOnConsoleKey",
+    "kCGSSessionSystemSafeBoot",
+    "kCGSSessionUserIDKey",
+    "kCGSSessionUserNameKey",
+    "kCGSessionLoginDoneKey",
+    "kCGSessionLongUserNameKey",
+    "kSCSecuritySessionID"
+  ]
+}

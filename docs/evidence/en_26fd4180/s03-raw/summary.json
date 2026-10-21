@@ -1,0 +1,26 @@
+[
+  {
+    "tool": "sh",
+    "dir": "85a2abaf-2e76-4fb4-ab1a-94068a689ca4",
+    "call": "85a2abaf-2e76-4fb4-ab1a-94068a689ca4",
+    "pid": 25341,
+    "manifest": "s03-raw/sh/manifest.json",
+    "transport": "s03-raw/sh/transport.json"
+  },
+  {
+    "tool": "chmod",
+    "dir": "96d50a5c-7de2-4935-99cc-20632f3e4fd6",
+    "call": "96d50a5c-7de2-4935-99cc-20632f3e4fd6",
+    "pid": 25314,
+    "manifest": "s03-raw/chmod/manifest.json",
+    "transport": "s03-raw/chmod/transport.json"
+  },
+  {
+    "tool": "curl",
+    "dir": "691d5d23-b48b-4a20-9ace-8ff2cdbee53e",
+    "call": "691d5d23-b48b-4a20-9ace-8ff2cdbee53e",
+    "pid": 25289,
+    "manifest": "s03-raw/curl/manifest.json",
+    "transport": "s03-raw/curl/transport.json"
+  }
+]

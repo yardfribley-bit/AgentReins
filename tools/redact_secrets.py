@@ -15,7 +15,7 @@ from urllib.parse import urlsplit, urlunsplit
 # Free-text fallbacks (after tool-aware pass)
 RE_BEARER = re.compile(r"(?i)(Bearer\s+)(\S+)")
 RE_BASIC = re.compile(r"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)")
-RE_COOKIE = re.compile(r"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)")
+RE_COOKIE = re.compile(r"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]*?)(?=(?:\s+https?://)|\s*$|\r|\n)")
 RE_X_API_KEY = re.compile(r"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)")
 RE_API_TOKEN_EQ = re.compile(
     r"(?i)((?:export\s+)?(?:API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|TOKEN)\s*=\s*)([^\s'\"&,;]+)"
@@ -54,7 +54,8 @@ RE_USERPASS_FALLBACK = re.compile(
 
 SENSITIVE_KEYS = re.compile(
     r"(?i)^(password|passwd|pwd|secret|token|api[_-]?key|access[_-]?token|refresh[_-]?token|"
-    r"client_secret|authorization|credential|cookie|x-api-key|db_password|.*_pass|.*_secret)$"
+    r"client_secret|authorization|credential|cookie|x-api-key|db_password|"
+    r"mcp-session-id|session-id|session_id|jsessionid|.*_pass|.*_secret)$"
 )
 
 HEADER_PREFIXES = (
@@ -73,6 +74,16 @@ HEADER_PREFIXES = (
 # Free-text session / CSRF header redaction (WorkBuddy P2 / en_d595e9da).
 RE_SESSION_HEADER = re.compile(
     r"(?i)((?:Mcp-Session-Id|X-Session-Id|Session-Id|X-CSRF-Token|CSRF-Token|X-XSRF-Token)\s*[:=]\s*)(\S+)"
+)
+
+RE_COOKIE_PAIR = re.compile(
+    r"(?i)\b((?:sessionid|jsessionid|phpsessid|mcp-session-id|session_id)=)([^;\s&]+)"
+)
+RE_JSON_SESSION = re.compile(
+    r'(?i)("(?:Mcp-Session-Id|X-Session-Id|Session-Id|session[_-]?id)"\s*:\s*")([^"\\]*(?:\\.[^"\\]*)*)(")'
+)
+RE_URL_SESSION_QUERY = re.compile(
+    r"(?i)([?&](?:session[_-]?id|jsessionid|phpsessid|sid)=)([^&\s\"']+)"
 )
 
 
@@ -149,6 +160,19 @@ def redact_argv_tokens(argv: list[str]) -> list[str]:
             if tok.startswith("--user=") or tok.startswith("--username="):
                 key, _, _ = tok.partition("=")
                 out[i] = key + "=" + _mask("userpass")
+                i += 1
+                continue
+            if tok in ("-b", "--cookie", "--cookie-jar") and i + 1 < len(out):
+                out[i + 1] = _mask("cookie")
+                i += 2
+                continue
+            if tok.startswith("-b") and tok != "-b" and not tok.startswith("--"):
+                out[i] = "-b" + _mask("cookie")
+                i += 1
+                continue
+            if tok.startswith("--cookie=") or tok.startswith("--cookie-jar="):
+                key, _, _ = tok.partition("=")
+                out[i] = key + "=" + _mask("cookie")
                 i += 1
                 continue
             if tok in ("-H", "--header") and i + 1 < len(out):
@@ -269,6 +293,9 @@ def redact_text(text: str) -> str:
         out,
     )
     out = RE_COOKIE.sub(lambda m: m.group(1) + _mask("cookie"), out)
+    out = RE_COOKIE_PAIR.sub(lambda m: m.group(1) + _mask("session"), out)
+    out = RE_JSON_SESSION.sub(lambda m: m.group(1) + _mask("session") + m.group(3), out)
+    out = RE_URL_SESSION_QUERY.sub(lambda m: m.group(1) + _mask("session"), out)
     out = RE_SESSION_HEADER.sub(lambda m: m.group(1) + _mask("session"), out)
     out = RE_X_API_KEY.sub(lambda m: m.group(1) + _mask("api_key"), out)
     out = RE_BASIC.sub(lambda m: m.group(1) + _mask("basic"), out)

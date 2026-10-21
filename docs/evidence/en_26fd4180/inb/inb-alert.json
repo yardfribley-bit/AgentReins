@@ -1,0 +1,12 @@
+{
+  "id": "INB:228b7577-7148-4bd8-a382-a5db2132c4cc:inj",
+  "rule": "INB",
+  "title": "收回内容含提示覆盖指令",
+  "agent": "Codex",
+  "session": "01a14d91-4e1b-7751-ab7d-ee59798fe0e2",
+  "executionId": "228b7577-7148-4bd8-a382-a5db2132c4cc",
+  "confidence": "Observed",
+  "timestamp": "2026-10-21T12:59:36.694318+00:00",
+  "sub": "curl · www.chuhaijian.com · 入站正文",
+  "finding": null
+}

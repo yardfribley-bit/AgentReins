@@ -1,0 +1,2 @@
+-rwxr-xr-x@ 1 jatsmith  staff  58896 Oct 21 22:55 tools/agentreins-mcp/keychain_helper
+-rw-r--r--@ 1 jatsmith  staff   4491 Oct 21 22:54 tools/agentreins-mcp/keychain_helper.swift

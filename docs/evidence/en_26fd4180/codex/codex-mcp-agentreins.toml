@@ -1,0 +1,4 @@
+# en_26fd4180 Codex MCP snippet
+[mcp_servers.agentreins]
+command = "python3"
+args = ["/Users/jatsmith/AgentSpec/AgentGuardApp/tools/agentreins-mcp/server.py"]

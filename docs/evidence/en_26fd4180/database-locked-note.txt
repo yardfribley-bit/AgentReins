@@ -1,0 +1,2 @@
+database is locked: not reproduced in this session’s AgentReins windows / MCP reads.
+If the home banner still shows it after unlock, it is SQLite contention on events.sqlite under concurrent collectors; not washed in UI. Trigger: two writers on Application Support/AgentGuard/events.json|sqlite. Mitigation deferred (product): single-writer queue / busy_timeout — not implemented this round; disclosed as residual.

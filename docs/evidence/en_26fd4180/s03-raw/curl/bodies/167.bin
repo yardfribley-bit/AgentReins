@@ -1,0 +1,6 @@
+GET /bytes/64 HTTP/2
+Host: httpbin.org
+User-Agent: curl/8.7.1
+Accept: */*
+X-AgentReins-Call: 691d5d23-b48b-4a20-9ace-8ff2cdbee53e
+

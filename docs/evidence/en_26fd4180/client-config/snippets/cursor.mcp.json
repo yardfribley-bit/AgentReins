@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentreins": {
+      "command": "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP",
+      "args": []
+    }
+  }
+}
