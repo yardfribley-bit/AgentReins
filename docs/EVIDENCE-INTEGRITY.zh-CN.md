@@ -1,7 +1,7 @@
 # 证据完整性：当前记录、历史记录与分界点
 
 本文说明 MCP 怎样判断审计记录和证据文件是否被改过，以及**哪些事它证明不了**。
-Python（`tools/agentreins-mcp/evidence.py`）和打包的 Swift MCP（`Sources/AgentReinsMCP/Core*.swift`）规则相同，由 `tools/agentreins-mcp/test_swift_parity.py` 用同一批场景对照检查。
+Python（`tools/agentreins-mcp/evidence.py`）和打包的 Swift MCP（`Sources/AgentReinsCore/Core*.swift`）规则相同，由 `tools/agentreins-mcp/test_swift_parity.py` 用同一批场景对照检查。
 
 ## 签了什么
 - **MCP 审计日志**：`~/Library/Application Support/AgentGuard/mcp-supervisor-audit.jsonl`。每条记录带 `prevHash`（上一条的哈希）和 HMAC-SHA256 签名，连成一条链。
@@ -22,7 +22,10 @@ Python（`tools/agentreins-mcp/evidence.py`）和打包的 Swift MCP（`Sources/
 - `get`、`set`、`delete` 一律关闭钥匙串交互（`SecKeychainSetUserInteractionAllowed(false)`）。钥匙串锁着，或者这个 helper 还不在条目的访问列表里时，helper 立刻以**退出码 4** 结束（表示需要用户授权）。调用方把它记成 `error`，原因写"keychain needs user approval"。
 - 其他退出码：0 成功，3 没有这个条目，1 其他钥匙串错误。
 - 每次调用 helper 都限时 15 秒。超时算失败，而且同一进程 60 秒内不再调用 helper，直接报"timed out recently; not retried yet"。这样钥匙串卡住时，每分钟只耗一次超时，不会每个账户、每次 MCP 调用都等 15 秒。Python 与 Swift 规则相同。
-- `AgentReinsKeychainHelper authorize` 是唯一允许弹窗的操作，只在有人登录、主动运行时使用。它会让 macOS 弹出一次授权（选"始终允许"），不输出任何密钥。升级后如果出现"needs user approval"，运行一次即可。前端（第 2 步）应在 App 启动时、用户在场的情况下调用它。
+- `AgentReinsKeychainHelper authorize` 是唯一允许弹窗的操作，只在有人登录、主动运行时使用。它会让 macOS 弹出一次授权（选"始终允许"），不输出任何密钥。升级后如果出现"needs user approval"，运行一次即可。
+- `AgentReinsKeychainHelper status [账户]`：不弹窗地试读一次，不输出任何内容，只用退出码报状态（0/3/4/1）。
+- App 启动时先用 `status` 检查；结果是需要授权、出错或超时时，弹出说明框（「授权…」/「以后再说」），用户点「授权…」后才运行 `authorize`，结果再弹框告知。从不静默弹钥匙串窗口。首页的覆盖横幅在 `key_unavailable` 时也给出「授权…」按钮和终端命令。
+- App 和打包的 MCP 共用 `Sources/AgentReinsCore`（SwiftPM 库目标），App 自己校验采样台账，不再为此拉起 MCP。
 
 ## 为什么要分"当前"和"历史"
 早期版本把密钥放在普通文件里。迁移到钥匙串时，旧密钥被删掉了。用旧密钥签的那些记录，从此既证明不了完好，也证明不了被改。
@@ -97,6 +100,7 @@ Python（`tools/agentreins-mcp/evidence.py`）和打包的 Swift MCP（`Sources/
   - 截断；
   - b6 与实际存储一致；
   - 钥匙串读错时不造新密钥。
+- 测试专用的钥匙串替身在 `tools/agentreins-mcp/keychain_fake.py`，只由测试用 `mock.patch` 注入。随包代码里不再有 `AGENTREINS_KEYCHAIN_BACKEND=memory|file`、非 macOS 的文件密钥退路或 `AGENTREINS_REDACT_SELFTEST`；`package_app.sh` 和 CI 会检查它们没有回到打包产物里。
 - `test_swift_parity.py`：同一批场景下，Python 与 Swift 的结论逐项相同，包括 Python 和 Swift 交替写同一条审计链。
 
 ## 已知局限

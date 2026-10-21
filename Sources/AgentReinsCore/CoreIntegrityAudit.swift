@@ -3,7 +3,7 @@ import Foundation
 extension Integrity {
     /// evidence.py validate_audit: keyed HMAC chain split into current (decides ok) and legacy (Unknown).
     /// Never re-signs anything on read.
-    func validate() -> [String: Any] {
+    public func validate() -> [String: Any] {
         var result: [String: Any] = [
             "mode": "keyed-HMAC-SHA256 append-only + required seal + evidence MAC + run inventory",
             "keyPath": "keychain:\(Self.accountHmac)", "logPath": auditLog.path, "ok": true, "entriesChecked": 0,
@@ -170,7 +170,7 @@ extension Integrity {
         return result
     }
 
-    static func summary(_ v: [String: Any]) -> [String: Any] {
+    public static func summary(_ v: [String: Any]) -> [String: Any] {
         let legacy = v["legacyUnverifiable"] as? [String: Any] ?? [:]
         return [
             "ok": nn(v["ok"]), "status": nn(v["status"]), "statusText": nn(v["statusText"]),

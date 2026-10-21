@@ -174,6 +174,10 @@ for res in \
   RealtimeWorkspace/network-view.js; do
   [[ -s "$APP_BUNDLE/Contents/Resources/$res" ]] || guard_fail "missing or empty Contents/Resources/$res"
 done
+if grep -l -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN -e AGENTREINS_REDACT_SELFTEST \
+     "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"*.py "$APP_BUNDLE/Contents/Resources/socket-sampler/"*.py 2>/dev/null; then
+  guard_fail "a packaged script still carries a test-only Keychain/self-test switch"
+fi
 grep -q 'SAMPLER_VERSION = "socket-sampler/2"' "$APP_BUNDLE/Contents/Resources/socket-sampler/socket_sampler.py" 2>/dev/null \
   || guard_fail "packaged socket_sampler.py is not socket-sampler/2 (measured coverage + signed ledger)"
 if [[ "$GUARD_FAILURES" -gt 0 ]]; then

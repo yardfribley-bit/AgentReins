@@ -15,6 +15,7 @@ import unittest
 from unittest import mock
 
 import evidence
+from keychain_fake import FAKE as FAKE_KEYCHAIN
 
 K0 = b"0" * 32  # deleted pre-migration key (fixture)
 K1 = b"1" * 32  # current Keychain key (fixture)
@@ -28,7 +29,7 @@ class Base(unittest.TestCase):
         self.audit, self.transport, self.integrity = (self.tmp / n for n in ("audit", "transport", "integrity"))
         for d in (self.audit, self.transport, self.integrity):
             d.mkdir()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         self.patches = [
             mock.patch.object(evidence, "AUDIT_DIR", self.audit),
             mock.patch.object(evidence, "DEFAULT_TRANSPORT", self.transport),
@@ -40,7 +41,7 @@ class Base(unittest.TestCase):
             mock.patch.object(evidence, "PROTECTED_SEAL_DIR", self.integrity / "seals"),
             mock.patch.object(evidence, "SIGNED_ERA_FLAG", self.integrity / "signed-era"),
             mock.patch.object(evidence, "RUN_INVENTORY_MAC", self.integrity / "transport-run-inventory.mac"),
-            mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "memory"}, clear=False),
+            *FAKE_KEYCHAIN.patches(evidence),
         ]
         for p in self.patches:
             p.start()
@@ -48,7 +49,7 @@ class Base(unittest.TestCase):
     def tearDown(self) -> None:
         for p in self.patches:
             p.stop()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     # -- helpers
@@ -78,10 +79,10 @@ class Base(unittest.TestCase):
             (run / (name + ".mac")).write_text(evidence.evidence_file_mac(path, K0) + "\n", encoding="utf-8")
             past = evidence._iso_ts(LEGACY_AT[1])
             os.utime(path, (past, past))
-        evidence._MEMORY_KEYCHAIN[evidence.KEYCHAIN_ACCOUNT_HMAC] = K1
+        FAKE_KEYCHAIN.items[evidence.KEYCHAIN_ACCOUNT_HMAC] = K1
         era = json.dumps({"at": ERA_AT, "keyFingerprint": evidence._key_fingerprint(K1), "schema": 2},
                          sort_keys=True).encode()
-        evidence._MEMORY_KEYCHAIN[evidence.KEYCHAIN_ACCOUNT_ERA] = era
+        FAKE_KEYCHAIN.items[evidence.KEYCHAIN_ACCOUNT_ERA] = era
         (self.integrity / "signed-era").write_bytes(era + b"\n")
         # First post-migration activity (new code): an MCP read gets audited.
         evidence.append_audit("codex-mcp-client/0.1", "get_coverage", {})
@@ -175,7 +176,7 @@ class Upgrade(Base):
         marker = json.loads(evidence.keychain_get(evidence.KEYCHAIN_ACCOUNT_BOUNDARY).decode())
         marker["auditBoundaryIndex"] = 99
         marker["mac"] = "f" * 64
-        evidence._MEMORY_KEYCHAIN[evidence.KEYCHAIN_ACCOUNT_BOUNDARY] = evidence.canonical_json(marker).encode()
+        FAKE_KEYCHAIN.items[evidence.KEYCHAIN_ACCOUNT_BOUNDARY] = evidence.canonical_json(marker).encode()
         v = evidence.validate_audit()
         self.assertFalse(v["ok"])
         self.assertIn("boundary_marker_mac_mismatch", self.reasons(v))
@@ -240,19 +241,19 @@ class KeyFacts(Base):
         evidence.append_audit("tester", "list_alerts", {})
         b6 = evidence.validate_audit()["b6"]
         self.assertIs(b6["sameUidCanForge"], True)
-        self.assertEqual(b6["keyStorage"]["backend"], "memory")
+        self.assertEqual(b6["keyStorage"]["backend"], FAKE_KEYCHAIN.backend)
         self.assertTrue(b6["reasons"])
 
     def test_keychain_read_error_never_mints_a_new_key(self) -> None:
         evidence.append_audit("tester", "list_alerts", {})
-        before = dict(evidence._MEMORY_KEYCHAIN)
+        before = dict(FAKE_KEYCHAIN.items)
         with mock.patch.object(evidence, "_keychain_lookup", return_value=("error", None)):
             with self.assertRaises(evidence.KeychainUnavailable):
                 evidence.load_or_create_hmac_key()
             v = evidence.validate_audit()
         self.assertFalse(v["ok"])
         self.assertEqual(v["status"], "key_unavailable")
-        self.assertEqual(evidence._MEMORY_KEYCHAIN, before)
+        self.assertEqual(FAKE_KEYCHAIN.items, before)
         self.assertFalse(evidence.HMAC_KEY_FILE.exists())
 
 

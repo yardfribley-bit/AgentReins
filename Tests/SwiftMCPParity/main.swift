@@ -1,6 +1,6 @@
 import Foundation
 
-// Linux/macOS parity harness for Sources/AgentReinsMCP/Core*.swift (test-only binary, not shipped).
+// Linux/macOS parity harness for Sources/AgentReinsCore/Core*.swift (test-only binary, not shipped).
 // Driven by tools/agentreins-mcp/test_swift_parity.py, which builds the same fixture worlds with
 // evidence.py and compares answers. The Keychain is a JSON file of hex values ({account: hex}),
 // standing in for the packaged helper; it exists only in this harness.
@@ -92,6 +92,19 @@ case "helper-lookups":
         out.append(["seconds": Date().timeIntervalSince(t0), "reason": reason])
     }
     emit(["calls": out, "keyFileExists": FileManager.default.fileExists(atPath: url("audit").appendingPathComponent("mcp-supervisor-hmac.key").path)])
+case "helper-status":
+    // Shipped HelperKeychain.status()/authorize() against a fake helper executable.
+    let kc = HelperKeychain(helper: URL(fileURLWithPath: opts["helper"]!))
+    emit(["status": kc.status(), "authorize": kc.authorize(timeout: 5), "missingHelper": HelperKeychain(helper: nil).status()])
+case "ledger-page":
+    // What the app's pages receive: SocketLedgerCore.page with the key read through a (fake) helper.
+    let kc = HelperKeychain(helper: URL(fileURLWithPath: opts["helper"]!))
+    let integrity = Integrity(auditDir: url("audit"), integrityDir: url("integrity"), transport: url("transport"),
+                              keychain: CachedKeychain(kc), crypto: crypto)
+    let ledger = url("ledger")
+    emit(SocketLedgerCore.page(integrity: integrity, keychainStatus: { kc.status() }, ledger: ledger,
+                               seal: SocketLedgerCore.sibling(ledger, ".seal"),
+                               now: Double(opts["now"] ?? "") ?? Date().timeIntervalSince1970))
 case "redact-vectors":
     let rows = JSON.parse(try? Data(contentsOf: url("vectors"))) as? [[String: Any]] ?? []
     let (n, fails) = Redact.runVectors(rows) { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }

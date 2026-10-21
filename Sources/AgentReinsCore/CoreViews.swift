@@ -7,26 +7,26 @@ import Darwin
 
 // MARK: - Destination (evidence.py destination_fields; one definition for get_execution and list_network)
 
-enum Destination {
-    static let loopbackNames: Set<String> = ["localhost", "::1", "[::1]"]
-    static let proxyValueOptions: Set<String> = ["-x", "--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5",
+public enum Destination {
+    public static let loopbackNames: Set<String> = ["localhost", "::1", "[::1]"]
+    public static let proxyValueOptions: Set<String> = ["-x", "--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5",
         "--socks5-hostname", "--proxy1.0", "--connect-to", "--resolve", "-e", "--referer", "-H", "--header"]
-    static let evidence: [String: String] = [
+    public static let evidence: [String: String] = [
         "proxy_observed": "Observed", "connection_observed": "Observed",
         "argv_parsed": "Inferred", "transport_peer_only": "Unknown",
     ]
 
-    static func isLoopback(_ host: String?) -> Bool {
+    public static func isLoopback(_ host: String?) -> Bool {
         let h = (host ?? "").trimmingCharacters(in: .whitespaces).lowercased()
         return loopbackNames.contains(h) || h.hasPrefix("127.")
     }
 
-    static func urlHost(_ s: String) -> String? {
+    public static func urlHost(_ s: String) -> String? {
         guard let comps = URLComponents(string: s), let host = comps.host, !host.isEmpty else { return nil }
         return host.trimmingCharacters(in: CharacterSet(charactersIn: "[]")).lowercased()
     }
 
-    static func argvDestination(_ args: [Any]) -> String? {
+    public static func argvDestination(_ args: [Any]) -> String? {
         var skip = false
         for arg in args {
             let s = str(arg) ?? ""
@@ -44,7 +44,7 @@ enum Destination {
         return nil
     }
 
-    static func hostOf(_ record: [String: Any]) -> String? {
+    public static func hostOf(_ record: [String: Any]) -> String? {
         for case let conn as [String: Any] in (record["connections"] as? [Any] ?? []) {
             if let detail = conn["detail"] as? [Any], let first = detail.first {
                 var token = String((str(first) ?? "").split(separator: "/", omittingEmptySubsequences: false).first ?? "")
@@ -61,7 +61,7 @@ enum Destination {
         return nil
     }
 
-    static func real(_ record: [String: Any]) -> (String?, String?, String?) {
+    public static func real(_ record: [String: Any]) -> (String?, String?, String?) {
         var peer: String?, real: String?, source: String?
         var proxied = false
         for case let conn as [String: Any] in (record["connections"] as? [Any] ?? []) {
@@ -115,7 +115,7 @@ enum Destination {
         return (real, peer, source)
     }
 
-    static func fields(_ record: [String: Any]) -> [String: Any] {
+    public static func fields(_ record: [String: Any]) -> [String: Any] {
         let (real, peer, source) = Self.real(record)
         var host = real ?? (source == "transport_peer_only" ? nil : hostOf(record))
         if let h = host, isLoopback(h), peer != nil { host = nil }
@@ -129,19 +129,19 @@ enum Destination {
 
 // MARK: - INB (instruction-override-inbound) match context
 
-enum Inb {
-    static let ruleIds: Set<String> = ["INB", "instruction-override-inbound"]
-    static let pattern = #"(?i)(?:ignore (?:all |the )?(?:previous|prior|system) instructions|忽略(?:之前|上述|系统)(?:的)?(?:指令|规则))"#
+public enum Inb {
+    public static let ruleIds: Set<String> = ["INB", "instruction-override-inbound"]
+    public static let pattern = #"(?i)(?:ignore (?:all |the )?(?:previous|prior|system) instructions|忽略(?:之前|上述|系统)(?:的)?(?:指令|规则))"#
 
-    static func normalize(_ rule: Any?) -> Any {
+    public static func normalize(_ rule: Any?) -> Any {
         if let r = rule as? String, ruleIds.contains(r) { return "INB" }
         return nn(rule)
     }
 
-    static func isInb(_ rule: Any?) -> Bool { (normalize(rule) as? String) == "INB" }
+    public static func isInb(_ rule: Any?) -> Bool { (normalize(rule) as? String) == "INB" }
 
     /// Python slices by code point; count unicode scalars so the window matches.
-    static func window(_ text: String, _ m: NSTextCheckingResult, _ w: Int = 80) -> String {
+    public static func window(_ text: String, _ m: NSTextCheckingResult, _ w: Int = 80) -> String {
         let ns = text as NSString
         let scalars = Array(text.unicodeScalars)
         let start = ns.substring(to: m.range.location).unicodeScalars.count
@@ -151,7 +151,7 @@ enum Inb {
         return String(out)
     }
 
-    static func storedContext(_ finding: [String: Any], _ w: Int = 80) -> String? {
+    public static func storedContext(_ finding: [String: Any], _ w: Int = 80) -> String? {
         var raw = str(finding["matchContext"])
         if raw?.isEmpty ?? true { raw = str(finding["context"]) }
         guard let text = raw, !text.isEmpty else { return nil }
@@ -162,7 +162,7 @@ enum Inb {
         return Redact.text(text)
     }
 
-    static func rescan(_ record: [String: Any], _ w: Int = 80, maxBytes: Int = 2_000_000) -> String? {
+    public static func rescan(_ record: [String: Any], _ w: Int = 80, maxBytes: Int = 2_000_000) -> String? {
         guard let path = str(record["evidencePath"]) else { return nil }
         let run = URL(fileURLWithPath: path).deletingLastPathComponent().resolvingSymlinksInPath().standardizedFileURL
         var budget = maxBytes
@@ -179,7 +179,7 @@ enum Inb {
     }
 
     /// evidence.py credential_finding_summary
-    static func summary(_ finding: [String: Any], _ record: [String: Any]?) -> [String: Any] {
+    public static func summary(_ finding: [String: Any], _ record: [String: Any]?) -> [String: Any] {
         let rule = finding["rule"]
         var out: [String: Any] = [
             "rule": nn(rule), "direction": nn(finding["direction"]), "severity": nn(finding["severity"]),
@@ -203,7 +203,7 @@ enum Inb {
         return out
     }
 
-    static func findingFor(_ record: [String: Any]?) -> [String: Any]? {
+    public static func findingFor(_ record: [String: Any]?) -> [String: Any]? {
         let audit = record?["securityAudit"] as? [String: Any] ?? [:]
         for case let f as [String: Any] in (audit["findings"] as? [Any] ?? []) where isInb(f["rule"]) { return f }
         return nil
@@ -212,7 +212,7 @@ enum Inb {
 
 // MARK: - Keychain (through the packaged helper: one key for Python MCP, sampler and Swift MCP)
 
-protocol KeychainStore: AnyObject {
+public protocol KeychainStore: AnyObject {
     /// ("found", data) | ("missing", nil) | ("error", nil) | ("no_helper", nil)
     func lookup(_ account: String) -> (String, Data?)
     func set(_ account: String, _ value: Data) -> Bool
@@ -223,57 +223,83 @@ protocol KeychainStore: AnyObject {
 }
 
 extension KeychainStore {
-    var lastError: String? { nil }
+    public var lastError: String? { nil }
 }
 
 /// Per-request cache in front of the helper (each lookup is a process launch).
-final class CachedKeychain: KeychainStore {
-    let inner: KeychainStore
+public final class CachedKeychain: KeychainStore {
+    public let inner: KeychainStore
     private var cache: [String: (String, Data?)] = [:]
-    init(_ inner: KeychainStore) { self.inner = inner }
-    func lookup(_ account: String) -> (String, Data?) {
+    public init(_ inner: KeychainStore) { self.inner = inner }
+    public func lookup(_ account: String) -> (String, Data?) {
         if let hit = cache[account] { return hit }
         let v = inner.lookup(account)
         cache[account] = v
         return v
     }
-    func set(_ account: String, _ value: Data) -> Bool {
+    public func set(_ account: String, _ value: Data) -> Bool {
         let ok = inner.set(account, value)
         cache[account] = nil
         return ok
     }
-    var backend: String { inner.backend }
-    var helperPath: String? { inner.helperPath }
-    var lastError: String? { inner.lastError }
+    public var backend: String { inner.backend }
+    public var helperPath: String? { inner.helperPath }
+    public var lastError: String? { inner.lastError }
 }
 
-final class HelperKeychain: KeychainStore {
-    let helper: URL?
-    init(helper: URL?) { self.helper = helper }
-    var backend: String { "security" }
-    var helperPath: String? { helper?.path }
+public final class HelperKeychain: KeychainStore {
+    public let helper: URL?
+    public init(helper: URL?) { self.helper = helper }
+    public var backend: String { "security" }
+    public var helperPath: String? { helper?.path }
 
     /// Contents/MacOS/AgentReinsKeychainHelper next to this executable.
-    static func packaged() -> URL? {
+    public static func packaged() -> URL? {
         let exe = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
         let url = exe.deletingLastPathComponent().appendingPathComponent("AgentReinsKeychainHelper")
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
-    static let timeoutSeconds: TimeInterval = 15
+    public static let timeoutSeconds: TimeInterval = 15
     /// After a timeout the helper is not called again for this long (process-wide), so a Keychain that
     /// blocks costs one timeout per minute, not one per account per MCP call. Same rule as evidence.py.
-    static let unresponsiveBackoff: TimeInterval = 60
+    public static let unresponsiveBackoff: TimeInterval = 60
     nonisolated(unsafe) private static var unresponsiveUntil = Date.distantPast
     nonisolated(unsafe) private static var lastFailure: String?
-    var lastError: String? { Self.lastFailure }
+    public var lastError: String? { Self.lastFailure }
 
-    static let exitNotFound: Int32 = 3
-    static let exitNeedsApproval: Int32 = 4
+    public static let exitNotFound: Int32 = 3
+    public static let exitNeedsApproval: Int32 = 4
 
-    private func run(_ args: [String], stdin: Data? = nil) -> (Int32, Data)? {
+    /// Non-interactive check of whether the integrity key is readable right now (helper `status`: reads the
+    /// item, prints nothing). "ok" | "missing" | "needs_approval" | "error" | "no_helper".
+    public func status(_ account: String = "hmac-key") -> String {
+        guard let (code, _) = run(["status", account]) else { return "no_helper" }
+        return Self.statusName(code)
+    }
+
+    /// Interactive: lets macOS show its own Keychain approval prompt for this helper. Only call this after an
+    /// explicit user action (the app's launch alert or the coverage banner button); never from a background path.
+    public func authorize(_ account: String = "hmac-key", timeout: TimeInterval = 180) -> String {
+        guard let (code, _) = run(["authorize", account], timeout: timeout, userInitiated: true) else { return "no_helper" }
+        if code == 0 { Self.unresponsiveUntil = .distantPast; Self.lastFailure = nil }
+        return Self.statusName(code)
+    }
+
+    public static func statusName(_ code: Int32) -> String {
+        switch code {
+        case 0: return "ok"
+        case exitNotFound: return "missing"
+        case exitNeedsApproval: return "needs_approval"
+        case -2: return "timeout"
+        default: return "error"
+        }
+    }
+
+    private func run(_ args: [String], stdin: Data? = nil, timeout: TimeInterval = HelperKeychain.timeoutSeconds,
+                     userInitiated: Bool = false) -> (Int32, Data)? {
         guard let helper else { return nil }
-        if Date() < Self.unresponsiveUntil {
+        if !userInitiated && Date() < Self.unresponsiveUntil {
             Self.lastFailure = "keychain helper timed out recently; not retried yet"
             return (-2, Data())
         }
@@ -289,10 +315,15 @@ final class HelperKeychain: KeychainStore {
         try? inp.fileHandleForWriting.close()
         // Same 15 s limit as evidence.py: a Keychain prompt nobody answers must not hang the MCP.
         // A timeout is reported as "error" (never as "missing", which would mint a new key).
-        let deadline = Date().addingTimeInterval(Self.timeoutSeconds)
+        let deadline = Date().addingTimeInterval(timeout)
         while p.isRunning && Date() < deadline { usleep(20_000) }
         if p.isRunning {
             p.terminate()
+            if userInitiated {
+                // Nobody answered the macOS prompt: not a hung Keychain, so no backoff.
+                Self.lastFailure = "keychain approval prompt was not answered within \(Int(timeout))s"
+                return (-2, Data())
+            }
             Self.unresponsiveUntil = Date().addingTimeInterval(Self.unresponsiveBackoff)
             Self.lastFailure = "keychain helper timed out after \(Int(Self.timeoutSeconds))s"
             return (-2, Data())
@@ -307,7 +338,7 @@ final class HelperKeychain: KeychainStore {
         return (code, out.fileHandleForReading.readDataToEndOfFile())
     }
 
-    func lookup(_ account: String) -> (String, Data?) {
+    public func lookup(_ account: String) -> (String, Data?) {
         guard let (code, data) = run(["get", account]) else { return ("no_helper", nil) }
         if code == Self.exitNotFound { return ("missing", nil) }
         let raw = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
@@ -321,11 +352,14 @@ final class HelperKeychain: KeychainStore {
         return ("found", bytes)
     }
 
-    func set(_ account: String, _ value: Data) -> Bool {
+    public func set(_ account: String, _ value: Data) -> Bool {
         let hex = value.map { String(format: "%02x", $0) }.joined()
         guard let (code, _) = run(["set", account], stdin: Data(hex.utf8)) else { return false }
         return code == 0
     }
 }
 
-struct KeyUnavailable: Error { let reason: String }
+public struct KeyUnavailable: Error {
+    public let reason: String
+    public init(reason: String) { self.reason = reason }
+}

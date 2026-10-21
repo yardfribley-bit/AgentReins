@@ -48,7 +48,8 @@ class KeychainFailureBase(unittest.TestCase):
             mock.patch.object(evidence, "RUN_INVENTORY_MAC", self.integrity / "transport-run-inventory.mac"),
             mock.patch.object(evidence, "KEYCHAIN_HELPER_TIMEOUT", 1.0),
             mock.patch.dict(evidence._KEYCHAIN_STATE, {"unresponsiveUntil": 0.0, "lastError": None}),
-            mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "security"}, clear=False),
+            # Exercise the real helper path on any OS (the fake helper binaries below stand in for the Keychain).
+            mock.patch.object(evidence, "_keychain_backend", lambda: "security"),
         ]
         for p in self.patches:
             p.start()
@@ -145,6 +146,38 @@ class FreshnessTests(KeychainFailureBase):
         self.assertEqual((f["state"], f["staleAfterSeconds"]), ("sampling", 15.0))
         # Never sampled at all: stopped, not sampling.
         self.assertEqual(evidence.socket_freshness({}, {"configuredIntervalSeconds": 2.0}, now=now)["state"], "stopped")
+
+
+_SHIPPED_BACKEND = evidence._keychain_backend  # captured before any test patches it
+
+
+class NoTestBackendsShip(KeychainFailureBase):
+    """Phase 2: the in-memory / file key stores and their env switch are gone from shipped code."""
+
+    def test_no_helper_never_falls_back_to_a_file_key(self) -> None:
+        with mock.patch.object(evidence, "_find_keychain_helper", return_value=None):
+            with self.assertRaises(evidence.KeychainUnavailable):
+                evidence.load_or_create_hmac_key()
+            v = evidence.validate_audit()
+        self.assertEqual(v["status"], "key_unavailable")
+        self.assertFalse(evidence.HMAC_KEY_FILE.exists())
+
+    def test_no_keychain_platform_is_unsigned_not_file_signed(self) -> None:
+        with mock.patch.object(evidence, "_keychain_backend", lambda: "unsupported"):
+            self.assertEqual(evidence._keychain_lookup(evidence.KEYCHAIN_ACCOUNT_HMAC), ("no_backend", None))
+            with self.assertRaises(evidence.KeychainUnavailable):
+                evidence.load_or_create_hmac_key()
+        self.assertFalse(evidence.HMAC_KEY_FILE.exists())
+
+    def test_env_switch_is_ignored(self) -> None:
+        with mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "memory"}, clear=False), \
+                mock.patch.object(evidence.sys, "platform", "linux"):
+            self.assertEqual(_SHIPPED_BACKEND(), "unsupported")
+        shipped = [pathlib.Path(evidence.__file__), pathlib.Path(evidence.__file__).with_name("server.py")]
+        for path in shipped:
+            text = path.read_text(encoding="utf-8")
+            self.assertNotIn("AGENTREINS_KEYCHAIN_BACKEND", text, path)
+            self.assertNotIn("_MEMORY_KEYCHAIN", text, path)
 
 
 if __name__ == "__main__":

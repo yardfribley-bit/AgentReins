@@ -1,4 +1,4 @@
-"""The packaged Swift MCP core (Sources/AgentReinsMCP/Core*.swift) must answer exactly like evidence.py.
+"""The packaged Swift MCP core (Sources/AgentReinsCore/Core*.swift) must answer exactly like evidence.py.
 
 Builds Tests/SwiftMCPParity (Core*.swift + a portable SHA-256/HMAC + a JSON-file Keychain) with swiftc and
 runs both implementations on the same fixture worlds. Also checks that each side accepts the other's
@@ -20,6 +20,7 @@ import unittest
 from unittest import mock
 
 import evidence
+from keychain_fake import FAKE as FAKE_KEYCHAIN
 
 HERE = pathlib.Path(__file__).resolve().parent
 REPO = HERE.parents[1]
@@ -45,7 +46,7 @@ def build_harness() -> None:
         BUILD_ERROR = "swiftc not found"
         return
     out = pathlib.Path(tempfile.mkdtemp(prefix="ar-parity-")) / "harness"
-    sources = sorted(str(p) for p in (REPO / "Sources/AgentReinsMCP").glob("Core*.swift"))
+    sources = sorted(str(p) for p in (REPO / "Sources/AgentReinsCore").glob("*.swift"))
     sources += sorted(str(p) for p in (REPO / "Tests/SwiftMCPParity").glob("*.swift"))
     proc = subprocess.run([swiftc, "-O", "-swift-version", "5", "-o", str(out), *sources],
                           capture_output=True, text=True, timeout=900)
@@ -92,7 +93,7 @@ class World:
             mock.patch.object(evidence, "PROTECTED_SEAL_DIR", i / "seals"),
             mock.patch.object(evidence, "SIGNED_ERA_FLAG", i / "signed-era"),
             mock.patch.object(evidence, "RUN_INVENTORY_MAC", i / "transport-run-inventory.mac"),
-            mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "memory"}, clear=False),
+            *FAKE_KEYCHAIN.patches(evidence),
         ]
 
     def py(self, fn, *args, **kw):
@@ -100,14 +101,14 @@ class World:
         ps = self.patches()
         for p in ps:
             p.start()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         for k, v in json.loads(self.kc.read_text(encoding="utf-8")).items():
-            evidence._MEMORY_KEYCHAIN[k] = bytes.fromhex(v)
+            FAKE_KEYCHAIN.items[k] = bytes.fromhex(v)
         try:
             return fn(*args, **kw)
         finally:
-            self.kc.write_text(json.dumps({k: v.hex() for k, v in evidence._MEMORY_KEYCHAIN.items()}), encoding="utf-8")
-            evidence._MEMORY_KEYCHAIN.clear()
+            self.kc.write_text(json.dumps({k: v.hex() for k, v in FAKE_KEYCHAIN.items.items()}), encoding="utf-8")
+            FAKE_KEYCHAIN.items.clear()
             for p in reversed(ps):
                 p.stop()
 
@@ -431,6 +432,42 @@ class SwiftHelperKeychainFailures(Base):
             self.assertIn("not retried yet", call["reason"])
         self.assertEqual(calls.read_text().count("x"), 1)
         self.assertFalse(out["keyFileExists"])
+
+    def test_status_and_authorize_map_helper_exit_codes(self) -> None:
+        log = self.tmp / "args"
+        helper = self.fake('echo "$@" >> "%s"\ncase "$1" in status) exit 4;; authorize) exit 0;; esac\nexit 1' % log)
+        out = harness("helper-status", "--helper", str(helper))
+        self.assertEqual(out["status"], "needs_approval")
+        self.assertEqual(out["authorize"], "ok")
+        self.assertEqual(out["missingHelper"], "no_helper")
+        # status is the non-interactive op; only authorize may show the macOS prompt.
+        self.assertEqual(log.read_text().split("\n")[:2], ["status hmac-key", "authorize hmac-key"])
+
+    def test_app_page_reports_key_unavailable_never_signed(self) -> None:
+        helper = self.fake('echo "get failed: OSStatus -25308" >&2\nexit 4')
+        ledger = self.tmp / "socket-ledger.json"
+        ledger.write_text(json.dumps({
+            "schema": "agentreins.socket-ledger/2",
+            "samples": {"count": 9, "lastAt": "2026-10-21T10:00:00Z", "failures": 0},
+            "coverage": {"successGapSecondsP95": 3.0},
+            "connections": [{"id": "c1", "agent": "Codex", "pid": 1, "remoteAddress": "203.0.113.9",
+                             "remotePort": 443, "viaProxy": False, "evidence": "Observed",
+                             "lastSeen": "2026-10-21T10:00:00Z"}],
+        }), encoding="utf-8")
+        now = "1792576805"  # 2026-10-21T10:00:05Z
+        out = harness("ledger-page", "--helper", str(helper), "--ledger", str(ledger), "--now", now,
+                      "--audit", str(self.tmp / "audit"), "--integrity", str(self.tmp / "integrity"),
+                      "--transport", str(self.tmp / "transport"))
+        self.assertEqual(out["keychain"]["state"], "key_unavailable")
+        self.assertEqual(out["keychain"]["helper"], "needs_approval")
+        self.assertIn("needs user approval", out["keychain"]["reason"])
+        self.assertNotEqual(out["coverage"]["integrity"]["state"], "verified")
+        self.assertEqual(out["coverage"]["state"], "sampling")
+        self.assertEqual(out["coverage"]["confidence"], "Unknown")
+        stale = harness("ledger-page", "--helper", str(helper), "--ledger", str(ledger), "--now", str(int(now) + 600),
+                        "--audit", str(self.tmp / "audit"), "--integrity", str(self.tmp / "integrity"),
+                        "--transport", str(self.tmp / "transport"))
+        self.assertEqual(stale["coverage"]["state"], "stopped")
 
 
 if __name__ == "__main__":

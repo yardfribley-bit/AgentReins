@@ -14,6 +14,7 @@ let service = "com.agentreins.mcp-integrity"
 /// 4 Keychain needs user interaction (locked, or this binary is not on the item's access list yet).
 func usage() -> Never {
     fputs("usage: AgentReinsKeychainHelper get|set|delete <account>  (set reads hex secret from stdin)\n"
+          + "       AgentReinsKeychainHelper status [<account>]  (non-interactive read check; prints nothing; exit 0/1/3/4)\n"
           + "       AgentReinsKeychainHelper authorize [<account>]  (only from a logged-in user session: allows the\n"
           + "       macOS Keychain approval prompt once, prints nothing secret)\n", stderr)
     exit(2)
@@ -23,7 +24,7 @@ var positional = Array(CommandLine.arguments.dropFirst())
 guard let op = positional.first else { usage() }
 positional.removeFirst()
 let account: String
-if op == "authorize" {
+if op == "authorize" || op == "status" {
     account = positional.first ?? "hmac-key"
 } else {
     guard let first = positional.first else { usage() }
@@ -88,7 +89,9 @@ case "delete":
     if status == errSecSuccess || status == errSecItemNotFound { exit(0) }
     fail("delete", status)
 
-case "get", "authorize":
+case "get", "authorize", "status":
+    // `status` reads the secret too (an attributes-only query would not hit the item's access list,
+    // so it could report ok while `get` still needs approval) but never prints it.
     let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: service,
@@ -100,6 +103,7 @@ case "get", "authorize":
     let status = SecItemCopyMatching(query as CFDictionary, &out)
     if status == errSecItemNotFound { exit(3) }
     guard status == errSecSuccess, let data = out as? Data else { fail(op, status) }
+    if op == "status" { exit(0) }
     if op == "authorize" {
         fputs("Keychain access for \(account) is allowed for this helper.\n", stderr)
         exit(0)

@@ -1,3 +1,4 @@
+import AgentReinsCore
 import CryptoKit
 import Foundation
 import JavaScriptCore
@@ -12,9 +13,6 @@ enum AgentReinsMCP {
     static var actorName: String = "unknown-client"
 
     static func main() {
-        if ProcessInfo.processInfo.environment["AGENTREINS_REDACT_SELFTEST"] == "1" {
-            Redact.selfTestAndExit()
-        }
         let tools: [[String: Any]] = [
             ["name": "list_agents", "description": "List observed agents. Read-only.",
              "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
@@ -172,52 +170,6 @@ enum Paths {
     static func ensureSupport() {
         try? FileManager.default.createDirectory(at: support, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         try? FileManager.default.createDirectory(at: transport, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-    }
-}
-
-// MARK: - Redaction self-test (patterns live in CoreRedact.swift)
-
-extension Redact {
-    /// Load tools/redact_vectors.json (or packaged copy) and exit 0/1.
-    static func selfTestAndExit() -> Never {
-        let candidates = [
-            URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
-                .deletingLastPathComponent().appendingPathComponent("Resources/agentreins-mcp/redact_vectors.json"),
-            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
-                .appendingPathComponent("tools/redact_vectors.json"),
-        ]
-        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
-              let data = try? Data(contentsOf: url),
-              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
-            fputs("REDACT_VECTOR_FAIL missing vectors\n", stderr)
-            exit(1)
-        }
-        var failures = 0
-        for caseRow in rows {
-            let name = caseRow["name"] as? String ?? "?"
-            let kind = caseRow["kind"] as? String ?? "text"
-            if kind == "text", let input = caseRow["input"] as? String {
-                let out = text(input)
-                for secret in (caseRow["must_absent"] as? [String] ?? []) where !secret.isEmpty && out.contains(secret) {
-                    fputs("fail \(name): still present \(secret)\n", stderr); failures += 1
-                }
-                for keep in (caseRow["must_keep"] as? [String] ?? []) where !keep.isEmpty && !out.contains(keep) {
-                    fputs("fail \(name): false positive removed \(keep)\n", stderr); failures += 1
-                }
-            } else if kind == "obj", let input = caseRow["input"] {
-                let out = any(input)
-                let blob = JSON.string(out)
-                for secret in (caseRow["must_absent"] as? [String] ?? []) where !secret.isEmpty && blob.contains(secret) {
-                    fputs("fail \(name): obj still present \(secret)\n", stderr); failures += 1
-                }
-            }
-        }
-        if failures > 0 {
-            fputs("REDACT_VECTOR_FAIL \(failures)\n", stderr)
-            exit(1)
-        }
-        fputs("REDACT_VECTOR_OK \(rows.count)\n", stdout)
-        exit(0)
     }
 }
 

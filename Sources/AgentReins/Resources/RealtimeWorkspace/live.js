@@ -7,7 +7,7 @@ const stageNames=[['user','需求'],['environment','材料'],['context','上下�
 const statuses={running:'进行中',awaiting_confirmation:'等我确认',completed:'已完成未读',stopped:'已停止 · 交付未确认',failed:'失败',cancelled:'已取消',observed:'状态待确认'};
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
-let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null;
+let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
 const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
@@ -98,6 +98,11 @@ function renderHeading(){const t=task();
 function renderStages(){const t=task(),stages=stageRows();$('stages').innerHTML=stages.map(s=>`<button data-select="stage:${esc(s.id)}" class="${t?.lifecycle?.currentStageID===s.id?'current':s.status==='returned'?'done':''}" title="${esc(s.summary)}" ${!t?'disabled':''}><span>${esc(s.title)}</span><span class="stage-count">${s.status==='absent'?'—':s.status==='running'?'进行中':s.status==='waiting'?'等待':s.status==='failed'?'失败':s.status==='returned'?'已返回':s.status==='cancelled'?'取消':'已记录'}</span></button>`).join('');}
 function renderGraph(animate=false){
  const t=task();if(runtimeTaskID!==t?.id){runtimeTaskID=t?.id;runtimeExchangeID=null;runtimeCallID=null;}
+ if(!t){
+  // Honest empty state (D3): no task identity yet, so no graph — not even a placeholder bubble.
+  runtimeProjection=null;const host=$('graph');if(host){host.style.aspectRatio='';host.innerHTML='<div class="graph-empty"><h3>还没有带任务身份的记录</h3><p>这里只画采到的真实过程；没有数据时不画示意图。无归属的观察保留在采集现场。</p></div>';}
+  if($('graph-nav'))$('graph-nav').innerHTML='';$('runtime-controls').innerHTML='';$('runtime-note').textContent='';$('current-bar').innerHTML='';return;
+ }
  const args={task:t,contexts:taskContexts(),processes:shown.processes,artifacts:taskArtifacts(),exchangeID:runtimeExchangeID,callID:runtimeCallID,overview:window.AgentReinsFlow.isOverview(),networkObservations:shown.collected.filter(r=>r.kind==='network'&&!r.hasTaskIdentity&&r.agent===t?.agent)};const g=graphMode==='spider'?window.AgentReinsRuntimeGraph.buildRelations(args):window.AgentReinsRuntimeGraph.buildArchitecture(args);runtimeProjection=g;
  for(const o of g.objects)object(o.key,o.type,o.data);
  const chosen=g.chosen;const inChosenCycle=chosen&&g.relevant.some(c=>c.id===chosen.id);
@@ -294,7 +299,7 @@ function render(animate=false){
  if(view!=='alerts'&&view!=='rules'&&view!=='coverage'&&window.AgentReinsRisk){const n=window.AgentReinsRisk.buildAlerts(shown).filter(a=>a.status==='todo'||a.status==='ask').length;const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}}
  if(view==='process'&&task()?.detailsLoaded===false){$('current-bar').textContent='正在读取该任务的完整执行证据…';$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
 }
-function renderNetwork(){if(networkTask&&shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);const focused=document.activeElement?.id==='network-search',position=focused?document.activeElement.selectionStart:null;window.AgentReinsNetwork.render($('network-view'),shown,{agent:networkAgent,query:networkQuery,taskOnly:networkTask,selected:networkSelected,focusTask:taskID});if(focused){$('network-search').focus();$('network-search').setSelectionRange(position,position);}}
+function renderNetwork(){if(networkTask&&shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);const focused=document.activeElement?.id==='network-search',position=focused?document.activeElement.selectionStart:null;window.AgentReinsNetwork.render($('network-view'),shown,{agent:networkAgent,query:networkQuery,taskOnly:networkTask,selected:networkSelected,focusTask:taskID,mode:networkMode,destination:networkDestination,suspicious:networkSuspicious,alerts:riskState.alerts||window.AgentReinsRisk?._lastAlerts||[]});if(focused){$('network-search').focus();$('network-search').setSelectionRange(position,position);}}
 window.agentreinsRenderNetwork=()=>{if(view==='network')renderNetwork();};
 function renderCollectionDetail(){const holder=$('collection-detail');if(holder&&snapshot)renderDetail(true,holder);}
 addEventListener('agentreins-layout',()=>renderGraph(false));
@@ -376,15 +381,26 @@ window.agentreinsHostResult=result=>{
   riskState.mcpAuditLoaded=true;
   if(view==='coverage')renderRisk();
  }
+ if(result?.action==='keychainAuthorize'){
+  // Re-read the ledger and key state after the user answered the Keychain prompt.
+  riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();
+ }
  if(result?.message)toast(result.message);
  if(view==='collection')renderCollectionDetail();else if(view==='process')renderDetail(true);
 };
 document.addEventListener('click',e=>{
  const el=e.target.closest('button');if(!el)return;
  if(el.hasAttribute('data-graph-focus')){window.AgentReinsFlow.focus();}
+ else if(el.dataset.keychainAuthorize){bridge('authorizeKeychain',{state:el.dataset.keychainAuthorize});}
+ else if(el.dataset.destAlert){view='alerts';riskState.selected=el.dataset.destAlert;render();}
+ else if(el.dataset.networkDestination!=null){networkDestination=el.dataset.networkDestination;networkTask=null;networkSelected=null;if(view!=='network'){view='network';render();}else renderNetwork();$('network-view')?.scrollTo?.(0,0);}
+ else if(el.hasAttribute('data-network-destination-back')){networkDestination=null;renderNetwork();}
+ else if(el.dataset.networkMode){networkMode=el.dataset.networkMode==='map'?'map':'list';networkDestination=null;renderNetwork();}
+ else if(el.dataset.networkMapFilter){networkSuspicious=el.dataset.networkMapFilter==='suspicious';renderNetwork();}
+ else if(el.dataset.networkAgentPill){networkAgent=el.dataset.networkAgentPill;renderNetwork();}
  else if(el.dataset.action==='toggle-details'){const collapsed=document.body.classList.toggle('details-collapsed');$('toggle-details').textContent=collapsed?'显示详情':'收起详情';}
  else if(el.dataset.zoom){window.AgentReinsFlow.zoom(el.dataset.zoom);}
- else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage')riskState.transportsRequested=false;render();}
+ else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;networkDestination=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage')riskState.transportsRequested=false;render();}
  else if(el.dataset.graphMode){graphMode=el.dataset.graphMode;renderGraph();}
  else if(el.dataset.networkScope){networkTask=el.dataset.networkScope;taskID=networkTask;following=false;networkQuery='';networkSelected=null;view='network';if(shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);render();}
  else if(el.hasAttribute('data-network-all')){networkTask=null;renderNetwork();}

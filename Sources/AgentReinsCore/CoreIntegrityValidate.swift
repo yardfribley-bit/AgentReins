@@ -3,7 +3,7 @@ import Foundation
 extension Integrity {
     // MARK: run inventory
 
-    func validateRunInventory(_ key: Data) -> [String: Any] {
+    public func validateRunInventory(_ key: Data) -> [String: Any] {
         var tampered: [[String: Any]] = []
         if exists(runInventoryMac) {
             guard let inv = read(runInventory) else {
@@ -19,7 +19,7 @@ extension Integrity {
         return ["ok": tampered.isEmpty, "tampered": tampered]
     }
 
-    func knownRunIds() -> Set<String> {
+    public func knownRunIds() -> Set<String> {
         var out = Set<String>()
         for l in lines(runInventory) {
             if let id = str(JSON.object(l)?["runID"]), !id.isEmpty { out.insert(id) }
@@ -29,7 +29,7 @@ extension Integrity {
 
     /// The seal anchors the inventory hash only while the inventory still verifies; otherwise the previously
     /// sealed anchor is kept, so an edit is never re-sealed by the next MCP read.
-    func inventoryAnchor(_ key: Data) -> String? {
+    public func inventoryAnchor(_ key: Data) -> String? {
         guard let inv = read(runInventory) else { return nil }
         if !exists(runInventoryMac) || (validateRunInventory(key)["ok"] as? Bool) == true { return crypto.shaHex(data: inv) }
         for s in [auditSeal, sealMirror] {
@@ -40,7 +40,7 @@ extension Integrity {
 
     // MARK: append (MCP read audit)
 
-    func append(actor: String, tool: String, arguments: [String: Any], key: Data) {
+    public func append(actor: String, tool: String, arguments: [String: Any], key: Data) {
         ensureDirs()
         let existing = lines()
         var prev = String(repeating: "0", count: 64)
@@ -64,7 +64,7 @@ extension Integrity {
     }
 
     /// Primary seal + mirror outside the audit dir (B9/B10), same body as Python _write_seal.
-    func writeSeal(head: String, count: Int, key: Data) {
+    public func writeSeal(head: String, count: Int, key: Data) {
         var body: [String: Any] = ["headHash": head, "count": count, "schema": 1]
         if let anchor = inventoryAnchor(key) { body["inventorySha256"] = anchor }
         body["mac"] = crypto.entryMac(body, key)
@@ -78,7 +78,7 @@ extension Integrity {
 
     // MARK: evidence files
 
-    func loadLegacyManifest(_ marker: [String: Any]?) -> ([String: String], String?) {
+    public func loadLegacyManifest(_ marker: [String: Any]?) -> ([String: String], String?) {
         guard let marker, (intValue(marker["legacyEvidenceCount"]) ?? 0) > 0 else { return ([:], nil) }
         guard let text = readText(legacyManifest) else { return ([:], "legacy_manifest_missing") }
         if crypto.shaHex(text) != str(marker["legacyManifestSha256"]) { return ([:], "legacy_manifest_modified") }
@@ -90,7 +90,7 @@ extension Integrity {
         return (out, nil)
     }
 
-    func transportHasAnyRunFile() -> Bool {
+    public func transportHasAnyRunFile() -> Bool {
         guard let runs = try? fm.contentsOfDirectory(atPath: transport.path) else { return false }
         for r in runs where !r.hasPrefix(".") {
             let items = (try? fm.contentsOfDirectory(atPath: transport.appendingPathComponent(r).path)) ?? []
@@ -99,7 +99,7 @@ extension Integrity {
         return false
     }
 
-    func validateEvidenceFiles(_ key: Data, _ marker: [String: Any]?) -> [String: Any] {
+    public func validateEvidenceFiles(_ key: Data, _ marker: [String: Any]?) -> [String: Any] {
         var result: [String: Any] = ["ok": true, "checked": 0, "confidence": "Observed", "keyLimitation": Self.limitation]
         var tampered: [[String: Any]] = [], legacyItems: [[String: Any]] = []
         var missingMac: [String] = [], missingRuns: [String] = []
@@ -178,7 +178,7 @@ extension Integrity {
 
     // MARK: b6 + split
 
-    func keyStorageFacts() -> [String: Any] {
+    public func keyStorageFacts() -> [String: Any] {
         let status = keychain.lookup(Self.accountHmac).0
         var facts: [String: Any] = [
             "backend": keychain.backend, "keyInKeychain": status == "found", "keychainLookup": status,
@@ -198,7 +198,7 @@ extension Integrity {
         return ["sameUidCanForge": true, "keyStorage": facts, "reasons": reasons]
     }
 
-    func boundaryPublic(_ marker: [String: Any]?, _ problem: String?) -> [String: Any] {
+    public func boundaryPublic(_ marker: [String: Any]?, _ problem: String?) -> [String: Any] {
         guard let marker else { return ["state": problem ?? "not_recorded"] }
         var out: [String: Any] = ["state": "recorded",
                                   "anchoredIn": "Keychain (HMAC-sealed) + integrity mirror + audit chain entry"]
@@ -208,7 +208,7 @@ extension Integrity {
         return out
     }
 
-    func finishSplit(_ result: inout [String: Any], _ tampered: [[String: Any]], _ gaps: [[String: Any]],
+    public func finishSplit(_ result: inout [String: Any], _ tampered: [[String: Any]], _ gaps: [[String: Any]],
                      _ legacyAudit: [[String: Any]], _ marker: [String: Any]?) {
         let ev = result["evidenceFiles"] as? [String: Any] ?? [:]
         let legacyFiles = ev["legacyUnverifiable"] as? [[String: Any]] ?? []

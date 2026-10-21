@@ -58,13 +58,16 @@ jobs:
           node Tests/Manual/network/test_risk_p5_association.cjs
           node Tests/Manual/network/test_risk_review_store.cjs
           node Tests/Manual/network/test_xss_escape.cjs
-          node tools/mutate_esc_calls.cjs
+          ESC_MUTANT_MIN_KILL=84 node tools/mutate_esc_calls.cjs
           node Tests/Manual/network/test_socket_ledger_view.cjs
-          echo "JS_TESTS_PASSED=4"
+          node Tests/Manual/network/test_xss_network_views.cjs
+          ESC_MUTANT_MIN_KILL=33 node tools/mutate_esc_calls.cjs Sources/AgentReins/Resources/RealtimeWorkspace/network-view.js Tests/Manual/network/test_xss_network_views.cjs
+          node Tests/Manual/network/test_phase2_views.cjs
+          echo "JS_TESTS_PASSED=6"
 
       - name: Run MCP supervisor unit tests (incl. Python <-> Swift MCP core parity)
         env:
-          # test_swift_parity.py builds Sources/AgentReinsMCP/Core*.swift with swiftc; never skip it in CI.
+          # test_swift_parity.py builds Sources/AgentReinsCore/Core*.swift with swiftc; never skip it in CI.
           AGENTREINS_REQUIRE_SWIFT_PARITY: "1"
         run: |
           python3 -m unittest discover -s tools/agentreins-mcp -p 'test_*.py' -v
@@ -109,6 +112,12 @@ jobs:
           done
           ! git grep -n 'snapshot-alerts' -- . ':!.github' ':!*.md'
           ! git grep -n 'snapshot_risk_alerts' -- . ':!.github' ':!*.md'
+          # Test switches must not ship (tests inject fakes from test-only code instead).
+          # (`! cmd` does not trip `set -e`, so these use explicit exits.)
+          if git grep -n -e 'AGENTREINS_REDACT_SELFTEST' -e 'AGENTREINS_KEYCHAIN_BACKEND' -e '_MEMORY_KEYCHAIN' -- Sources tools/agentreins-mcp/evidence.py tools/agentreins-mcp/server.py tools/socket-sampler/socket_sampler.py; then exit 1; fi
+          if git grep -n -e 'set esc' -- Sources/AgentReins/Resources/RealtimeWorkspace; then exit 1; fi
+          if strings AgentReins.app/Contents/MacOS/AgentReinsMCP | grep -e AGENTREINS_REDACT_SELFTEST -e AGENTREINS_KEYCHAIN_BACKEND; then exit 1; fi
+          if grep -rn -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN AgentReins.app/Contents/Resources/agentreins-mcp; then exit 1; fi
           echo "PACKAGED_MCP_OK=1"
 
       - name: Fresh CI keychain for the packaged helper
@@ -116,15 +125,15 @@ jobs:
         # AgentReinsKeychainHelper must create (and own) the integrity key itself.
         run: scripts/ci_keychain.sh reset
 
-      - name: Shared redaction vectors (Swift MCP) + MCP smoke
+      - name: Packaged MCP smoke
+        # Redaction vectors run against the same AgentReinsCore sources in test_swift_parity.py
+        # (redact-vectors); the shipped binary has no self-test switch.
         run: |
           set -euo pipefail
-          AGENTREINS_REDACT_SELFTEST=1 AgentReins.app/Contents/MacOS/AgentReinsMCP
           python3 - <<'PY'
           import json, subprocess, os, tempfile, pathlib
           mcp = pathlib.Path("AgentReins.app/Contents/MacOS/AgentReinsMCP").resolve()
           env = os.environ.copy()
-          env.pop("AGENTREINS_REDACT_SELFTEST", None)
           proc = subprocess.Popen(
               [str(mcp)],
               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,

@@ -6,27 +6,27 @@ import Darwin
 #endif
 
 /// tools/socket-sampler output, checked with the same rules as socket_sampler.verify_snapshot.
-enum SocketLedgerCore {
-    static let fields = ["id", "agent", "pid", "ppid", "processName", "processPath", "processStartAt", "protocol",
+public enum SocketLedgerCore {
+    public static let fields = ["id", "agent", "pid", "ppid", "processName", "processPath", "processStartAt", "protocol",
         "localAddress", "remoteAddress", "remoteIP", "remotePort", "state", "firstSeen", "lastSeen",
         "sampleCount", "scope", "viaProxy", "transportPeer", "realDestination", "realDestinationPort",
         "destinationSource", "destinationEvidence", "destinationBasis", "forwardConfirmed", "transportCall",
         "proxy", "evidence"]
-    static let sideFields = ["schema", "seq", "prevHash", "fileSha256", "at"]
+    public static let sideFields = ["schema", "seq", "prevHash", "fileSha256", "at"]
 
-    static func sibling(_ u: URL, _ suffix: String) -> URL {
+    public static func sibling(_ u: URL, _ suffix: String) -> URL {
         u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + suffix)
     }
 
     /// Must match socket_sampler.default_seal_path / evidence.socket_ledger_seal_path.
-    static func sealPath(ledger: URL, defaultLedger: URL, integrityDir: URL) -> URL {
+    public static func sealPath(ledger: URL, defaultLedger: URL, integrityDir: URL) -> URL {
         if ledger.resolvingSymlinksInPath().path == defaultLedger.resolvingSymlinksInPath().path {
             return integrityDir.appendingPathComponent("seals").appendingPathComponent("socket-ledger.seal")
         }
         return sibling(ledger, ".seal")
     }
 
-    static func truthy(_ v: Any?) -> Bool {
+    public static func truthy(_ v: Any?) -> Bool {
         guard let v, !(v is NSNull) else { return false }
         if let b = v as? Bool { return b }
         if let i = v as? Int { return i != 0 }
@@ -34,7 +34,7 @@ enum SocketLedgerCore {
         return true
     }
 
-    static func verify(_ data: Data?, _ side: Any?, _ seal: Any?, _ key: Data?, _ crypto: CryptoBox) -> [String: Any] {
+    public static func verify(_ data: Data?, _ side: Any?, _ seal: Any?, _ key: Data?, _ crypto: CryptoBox) -> [String: Any] {
         func bad(_ reason: String, _ extra: [String: Any] = [:]) -> [String: Any] {
             var out: [String: Any] = ["state": "tampered", "ok": false, "reason": reason, "confidence": "Unknown"]
             for (k, v) in extra { out[k] = v }
@@ -94,7 +94,7 @@ enum SocketLedgerCore {
                 "reason": "HMAC over the exact ledger bytes verified; sequence matches the external seal"]
     }
 
-    static func number(_ v: Any?) -> Double? {
+    public static func number(_ v: Any?) -> Double? {
         if v is String || v is NSNull { return nil }
         if let d = v as? Double { return d }
         if let i = v as? Int { return Double(i) }
@@ -102,7 +102,7 @@ enum SocketLedgerCore {
     }
 
     /// 'sampling' only while samples keep arriving; otherwise 'stopped' with how long ago.
-    static func freshness(_ samples: [String: Any], _ coverage: [String: Any], now: Double) -> [String: Any] {
+    public static func freshness(_ samples: [String: Any], _ coverage: [String: Any], now: Double) -> [String: Any] {
         let cadence = ["successGapSecondsP95", "configuredIntervalSeconds", "intervalSeconds"].compactMap { number(coverage[$0]) }
         let limit = max(10.0, 3 * (cadence.max() ?? 3.0))
         guard let last = Clock.parse(samples["lastAt"]) else {
@@ -115,7 +115,7 @@ enum SocketLedgerCore {
 
     /// Ledger + sidecar + seal under a shared flock, only if the sampler's lock file already exists
     /// (the read-only MCP never creates files there).
-    static func readLocked(_ ledger: URL, seal: URL) -> (Data?, Any?, Any?) {
+    public static func readLocked(_ ledger: URL, seal: URL) -> (Data?, Any?, Any?) {
         let lock = sibling(ledger, ".lock")
         var fd: Int32 = -1
         if FileManager.default.fileExists(atPath: lock.path) {
@@ -129,7 +129,7 @@ enum SocketLedgerCore {
         return (data, side, sealObj)
     }
 
-    static func load(ledger: URL, seal: URL, key: Data?, crypto: CryptoBox, agent: String?, since: String?,
+    public static func load(ledger: URL, seal: URL, key: Data?, crypto: CryptoBox, agent: String?, since: String?,
                      limit: Int = 200, now: Double = Date().timeIntervalSince1970) -> [String: Any] {
         let (raw, side, sealObj) = readLocked(ledger, seal: seal)
         let integrity = verify(raw, side, sealObj, key, crypto)
@@ -184,5 +184,28 @@ enum SocketLedgerCore {
             coverage["measurementNote"] = "采样器版本过旧：该值是配置间隔，不是实测周期"
         }
         return ["connections": Redact.any(Array(rows.prefix(limit))), "total": rows.count, "coverage": coverage]
+    }
+
+    /// What the app's 首页 / 外网访问 pages get: the same verified, freshness-aware `load` the MCP answers with,
+    /// plus whether the integrity key could be read, so the page can say key_unavailable / needs approval
+    /// instead of pretending the ledger is signed. `keychainStatus` is only asked when the key is unavailable.
+    public static func page(integrity: Integrity, keychainStatus: () -> String, ledger: URL, seal: URL,
+                            limit: Int = 300, now: Double = Date().timeIntervalSince1970) -> [String: Any] {
+        var keyInfo: [String: Any]
+        var key: Data?
+        do {
+            key = try integrity.loadKey(create: false)
+            keyInfo = ["state": "ok"]
+        } catch let error as KeyUnavailable {
+            keyInfo = ["state": "key_unavailable", "reason": error.reason, "helper": keychainStatus(),
+                       "lastError": nn(integrity.keychain.lastError)]
+        } catch {
+            keyInfo = ["state": "key_unavailable", "reason": "\(error)", "helper": keychainStatus(),
+                       "lastError": nn(integrity.keychain.lastError)]
+        }
+        var out = load(ledger: ledger, seal: seal, key: key, crypto: integrity.crypto, agent: nil, since: nil,
+                       limit: limit, now: now)
+        out["keychain"] = keyInfo
+        return out
     }
 }

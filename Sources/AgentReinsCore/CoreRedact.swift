@@ -2,8 +2,8 @@ import Foundation
 
 // MARK: - Redaction (shared vectors with tools/redact_secrets.py)
 
-enum Redact {
-    static func text(_ input: String) -> String {
+public enum Redact {
+    public static func text(_ input: String) -> String {
         var out = input
         let patterns: [(String, String)] = [
             (#"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"#, "[pem:REDACTED]"),
@@ -42,7 +42,7 @@ enum Redact {
         return out
     }
 
-    static func any(_ value: Any) -> Any {
+    public static func any(_ value: Any) -> Any {
         if let s = value as? String { return text(s) }
         if let arr = value as? [Any] { return arr.map { any($0) } }
         if let dict = value as? [String: Any] {
@@ -71,7 +71,7 @@ enum Redact {
 
 extension Redact {
     /// tools/redact_vectors.json cases → (cases, failures). Used by the packaged self-test and the parity harness.
-    static func runVectors(_ rows: [[String: Any]], log: (String) -> Void) -> (Int, Int) {
+    public static func runVectors(_ rows: [[String: Any]], log: (String) -> Void) -> (Int, Int) {
         var failures = 0
         for caseRow in rows {
             let name = caseRow["name"] as? String ?? "?"

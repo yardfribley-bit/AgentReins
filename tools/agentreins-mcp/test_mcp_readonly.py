@@ -36,8 +36,12 @@ class MCPReadonlyTests(unittest.TestCase):
         evidence.PROTECTED_SEAL_DIR = integrity / "seals"
         evidence.SIGNED_ERA_FLAG = integrity / "signed-era"
         evidence.RUN_INVENTORY_MAC = integrity / "transport-run-inventory.mac"
-        os.environ["AGENTREINS_KEYCHAIN_BACKEND"] = "memory"
-        evidence._MEMORY_KEYCHAIN.clear()
+        from keychain_fake import FAKE as FAKE_KEYCHAIN
+
+        FAKE_KEYCHAIN.items.clear()
+        self._keychain_patches = FAKE_KEYCHAIN.patches(evidence)
+        for patch in self._keychain_patches:
+            patch.start()
         self.evidence = evidence
         run = self.transport / "exec-s02"
         run.mkdir()
@@ -143,6 +147,8 @@ class MCPReadonlyTests(unittest.TestCase):
                 self.evidence.register_run_id(run_dir.name, run_dir)
 
     def tearDown(self):
+        for patch in reversed(self._keychain_patches):
+            patch.stop()
         self.tmp.cleanup()
 
     def test_tools_list_has_no_write_tools(self):

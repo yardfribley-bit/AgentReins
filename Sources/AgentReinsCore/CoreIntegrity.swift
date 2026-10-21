@@ -2,27 +2,27 @@ import Foundation
 
 // Audit chain, seal, run inventory, evidence MACs and the legacy/current split (evidence.py port).
 
-final class Integrity {
-    static let accountHmac = "hmac-key"
-    static let accountEra = "signed-era"
-    static let accountBoundary = "integrity-boundary"
-    static let boundaryTool = "integrity-boundary"
-    static let boundaryActor = "agentreins-integrity"
-    static let legacyReason = "signed with deleted pre-migration key"
-    static let limitation = "HMAC 密钥与安装锚点经 Security.framework（AgentReinsKeychainHelper）写入 Keychain，"
+public final class Integrity {
+    public static let accountHmac = "hmac-key"
+    public static let accountEra = "signed-era"
+    public static let accountBoundary = "integrity-boundary"
+    public static let boundaryTool = "integrity-boundary"
+    public static let boundaryActor = "agentreins-integrity"
+    public static let legacyReason = "signed with deleted pre-migration key"
+    public static let limitation = "HMAC 密钥与安装锚点经 Security.framework（AgentReinsKeychainHelper）写入 Keychain，"
         + "访问控制只信任 helper 程序本身；同一用户的其他进程可以直接运行 helper 取得密钥并伪造签名（b6）。"
         + "没有 root 守护进程或远端锚点。"
-    static let entryFields = ["at", "actor", "tool", "argsDigest", "prevHash"]
+    public static let entryFields = ["at", "actor", "tool", "argsDigest", "prevHash"]
 
-    let auditDir: URL
-    let integrityDir: URL
-    let transport: URL
-    let keychain: KeychainStore
-    let crypto: CryptoBox
-    let now: () -> Date
-    let fm = FileManager.default
+    public let auditDir: URL
+    public let integrityDir: URL
+    public let transport: URL
+    public let keychain: KeychainStore
+    public let crypto: CryptoBox
+    public let now: () -> Date
+    public let fm = FileManager.default
 
-    init(auditDir: URL, integrityDir: URL, transport: URL, keychain: KeychainStore, crypto: CryptoBox,
+    public init(auditDir: URL, integrityDir: URL, transport: URL, keychain: KeychainStore, crypto: CryptoBox,
          now: @escaping () -> Date = { Date() }) {
         self.auditDir = auditDir
         self.integrityDir = integrityDir
@@ -32,31 +32,31 @@ final class Integrity {
         self.now = now
     }
 
-    var auditLog: URL { auditDir.appendingPathComponent("mcp-supervisor-audit.jsonl") }
-    var auditSeal: URL { auditDir.appendingPathComponent("mcp-supervisor-audit.seal") }
-    var hmacKeyFile: URL { auditDir.appendingPathComponent("mcp-supervisor-hmac.key") }
-    var runInventory: URL { auditDir.appendingPathComponent("transport-run-inventory.jsonl") }
-    var sealDir: URL { integrityDir.appendingPathComponent("seals") }
-    var sealMirror: URL { sealDir.appendingPathComponent("mcp-supervisor-audit.seal") }
-    var signedEraFlag: URL { integrityDir.appendingPathComponent("signed-era") }
-    var runInventoryMac: URL { integrityDir.appendingPathComponent("transport-run-inventory.mac") }
-    var boundaryMirror: URL { integrityDir.appendingPathComponent("integrity-boundary.json") }
-    var legacyManifest: URL { integrityDir.appendingPathComponent("legacy-evidence-manifest.json") }
+    public var auditLog: URL { auditDir.appendingPathComponent("mcp-supervisor-audit.jsonl") }
+    public var auditSeal: URL { auditDir.appendingPathComponent("mcp-supervisor-audit.seal") }
+    public var hmacKeyFile: URL { auditDir.appendingPathComponent("mcp-supervisor-hmac.key") }
+    public var runInventory: URL { auditDir.appendingPathComponent("transport-run-inventory.jsonl") }
+    public var sealDir: URL { integrityDir.appendingPathComponent("seals") }
+    public var sealMirror: URL { sealDir.appendingPathComponent("mcp-supervisor-audit.seal") }
+    public var signedEraFlag: URL { integrityDir.appendingPathComponent("signed-era") }
+    public var runInventoryMac: URL { integrityDir.appendingPathComponent("transport-run-inventory.mac") }
+    public var boundaryMirror: URL { integrityDir.appendingPathComponent("integrity-boundary.json") }
+    public var legacyManifest: URL { integrityDir.appendingPathComponent("legacy-evidence-manifest.json") }
 
-    func exists(_ u: URL) -> Bool { fm.fileExists(atPath: u.path) }
-    func isDir(_ u: URL) -> Bool {
+    public func exists(_ u: URL) -> Bool { fm.fileExists(atPath: u.path) }
+    public func isDir(_ u: URL) -> Bool {
         var d: ObjCBool = false
         return fm.fileExists(atPath: u.path, isDirectory: &d) && d.boolValue
     }
-    func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
-    func readText(_ u: URL) -> String? { read(u).map { String(decoding: $0, as: UTF8.self) } }
+    public func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
+    public func readText(_ u: URL) -> String? { read(u).map { String(decoding: $0, as: UTF8.self) } }
 
-    func writePrivate(_ u: URL, _ text: String) {
+    public func writePrivate(_ u: URL, _ text: String) {
         try? text.write(to: u, atomically: true, encoding: .utf8)
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: u.path)
     }
 
-    func ensureDirs() {
+    public func ensureDirs() {
         for d in [auditDir, integrityDir] {
             try? fm.createDirectory(at: d, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         }
@@ -66,7 +66,7 @@ final class Integrity {
 
     /// evidence.py load_or_create_hmac_key. A Keychain *error* never mints a replacement key, and there is
     /// no file-key fallback here: that fallback is what used to sign entries with throwaway keys.
-    func loadKey(create: Bool = true) throws -> Data {
+    public func loadKey(create: Bool = true) throws -> Data {
         let (status, existing) = keychain.lookup(Self.accountHmac)
         if status == "found", let existing, existing.count >= 16 {
             try? fm.removeItem(at: hmacKeyFile)
@@ -92,30 +92,30 @@ final class Integrity {
         return key
     }
 
-    func fingerprint(_ key: Data) -> String { String(crypto.shaHex(data: key).prefix(32)) }
+    public func fingerprint(_ key: Data) -> String { String(crypto.shaHex(data: key).prefix(32)) }
 
     // MARK: audit lines
 
-    func lines(_ log: URL? = nil) -> [String] {
+    public func lines(_ log: URL? = nil) -> [String] {
         guard let text = readText(log ?? auditLog) else { return [] }
         return text.components(separatedBy: CharacterSet.newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }
 
-    func prefixSha(_ lines: [String], _ count: Int) -> String {
+    public func prefixSha(_ lines: [String], _ count: Int) -> String {
         crypto.shaHex(lines.prefix(count).joined(separator: "\n"))
     }
 
-    func entryVerifies(_ line: String, _ key: Data) -> Bool {
+    public func entryVerifies(_ line: String, _ key: Data) -> Bool {
         guard let e = JSON.object(line), e["mac"] != nil else { return false }
         var body: [String: Any] = [:]
         for k in Self.entryFields { if let v = e[k] { body[k] = v } }
         return constantTimeEqual(str(e["mac"]) ?? "", crypto.entryMac(body, key))
     }
 
-    func entryAt(_ line: String) -> String { str(JSON.object(line)?["at"]) ?? "" }
+    public func entryAt(_ line: String) -> String { str(JSON.object(line)?["at"]) ?? "" }
 
-    func hasBoundaryEntry(_ lines: [String]) -> Bool {
+    public func hasBoundaryEntry(_ lines: [String]) -> Bool {
         lines.contains { l in
             guard let e = JSON.object(l) else { return false }
             return str(e["tool"]) == Self.boundaryTool && str(e["actor"]) == Self.boundaryActor
@@ -124,22 +124,22 @@ final class Integrity {
 
     // MARK: era / boundary
 
-    func eraAt() -> String? {
+    public func eraAt() -> String? {
         let (s, d) = keychain.lookup(Self.accountEra)
         let blob = s == "found" ? d : read(signedEraFlag)
         guard let blob, let o = JSON.parse(blob) as? [String: Any] else { return nil }
         return str(o["at"])
     }
 
-    func keychainHasAnchor() -> Bool {
+    public func keychainHasAnchor() -> Bool {
         keychain.lookup(Self.accountEra).0 == "found" || keychain.lookup(Self.accountBoundary).0 == "found"
     }
 
-    func signedEraActive() -> Bool {
+    public func signedEraActive() -> Bool {
         keychainHasAnchor() || exists(boundaryMirror) || exists(signedEraFlag) || exists(sealMirror)
     }
 
-    func eraKeyMismatch(_ key: Data) -> Bool {
+    public func eraKeyMismatch(_ key: Data) -> Bool {
         let fp = fingerprint(key)
         let (s, d) = keychain.lookup(Self.accountEra)
         if s == "found", let d, let o = JSON.parse(d) as? [String: Any], let stored = str(o["keyFingerprint"]),
@@ -150,7 +150,7 @@ final class Integrity {
         return false
     }
 
-    func loadBoundary(_ key: Data) -> ([String: Any]?, String?) {
+    public func loadBoundary(_ key: Data) -> ([String: Any]?, String?) {
         let (s, blob) = keychain.lookup(Self.accountBoundary)
         guard s == "found", let blob else { return (nil, nil) }
         guard let marker = JSON.parse(blob) as? [String: Any] else { return (nil, "boundary_marker_unreadable") }
@@ -162,7 +162,7 @@ final class Integrity {
         return (marker, nil)
     }
 
-    func evidenceFiles() -> [URL] {
+    public func evidenceFiles() -> [URL] {
         guard let dirs = try? fm.contentsOfDirectory(at: transport, includingPropertiesForKeys: nil,
                                                        options: [.skipsHiddenFiles]) else { return [] }
         var out: [URL] = []
@@ -175,15 +175,15 @@ final class Integrity {
         return out
     }
 
-    func macFile(_ u: URL) -> URL { u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".mac") }
-    func rel(_ u: URL) -> String { u.deletingLastPathComponent().lastPathComponent + "/" + u.lastPathComponent }
-    func mtime(_ u: URL) -> Double? {
+    public func macFile(_ u: URL) -> URL { u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".mac") }
+    public func rel(_ u: URL) -> String { u.deletingLastPathComponent().lastPathComponent + "/" + u.lastPathComponent }
+    public func mtime(_ u: URL) -> Double? {
         ((try? fm.attributesOfItem(atPath: u.path))?[.modificationDate] as? Date)?.timeIntervalSince1970
     }
 
     /// evidence.py establish_boundary: recorded exactly once, never re-established after deletion.
     @discardableResult
-    func establishBoundary(_ key: Data, fresh: Bool) -> [String: Any]? {
+    public func establishBoundary(_ key: Data, fresh: Bool) -> [String: Any]? {
         if keychain.lookup(Self.accountBoundary).0 == "found" { return nil }
         let lines = self.lines()
         if hasBoundaryEntry(lines) { return nil }
@@ -246,7 +246,7 @@ final class Integrity {
     }
 
     /// evidence.py mark_signed_era (an existing era fingerprint is never overwritten: B12).
-    func markSignedEra(_ key: Data) {
+    public func markSignedEra(_ key: Data) {
         let (s, existing) = keychain.lookup(Self.accountEra)
         if s == "found", let existing, let prev = JSON.parse(existing) as? [String: Any],
            let fp = str(prev["keyFingerprint"]), !fp.isEmpty {

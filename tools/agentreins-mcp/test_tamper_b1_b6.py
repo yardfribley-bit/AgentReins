@@ -10,6 +10,7 @@ import unittest
 from unittest import mock
 
 import evidence
+from keychain_fake import FAKE as FAKE_KEYCHAIN
 
 
 class TamperBTests(unittest.TestCase):
@@ -21,7 +22,7 @@ class TamperBTests(unittest.TestCase):
         self.audit.mkdir()
         self.transport.mkdir()
         self.integrity.mkdir()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         self.patches = [
             mock.patch.object(evidence, "AUDIT_DIR", self.audit),
             mock.patch.object(evidence, "DEFAULT_TRANSPORT", self.transport),
@@ -33,7 +34,7 @@ class TamperBTests(unittest.TestCase):
             mock.patch.object(evidence, "PROTECTED_SEAL_DIR", self.integrity / "seals"),
             mock.patch.object(evidence, "SIGNED_ERA_FLAG", self.integrity / "signed-era"),
             mock.patch.object(evidence, "RUN_INVENTORY_MAC", self.integrity / "transport-run-inventory.mac"),
-            mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "memory"}, clear=False),
+            *FAKE_KEYCHAIN.patches(evidence),
         ]
         for p in self.patches:
             p.start()
@@ -41,7 +42,7 @@ class TamperBTests(unittest.TestCase):
     def tearDown(self) -> None:
         for p in self.patches:
             p.stop()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _seed(self) -> pathlib.Path:

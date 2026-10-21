@@ -50,8 +50,6 @@ BOUNDARY_TOOL = "integrity-boundary"
 BOUNDARY_ACTOR = "agentreins-integrity"
 LEGACY_REASON = "signed with deleted pre-migration key"
 KEYCHAIN_HELPER = ROOT / "keychain_helper"
-# In-memory Keychain for unit tests (survives wiping AUDIT_DIR + INTEGRITY_DIR).
-_MEMORY_KEYCHAIN: dict[str, bytes] = {}
 KEYCHAIN_LIMITATION = (
     "HMAC 密钥与安装锚点经 Security.framework（AgentReinsKeychainHelper）写入 Keychain，"
     "不经 `security -A`、不把密钥放进 argv。旧明文 hmac 文件在迁入后删除。"
@@ -1142,13 +1140,9 @@ def ensure_audit_dir() -> None:
 
 
 def _keychain_backend() -> str:
-    """memory | security | file. Tests patch MEMORY; CI may force file."""
-    env = (os.environ.get("AGENTREINS_KEYCHAIN_BACKEND") or "").strip().lower()
-    if env in ("memory", "security", "file"):
-        return env
-    if sys.platform == "darwin":
-        return "security"
-    return "file"
+    """'security' (macOS Keychain via AgentReinsKeychainHelper) or 'unsupported'. There is no file or
+    in-memory key store in shipped code: unit tests inject a fake from test-only code (keychain_fake.py)."""
+    return "security" if sys.platform == "darwin" else "unsupported"
 
 
 class KeychainUnavailable(OSError):
@@ -1217,11 +1211,7 @@ def _helper_failure(proc: subprocess.CompletedProcess[bytes]) -> str:
 
 def _keychain_lookup(account: str) -> tuple[str, bytes | None]:
     """('found', data) | ('missing', None) | ('error', None) | ('no_helper', None) | ('no_backend', None)."""
-    backend = _keychain_backend()
-    if backend == "memory":
-        data = _MEMORY_KEYCHAIN.get(account)
-        return ("found", data) if data is not None else ("missing", None)
-    if backend != "security":
+    if _keychain_backend() != "security":
         return "no_backend", None
     try:
         proc = _run_keychain_helper(["get", account])
@@ -1258,11 +1248,7 @@ def keychain_get(account: str) -> bytes | None:
 
 
 def keychain_set(account: str, value: bytes) -> bool:
-    backend = _keychain_backend()
-    if backend == "memory":
-        _MEMORY_KEYCHAIN[account] = value
-        return True
-    if backend == "security":
+    if _keychain_backend() == "security":
         # Never put the secret on argv; never use `security -A`.
         try:
             proc = _run_keychain_helper(["set", account], stdin=value.hex().encode("ascii"))
@@ -1279,11 +1265,7 @@ def keychain_set(account: str, value: bytes) -> bool:
 
 
 def keychain_delete(account: str) -> bool:
-    backend = _keychain_backend()
-    if backend == "memory":
-        _MEMORY_KEYCHAIN.pop(account, None)
-        return True
-    if backend == "security":
+    if _keychain_backend() == "security":
         try:
             proc = _run_keychain_helper(["delete", account])
             return proc.returncode == 0
@@ -1331,28 +1313,18 @@ def load_or_create_hmac_key(create: bool = True) -> bytes:
             return raw
     if not create:
         raise KeychainUnavailable("no integrity key yet")
-    if status == "no_helper" and _keychain_backend() == "security" and (
-        SIGNED_ERA_FLAG.is_file() or (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file()
-    ):
-        raise KeychainUnavailable("keychain helper missing but a signed era exists; not minting a new key")
+    if status == "no_helper":
+        raise KeychainUnavailable("AgentReinsKeychainHelper not found; nothing is signed (no file-key fallback)")
+    if status != "missing":
+        raise KeychainUnavailable("no Keychain on this platform (%s); nothing is signed" % sys.platform)
     key = os.urandom(32)
-    if status == "missing":
-        if keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
-            _delete_hmac_key_file()
-            return key
-        # The Keychain is there but refused the write (locked / needs approval / timeout): a plaintext
-        # replacement key would be readable by anything and would fork the key from the Swift MCP's.
-        raise KeychainUnavailable("could not store a new integrity key in the Keychain (%s)"
-                                  % (keychain_last_error() or "helper set failed"))
-    # Last resort: file backend (non-Darwin / helper missing on a fresh install). Still 0600.
-    fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(key)
-    try:
-        os.chmod(HMAC_KEY_FILE, 0o600)
-    except OSError:
-        pass
-    return key
+    if keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
+        _delete_hmac_key_file()
+        return key
+    # The Keychain is there but refused the write (locked / needs approval / timeout): a plaintext
+    # replacement key would be readable by anything and would fork the key from the Swift MCP's.
+    raise KeychainUnavailable("could not store a new integrity key in the Keychain (%s)"
+                              % (keychain_last_error() or "helper set failed"))
 
 
 def canonical_json(obj: Any) -> str:
@@ -1973,7 +1945,7 @@ def key_storage_facts() -> dict[str, Any]:
         "helperPath": str(helper) if helper else None,
     }
     reasons = []
-    if facts["plaintextKeyFile"] or backend == "file":
+    if facts["plaintextKeyFile"]:
         reasons.append("密钥在同一用户可读的文件里")
     if backend == "security":
         facts["keychainAclTrustsHelperByPath"] = True
@@ -1982,8 +1954,6 @@ def key_storage_facts() -> dict[str, Any]:
             "钥匙串条目的访问控制只信任 keychain helper 这个程序本身；同一用户的任何进程都能直接运行它"
             "（get hmac-key）拿到密钥，helper 不检查是谁在调用它"
         )
-    if backend == "memory":
-        reasons.append("进程内存后端（只在单元测试里使用）")
     reasons.append("签名、日志、封条都由同一用户写入，没有 root 守护进程或远端锚点")
     # Every backend available today is readable by same-uid code, so this is True by fact, not by default.
     return {"sameUidCanForge": True, "keyStorage": facts, "reasons": reasons}

@@ -1,9 +1,8 @@
 'use strict';
 (()=>{
 const list=v=>Array.isArray(v)?v:[];
-/** Single mutable escape binding — renderList/detail always call through escImpl. */
-let escImpl=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-function esc(s){return escImpl(s);}
+/** HTML-escape every rendered field. Not replaceable from outside (no test hook). */
+function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}
 const cut=(s,n=72)=>{const a=Array.from(String(s??''));return a.slice(0,n).join('')+(a.length>n?'…':'')};
 const time=v=>{const d=new Date(v);return isNaN(d)?'—':d.toLocaleTimeString('zh-CN',{hour12:false});};
 const dayKey=v=>{const d=new Date(v);return isNaN(d)?'':d.toLocaleDateString('zh-CN');};
@@ -23,8 +22,8 @@ const RULES=[
   cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 sh/bash。'},
  {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
-  cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）',
-  cant:'ssh 通道内传了什么看不到，只能看到连到了哪里。'},
+  cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）；或按进程采样到 agent 未走代理的公网连接，其目的地（主机名或只有 IP）不在名单',
+  cant:'ssh 通道内传了什么看不到，只能看到连到了哪里。只有 IP、没有主机名的采样连接按 Medium 报，不臆测归属。'},
  {id:'S05',name:'大体积上传',mode:'告警',severity:'high',
   desc:'单次向首次出现的域名上传超过 1 MB。',
   cond:'域名首次出现 ∧ 送出字节 > 1 MB',
@@ -34,9 +33,9 @@ const RULES=[
   cond:'监看各 agent 配置文件的关键字段变更',
   cant:'当前未接入配置文件监看；运行时临时放开（不写配置）也看不到。'},
  {id:'S07',name:'绕过审计代理',mode:'告警',severity:'high',
-  desc:'命令显式 --noproxy / 自选代理，导致不经本机审计代理。',
-  cond:'后端写入 auditBypass=true（前端不再自行根据参数推断）',
-  cant:'不读 HTTPS_PROXY 的内置直连仍可能完全看不到；后端未打标时本页不报 S07。'}
+  desc:'命令显式 --noproxy / 自选代理，或 agent 进程直接连到公网，不经本机审计代理。',
+  cond:'后端写入 auditBypass=true；或按进程采样（socket ledger）看到 agent 进程树的公网连接 viaProxy=false',
+  cant:'采样周期之间开始又结束的短连接会漏掉（覆盖率横幅写实测周期）；直连流量的正文看不到，只知道连到了哪里。'}
 ];
 
 const DEFAULT_ALLOW=new Set([
@@ -75,6 +74,53 @@ function isAllowedHost(host){
  if(DEFAULT_ALLOW.has(host))return true;
  for(const a of DEFAULT_ALLOW)if(host.endsWith('.'+a))return true;
  return false;
+}
+/** Socket-ledger evidence → confidence key. A ledger that failed verification is Unknown, whatever it says. */
+function socketConf(s,integrity){
+ if(integrity==='tampered'||s.ledgerIntegrity==='tampered')return 'unk';
+ return ({Observed:'obs',Correlated:'cor',Inferred:'inf'})[String(s.destinationEvidence||s.evidence||'')]||'unk';
+}
+function socketAlerts(net){
+ const data=typeof net.socketLedgerData==='function'?net.socketLedgerData():null;
+ if(!data||!list(data.connections).length)return [];
+ const integrity=data.coverage?.integrity?.state||'unknown';
+ const isPublic=s=>s.scope==='public'||(s.scope==null&&typeof net.scope==='function'&&net.scope(s.remoteAddress)==='public');
+ const direct=list(data.connections).filter(s=>s&&s.viaProxy===false&&isPublic(s)&&!isTestCapture(s));
+ const destOf=s=>{const d=String(s.realDestination||'').toLowerCase();return d||String(s.remoteAddress||'').toLowerCase();};
+ const ipOnly=d=>typeof net.scope==='function'&&net.scope(d)!=='unknown';
+ const rank={obs:3,cor:2,inf:1,unk:0};
+ const weakest=rows=>rows.map(s=>socketConf(s,integrity)).sort((a,b)=>rank[a]-rank[b])[0]||'unk';
+ const out=[];
+ const byProc=new Map();
+ for(const s of direct){const k=(s.agent||'未对上 Agent')+'\u0000'+(s.processName||'进程');if(!byProc.has(k))byProc.set(k,[]);byProc.get(k).push(s);}
+ for(const [k,rows] of byProc){
+  const [agent,proc]=k.split('\u0000');
+  const dests=[...new Set(rows.map(destOf))];
+  const risky=dests.some(d=>!isAllowedHost(d));
+  const last=rows.map(s=>s.lastSeen||s.firstSeen).sort().pop();
+  out.push({
+   id:alertId('S07','sock:'+agent+':'+proc),rule:'S07',severity:risky?'high':'medium',confidence:weakest(rows),
+   title:`${proc} 直连外网，绕过了审计代理`,
+   sub:`${proc} · ${dests.length} 个目的地 · 按进程采样`,
+   agent,session:'按进程采样（无会话）',call:null,record:null,sockets:rows,destination:dests.length===1?dests[0]:null,timestamp:last,status:'open',
+   why:'按进程采样看到 agent 进程树里的连接直接连到公网地址（viaProxy=false），没经过本机审计代理，所以正文没有审计。'+(integrity==='verified'?'':integrity==='tampered'?'连接台账校验失败，按篡改处理，可信度记为 Unknown。':'连接台账当前不是“已签名并校验通过”（'+integrity+'），这些连接是否被事后改动无法证明。')
+  });
+ }
+ const byDest=new Map();
+ for(const s of direct){const d=destOf(s);if(!d||isAllowedHost(d))continue;const k=(s.agent||'未对上 Agent')+'\u0000'+d;if(!byDest.has(k))byDest.set(k,[]);byDest.get(k).push(s);}
+ for(const [k,rows] of byDest){
+  const [agent,dest]=k.split('\u0000');
+  const bare=ipOnly(dest);
+  const procs=[...new Set(rows.map(s=>s.processName||'进程'))];
+  out.push({
+   id:alertId('S04','sock:'+agent+':'+dest),rule:'S04',severity:bare?'medium':'high',confidence:weakest(rows),
+   title:bare?`直连非白名单地址 ${dest}（只有 IP）`:`直连非白名单主机 ${dest}`,
+   sub:`${procs.join('、')} · ${dest} · 未走代理 · 按进程采样`,
+   agent,session:'按进程采样（无会话）',call:null,record:null,sockets:rows,destination:dest,timestamp:rows.map(s=>s.lastSeen||s.firstSeen).sort().pop(),status:'open',
+   why:(bare?'只有对端 IP，没有可核对的主机名；':'')+'目的地不在默认可信名单，且连接没有经过审计代理。主机名来源见下方每条连接的“目的地来源”。'
+  });
+ }
+ return out;
 }
 function confOf(kind){
  const table={obs:{c:'obs',t:'Observed · 已观测'},cor:{c:'cor',t:'Correlated · 已关联'},inf:{c:'inf',t:'Inferred · 推断'},unk:{c:'unk',t:'Unknown · 未知'}};
@@ -393,6 +439,16 @@ function buildAlerts(payload){
   });
  }
 
+ // Non-proxy traffic from the per-process socket ledger (same rule ids; never duplicates a record alert).
+ const recordS04=new Set(alerts.filter(a=>a.rule==='S04').map(a=>(a.agent||'')+'\u0000'+hostOf(a.record||{})));
+ const recordS07=new Set(alerts.filter(a=>a.rule==='S07').map(a=>(a.agent||'')+'\u0000'+hostOf(a.record||{})));
+ for(const a of socketAlerts(net)){
+  if(a.rule==='S04'&&recordS04.has((a.agent||'')+'\u0000'+a.destination))continue;
+  // The same bypass already alerted from the command record (with its execution id): don't repeat it per process.
+  if(a.rule==='S07'&&a.sockets.every(s=>recordS07.has((a.agent||'')+'\u0000'+String(s.realDestination||s.remoteAddress||'').toLowerCase())))continue;
+  alerts.push(a);
+ }
+
  // dedupe by id, keep newest
  const map=new Map();
  for(const a of alerts){
@@ -402,6 +458,29 @@ function buildAlerts(payload){
  return [...map.values()].sort((a,b)=>new Date(b.timestamp)-new Date(a.timestamp));
 }
 
+/** Measured socket-sampling coverage (from the verified ledger the app loads), never an estimate. */
+function socketCoverage(){
+ const net=window.AgentReinsNetwork;
+ return typeof net?.socketCoverageSummary==='function'?net.socketCoverageSummary():{state:'not_loaded'};
+}
+const SOCKET_STATE={sampling:'运行中',stopped:'已停止',not_running:'没有运行',tampered:'台账校验失败',not_loaded:'尚未读取'};
+const LEDGER_INTEGRITY={verified:'台账已签名 · 校验通过',unsigned:'台账未签名',unverifiable:'台账已签名 · 本机无法校验',tampered:'台账被改动（按篡改处理）',missing:'没有台账'};
+const KEY_HELPER={needs_approval:'需要你在钥匙串里批准',missing:'密钥尚未创建',timeout:'钥匙串没有响应',error:'钥匙串读取失败',no_helper:'找不到 AgentReinsKeychainHelper'};
+function socketBanner(){
+ const c=socketCoverage();
+ const level=c.state==='sampling'&&c.integrity==='verified'&&c.keyState!=='key_unavailable'?'ok':c.state==='sampling'?'warn':'bad';
+ if(c.state==='not_loaded')return `<div class="cov-banner warn" data-coverage-banner><b>未走代理的连接：尚未读取采样台账</b><span>读取之前，首页告警只来自经过审计代理或审计入口的流量。</span></div>`;
+ const parts=[
+  `<span>${esc(c.p95Text)}${c.misses!=null?esc(' · 短于 '+c.misses+' 秒的连接可能漏掉'):''}</span>`,
+  `<span>失败 ${esc(c.failures)} 次${c.lastFailure?esc('（最近：'+cut(c.lastFailure,60)+'）'):''}</span>`,
+  c.state==='stopped'?`<span>最近一次采样在 ${esc(c.staleSeconds==null?'未知时间':c.staleSeconds+' 秒前')}</span>`:'',
+  `<span>${esc(LEDGER_INTEGRITY[c.integrity]||('台账：'+c.integrity))}</span>`
+ ].join('');
+ const key=c.keyState==='key_unavailable'
+  ?`<div class="cov-key"><span>完整性密钥不可用：${esc(KEY_HELPER[c.keyHelper]||c.keyHelper||'原因未知')}。没有它，台账和 MCP 审计日志都不能签名或校验。</span>${!['missing','no_helper'].includes(c.keyHelper)?`<button type="button" data-keychain-authorize="${esc(c.keyHelper)}">授权钥匙串…</button>`:''}<small>也可以在终端运行：/Applications/AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper authorize</small></div>`
+  :'';
+ return `<div class="cov-banner ${level}" data-coverage-banner><b>未走代理的连接 · 按进程采样${esc(SOCKET_STATE[c.state]||c.state)}</b>${parts}${key}</div>`;
+}
 function coverageModel(payload){
  const health=list(payload.health);
  const agents=['Cursor','Codex','WorkBuddy'];
@@ -415,7 +494,7 @@ function coverageModel(payload){
  const proxy=health.find(h=>/workbuddy-network|proxy|mitm/i.test(String(h.source||'')+' '+String(h.detail||'')));
  const proxyUp=!!(proxy&&proxy.state!=='failed'&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||/18891|proxy is running|records received/i.test(String(proxy.detail||''))));
  const blindBase=[
-  {t:'未走代理的流量',s:'不读 HTTPS_PROXY 的程序、agent 内置直连',v:'看不到，也不估算比例'},
+  socketBlind(),
   {t:'文件读取（S01）',s:'不经 agent 会话 / 执行编号的读文件；无 resource.path 的描述文本不算读取证据',v:'未接 Endpoint Security，不声称文件级监控；无真实读取证据时 S01 不报'},
   {t:'安全设置变更（S06）',s:'各 agent 配置文件关键字段',v:'本版未监看，规则页仅说明'},
   {t:'SSH 加密通道',s:'ssh、git over ssh 内部传输',v:'只看到连到了哪台主机'},
@@ -429,6 +508,11 @@ function coverageModel(payload){
  };
 }
 
+function socketBlind(){
+ const c=socketCoverage();
+ if(c.state==='sampling')return {t:'未走代理的流量',s:'按进程采样 agent 进程树的 TCP/UDP 连接（不含正文）',v:c.p95Text+(c.misses!=null?'；短于 '+c.misses+' 秒的连接可能漏掉':'')+'；系统解析器发出的 DNS 看不到'};
+ return {t:'未走代理的流量',s:'按进程连接采样'+(SOCKET_STATE[c.state]||c.state),v:'现在看不到，也不估算比例'};
+}
 /** 已知悉只影响显示样式，不改变告警本身、不做验收处置。 */
 function applyDecisions(alerts,decisions){
  const map=new Map(list(decisions).map(d=>[d.id,d]));
@@ -447,7 +531,8 @@ function renderStats(alerts,cov){
  const high=alerts.filter(a=>a.severity==='high').length;
  const unread=alerts.filter(a=>!a.acked).length;
  const chips=cov.chips.map(c=>`<span class="risk-chip ${c.level==='full'?'ok':c.level==='part'?'warn':'bad'}"><i></i>${esc(c.a)} ${esc(c.label)}</span>`).join('')
-  +`<span class="risk-chip ${cov.proxyUp?'ok':'bad'}"><i></i>${cov.proxyUp?'代理在听':'未走代理流量：看不到'}</span>`;
+  +`<span class="risk-chip ${cov.proxyUp?'ok':'bad'}"><i></i>${cov.proxyUp?'代理在听':'代理未确认'}</span>`
+  +`<span class="risk-chip ${socketCoverage().state==='sampling'?'ok':'bad'}"><i></i>${socketCoverage().state==='sampling'?'未走代理流量：按进程采样':'未走代理流量：看不到'}</span>`;
  return `<div class="risk-stats">
   <div class="risk-stat crit"><b>${crit}</b><span>今日 Critical</span></div>
   <div class="risk-stat high"><b>${high}</b><span>今日 High</span></div>
@@ -487,10 +572,13 @@ function rowHTML(a,selected){
 }
 
 function renderList(holder,payload,state){
- // Prefer caller-supplied alerts (e.g. tests injecting probes into real fields).
- const alerts=Array.isArray(state.alerts)
-  ?applyDecisions(state.alerts,state.decisions||[])
-  :applyDecisions(buildAlerts(payload),state.decisions||[]);
+ // Always rebuilt from the current payload + ledger: state.alerts is only the last result (used by the
+ // badge and 标记已知悉), never an input — a cached list used to freeze the home page at its first render.
+ renderAlerts(holder,payload,state,buildAlerts(payload));
+}
+/** Pure render of a given alert list (renderList passes the freshly built one). */
+function renderAlerts(holder,payload,state,built){
+ const alerts=applyDecisions(list(built),state.decisions||[]);
  const cov=state.coverage||coverageModel(payload);
  state.alerts=alerts;
  if(window.AgentReinsRisk)window.AgentReinsRisk._lastAlerts=alerts;
@@ -500,9 +588,10 @@ function renderList(holder,payload,state){
  const selected=state.selected&&shown.find(a=>a.id===state.selected)||null;
  const table=shown.length?`<div class="risk-table-wrap"><table class="risk-table"><thead><tr><th>级别</th><th>告警</th><th>Agent · 会话</th><th>规则</th><th>证据可信度</th><th>状态</th><th>时间</th></tr></thead><tbody>${shown.map(a=>rowHTML(a,selected?.id)).join('')}</tbody></table>
  <div class="risk-ft"><span>可信度：Observed / Correlated / Inferred / Unknown · 关联强度：按执行编号 / 候选 / 缺口</span><span>仅真实采集 · ${shown.length} 条</span></div></div>`
-  :`<div class="risk-empty"><h2>今天还没有风险告警</h2><p>没有告警不等于安全。未走代理的流量、文件级读取和配置变更仍可能是盲区。</p><ol><li>看覆盖度，确认代理是否在听。</li><li>用真实工具调用触发 S02 / S03 / S07 后再回到这里。</li></ol><button type="button" data-view="coverage">打开覆盖度</button><button type="button" data-view="network">打开外网访问</button></div>`;
+  :`<div class="risk-empty"><h2>今天还没有风险告警</h2><p>没有告警不等于安全。未走代理的流量、文件级读取和配置变更仍可能是盲区。</p><ol><li>看覆盖度，确认代理是否在听。</li><li>确认上方“按进程采样”在运行，未走代理的连接才看得到。</li></ol><button type="button" data-view="coverage">打开覆盖度</button><button type="button" data-view="network">打开外网访问</button></div>`;
  const detail=selected?renderDetail(selected,payload):'';
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机 · WorkBuddy / Codex / Cursor</div><h1>风险告警</h1><p>这台 Mac 上的编码 agent 今天有没有做危险的事。每条告警都能点开看送出和收回的证据。</p></div></div>
+ ${socketBanner()}
  ${renderStats(alerts,cov)}
  <div class="risk-split">${renderFilters(alerts,f)}<div class="risk-main">${table}${detail}</div></div>`;
 }
@@ -525,11 +614,25 @@ function s07EvidenceMarkup(a,r){
   <p class="network-notice">本条没有请求/响应流、也没有 flow ID；未采到的字段不会写成已确认证据。</p>`;
 }
 
+/** Clock time, or the raw value when it is not a parseable date (never silently hidden). */
+function stamp(v){if(v==null||v==='')return '未采到';const d=new Date(v);return isNaN(d)?'时间无法解析：'+String(v):d.toLocaleTimeString('zh-CN',{hour12:false});}
+function socketEvidenceMarkup(a){
+ const rows=list(a.sockets);
+ const net=window.AgentReinsNetwork;
+ const integ=socketCoverage().integrity;
+ const body=rows.slice(0,40).map(s=>`<tr><td>${esc(s.processName||'进程')} · PID ${esc(s.pid)}<div class="t2">父进程 ${esc(s.ppid)}</div></td><td><b>${esc(s.realDestination||s.remoteAddress||'未知')}</b><div class="t2">${esc(s.remoteAddress)}${s.remotePort?':'+esc(s.remotePort):''} · ${esc(s.protocol)} · ${esc(s.state||'状态未采到')}</div></td><td>${esc(s.destinationSource||'未提供')}<div class="t2">${esc(s.destinationEvidence||s.evidence||'Unknown')}</div></td><td>${s.viaProxy?'经代理':'未走代理'}</td><td class="mono">${esc(stamp(s.firstSeen))} → ${esc(stamp(s.lastSeen))}<div class="t2">${esc(s.sampleCount)} 次采样</div></td></tr>`).join('');
+ return `<div class="network-verdict"><strong>按进程采样的连接（viaProxy=false）</strong><p>${esc(LEDGER_INTEGRITY[integ]||integ)} · 共 ${rows.length} 条</p></div>
+  <table class="risk-table"><thead><tr><th>进程</th><th>目的地</th><th>目的地来源 · 证据</th><th>代理</th><th>首次 → 最近</th></tr></thead><tbody>${body}</tbody></table>
+  <p class="network-notice">采样只看到“连到了哪里”，不含正文；没有执行编号，归属到进程而不是某次工具调用。</p>${a.destination?`<button type="button" class="quiet" data-network-destination="${esc(a.destination)}">在外网访问中打开 ${esc(a.destination)}</button>`:''}`;
+}
+
 function renderDetail(a,payload){
  const r=a.record;
  const net=window.AgentReinsNetwork;
  let exchange='';
- if(a.rule==='S07'){
+ if(list(a.sockets).length&&!r){
+  exchange=socketEvidenceMarkup(a);
+ }else if(a.rule==='S07'){
   exchange=s07EvidenceMarkup(a,r);
  }else if(r&&net?.exchangeMarkup){
   exchange=net.exchangeMarkup({
@@ -557,7 +660,7 @@ function renderDetail(a,payload){
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
   ${a.acked?`<p class="note">已知悉（仅样式）· ${esc(a.decision?.decidedAt||'')} · 告警本身未改</p>`:''}
-  <h3>${a.rule==='S07'?'绕过证据':'送出 / 收回'}</h3>
+  <h3>${list(a.sockets).length&&!r?'连接证据':a.rule==='S07'?'绕过证据':'送出 / 收回'}</h3>
   ${exchange||'<p class="empty">这条告警还没有可展示的交换正文。</p>'}
   <div class="risk-gapbox"><b>证据缺口</b><br>${esc(gapText)}${a.call?'':'<br>· 还没有执行编号，工具调用归属未知。'}</div>
  </article>`;
@@ -588,11 +691,12 @@ function renderCoverage(holder,payload,riskState){
   :`<tr><td colspan="5" class="t2">尚无 Codex/supervisor 只读调用记录。配置 tools/agentreins-mcp/server.py 后会出现哈希链审计。</td></tr>`;
  const auditPath=esc(cut(riskState?.mcpAuditPath||'~/Library/Application Support/AgentGuard/mcp-supervisor-audit.jsonl',120));
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">告警只来自看得到的部分</div><h1>覆盖度 · 看不到什么</h1><p>没有告警不等于安全。下面写清盲区。</p></div></div>
+ ${socketBanner()}
  <div class="risk-stats cov-only">
   <div class="risk-stat"><b class="${cov.proxyUp?'ok':''}">${cov.proxyUp?'在听':'未确认'}</b><span>审计代理 18891</span></div>
   <div class="risk-stat"><b>S01</b><span>文件读 · 盲区（无 ES）</span></div>
   <div class="risk-stat"><b>S06</b><span>配置监看 · 未接入</span></div>
-  <div class="risk-stat"><b>看不到</b><span>未走代理流量 · 不估算</span></div>
+  <div class="risk-stat"><b>${socketCoverage().state==='sampling'?'采样中':'看不到'}</b><span>未走代理流量 · ${socketCoverage().state==='sampling'?esc(socketCoverage().p95Text):'不估算'}</span></div>
  </div>
  <div class="risk-covg">
   <section class="risk-card"><h3>Agent 接入情况</h3><table class="risk-table"><thead><tr><th>Agent</th><th>接入</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>
@@ -612,7 +716,8 @@ function evidenceTextFor(a){
   'rule='+a.rule,'title='+a.title,'agent='+a.agent,'session='+a.session,'call='+(a.call||''),
   'why='+(a.why||''),'host='+hostOf(r),'args='+list(r.args).join(' '),
   'request='+String(body.request||'').slice(0,8000),'response='+String(body.response||'').slice(0,8000),
-  'audit='+JSON.stringify(auditOf(r)||{})
+  'audit='+JSON.stringify(auditOf(r)||{}),
+  'sockets='+JSON.stringify(list(a.sockets).map(s=>({pid:s.pid,processName:s.processName,remoteAddress:s.remoteAddress,remotePort:s.remotePort,realDestination:s.realDestination,destinationSource:s.destinationSource,viaProxy:s.viaProxy,firstSeen:s.firstSeen,lastSeen:s.lastSeen})))
  ].join('\n');
 }
 function packFields(a){
@@ -623,9 +728,8 @@ function packFields(a){
  };
 }
 window.AgentReinsRisk={
- RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,isProvenShellParent,
- get esc(){return escImpl;},
- set esc(fn){escImpl=typeof fn==='function'?fn:escImpl;},
+ RULES,buildAlerts,applyDecisions,renderList,renderAlerts,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,isProvenShellParent,
+ isAllowedHost,socketAlerts,
  _lastAlerts:[]
 };
 })();
