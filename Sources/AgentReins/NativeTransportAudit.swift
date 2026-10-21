@@ -9,12 +9,17 @@ enum NativeTransportAudit {
             .appendingPathComponent("Library/Application Support/AgentGuard/transport-audit")
     }
 
-    /// Legacy world-writable root kept readable during migration.
+    /// Legacy world-writable root — never merged into trusted live evidence (Unknown / skipped).
     static var legacyLiveRoot: URL {
         URL(fileURLWithPath: "/private/tmp/agentreins-transport-audit")
     }
 
     static func records(root: URL = defaultLiveRoot) -> [[String: Any]] {
+        // Refuse to treat /private/tmp as trusted evidence.
+        let path = root.resolvingSymlinksInPath().path
+        if path == legacyLiveRoot.path || path.hasPrefix("/private/tmp/") || path.hasPrefix("/tmp/") {
+            return []
+        }
         let fm = FileManager.default
         try? fm.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let canonical = root.resolvingSymlinksInPath().path + "/"
@@ -48,13 +53,8 @@ enum NativeTransportAudit {
         return records.sorted { ($0["startedAt"] as? String ?? "") > ($1["startedAt"] as? String ?? "") }
     }
 
-    /// Primary user dir plus legacy /private/tmp (migration).
+    /// Only the user-owned 0700 transport root. /private/tmp is not read.
     static func liveRecords() -> [[String: Any]] {
-        var byID: [String: [String: Any]] = [:]
-        for record in records(root: defaultLiveRoot) + records(root: legacyLiveRoot) {
-            guard let runID = record["runID"] as? String else { continue }
-            if byID[runID] == nil { byID[runID] = record }
-        }
-        return byID.values.sorted { ($0["startedAt"] as? String ?? "") > ($1["startedAt"] as? String ?? "") }
+        records(root: defaultLiveRoot)
     }
 }

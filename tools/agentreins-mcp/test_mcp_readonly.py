@@ -27,6 +27,7 @@ class MCPReadonlyTests(unittest.TestCase):
         evidence.DEFAULT_TRANSPORT = self.transport
         evidence.AUDIT_LOG = self.audit
         evidence.AUDIT_DIR = self.audit_dir
+        evidence.AUDIT_SEAL = self.audit_dir / "mcp-supervisor-audit.seal"
         evidence.HMAC_KEY_FILE = self.audit_dir / "mcp-supervisor-hmac.key"
         self.evidence = evidence
         run = self.transport / "exec-s02"
@@ -181,6 +182,55 @@ class MCPReadonlyTests(unittest.TestCase):
         self.assertNotIn("s3cretPass", out)
         self.assertIn("api.example.com", out)
 
+    def test_redaction_ux_variants_each_class(self):
+        cases = [
+            ("curl -uX alice:p@ss https://h/", "p@ss"),
+            ("curl --user=alice:pww https://h/", "pww"),
+            ("curl --user 'alice:b c' https://h/", "b c"),
+            ('aws_secret_access_key="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"', "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"),
+            ("export SECRET=TopSecretValue99", "TopSecretValue99"),
+            ("Authorization: Bearer abcd", "abcd"),
+            ("Authorization: Basic YWxpY2U6c2VjcmV0", "YWxpY2U6c2VjcmV0"),
+            ("postgres://u:p@w@host/db", "p@w"),
+            ("https://u:p%40ss@host/", "p%40ss"),
+            ("tool --password s3cretx", "s3cretx"),
+            ("mysql -pSecretMySQL", "SecretMySQL"),
+            ("DB_PASS=DbPass99 client_secret=Cs99", "DbPass99"),
+        ]
+        for raw, secret in cases:
+            out = self.evidence.redact_text(raw)
+            self.assertNotIn(secret, out, raw)
+            self.assertNotIn("sha256=", out, "mask must not include sha256 prefix")
+
+    def test_redact_obj_sensitive_keys(self):
+        obj = {"password": "PlainPass99", "nested": {"client_secret": "CsValue"}, "ok": "visible"}
+        out = self.evidence.redact_obj(obj)
+        blob = json.dumps(out)
+        self.assertNotIn("PlainPass99", blob)
+        self.assertNotIn("CsValue", blob)
+        self.assertIn("visible", blob)
+
+    def test_manifest_disk_has_no_plaintext_userpass(self):
+        # Collector redacts argv as a joined command so "-u" + "user:pass" both go away.
+        run = self.transport / "manifest-scan"
+        run.mkdir()
+        raw_args = ["-u", "alice:hunter2manifest", "https://example.com/"]
+        joined = " ".join(raw_args)
+        redacted = self.evidence.redact_text(joined)
+        manifest = {
+            "schema": 1,
+            "tool": "curl",
+            "args": redacted.split(" ", 2),  # store redacted tokens
+            "commandRedacted": redacted,
+        }
+        (run / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+        text = (run / "manifest.json").read_text(encoding="utf-8")
+        self.assertNotIn("hunter2manifest", text)
+        self.assertNotIn("alice:hunter2manifest", text)
+        for path in self.transport.glob("*/manifest.json"):
+            body = path.read_text(encoding="utf-8")
+            self.assertNotIn("hunter2manifest", body)
+
     def test_list_alerts_and_redaction(self):
         alerts = self.evidence.list_alerts(agent="Cursor")
         rules = {a["rule"] for a in alerts["alerts"]}
@@ -193,7 +243,7 @@ class MCPReadonlyTests(unittest.TestCase):
         s02 = next(a for a in alerts["alerts"] if a["rule"] == "S02")
         self.assertEqual(s02["confidence"], "Observed")
         self.assertEqual(s02["executionId"], "exec-s02")
-        self.assertEqual(alerts.get("engine"), "js-bridge")
+        self.assertIn(alerts.get("engine"), ("js-bridge", "swift-jsc-bridge"))
 
     def test_get_execution_redacts_and_reports_bypass(self):
         detail = self.evidence.get_execution("exec-s02")
@@ -220,7 +270,7 @@ class MCPReadonlyTests(unittest.TestCase):
         self.assertTrue(entries[0].get("mac"))
         ok = self.evidence.validate_audit()
         self.assertTrue(ok["ok"], ok)
-        # Tamper one record
+        # Tamper a signed record (change body, keep stale MAC) → ok=false
         lines = self.audit.read_text(encoding="utf-8").splitlines()
         first = json.loads(lines[0])
         first["tool"] = "tampered_tool"
@@ -229,6 +279,45 @@ class MCPReadonlyTests(unittest.TestCase):
         bad = self.evidence.validate_audit()
         self.assertFalse(bad["ok"])
         self.assertTrue(bad["tampered"], bad)
+
+    def test_audit_strip_mac_after_signed_era(self):
+        self.evidence.append_audit("Codex", "list_alerts", {})
+        self.evidence.append_audit("Codex", "list_agents", {})
+        lines = self.audit.read_text(encoding="utf-8").splitlines()
+        second = json.loads(lines[1])
+        second.pop("mac", None)
+        lines[1] = json.dumps(second, ensure_ascii=False)
+        self.audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        result = self.evidence.validate_audit()
+        self.assertFalse(result["ok"])
+        self.assertTrue(any(t.get("reason") == "missing_mac_after_signed_era" for t in result["tampered"]), result)
+
+    def test_audit_truncation_via_seal(self):
+        self.evidence.append_audit("Codex", "list_agents", {})
+        self.evidence.append_audit("Codex", "list_alerts", {})
+        self.evidence.append_audit("Codex", "get_coverage", {})
+        lines = self.audit.read_text(encoding="utf-8").splitlines()
+        # Truncate tail — seal count/head no longer match
+        self.audit.write_text("\n".join(lines[:2]) + "\n", encoding="utf-8")
+        result = self.evidence.validate_audit()
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any(g.get("reason") == "truncated_or_count_mismatch" for g in result["deletedOrGap"]),
+            result,
+        )
+
+    def test_evidence_file_mac_tamper(self):
+        self.evidence.append_audit("Codex", "list_alerts", {})
+        # append_audit signs evidence tree; tamper transport.json
+        tpath = self.transport / "exec-s02" / "transport.json"
+        raw = tpath.read_text(encoding="utf-8")
+        tpath.write_text(raw.replace("Cursor", "TamperedAgent"), encoding="utf-8")
+        result = self.evidence.validate_audit()
+        self.assertFalse(result["ok"])
+        self.assertTrue(
+            any(t.get("reason") == "evidence_mac_mismatch" for t in result["tampered"]),
+            result,
+        )
 
     def test_audit_delete_detection(self):
         self.evidence.append_audit("Codex", "list_agents", {})
@@ -242,6 +331,13 @@ class MCPReadonlyTests(unittest.TestCase):
         self.assertFalse(result["ok"])
         self.assertTrue(result["deletedOrGap"], result)
 
+    def test_never_reads_private_tmp(self):
+        legacy = pathlib.Path(self.tmp.name) / "fake-private-tmp"
+        # Simulate pointing at legacy path — must return empty
+        rows = self.evidence.load_transport_records(root=pathlib.Path("/private/tmp/agentreins-transport-audit"))
+        self.assertEqual(rows, [])
+        _ = legacy  # keep tempfile root alive
+
     def test_list_mcp_audit_exposes_validation(self):
         self.evidence.append_audit("Codex", "list_alerts", {})
         payload = self.evidence.list_mcp_audit(limit=10)
@@ -249,10 +345,11 @@ class MCPReadonlyTests(unittest.TestCase):
         self.assertTrue(payload["validation"]["ok"])
 
     def test_fallback_warns_explicitly(self):
-        alerts, meta = self.evidence.build_alerts_via_bridge([])
-        # Force fallback by pointing bridge aside
-        old = self.evidence.BRIDGE
+        # Force fallback by pointing both bridges aside
+        old_bridge = self.evidence.BRIDGE
+        old_swift = self.evidence.SWIFT_BRIDGE
         self.evidence.BRIDGE = pathlib.Path("/nonexistent/alerts_bridge.cjs")
+        self.evidence.SWIFT_BRIDGE = pathlib.Path("/nonexistent/AgentReinsAlertsBridge")
         try:
             _, meta = self.evidence.build_alerts_via_bridge(
                 self.evidence.load_transport_records()
@@ -260,7 +357,8 @@ class MCPReadonlyTests(unittest.TestCase):
             self.assertEqual(meta["engine"], "python-fallback")
             self.assertTrue(meta.get("warning"))
         finally:
-            self.evidence.BRIDGE = old
+            self.evidence.BRIDGE = old_bridge
+            self.evidence.SWIFT_BRIDGE = old_swift
 
     def test_stdio_initialize_and_tools_list(self):
         proc = subprocess.Popen(

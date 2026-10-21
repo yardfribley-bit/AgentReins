@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "invocation": {
+    "schema": 1,
+    "agent": "Cursor",
+    "tool": "sh",
+    "startedAt": "2026-10-21T04:59:23.006518+00:00",
+    "launcherPID": 64067,
+    "parentPID": 64015,
+    "captureMode": "agent-path",
+    "args": [
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh"
+    ],
+    "task": null,
+    "call": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+    "codexThreadID": null,
+    "session": "en7da249ce-s03-1792558759",
+    "nativeRequestID": null,
+    "nativeMessageID": null,
+    "coverage": "PATH-resolved command; absolute paths and overwritten PATH bypass this entry",
+    "provenance": "live",
+    "testCapture": false,
+    "gap": "该工具没有专用协议跟踪。已保留命令、退出码和会话日志，不能把它当成完整协议正文。",
+    "operation": null,
+    "pid": 64068,
+    "exitCode": 0,
+    "finishedAt": "2026-10-21T04:59:23.056861+00:00"
+  },
+  "helpers": [],
+  "packFiles": [],
+  "children": [],
+  "connections": [],
+  "blocks": [
+    {
+      "direction": "send",
+      "kind": "data",
+      "observedBytes": 93,
+      "http": [],
+      "textPreview": "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh",
+      "previewTruncated": false
+    },
+    {
+      "direction": "receive",
+      "kind": "data",
+      "observedBytes": 0,
+      "http": [],
+      "textPreview": "",
+      "previewTruncated": false
+    }
+  ],
+  "limitations": [
+    "该工具没有专用协议跟踪。已保留命令、退出码和会话日志，不能把它当成完整协议正文。"
+  ],
+  "attribution": "这次执行的编号就是这次工具调用",
+  "securityAudit": {
+    "version": "content-rules-v2",
+    "policyError": null,
+    "destinationHost": null,
+    "destinationPolicy": "not_configured",
+    "findings": [],
+    "requestBytesInspected": 93,
+    "responseBytesInspected": 0,
+    "inspectionTruncated": false,
+    "scope": "transport_text",
+    "verdict": "no_rule_match"
+  }
+}

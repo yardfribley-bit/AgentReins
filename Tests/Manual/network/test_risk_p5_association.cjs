@@ -50,7 +50,7 @@ const payload = {
     agent: 'Cursor',
     session,
     cards: [
-      // Separate execution id, unwrapped chmod+sh — MUST still create S03 via path
+      // chmod +x alone must NOT create S03; only the real /bin/sh execution does
       {
         id: 'call:' + callChmod, call: callChmod, timestamp: '2026-10-21T02:00:30Z',
         kind: 'command',
@@ -71,12 +71,15 @@ const payload = {
 
 const alerts = risk.buildAlerts(payload);
 const s03 = alerts.filter(a => a.rule === 'S03' && /下载后/.test(a.title));
-assert.ok(s03.length >= 1, 'S03 must fire across different execution ids via path');
-assert.ok(s03.every(a => a.call !== callDownload || a.confidence === 'inf' || a.confidence === 'cor'), 'confidence set');
+assert.equal(s03.length, 1, 'one download→exec yields exactly one S03 (chmod ignored)');
+assert.ok(s03.every(a => a.confidence === 'inf' || a.confidence === 'cor'), 'confidence set');
 assert.ok(s03.some(a => a.confidence === 'inf'), 'path-only match is Inferred');
+assert.ok(s03.every(a => !/chmod \+x/.test(a.why || '')), 'why must not treat chmod as execution');
 assert.notEqual(risk.associationOf(s03[0]).name, '已确认', 'association strength must not say 已确认');
+assert.ok(risk.isActualExecution('/bin/sh /tmp/x.sh', 'sh'));
+assert.ok(!risk.isActualExecution('chmod +x /tmp/x.sh', 'chmod'));
 
-// Correlated when chmod/sh arrive as real transport records (path + same agent), not synthetic sha256 on cards
+// Correlated only with real lineage (parentPID→download pid) or file hash — same agent+path alone is Inferred
 net.setLocalTransports([
   {
     captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:00:00Z',
@@ -100,8 +103,31 @@ net.setLocalTransports([
   },
 ]);
 const correlated = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03' && /下载后/.test(a.title));
-assert.ok(correlated.some(a => a.confidence === 'cor'), 'path + transport exec / lineage is Correlated');
-assert.ok(correlated.some(a => /parentPID|运输审计/.test(a.why || '')), 'why mentions lineage or transport');
+assert.equal(correlated.length, 1, 'chmod ignored; single S03 for sh');
+assert.ok(correlated.some(a => a.confidence === 'cor'), 'lineage parentPID→download pid is Correlated');
+assert.ok(correlated.some(a => /分级依据 Correlated|parentPID/.test(a.why || '')), 'why states Correlated basis');
+
+// Same agent + same path without lineage/hash → Inferred (not Correlated)
+net.setLocalTransports([
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T05:00:00Z',
+    pid: 41, exitCode: 0, runID: 'dl-inf', call: 'dl-inf', session: 's-inf',
+    args: ['-o', filePath, 'https://cdn.agentreins-field.net/p5.sh'],
+    downloads: [{ path: filePath, sha256: fileSha }],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
+    blocks: [],
+  },
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'sh', startedAt: '2026-10-21T05:00:10Z',
+    pid: 99, parentPID: 1, exitCode: 0, runID: 'sh-inf', call: 'sh-inf', session: 's-inf',
+    args: [filePath],
+    connections: [], blocks: [], downloads: [],
+  },
+]);
+const inferredOnly = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03');
+assert.equal(inferredOnly.length, 1);
+assert.equal(inferredOnly[0].confidence, 'inf', 'same agent+path without lineage is Inferred');
+assert.match(inferredOnly[0].why || '', /分级依据 Inferred/);
 
 const s07 = alerts.filter(a => a.rule === 'S07');
 assert.equal(s07.length, 1, 'S07 only when auditBypass===true');
@@ -110,6 +136,34 @@ assert.ok(risk.bypassed({ auditBypass: true }));
 assert.ok(!risk.bypassed({ auditBypass: false, args: ['--noproxy', '*'] }));
 assert.ok(!risk.bypassed({ args: ['--noproxy', '*'] }));
 
+// Restore the first transport set so renderList detail matches s03[0]
+net.setLocalTransports([
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:00:00Z',
+    pid: 11, exitCode: 0, runID: callDownload, call: callDownload, session,
+    args: ['-o', filePath, 'https://cdn.agentreins-field.net/p5.sh'],
+    downloads: [{ path: filePath, sha256: fileSha }],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
+    blocks: [],
+    auditBypass: false,
+  },
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:01:00Z',
+    pid: 12, exitCode: 0, runID: 'other-1', call: 'other-1', session,
+    args: ['--noproxy', '*', 'https://cdn.agentreins-field.net/other'],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
+    blocks: [],
+    auditBypass: false,
+  },
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:02:00Z',
+    pid: 13, exitCode: 0, runID: 'bypass-1', call: 'bypass-1', session,
+    args: ['--noproxy', '*', 'https://cdn.agentreins-field.net/bypass'],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
+    blocks: [],
+    auditBypass: true,
+  },
+]);
 const holder = { innerHTML: '' };
 risk.renderList(holder, payload, { filter: { sev: 'all', rule: 'all', agent: 'all', q: '' }, selected: s03[0].id, decisions: [] });
 assert.match(holder.innerHTML, /关联：按执行编号|关联：缺口|关联：候选/);
@@ -119,6 +173,10 @@ assert.match(holder.innerHTML, /按执行编号 \/ 候选 \/ 缺口/);
 assert.doesNotMatch(holder.innerHTML, /确认无风险|标记已处置|导出证据包|已处置/);
 assert.match(holder.innerHTML, /标记已知悉/);
 assert.doesNotMatch(holder.innerHTML, /待我处理/);
+// S07 detail must not claim flow ID / 已采流证据 it does not have
+risk.renderList(holder, payload, { filter: { sev: 'all', rule: 'S07', agent: 'all', q: '' }, selected: s07[0].id, decisions: [] });
+assert.match(holder.innerHTML, /auditBypass=true/);
+assert.doesNotMatch(holder.innerHTML, /已采请求\/响应流证据|同一原生 HTTPS flow ID/);
 
 // Explicit provenance only — hostname/loopback alone must NOT hide real traffic
 net.setLocalTransports([

@@ -1,0 +1,170 @@
+[
+  {
+    "run": "5c34ce5a-c430-458d-9d65-92e581f1f540",
+    "tool": "curl",
+    "startedAt": "2026-10-21T04:59:23.341203+00:00",
+    "pid": 64070,
+    "parentPID": 64015,
+    "args": [
+      "--noproxy",
+      "*",
+      "-fsSL",
+      "https://httpbin.org/get?en7da249ce=s07",
+      "-o",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s07.json"
+    ],
+    "auditBypass": true,
+    "session": "en7da249ce-s03-1792558759",
+    "downloads": [
+      {
+        "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s07.json",
+        "bytes": 298,
+        "sha256": "9c4f9c1c1ce7583f547e54b182d9897c9ea839ebf62144fff85c4b0759746b80",
+        "state": "verified",
+        "source": null
+      }
+    ]
+  },
+  {
+    "run": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+    "tool": "sh",
+    "startedAt": "2026-10-21T04:59:23.006518+00:00",
+    "pid": 64068,
+    "parentPID": 64015,
+    "args": [
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh"
+    ],
+    "auditBypass": null,
+    "session": "en7da249ce-s03-1792558759",
+    "downloads": null
+  },
+  {
+    "run": "21b19f18-ebd9-4ea9-b690-1e0e4527ca5e",
+    "tool": "chmod",
+    "startedAt": "2026-10-21T04:59:22.495642+00:00",
+    "pid": 64066,
+    "parentPID": 64015,
+    "args": [
+      "+x",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh"
+    ],
+    "auditBypass": null,
+    "session": "en7da249ce-s03-1792558759",
+    "downloads": null
+  },
+  {
+    "run": "70852a9f-69df-4c12-9096-cec993305b7a",
+    "tool": "curl",
+    "startedAt": "2026-10-21T04:59:20.847527+00:00",
+    "pid": 64058,
+    "parentPID": 64015,
+    "args": [
+      "-fsSL",
+      "-o",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh",
+      "https://httpbin.org/base64/IyEvYmluL3NoCmVjaG8gYWdlbnRyZWlucy1zMDMtZW43ZGEyNDljZQplY2hvIG9rCg=="
+    ],
+    "auditBypass": null,
+    "session": "en7da249ce-s03-1792558759",
+    "downloads": [
+      {
+        "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh",
+        "bytes": 49,
+        "sha256": "c9ec28a9a2a85097c0e0094ef63e8b5d168dc1bedef74c050b637ff2960a4c20",
+        "state": "verified",
+        "source": null
+      }
+    ]
+  },
+  {
+    "run": "3ad933a4-6170-4ef7-9b6b-995ffbbfc925",
+    "tool": "curl",
+    "startedAt": "2026-10-21T04:59:19.404486+00:00",
+    "pid": 64052,
+    "parentPID": 64015,
+    "args": [
+      "-fsSL",
+      "-o",
+      "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh",
+      "https://httpbin.org/base64/IyEvYmluL3NoCmVjaG8gYWdlbnRyZWlucy1zMDMtZW43ZGEyNDljZQplY2hvIG9rCg=="
+    ],
+    "auditBypass": null,
+    "session": "en7da249ce-s03-1792558759",
+    "downloads": [
+      {
+        "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh",
+        "bytes": 49,
+        "sha256": "c9ec28a9a2a85097c0e0094ef63e8b5d168dc1bedef74c050b637ff2960a4c20",
+        "state": "verified",
+        "source": null
+      }
+    ]
+  },
+  {
+    "run": "f35d7a24-8b96-4247-a1ec-cb008d7d51c3",
+    "tool": "curl",
+    "startedAt": "2026-10-21T04:59:17.474980+00:00",
+    "pid": 63925,
+    "parentPID": 63917,
+    "args": [
+      "-sS",
+      "-L",
+      "-A",
+      "Mozilla/5.0",
+      "--max-time",
+      "60",
+      "https://www.chuhaijian.com/task/v1/tasks/T000016/context",
+      "-o",
+      "/tmp/t000016-context.json"
+    ],
+    "auditBypass": null,
+    "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+    "downloads": [
+      {
+        "path": "/private/tmp/t000016-context.json",
+        "bytes": 19045,
+        "sha256": "228efa7ab527f01de4203f1cf366acc99a8c2f9d0baec5ac616b1af7c64ee1ac",
+        "state": "verified",
+        "source": null
+      }
+    ]
+  },
+  {
+    "run": "e5072fbf-4e08-4fc5-ba7f-4372b50b7f79",
+    "tool": "curl",
+    "startedAt": "2026-10-21T04:59:04.880869+00:00",
+    "pid": 63632,
+    "parentPID": 63620,
+    "args": [
+      "-sS",
+      "-L",
+      "-A",
+      "Mozilla/5.0",
+      "--max-time",
+      "30",
+      "https://www.chuhaijian.com/task/v1/agent-guide.md"
+    ],
+    "auditBypass": null,
+    "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+    "downloads": null
+  },
+  {
+    "run": "28f73d7f-f74b-4113-ab01-0b3f579e528a",
+    "tool": "curl",
+    "startedAt": "2026-10-21T04:59:03.729484+00:00",
+    "pid": 63617,
+    "parentPID": 63608,
+    "args": [
+      "-sS",
+      "-L",
+      "-A",
+      "Mozilla/5.0",
+      "--max-time",
+      "30",
+      "https://www.chuhaijian.com/task/v1/discover"
+    ],
+    "auditBypass": null,
+    "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+    "downloads": null
+  }
+]

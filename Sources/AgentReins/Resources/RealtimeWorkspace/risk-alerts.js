@@ -15,9 +15,9 @@ const RULES=[
   cond:'content_audit：credential-outbound / private-key-outbound',
   cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。'},
  {id:'S03',name:'下载后执行',mode:'告警',severity:'critical',
-  desc:'curl / wget 下载的文件在 5 分钟内被 chmod +x、sh、bash 或 open 执行。',
-  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s（执行编号可不同）；进程血缘（parentPID）对上为 Correlated',
-  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 chmod/sh。'},
+  desc:'curl / wget 下载的文件在 5 分钟内被 sh、bash 或 open 真正执行（chmod +x 只改权限，不算执行）。',
+  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s；仅 pid/ppid 血缘或被执行文件实际哈希一致为 Correlated；同 agent+同路径仅为 Inferred',
+  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 sh/bash。'},
  {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
   cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）',
@@ -124,7 +124,19 @@ function commandCards(tasks){
  return out;
 }
 
-/** 真实运输审计里的 chmod / sh / bash / open —— 与任务卡片同等作为 S03 执行侧证据。 */
+/** True when the command actually runs a file (sh/bash/open/direct path). chmod +x alone is NOT execution. */
+function isActualExecution(cmd,tool){
+ const t=String(tool||'');
+ const c=String(cmd||'');
+ if(/^(chmod)$/.test(t)||/^\s*chmod\b/.test(c))return false;
+ if(/^(sh|bash|open)$/.test(t))return true;
+ if(/\/bin\/(ba)?sh\b|\bbash\b|(?:^|[\s;|&])sh\s+|^\s*open\s+/.test(c))return true;
+ // bare path / interpreter invocation without chmod
+ if(/^\s*(?:\.\/|\/)[^\s]+\s*$/.test(c))return true;
+ return false;
+}
+
+/** 真实运输审计里的 sh / bash / open —— 与任务卡片同等作为 S03 执行侧证据（不含 chmod）。 */
 function transportExecCommands(){
  const net=window.AgentReinsNetwork;
  const locals=typeof net?.localExchanges==='function'?net.localExchanges():[];
@@ -135,12 +147,11 @@ function transportExecCommands(){
   const args=list(r.args).map(String);
   const cmd=[tool,...args].join(' ').trim();
   if(!cmd)continue;
-  const isExecTool=/^(chmod|sh|bash|open)$/.test(tool);
-  const isExecCmd=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(cmd);
-  if(!isExecTool&&!isExecCmd)continue;
+  if(!isActualExecution(cmd,tool))continue;
   if(list(r.downloads).some(d=>d&&d.path))continue;
+  const sha=String(r.fileResult?.sha256||r.resource?.sha256||r.sha256||'').toLowerCase();
   out.push({
-   task:{agent:r.agent,session:r.session},card:null,cmd,sha:'',
+   task:{agent:r.agent,session:r.session},card:null,cmd,sha,
    call:r.call||r.runID||null,at:r.startedAt||r.timestamp,
    pid:r.pid,parentPID:r.parentPID||r.launcherPID,agent:r.agent,fromTransport:true,record:r
   });
@@ -259,7 +270,8 @@ function buildAlerts(payload){
    }
   }
 
-  // S03: 路径 + 时间窗（≤300s）+ 进程血缘；不依赖命令侧从未填写的 sha256
+  // S03: 路径 + 时间窗（≤300s）；Correlated 仅真实血缘或被执行文件实际哈希；同 agent+同路径 = Inferred
+  // chmod +x 不算执行；同一下载路径全局只保留一条最优告警
   const downloads=list(r.downloads).filter(d=>d&&d.path);
   for(const d of downloads){
    const fullPath=String(d.path);
@@ -268,34 +280,48 @@ function buildAlerts(payload){
    const start=new Date(when).getTime();
    if(isNaN(start))continue;
    const dlPid=r.pid;
+   const dlCall=call||'缺口';
+   let best=null;
    for(const c of cmds){
     if(!c.at)continue;
     const dt=(new Date(c.at).getTime()-start)/1000;
     if(dt<0||dt>300)continue;
-    const isExec=/chmod\s+\+x|chmod\s+[0-7]*[1357]|\/bin\/(ba)?sh\b|\bbash\b|\bsh\b|\bopen\b/.test(c.cmd)||/^(chmod|sh|bash|open)\b/.test(c.cmd);
-    if(!isExec)continue;
+    if(!isActualExecution(c.cmd,c.card?.execution?.tool||c.record?.tool||(c.cmd||'').split(/\s+/)[0]))continue;
     const pathHit=c.cmd.includes(fullPath)||(name&&(new RegExp('(?:^|[\\s\'"`/=])'+name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:$|[\\s\'"`;|&])')).test(c.cmd));
     if(!pathHit)continue;
     const lineageHit=!!(dlPid&&c.parentPID&&String(c.parentPID)===String(dlPid));
-    const transportPair=!!(c.fromTransport&&agent&&c.agent&&c.agent===agent);
+    const sameShell=!!(r.session&&c.task?.session&&String(r.session)===String(c.task.session)&&c.pid&&dlPid&&String(c.pid)!==String(dlPid)&&(c.parentPID&&(String(c.parentPID)===String(dlPid)||String(c.parentPID)===String(r.parentPID||r.launcherPID))));
     const hashHit=!!(sha&&c.sha&&c.sha===sha);
-    // Correlated：路径 +（进程血缘或同 agent 的真实运输执行记录）；不再要求命令侧 sha256
-    const confidence=(lineageHit||transportPair||hashHit)?'cor':'inf';
-    const dlCall=call||'缺口';
+    // Correlated：仅血缘（pid/ppid 或同 shell 会话链）或实际文件哈希；同 agent+同路径单独不够
+    const confidence=(lineageHit||sameShell||hashHit)?'cor':'inf';
     const cmdCall=c.call||'缺口';
-    alerts.push({
-     id:alertId('S03',dlCall+':'+name+':'+cmdCall),rule:'S03',severity:'critical',confidence,
+    const rank=(confidence==='cor'?2:1)+(hashHit?1:0)+(lineageHit?1:0);
+    const candidate={
+     id:alertId('S03',dlCall+':'+name),rule:'S03',severity:'critical',confidence,rank,
      title:'下载后在 5 分钟内执行',
      sub:`${name}${sha?' · SHA-256 '+sha.slice(0,12)+'…':''}`,
-     agent,session:sess,call:c.call||call,record:r,timestamp:c.at||when,status:'open',
+     agent,session:sess,call:c.call||call,record:r,execRecord:c.record||null,timestamp:c.at||when,status:'open',
+     evidence:{downloadCall:dlCall,execCall:cmdCall,path:fullPath,lineage:lineageHit,hashMatch:hashHit,dtSec:Math.round(dt),parentPID:c.parentPID||null,downloadPID:dlPid||null},
      why:lineageHit
-      ?`路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」对上，且 parentPID=${c.parentPID} 指向下载进程 ${dlPid}（Δt ${Math.round(dt)}s）。可信度 Correlated。下载 ${dlCall} · 命令 ${cmdCall}。`
-      :transportPair
-       ?`路径「${cut(fullPath,60)}」与运输审计执行「${cut(c.cmd,80)}」对上（同 agent，Δt ${Math.round(dt)}s）。可信度 Correlated。下载 ${dlCall} · 命令 ${cmdCall}。`
+      ?`分级依据 Correlated：路径「${cut(fullPath,60)}」与执行「${cut(c.cmd,80)}」对上，且 parentPID=${c.parentPID} 指向下载进程 ${dlPid}（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+      :sameShell
+       ?`分级依据 Correlated：路径对上且同 shell 会话链（下载 pid ${dlPid} · 执行 parentPID ${c.parentPID}，Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
        :hashHit
-        ?`SHA-256 与路径均对上（Δt ${Math.round(dt)}s）。可信度 Correlated。下载 ${dlCall} · 命令 ${cmdCall}。`
-        :`路径对上「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）。可信度 Inferred（无进程血缘）。下载 ${dlCall} · 命令 ${cmdCall}。`
-    });
+        ?`分级依据 Correlated：被执行文件 SHA-256 与下载哈希一致（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+        :`分级依据 Inferred：仅同 agent + 同路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）；无 pid/ppid 血缘、无文件哈希。下载 ${dlCall} · 命令 ${cmdCall}。`
+    };
+    if(!best||candidate.rank>best.rank||(candidate.rank===best.rank&&new Date(candidate.timestamp)>=new Date(best.timestamp)))best=candidate;
+   }
+   if(best){
+    delete best.rank;
+    // Collapse by absolute path so one download→exec chain yields one home alert.
+    const existing=alerts.findIndex(a=>a.rule==='S03'&&a.evidence?.path===fullPath);
+    if(existing>=0){
+     const prev=alerts[existing];
+     const prevRank=(prev.confidence==='cor'?2:1);
+     const nextRank=(best.confidence==='cor'?2:1);
+     if(nextRank>=prevRank)alerts[existing]=best;
+    }else alerts.push(best);
    }
   }
  }
@@ -417,28 +443,53 @@ function renderList(holder,payload,state){
  <div class="risk-split">${renderFilters(alerts,f)}<div class="risk-main">${table}${detail}</div></div>`;
 }
 
+function s07EvidenceMarkup(a,r){
+ // S07 只陈述本条实际有的证据（auditBypass），不套用通用「flow ID / 已采流证据」文案。
+ const host=hostOf(r||{});
+ const args=list(r?.args).map(String).join(' ');
+ return `<div class="network-verdict"><strong>后端标记 auditBypass=true</strong>
+  <p>${esc(host||'目标未解析')} · 工具 ${esc(r?.tool||'—')} · 执行编号 ${esc(a.call||'缺口')}</p></div>
+  <dl class="network-facts">
+   <dt>证据字段</dt><dd>auditBypass=true（后端写入；前端不根据 --noproxy 自行推断）</dd>
+   <dt>Agent</dt><dd>${esc(a.agent||'—')}</dd>
+   <dt>会话</dt><dd>${esc(a.session||'未确认')}</dd>
+   <dt>命令参数</dt><dd class="mono">${esc(cut(args,200)||'未采到')}</dd>
+   <dt>开始时间</dt><dd>${esc(a.timestamp||r?.startedAt||'—')}</dd>
+  </dl>
+  <p class="network-notice">本条没有请求/响应流、也没有 flow ID；未采到的字段不会写成已确认证据。</p>`;
+}
+
 function renderDetail(a,payload){
  const r=a.record;
  const net=window.AgentReinsNetwork;
- const exchange=r&&net?.exchangeMarkup?net.exchangeMarkup({
-  agent:a.agent,host:hostOf(r),port:r.port||r.resource?.remotePort,ip:r.resource?.remoteIP||r.ip,
-  proxy:r.proxy,session:a.session,call:a.call,taskID:r.taskID,command:list(r.args).join(' '),tool:r.tool,
-  evidenceType:r.evidenceType,networkBody:r.networkBody,gap:r.gap,auditBypass:r.auditBypass
- }):'';
+ let exchange='';
+ if(a.rule==='S07'){
+  exchange=s07EvidenceMarkup(a,r);
+ }else if(r&&net?.exchangeMarkup){
+  exchange=net.exchangeMarkup({
+   agent:a.agent,host:hostOf(r),port:r.port||r.resource?.remotePort,ip:r.resource?.remoteIP||r.ip,
+   proxy:r.proxy,session:a.session,call:a.call,taskID:r.taskID,command:list(r.args).join(' '),tool:r.tool,
+   evidenceType:r.evidenceType,networkBody:r.networkBody,gap:r.gap,auditBypass:r.auditBypass
+  });
+ }
  const c=confOf(a.confidence);
  const assoc=associationOf(a);
+ const evidenceBlock=a.evidence
+  ?`<pre class="mono risk-evidence-json">${esc(JSON.stringify(a.evidence,null,2))}</pre>`
+  :'';
  return `<article class="risk-detail${a.acked?' acked':''}">
   <header><span class="risk-sev ${sevOf(a.severity)}">${sevLabel(a.severity)}</span><h2>${esc(a.title)}</h2>
   <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.kind)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')}</p></header>
   <p class="risk-why">${esc(a.why||'')}</p>
+  ${evidenceBlock}
   <div class="risk-actions">
    ${a.acked?'':`<button type="button" class="quiet" data-risk-decide="acked" data-risk-id="${esc(a.id)}">标记已知悉</button>`}
-   ${a.call?`<button type="button" class="quiet" data-network-record-jump="${esc(r?.id||'')}">在外网访问中打开</button>`:''}
+   ${a.call&&a.rule!=='S07'?`<button type="button" class="quiet" data-network-record-jump="${esc(r?.id||'')}">在外网访问中打开</button>`:''}
    <button type="button" class="quiet" data-view="network">外网访问</button>
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
   ${a.acked?`<p class="note">已知悉（仅样式）· ${esc(a.decision?.decidedAt||'')} · 告警本身未改</p>`:''}
-  <h3>送出 / 收回</h3>
+  <h3>${a.rule==='S07'?'绕过证据':'送出 / 收回'}</h3>
   ${exchange||'<p class="empty">这条告警还没有可展示的交换正文。</p>'}
   <div class="risk-gapbox"><b>证据缺口</b><br>${esc(RULES.find(x=>x.id===a.rule)?.cant||'未采到的部分不会补成已确认。')}${a.call?'':'<br>· 还没有执行编号，工具调用归属未知。'}</div>
  </article>`;
@@ -502,5 +553,5 @@ function packFields(a){
   decidedAt:a.decision?.decidedAt||null,evidenceText:evidenceTextFor(a)
  };
 }
-window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture};
+window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,esc};
 })();

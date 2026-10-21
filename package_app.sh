@@ -44,6 +44,16 @@ fi
 echo "==> Creating $APP_NAME.app"
 rm -rf "$APP_BUNDLE"
 mkdir -p "$APP_BUNDLE/Contents/MacOS" "$APP_BUNDLE/Contents/Resources"
+copy_helper() {
+  local name="$1"
+  if [[ "$CONFIGURATION" == "debug" || "$TARGET_ARCHS" == "x86_64" ]]; then
+    cp "$INTEL_BIN_DIR/$name" "$APP_BUNDLE/Contents/MacOS/$name"
+  else
+    lipo -create "$ARM_BIN_DIR/$name" "$INTEL_BIN_DIR/$name" -output "$APP_BUNDLE/Contents/MacOS/$name"
+  fi
+  chmod +x "$APP_BUNDLE/Contents/MacOS/$name"
+}
+
 if [[ "$CONFIGURATION" == "debug" || "$TARGET_ARCHS" == "x86_64" ]]; then
   cp "$INTEL_BIN_DIR/$APP_NAME" "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
   cp "$INTEL_BIN_DIR/AgentReinsNativeHost" "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
@@ -62,6 +72,9 @@ else
 fi
 chmod +x "$APP_BUNDLE/Contents/MacOS/$APP_NAME"
 chmod +x "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
+# Swift MCP + JSC alerts bridge — no system node/python required for Codex.
+copy_helper AgentReinsAlertsBridge
+copy_helper AgentReinsMCP
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
 cp "$INTEL_BIN_DIR/AgentReins_AgentReins.bundle/Resources/workbuddy_network_capture.py" \
   "$APP_BUNDLE/Contents/Resources/"
@@ -73,14 +86,15 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/agentreins-mcp"
 cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
    "$PROJECT_DIR/tools/agentreins-mcp/evidence.py" \
    "$PROJECT_DIR/tools/agentreins-mcp/alerts_bridge.cjs" \
+   "$PROJECT_DIR/tools/redact_secrets.py" \
    "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
    "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
-# Point Codex example at the packaged server path placeholder.
+# Point Codex at the packaged Swift MCP (no system python/node).
 printf '%s\n' \
   '# Packaged with AgentReins.app — replace APP with the installed bundle path.' \
+  '# Swift MCP embeds JavaScriptCore rules; no system node/python required.' \
   '[mcp_servers.agentreins]' \
-  'command = "python3"' \
-  'args = ["APP/Contents/Resources/agentreins-mcp/server.py"]' \
+  'command = "APP/Contents/MacOS/AgentReinsMCP"' \
   > "$APP_BUNDLE/Contents/Resources/agentreins-mcp/codex-config.example.toml"
 
 cat > "$APP_BUNDLE/Contents/Info.plist" <<EOF

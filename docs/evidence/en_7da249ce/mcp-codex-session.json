@@ -1,0 +1,457 @@
+{
+  "engine": "AgentReinsMCP-swift",
+  "stderr": "",
+  "messages": [
+    {
+      "id": 1,
+      "jsonrpc": "2.0",
+      "result": {
+        "capabilities": {
+          "tools": {
+            "listChanged": false
+          }
+        },
+        "instructions": "Read-only AgentReins supervisor MCP (Swift, no system node/python).",
+        "protocolVersion": "2024-11-05",
+        "serverInfo": {
+          "name": "agentreins-supervisor",
+          "version": "0.2.0-swift"
+        }
+      }
+    },
+    {
+      "id": 2,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"alerts\" : [\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"b465cbf1-118f-4388-a532-f108bd255720\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"b465cbf1-118f-4388-a532-f108bd255720\",\n      \"id\" : \"S04:b465cbf1-118f-4388-a532-f108bd255720:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:59:41.954069+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"e4c35e5c-bbe1-48f6-9639-742c7b390e8a\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"e4c35e5c-bbe1-48f6-9639-742c7b390e8a\",\n      \"id\" : \"S04:e4c35e5c-bbe1-48f6-9639-742c7b390e8a:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:59:40.984632+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"84000323-8e9e-48f4-b1d0-a9f3f064e451\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"84000323-8e9e-48f4-b1d0-a9f3f064e451\",\n      \"id\" : \"S04:84000323-8e9e-48f4-b1d0-a9f3f064e451:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:59:40.020274+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"5c34ce5a-c430-458d-9d65-92e581f1f540\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"5c34ce5a-c430-458d-9d65-92e581f1f540\",\n      \"id\" : \"S07:5c34ce5a-c430-458d-9d65-92e581f1f540\",\n      \"rule\" : \"S07\",\n      \"session\" : \"en7da249ce-s03-1792558759\",\n      \"sub\" : \"curl · httpbin.org · 后端 auditBypass\",\n      \"timestamp\" : \"2026-10-21T04:59:23.341203+00:00\",\n      \"title\" : \"命令绕过了审计代理\",\n      \"why\" : \"后端写入了 auditBypass=true。前端不根据 --noproxy 等参数自行推断。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"5c34ce5a-c430-458d-9d65-92e581f1f540\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"5c34ce5a-c430-458d-9d65-92e581f1f540\",\n      \"id\" : \"S04:5c34ce5a-c430-458d-9d65-92e581f1f540:httpbin.org\",\n      \"rule\" : \"S04\",\n      \"session\" : \"en7da249ce-s03-1792558759\",\n      \"sub\" : \"curl · httpbin.org\",\n      \"timestamp\" : \"2026-10-21T04:59:23.341203+00:00\",\n      \"title\" : \"外联非白名单主机 httpbin.org\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"84b62cd9-65ea-4e37-bfa8-49a0f23601d9\",\n      \"confidence\" : \"Correlated\",\n      \"evidence\" : {\n        \"downloadCall\" : \"70852a9f-69df-4c12-9096-cec993305b7a\",\n        \"downloadPID\" : 64058,\n        \"dtSec\" : 2,\n        \"execCall\" : \"84b62cd9-65ea-4e37-bfa8-49a0f23601d9\",\n        \"hashMatch\" : false,\n        \"lineage\" : false,\n        \"parentPID\" : 64015,\n        \"path\" : \"\\/Users\\/jatsmith\\/Library\\/Application Support\\/AgentGuard\\/en_7da249ce-evidence\\/s03-downloaded.sh\"\n      },\n      \"executionId\" : \"84b62cd9-65ea-4e37-bfa8-49a0f23601d9\",\n      \"id\" : \"S03:70852a9f-69df-4c12-9096-cec993305b7a:s03-downloaded.sh\",\n      \"rule\" : \"S03\",\n      \"session\" : \"en7da249ce-s03-1792558759\",\n      \"sub\" : \"s03-downloaded.sh · SHA-256 c9ec28a9a2a8…\",\n      \"timestamp\" : \"2026-10-21T04:59:23.006518+00:00\",\n      \"title\" : \"下载后在 5 分钟内执行\",\n      \"why\" : \"分级依据 Correlated：路径对上且同 shell 会话链（下载 pid 64058 · 执行 parentPID 64015，Δt 2s）。下载 70852a9f-69df-4c12-9096-cec993305b7a · 命令 84b62cd9-65ea-4e37-bfa8-49a0f23601d9。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"84b62cd9-65ea-4e37-bfa8-49a0f23601d9\",\n      \"confidence\" : \"Correlated\",\n      \"evidence\" : {\n        \"downloadCall\" : \"3ad933a4-6170-4ef7-9b6b-995ffbbfc925\",\n        \"downloadPID\" : 64052,\n        \"dtSec\" : 4,\n        \"execCall\" : \"84b62cd9-65ea-4e37-bfa8-49a0f23601d9\",\n        \"hashMatch\" : false,\n        \"lineage\" : false,\n        \"parentPID\" : 64015,\n        \"path\" : \"\\/Users\\/jatsmith\\/Library\\/Application Support\\/AgentGuard\\/en_7da249ce-evidence\\/s03-downloaded.sh\"\n      },\n      \"executionId\" : \"84b62cd9-65ea-4e37-bfa8-49a0f23601d9\",\n      \"id\" : \"S03:3ad933a4-6170-4ef7-9b6b-995ffbbfc925:s03-downloaded.sh\",\n      \"rule\" : \"S03\",\n      \"session\" : \"en7da249ce-s03-1792558759\",\n      \"sub\" : \"s03-downloaded.sh · SHA-256 c9ec28a9a2a8…\",\n      \"timestamp\" : \"2026-10-21T04:59:23.006518+00:00\",\n      \"title\" : \"下载后在 5 分钟内执行\",\n      \"why\" : \"分级依据 Correlated：路径对上且同 shell 会话链（下载 pid 64052 · 执行 parentPID 64015，Δt 4s）。下载 3ad933a4-6170-4ef7-9b6b-995ffbbfc925 · 命令 84b62cd9-65ea-4e37-bfa8-49a0f23601d9。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"70852a9f-69df-4c12-9096-cec993305b7a\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"70852a9f-69df-4c12-9096-cec993305b7a\",\n      \"id\" : \"S04:70852a9f-69df-4c12-9096-cec993305b7a:httpbin.org\",\n      \"rule\" : \"S04\",\n      \"session\" : \"en7da249ce-s03-1792558759\",\n      \"sub\" : \"curl · httpbin.org\",\n      \"timestamp\" : \"2026-10-21T04:59:20.847527+00:00\",\n      \"title\" : \"外联非白名单主机 httpbin.org\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"3ad933a4-6170-4ef7-9b6b-995ffbbfc925\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"3ad933a4-6170-4ef7-9b6b-995ffbbfc925\",\n      \"id\" : \"S04:3ad933a4-6170-4ef7-9b6b-995ffbbfc925:httpbin.org\",\n      \"rule\" : \"S04\",\n      \"session\" : \"en7da249ce-s03-1792558759\",\n      \"sub\" : \"curl · httpbin.org\",\n      \"timestamp\" : \"2026-10-21T04:59:19.404486+00:00\",\n      \"title\" : \"外联非白名单主机 httpbin.org\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"f35d7a24-8b96-4247-a1ec-cb008d7d51c3\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"f35d7a24-8b96-4247-a1ec-cb008d7d51c3\",\n      \"id\" : \"S04:f35d7a24-8b96-4247-a1ec-cb008d7d51c3:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:59:17.474980+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"e5072fbf-4e08-4fc5-ba7f-4372b50b7f79\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"e5072fbf-4e08-4fc5-ba7f-4372b50b7f79\",\n      \"id\" : \"S04:e5072fbf-4e08-4fc5-ba7f-4372b50b7f79:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:59:04.880869+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"28f73d7f-f74b-4113-ab01-0b3f579e528a\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"28f73d7f-f74b-4113-ab01-0b3f579e528a\",\n      \"id\" : \"S04:28f73d7f-f74b-4113-ab01-0b3f579e528a:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:59:03.729484+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"547ab71e-d059-43d6-9e51-33e345a8faf4\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"547ab71e-d059-43d6-9e51-33e345a8faf4\",\n      \"id\" : \"S04:547ab71e-d059-43d6-9e51-33e345a8faf4:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:58:55.611657+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"a09bcc8c-747f-4dc1-beea-aaf06237f835\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"a09bcc8c-747f-4dc1-beea-aaf06237f835\",\n      \"id\" : \"S04:a09bcc8c-747f-4dc1-beea-aaf06237f835:www.chuhaijian.com\",\n      \"rule\" : \"S04\",\n      \"session\" : \"4a34ea12-5df7-4aea-9f35-c06c32faffd3\",\n      \"sub\" : \"curl · www.chuhaijian.com\",\n      \"timestamp\" : \"2026-10-21T04:58:50.066285+00:00\",\n      \"title\" : \"外联非白名单主机 www.chuhaijian.com\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"75d4954b-29e6-4667-b7f4-a747dbafae80\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"75d4954b-29e6-4667-b7f4-a747dbafae80\",\n      \"id\" : \"S07:75d4954b-29e6-4667-b7f4-a747dbafae80\",\n      \"rule\" : \"S07\",\n      \"session\" : \"7bb20cc2-5dec-4183-80de-0c3e8551070b\",\n      \"sub\" : \"curl · httpbin.org · 后端 auditBypass\",\n      \"timestamp\" : \"2026-10-20T21:44:39.394592+00:00\",\n      \"title\" : \"命令绕过了审计代理\",\n      \"why\" : \"后端写入了 auditBypass=true。前端不根据 --noproxy 等参数自行推断。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"75d4954b-29e6-4667-b7f4-a747dbafae80\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"75d4954b-29e6-4667-b7f4-a747dbafae80\",\n      \"id\" : \"S04:75d4954b-29e6-4667-b7f4-a747dbafae80:httpbin.org\",\n      \"rule\" : \"S04\",\n      \"session\" : \"7bb20cc2-5dec-4183-80de-0c3e8551070b\",\n      \"sub\" : \"curl · httpbin.org\",\n      \"timestamp\" : \"2026-10-20T21:44:39.394592+00:00\",\n      \"title\" : \"外联非白名单主机 httpbin.org\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"6d76f94f-ffd3-4b2d-9600-b053161d2c39\",\n      \"confidence\" : \"Correlated\",\n      \"evidence\" : {\n        \"downloadCall\" : \"a1dd5ddb-2859-4654-b274-da1bcd7b452c\",\n        \"downloadPID\" : 3910,\n        \"dtSec\" : 2,\n        \"execCall\" : \"6d76f94f-ffd3-4b2d-9600-b053161d2c39\",\n        \"hashMatch\" : false,\n        \"lineage\" : false,\n        \"parentPID\" : 3900,\n        \"path\" : \"\\/Users\\/jatsmith\\/Library\\/Application Support\\/AgentGuard\\/en_f27b746b-evidence\\/s03-downloaded.sh\"\n      },\n      \"executionId\" : \"6d76f94f-ffd3-4b2d-9600-b053161d2c39\",\n      \"id\" : \"S03:a1dd5ddb-2859-4654-b274-da1bcd7b452c:s03-downloaded.sh\",\n      \"rule\" : \"S03\",\n      \"session\" : \"7bb20cc2-5dec-4183-80de-0c3e8551070b\",\n      \"sub\" : \"s03-downloaded.sh · SHA-256 c1fdfb85edd1…\",\n      \"timestamp\" : \"2026-10-20T21:44:38.970155+00:00\",\n      \"title\" : \"下载后在 5 分钟内执行\",\n      \"why\" : \"分级依据 Correlated：路径对上且同 shell 会话链（下载 pid 3910 · 执行 parentPID 3900，Δt 2s）。下载 a1dd5ddb-2859-4654-b274-da1bcd7b452c · 命令 6d76f94f-ffd3-4b2d-9600-b053161d2c39。\"\n    },\n    {\n      \"agent\" : \"Cursor\",\n      \"call\" : \"a1dd5ddb-2859-4654-b274-da1bcd7b452c\",\n      \"confidence\" : \"Observed\",\n      \"evidence\" : null,\n      \"executionId\" : \"a1dd5ddb-2859-4654-b274-da1bcd7b452c\",\n      \"id\" : \"S04:a1dd5ddb-2859-4654-b274-da1bcd7b452c:httpbin.org\",\n      \"rule\" : \"S04\",\n      \"session\" : \"7bb20cc2-5dec-4183-80de-0c3e8551070b\",\n      \"sub\" : \"curl · httpbin.org\",\n      \"timestamp\" : \"2026-10-20T21:44:36.822725+00:00\",\n      \"title\" : \"外联非白名单主机 httpbin.org\",\n      \"why\" : \"目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。\"\n    }\n  ],\n  \"confidence\" : \"Observed\",\n  \"engine\" : \"swift-jsc-bridge\",\n  \"note\" : \"告警由本机运输审计 + 与 App 相同的 risk-alerts.js（JavaScriptCore）推导。\"\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false,
+        "structuredContent": {
+          "alerts": [
+            {
+              "agent": "Cursor",
+              "call": "b465cbf1-118f-4388-a532-f108bd255720",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "b465cbf1-118f-4388-a532-f108bd255720",
+              "id": "S04:b465cbf1-118f-4388-a532-f108bd255720:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:59:41.954069+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "e4c35e5c-bbe1-48f6-9639-742c7b390e8a",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "e4c35e5c-bbe1-48f6-9639-742c7b390e8a",
+              "id": "S04:e4c35e5c-bbe1-48f6-9639-742c7b390e8a:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:59:40.984632+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "84000323-8e9e-48f4-b1d0-a9f3f064e451",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "84000323-8e9e-48f4-b1d0-a9f3f064e451",
+              "id": "S04:84000323-8e9e-48f4-b1d0-a9f3f064e451:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:59:40.020274+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "5c34ce5a-c430-458d-9d65-92e581f1f540",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "5c34ce5a-c430-458d-9d65-92e581f1f540",
+              "id": "S07:5c34ce5a-c430-458d-9d65-92e581f1f540",
+              "rule": "S07",
+              "session": "en7da249ce-s03-1792558759",
+              "sub": "curl · httpbin.org · 后端 auditBypass",
+              "timestamp": "2026-10-21T04:59:23.341203+00:00",
+              "title": "命令绕过了审计代理",
+              "why": "后端写入了 auditBypass=true。前端不根据 --noproxy 等参数自行推断。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "5c34ce5a-c430-458d-9d65-92e581f1f540",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "5c34ce5a-c430-458d-9d65-92e581f1f540",
+              "id": "S04:5c34ce5a-c430-458d-9d65-92e581f1f540:httpbin.org",
+              "rule": "S04",
+              "session": "en7da249ce-s03-1792558759",
+              "sub": "curl · httpbin.org",
+              "timestamp": "2026-10-21T04:59:23.341203+00:00",
+              "title": "外联非白名单主机 httpbin.org",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+              "confidence": "Correlated",
+              "evidence": {
+                "downloadCall": "70852a9f-69df-4c12-9096-cec993305b7a",
+                "downloadPID": 64058,
+                "dtSec": 2,
+                "execCall": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+                "hashMatch": false,
+                "lineage": false,
+                "parentPID": 64015,
+                "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh"
+              },
+              "executionId": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+              "id": "S03:70852a9f-69df-4c12-9096-cec993305b7a:s03-downloaded.sh",
+              "rule": "S03",
+              "session": "en7da249ce-s03-1792558759",
+              "sub": "s03-downloaded.sh · SHA-256 c9ec28a9a2a8…",
+              "timestamp": "2026-10-21T04:59:23.006518+00:00",
+              "title": "下载后在 5 分钟内执行",
+              "why": "分级依据 Correlated：路径对上且同 shell 会话链（下载 pid 64058 · 执行 parentPID 64015，Δt 2s）。下载 70852a9f-69df-4c12-9096-cec993305b7a · 命令 84b62cd9-65ea-4e37-bfa8-49a0f23601d9。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+              "confidence": "Correlated",
+              "evidence": {
+                "downloadCall": "3ad933a4-6170-4ef7-9b6b-995ffbbfc925",
+                "downloadPID": 64052,
+                "dtSec": 4,
+                "execCall": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+                "hashMatch": false,
+                "lineage": false,
+                "parentPID": 64015,
+                "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_7da249ce-evidence/s03-downloaded.sh"
+              },
+              "executionId": "84b62cd9-65ea-4e37-bfa8-49a0f23601d9",
+              "id": "S03:3ad933a4-6170-4ef7-9b6b-995ffbbfc925:s03-downloaded.sh",
+              "rule": "S03",
+              "session": "en7da249ce-s03-1792558759",
+              "sub": "s03-downloaded.sh · SHA-256 c9ec28a9a2a8…",
+              "timestamp": "2026-10-21T04:59:23.006518+00:00",
+              "title": "下载后在 5 分钟内执行",
+              "why": "分级依据 Correlated：路径对上且同 shell 会话链（下载 pid 64052 · 执行 parentPID 64015，Δt 4s）。下载 3ad933a4-6170-4ef7-9b6b-995ffbbfc925 · 命令 84b62cd9-65ea-4e37-bfa8-49a0f23601d9。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "70852a9f-69df-4c12-9096-cec993305b7a",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "70852a9f-69df-4c12-9096-cec993305b7a",
+              "id": "S04:70852a9f-69df-4c12-9096-cec993305b7a:httpbin.org",
+              "rule": "S04",
+              "session": "en7da249ce-s03-1792558759",
+              "sub": "curl · httpbin.org",
+              "timestamp": "2026-10-21T04:59:20.847527+00:00",
+              "title": "外联非白名单主机 httpbin.org",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "3ad933a4-6170-4ef7-9b6b-995ffbbfc925",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "3ad933a4-6170-4ef7-9b6b-995ffbbfc925",
+              "id": "S04:3ad933a4-6170-4ef7-9b6b-995ffbbfc925:httpbin.org",
+              "rule": "S04",
+              "session": "en7da249ce-s03-1792558759",
+              "sub": "curl · httpbin.org",
+              "timestamp": "2026-10-21T04:59:19.404486+00:00",
+              "title": "外联非白名单主机 httpbin.org",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "f35d7a24-8b96-4247-a1ec-cb008d7d51c3",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "f35d7a24-8b96-4247-a1ec-cb008d7d51c3",
+              "id": "S04:f35d7a24-8b96-4247-a1ec-cb008d7d51c3:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:59:17.474980+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "e5072fbf-4e08-4fc5-ba7f-4372b50b7f79",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "e5072fbf-4e08-4fc5-ba7f-4372b50b7f79",
+              "id": "S04:e5072fbf-4e08-4fc5-ba7f-4372b50b7f79:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:59:04.880869+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "28f73d7f-f74b-4113-ab01-0b3f579e528a",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "28f73d7f-f74b-4113-ab01-0b3f579e528a",
+              "id": "S04:28f73d7f-f74b-4113-ab01-0b3f579e528a:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:59:03.729484+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "547ab71e-d059-43d6-9e51-33e345a8faf4",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "547ab71e-d059-43d6-9e51-33e345a8faf4",
+              "id": "S04:547ab71e-d059-43d6-9e51-33e345a8faf4:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:58:55.611657+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "a09bcc8c-747f-4dc1-beea-aaf06237f835",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "a09bcc8c-747f-4dc1-beea-aaf06237f835",
+              "id": "S04:a09bcc8c-747f-4dc1-beea-aaf06237f835:www.chuhaijian.com",
+              "rule": "S04",
+              "session": "4a34ea12-5df7-4aea-9f35-c06c32faffd3",
+              "sub": "curl · www.chuhaijian.com",
+              "timestamp": "2026-10-21T04:58:50.066285+00:00",
+              "title": "外联非白名单主机 www.chuhaijian.com",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "75d4954b-29e6-4667-b7f4-a747dbafae80",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "75d4954b-29e6-4667-b7f4-a747dbafae80",
+              "id": "S07:75d4954b-29e6-4667-b7f4-a747dbafae80",
+              "rule": "S07",
+              "session": "7bb20cc2-5dec-4183-80de-0c3e8551070b",
+              "sub": "curl · httpbin.org · 后端 auditBypass",
+              "timestamp": "2026-10-20T21:44:39.394592+00:00",
+              "title": "命令绕过了审计代理",
+              "why": "后端写入了 auditBypass=true。前端不根据 --noproxy 等参数自行推断。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "75d4954b-29e6-4667-b7f4-a747dbafae80",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "75d4954b-29e6-4667-b7f4-a747dbafae80",
+              "id": "S04:75d4954b-29e6-4667-b7f4-a747dbafae80:httpbin.org",
+              "rule": "S04",
+              "session": "7bb20cc2-5dec-4183-80de-0c3e8551070b",
+              "sub": "curl · httpbin.org",
+              "timestamp": "2026-10-20T21:44:39.394592+00:00",
+              "title": "外联非白名单主机 httpbin.org",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "6d76f94f-ffd3-4b2d-9600-b053161d2c39",
+              "confidence": "Correlated",
+              "evidence": {
+                "downloadCall": "a1dd5ddb-2859-4654-b274-da1bcd7b452c",
+                "downloadPID": 3910,
+                "dtSec": 2,
+                "execCall": "6d76f94f-ffd3-4b2d-9600-b053161d2c39",
+                "hashMatch": false,
+                "lineage": false,
+                "parentPID": 3900,
+                "path": "/Users/jatsmith/Library/Application Support/AgentGuard/en_f27b746b-evidence/s03-downloaded.sh"
+              },
+              "executionId": "6d76f94f-ffd3-4b2d-9600-b053161d2c39",
+              "id": "S03:a1dd5ddb-2859-4654-b274-da1bcd7b452c:s03-downloaded.sh",
+              "rule": "S03",
+              "session": "7bb20cc2-5dec-4183-80de-0c3e8551070b",
+              "sub": "s03-downloaded.sh · SHA-256 c1fdfb85edd1…",
+              "timestamp": "2026-10-20T21:44:38.970155+00:00",
+              "title": "下载后在 5 分钟内执行",
+              "why": "分级依据 Correlated：路径对上且同 shell 会话链（下载 pid 3910 · 执行 parentPID 3900，Δt 2s）。下载 a1dd5ddb-2859-4654-b274-da1bcd7b452c · 命令 6d76f94f-ffd3-4b2d-9600-b053161d2c39。"
+            },
+            {
+              "agent": "Cursor",
+              "call": "a1dd5ddb-2859-4654-b274-da1bcd7b452c",
+              "confidence": "Observed",
+              "evidence": null,
+              "executionId": "a1dd5ddb-2859-4654-b274-da1bcd7b452c",
+              "id": "S04:a1dd5ddb-2859-4654-b274-da1bcd7b452c:httpbin.org",
+              "rule": "S04",
+              "session": "7bb20cc2-5dec-4183-80de-0c3e8551070b",
+              "sub": "curl · httpbin.org",
+              "timestamp": "2026-10-20T21:44:36.822725+00:00",
+              "title": "外联非白名单主机 httpbin.org",
+              "why": "目的地不在默认可信名单。白名单可在本机策略里扩展（当前为内置默认）。"
+            }
+          ],
+          "confidence": "Observed",
+          "engine": "swift-jsc-bridge",
+          "note": "告警由本机运输审计 + 与 App 相同的 risk-alerts.js（JavaScriptCore）推导。"
+        }
+      }
+    },
+    {
+      "id": 3,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"confidence\" : \"Observed\",\n  \"evidenceIntegrity\" : {\n    \"confidence\" : \"Observed\",\n    \"deletedOrGap\" : [\n\n    ],\n    \"entriesChecked\" : 4,\n    \"legacyPathPolicy\" : \"never_read_\\/private\\/tmp\",\n    \"mode\" : \"keyed-HMAC-SHA256 append-only + seal + evidence MAC\",\n    \"ok\" : false,\n    \"tampered\" : [\n      {\n        \"index\" : 0,\n        \"reason\" : \"mac_mismatch\"\n      },\n      {\n        \"index\" : 1,\n        \"reason\" : \"mac_mismatch\"\n      }\n    ]\n  },\n  \"legacyPathPolicy\" : \"never_read_\\/private\\/tmp\",\n  \"rules\" : [\n    {\n      \"confidence\" : \"Unknown\",\n      \"id\" : \"S01\",\n      \"status\" : \"blind\"\n    },\n    {\n      \"confidence\" : \"Correlated\",\n      \"id\" : \"S03\",\n      \"status\" : \"supported\"\n    },\n    {\n      \"confidence\" : \"Observed\",\n      \"id\" : \"S07\",\n      \"status\" : \"supported\"\n    }\n  ],\n  \"runtime\" : \"swift-mcp-no-system-node-python\",\n  \"transportRoot\" : \"\\/Users\\/jatsmith\\/Library\\/Application Support\\/AgentGuard\\/transport-audit\"\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false,
+        "structuredContent": {
+          "confidence": "Observed",
+          "evidenceIntegrity": {
+            "confidence": "Observed",
+            "deletedOrGap": [],
+            "entriesChecked": 4,
+            "legacyPathPolicy": "never_read_/private/tmp",
+            "mode": "keyed-HMAC-SHA256 append-only + seal + evidence MAC",
+            "ok": false,
+            "tampered": [
+              {
+                "index": 0,
+                "reason": "mac_mismatch"
+              },
+              {
+                "index": 1,
+                "reason": "mac_mismatch"
+              }
+            ]
+          },
+          "legacyPathPolicy": "never_read_/private/tmp",
+          "rules": [
+            {
+              "confidence": "Unknown",
+              "id": "S01",
+              "status": "blind"
+            },
+            {
+              "confidence": "Correlated",
+              "id": "S03",
+              "status": "supported"
+            },
+            {
+              "confidence": "Observed",
+              "id": "S07",
+              "status": "supported"
+            }
+          ],
+          "runtime": "swift-mcp-no-system-node-python",
+          "transportRoot": "/Users/jatsmith/Library/Application Support/AgentGuard/transport-audit"
+        }
+      }
+    },
+    {
+      "id": 4,
+      "jsonrpc": "2.0",
+      "result": {
+        "content": [
+          {
+            "text": "{\n  \"confidence\" : \"Observed\",\n  \"entries\" : [\n    {\n      \"actor\" : \"Codex\",\n      \"argsDigest\" : \"725cac9ad2512c8d2ad2738e\",\n      \"at\" : \"2026-10-20T22:12:23Z\",\n      \"hash\" : \"c9f66a55840ff20fc5130e21c2d810810630ef8e7ae3413cda39316f68c306f2\",\n      \"mac\" : \"e4a63714555514b61cd3cebcb39654502fe450650a6b0c7754b8617c43f17938\",\n      \"prevHash\" : \"0000000000000000000000000000000000000000000000000000000000000000\",\n      \"tool\" : \"list_alerts\"\n    },\n    {\n      \"actor\" : \"Codex\",\n      \"argsDigest\" : \"3804e3820a806bbdcc327f8a\",\n      \"at\" : \"2026-10-20T22:12:23Z\",\n      \"hash\" : \"b7d39499bda17b18a5037e94a58daab19e53ddd1c6e585fbc555102b10854682\",\n      \"mac\" : \"1038d0d3eb3a548767ebdf4543ed7d275a6035b31504649175f5934cc87601d5\",\n      \"prevHash\" : \"c9f66a55840ff20fc5130e21c2d810810630ef8e7ae3413cda39316f68c306f2\",\n      \"tool\" : \"list_mcp_audit\"\n    },\n    {\n      \"actor\" : \"Codex\",\n      \"argsDigest\" : \"47de5740772b3b7ed4eb4af6\",\n      \"at\" : \"2026-10-21T05:14:35Z\",\n      \"hash\" : \"78374d99f96771ccca84d9bade7147574b9ba2e80eb2d64858de01ca6d56bc34\",\n      \"mac\" : \"79e1d45acd07c2056062507dea7b78a672f8cc8007b10a4e7d07402897a953b3\",\n      \"prevHash\" : \"b7d39499bda17b18a5037e94a58daab19e53ddd1c6e585fbc555102b10854682\",\n      \"tool\" : \"list_alerts\"\n    },\n    {\n      \"actor\" : \"Codex\",\n      \"argsDigest\" : \"44136fa355b3678a1146ad16\",\n      \"at\" : \"2026-10-21T05:14:36Z\",\n      \"hash\" : \"2b1fd4b8b73fa37b0f44649de15679ddf0e24eaf92b61dfe9d8b4d81d9b9453f\",\n      \"mac\" : \"ab7f381da4d3cf6f301f7339ec06b5b6ba3aaedb2be49aa34dec2a579c5e6ea9\",\n      \"prevHash\" : \"78374d99f96771ccca84d9bade7147574b9ba2e80eb2d64858de01ca6d56bc34\",\n      \"tool\" : \"get_coverage\"\n    },\n    {\n      \"actor\" : \"Codex\",\n      \"argsDigest\" : \"a03c8657a575356de5937110\",\n      \"at\" : \"2026-10-21T05:14:36Z\",\n      \"hash\" : \"d2b43c8c3af1d7caa29b026f243e8a178d3fd4fc221c4b462f11fe475ec399d5\",\n      \"mac\" : \"afc86fa5bf3f8c68c3536c2b9f27d826e57e8ec647c098d45b30f984ecec25f3\",\n      \"prevHash\" : \"2b1fd4b8b73fa37b0f44649de15679ddf0e24eaf92b61dfe9d8b4d81d9b9453f\",\n      \"tool\" : \"list_mcp_audit\"\n    }\n  ],\n  \"validation\" : {\n    \"confidence\" : \"Observed\",\n    \"deletedOrGap\" : [\n\n    ],\n    \"entriesChecked\" : 5,\n    \"legacyPathPolicy\" : \"never_read_\\/private\\/tmp\",\n    \"mode\" : \"keyed-HMAC-SHA256 append-only + seal + evidence MAC\",\n    \"ok\" : false,\n    \"tampered\" : [\n      {\n        \"index\" : 0,\n        \"reason\" : \"mac_mismatch\"\n      },\n      {\n        \"index\" : 1,\n        \"reason\" : \"mac_mismatch\"\n      }\n    ]\n  }\n}",
+            "type": "text"
+          }
+        ],
+        "isError": false,
+        "structuredContent": {
+          "confidence": "Observed",
+          "entries": [
+            {
+              "actor": "Codex",
+              "argsDigest": "725cac9ad2512c8d2ad2738e",
+              "at": "2026-10-20T22:12:23Z",
+              "hash": "c9f66a55840ff20fc5130e21c2d810810630ef8e7ae3413cda39316f68c306f2",
+              "mac": "e4a63714555514b61cd3cebcb39654502fe450650a6b0c7754b8617c43f17938",
+              "prevHash": "0000000000000000000000000000000000000000000000000000000000000000",
+              "tool": "list_alerts"
+            },
+            {
+              "actor": "Codex",
+              "argsDigest": "3804e3820a806bbdcc327f8a",
+              "at": "2026-10-20T22:12:23Z",
+              "hash": "b7d39499bda17b18a5037e94a58daab19e53ddd1c6e585fbc555102b10854682",
+              "mac": "1038d0d3eb3a548767ebdf4543ed7d275a6035b31504649175f5934cc87601d5",
+              "prevHash": "c9f66a55840ff20fc5130e21c2d810810630ef8e7ae3413cda39316f68c306f2",
+              "tool": "list_mcp_audit"
+            },
+            {
+              "actor": "Codex",
+              "argsDigest": "47de5740772b3b7ed4eb4af6",
+              "at": "2026-10-21T05:14:35Z",
+              "hash": "78374d99f96771ccca84d9bade7147574b9ba2e80eb2d64858de01ca6d56bc34",
+              "mac": "79e1d45acd07c2056062507dea7b78a672f8cc8007b10a4e7d07402897a953b3",
+              "prevHash": "b7d39499bda17b18a5037e94a58daab19e53ddd1c6e585fbc555102b10854682",
+              "tool": "list_alerts"
+            },
+            {
+              "actor": "Codex",
+              "argsDigest": "44136fa355b3678a1146ad16",
+              "at": "2026-10-21T05:14:36Z",
+              "hash": "2b1fd4b8b73fa37b0f44649de15679ddf0e24eaf92b61dfe9d8b4d81d9b9453f",
+              "mac": "ab7f381da4d3cf6f301f7339ec06b5b6ba3aaedb2be49aa34dec2a579c5e6ea9",
+              "prevHash": "78374d99f96771ccca84d9bade7147574b9ba2e80eb2d64858de01ca6d56bc34",
+              "tool": "get_coverage"
+            },
+            {
+              "actor": "Codex",
+              "argsDigest": "a03c8657a575356de5937110",
+              "at": "2026-10-21T05:14:36Z",
+              "hash": "d2b43c8c3af1d7caa29b026f243e8a178d3fd4fc221c4b462f11fe475ec399d5",
+              "mac": "afc86fa5bf3f8c68c3536c2b9f27d826e57e8ec647c098d45b30f984ecec25f3",
+              "prevHash": "2b1fd4b8b73fa37b0f44649de15679ddf0e24eaf92b61dfe9d8b4d81d9b9453f",
+              "tool": "list_mcp_audit"
+            }
+          ],
+          "validation": {
+            "confidence": "Observed",
+            "deletedOrGap": [],
+            "entriesChecked": 5,
+            "legacyPathPolicy": "never_read_/private/tmp",
+            "mode": "keyed-HMAC-SHA256 append-only + seal + evidence MAC",
+            "ok": false,
+            "tampered": [
+              {
+                "index": 0,
+                "reason": "mac_mismatch"
+              },
+              {
+                "index": 1,
+                "reason": "mac_mismatch"
+              }
+            ]
+          }
+        }
+      }
+    }
+  ]
+}

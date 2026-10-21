@@ -297,14 +297,18 @@ final class RealtimeWorkspaceTests: XCTestCase {
             if contextText?.contains("XSS-PROBE-原文") == true { break }
             _ = try? await browser.evaluateJavaScript("document.querySelector('[data-select=user]')?.click(); document.querySelector('[data-flow-node=\"user\"]')?.dispatchEvent(new MouseEvent('click',{bubbles:true}))")
         }
-        // Exact XSS assertions: escaped probe text in detail-code; raw HTML must not contain the injection tag.
+        // Exact XSS assertions via the app's own esc / render path — no local copy of esc().
         XCTAssertEqual(contextText?.contains("XSS-PROBE-原文"), true, "detail-code must contain XSS probe text; got=\(contextText ?? "nil")")
         let rawHTML = try await browser.evaluateJavaScript("document.getElementById('detail-code')?.innerHTML || ''") as? String
         XCTAssertEqual(rawHTML?.contains("<img src=x"), false, "injection must be escaped in detail-code HTML")
         let escapedExact = try await browser.evaluateJavaScript(
-            #"(function(){const esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));return esc("<img src=x onerror='window.hacked=1'>XSS-PROBE-原文");})()"#
+            #"window.AgentReinsRisk.esc("<img src=x onerror='window.hacked=1'>XSS-PROBE-原文")"#
         ) as? String
         XCTAssertEqual(escapedExact, "&lt;img src=x onerror=&#39;window.hacked=1&#39;&gt;XSS-PROBE-原文")
+        let brokenWouldPass = try await browser.evaluateJavaScript(
+            #"(function(){const real=window.AgentReinsRisk.esc; window.AgentReinsRisk.esc=s=>String(s); let failed=false; try{ if(window.AgentReinsRisk.esc("<img>")!=="&lt;img&gt;") failed=true; }catch(e){failed=true;} window.AgentReinsRisk.esc=real; return failed;})()"#
+        ) as? Bool
+        XCTAssertEqual(brokenWouldPass, true, "deliberately breaking app esc must fail the exact assertion")
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=rules]')?.click()")
         try await Task.sleep(for: .milliseconds(200))
         let rulesBody = try await browser.evaluateJavaScript("document.body.innerHTML") as? String

@@ -3,14 +3,33 @@
 import datetime,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
 BASE=pathlib.Path(__file__).resolve().parent
 ENCRYPTED_TOOLS={'ssh','scp','sftp','rsync'}
+_TOOLS=BASE.parents[1]/'tools' if (BASE.parents[1]/'tools'/'redact_secrets.py').is_file() else BASE.parent
+# Prefer repo tools/redact_secrets.py; packaged MCP copy is a fallback.
+for _p in (BASE.parents[1]/'tools', BASE.parent, BASE):
+    if (_p/'redact_secrets.py').is_file() and str(_p) not in sys.path:
+        sys.path.insert(0, str(_p)); break
+from redact_secrets import redact_text  # noqa: E402
+
+def redact_argv(args):
+    """Redact argv so `-u` / `--user` followed by `user:pass` never land as plaintext on disk."""
+    out=[]; i=0; args=list(args)
+    while i < len(args):
+        a=str(args[i])
+        nxt=str(args[i+1]) if i+1 < len(args) else ''
+        if re.fullmatch(r'(?i)-uX?|--user|--username', a) and nxt and not nxt.startswith('-'):
+            joined=redact_text(a+' '+nxt)
+            # Prefer splitting back into two tokens when possible
+            parts=joined.split(' ',1)
+            out.append(parts[0][:500])
+            out.append((parts[1] if len(parts)>1 else '[userpass:REDACTED]')[:500])
+            i+=2; continue
+        if re.fullmatch(r'(?i)--password|-p', a) and nxt and not nxt.startswith('-'):
+            out.append(a); out.append('[password:REDACTED]'); i+=2; continue
+        out.append(redact_text(a)[:500]); i+=1
+    return out[:40]
 
 def entry_allowed(tool):
     return tool not in ('auto.py','') and re.fullmatch(r'[A-Za-z0-9._+-]{1,32}', tool) is not None
-
-def redact_text(text):
-    text=re.sub(r'(?i)(authorization:\s*(?:bearer|token|basic)\s+)\S+', r'\1[隐藏]', text)
-    text=re.sub(r'(?i)((?:password|secret|token|api[_-]?key)\s*[\"\']?\s*[:=]\s*[\"\']?)[^\s\"\',}]+', r'\1[隐藏]', text)
-    return text
 
 def flag_value(args, name):
     for index, arg in enumerate(args):
@@ -170,7 +189,7 @@ def main():
         provenance='test' if test_capture else (env.get('AGENTREINS_PROVENANCE') or 'live')
         manifest={'schema':1,'agent':agent,'tool':tool,'startedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
                   'launcherPID':os.getpid(),'parentPID':os.getppid(),'captureMode':'agent-path',
-                  'args':[redact_text(str(arg))[:500] for arg in args][:40],
+                  'args':redact_argv(args),
                   'task':None,'call':run.name,'codexThreadID':env.get('CODEX_THREAD_ID') if agent=='Codex' else None,'session':env.get('CODEX_THREAD_ID') if agent=='Codex' else env.get('CODEBUDDY_SESSION_ID') if agent=='WorkBuddy' else env.get('CURSOR_CONVERSATION_ID'),'nativeRequestID':env.get('CODEBUDDY_CONVERSATION_REQUEST_ID'),'nativeMessageID':env.get('CODEBUDDY_CONVERSATION_MESSAGE_ID'),'coverage':'PATH-resolved command; absolute paths and overwritten PATH bypass this entry',
                   'provenance':provenance,'testCapture':test_capture}
         env['AGENTREINS_TRANSPORT_CALL']=run.name

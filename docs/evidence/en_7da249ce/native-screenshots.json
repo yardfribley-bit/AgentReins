@@ -1,0 +1,6 @@
+{
+  "build" : "en7da249ce-snap-051008",
+  "method" : "AgentReins.app titled window + screencapture -l",
+  "note" : "Live transport evidence; UI selection only — no injected payload\/banner",
+  "version" : "0.0.0-en7da249ce"
+}

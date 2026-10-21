@@ -58,7 +58,12 @@ jobs:
           test -f AgentReins.app/Contents/Resources/agentreins-mcp/server.py
           test -f AgentReins.app/Contents/Resources/agentreins-mcp/evidence.py
           test -f AgentReins.app/Contents/Resources/agentreins-mcp/alerts_bridge.cjs
+          test -f AgentReins.app/Contents/Resources/agentreins-mcp/redact_secrets.py
           test -f AgentReins.app/Contents/Resources/RealtimeWorkspace/risk-alerts.js
+          test -x AgentReins.app/Contents/MacOS/AgentReinsMCP
+          test -x AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge
+          lipo -archs AgentReins.app/Contents/MacOS/AgentReinsMCP | grep arm64
+          lipo -archs AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge | grep x86_64
           echo "PACKAGED_MCP_OK=1"
 
       - name: Create CI artifact

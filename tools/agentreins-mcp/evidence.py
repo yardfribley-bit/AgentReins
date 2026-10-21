@@ -12,11 +12,18 @@ import os
 import pathlib
 import re
 import subprocess
+import sys
 import time
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent
 REPO = ROOT.parents[1]
+_TOOLS = REPO / "tools"
+for _p in (_TOOLS, ROOT):
+    if str(_p) not in sys.path:
+        sys.path.insert(0, str(_p))
+from redact_secrets import redact_obj, redact_text  # noqa: E402
+
 AUDIT_DIR = pathlib.Path.home() / "Library/Application Support/AgentGuard"
 DEFAULT_TRANSPORT = pathlib.Path(
     os.environ.get(
@@ -24,32 +31,29 @@ DEFAULT_TRANSPORT = pathlib.Path(
         str(AUDIT_DIR / "transport-audit"),
     )
 )
+# Legacy world-writable path — never trusted as primary evidence (Unknown / skipped).
 LEGACY_TRANSPORT = pathlib.Path("/private/tmp/agentreins-transport-audit")
 AUDIT_LOG = AUDIT_DIR / "mcp-supervisor-audit.jsonl"
+AUDIT_SEAL = AUDIT_DIR / "mcp-supervisor-audit.seal"
 HMAC_KEY_FILE = AUDIT_DIR / "mcp-supervisor-hmac.key"
 # Prefer packaged RealtimeWorkspace next to this MCP copy; fall back to repo Sources.
 _PACKAGED_JS = ROOT.parent / "RealtimeWorkspace"
 _REPO_JS = REPO / "Sources/AgentReins/Resources/RealtimeWorkspace"
 WORKSPACE_JS = _PACKAGED_JS if (_PACKAGED_JS / "risk-alerts.js").is_file() else _REPO_JS
 BRIDGE = ROOT / "alerts_bridge.cjs"
+# Packaged Swift/JSC bridge (no system node). Falls back to node only in repo dev.
+def _resolve_swift_bridge() -> pathlib.Path:
+    env = os.environ.get("AGENTREINS_ALERTS_BRIDGE")
+    if env:
+        return pathlib.Path(env)
+    packaged = ROOT.parent.parent / "MacOS" / "AgentReinsAlertsBridge"
+    if packaged.is_file():
+        return packaged
+    return ROOT / "AgentReinsAlertsBridge"
 
-# Per-class secret patterns — unit tests assert each original is absent after redact.
-RE_PASSWORD = re.compile(
-    r"(?i)((?:password|passwd|pwd)\s*[=:]\s*)([^\s'\"&,;]+)"
-)
-RE_USERPASS_FLAG = re.compile(
-    r"(?i)(-u|--user|--username)(\s+| =)(\S+:\S+)"
-)
-RE_AWS_AKIA = re.compile(r"\b(AKIA[0-9A-Z]{16})\b")
-RE_AWS_SECRET = re.compile(
-    r"(?i)((?:aws_)?secret(?:_?access)?_?key\s*[=:]\s*)([A-Za-z0-9/+=]{40})"
-)
-RE_BEARER = re.compile(r"(?i)(Bearer\s+)([A-Za-z0-9._\-+/=]{8,})")
-RE_URL_USERINFO = re.compile(r"(https?://)([^/\s:@]+):([^/\s@]+)@")
-RE_GENERIC_TOKEN = re.compile(
-    r"(?i)(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
-    r"api[_-]?key\s*[:=]\s*\S+|token\s*[:=]\s*\S+)"
-)
+
+SWIFT_BRIDGE = _resolve_swift_bridge()
+
 DEFAULT_ALLOW = {
     "github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
     "registry.npmjs.org", "registry.yarnpkg.com", "pypi.org", "files.pythonhosted.org",
@@ -64,51 +68,8 @@ def sha256_hex(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _mask(kind: str, raw: str) -> str:
-    return f"[{kind}:len={len(raw)}:sha256={sha256_hex(raw)[:12]}]"
-
-
-def redact_text(text: str) -> str:
-    """Redact password, -u user:pass, AWS AKIA/secret, Bearer, URL userinfo, and common tokens."""
-    if not text:
-        return text
-    out = text
-
-    def sub_password(m: re.Match[str]) -> str:
-        return m.group(1) + _mask("password", m.group(2))
-
-    def sub_userpass(m: re.Match[str]) -> str:
-        return m.group(1) + m.group(2) + _mask("userpass", m.group(3))
-
-    def sub_akia(m: re.Match[str]) -> str:
-        return _mask("aws_access_key", m.group(1))
-
-    def sub_aws_secret(m: re.Match[str]) -> str:
-        return m.group(1) + _mask("aws_secret", m.group(2))
-
-    def sub_bearer(m: re.Match[str]) -> str:
-        return m.group(1) + _mask("bearer", m.group(2))
-
-    def sub_userinfo(m: re.Match[str]) -> str:
-        return m.group(1) + _mask("url_userinfo", m.group(2) + ":" + m.group(3)) + "@"
-
-    def sub_generic(m: re.Match[str]) -> str:
-        raw = m.group(0)
-        kind = "credential"
-        if raw.startswith("sk-"):
-            kind = "api_key"
-        elif raw.startswith("ghp_") or raw.startswith("github_pat_"):
-            kind = "github_token"
-        return _mask(kind, raw)
-
-    out = RE_URL_USERINFO.sub(sub_userinfo, out)
-    out = RE_USERPASS_FLAG.sub(sub_userpass, out)
-    out = RE_PASSWORD.sub(sub_password, out)
-    out = RE_BEARER.sub(sub_bearer, out)
-    out = RE_AWS_AKIA.sub(sub_akia, out)
-    out = RE_AWS_SECRET.sub(sub_aws_secret, out)
-    out = RE_GENERIC_TOKEN.sub(sub_generic, out)
-    return out
+def sha256_bytes(data: bytes) -> str:
+    return hashlib.sha256(data).hexdigest()
 
 
 def is_test_capture(record: dict[str, Any]) -> bool:
@@ -129,22 +90,6 @@ def is_test_capture(record: dict[str, Any]) -> bool:
     if str(record.get("agent") or "") == "__test__":
         return True
     return False
-
-
-def redact_obj(value: Any) -> Any:
-    if isinstance(value, str):
-        return redact_text(value)
-    if isinstance(value, list):
-        return [redact_obj(v) for v in value]
-    if isinstance(value, dict):
-        out = {}
-        for key, item in value.items():
-            if key in ("textPreview", "request", "response", "blocks") or "secret" in key.lower():
-                out[key] = redact_obj(item)
-            else:
-                out[key] = redact_obj(item)
-        return out
-    return value
 
 
 def credential_finding_summary(finding: dict[str, Any]) -> dict[str, Any]:
@@ -221,16 +166,14 @@ def _load_transport_dir(root: pathlib.Path, limit: int) -> list[dict[str, Any]]:
 
 
 def load_transport_records(root: pathlib.Path | None = None, limit: int = 80) -> list[dict[str, Any]]:
+    """Load only the user-owned transport root. /private/tmp is not trusted and is skipped."""
     if root is not None:
+        resolved = root.resolve()
+        if str(resolved).startswith(str(LEGACY_TRANSPORT.resolve())) or str(resolved) == "/private/tmp" or str(resolved).startswith("/private/tmp/"):
+            # Explicit legacy path → return empty with Unknown (caller may surface warning).
+            return []
         return _load_transport_dir(root, limit)
-    primary = _load_transport_dir(DEFAULT_TRANSPORT, limit)
-    if str(DEFAULT_TRANSPORT.resolve()) == str(LEGACY_TRANSPORT.resolve()):
-        return primary
-    legacy = _load_transport_dir(LEGACY_TRANSPORT, limit)
-    by_id: dict[str, dict[str, Any]] = {}
-    for row in primary + legacy:
-        by_id.setdefault(str(row.get("runID")), row)
-    return sorted(by_id.values(), key=lambda r: str(r.get("startedAt") or ""), reverse=True)[:limit]
+    return _load_transport_dir(DEFAULT_TRANSPORT, limit)
 
 
 def host_of(record: dict[str, Any]) -> str | None:
@@ -305,17 +248,8 @@ def list_agents(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     }
 
 
-def build_alerts_via_bridge(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
-    """Return (alerts, meta). meta.engine is 'js-bridge' or 'python-fallback' with warning."""
-    meta: dict[str, Any] = {"engine": "js-bridge", "warning": None}
-    js_ok = BRIDGE.is_file() and (WORKSPACE_JS / "risk-alerts.js").is_file()
-    if not js_ok:
-        meta = {
-            "engine": "python-fallback",
-            "warning": "未加载与 App 相同的 JS 规则引擎（risk-alerts.js）；Python 回退可能缺少完整 S03 关联。",
-        }
-        return build_alerts_fallback(records), meta
-    payload = {
+def _bridge_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
+    return {
         "tasks": [],
         "collected": [],
         "health": [],
@@ -346,30 +280,52 @@ def build_alerts_via_bridge(records: list[dict[str, Any]]) -> tuple[list[dict[st
             if not is_test_capture(r)
         ],
     }
-    try:
-        proc = subprocess.run(
-            ["node", str(BRIDGE)],
-            input=json.dumps(payload),
-            text=True,
-            capture_output=True,
-            timeout=20,
-            cwd=str(ROOT),
-            env={**os.environ, "AGENTREINS_WORKSPACE_JS": str(WORKSPACE_JS)},
-        )
-        if proc.returncode != 0:
-            meta = {
-                "engine": "python-fallback",
-                "warning": f"JS 规则桥接失败（exit {proc.returncode}）；已显式回退，结果可能不完整。stderr={proc.stderr[:200]}",
-            }
-            return build_alerts_fallback(records), meta
-        data = json.loads(proc.stdout)
-        return data.get("alerts") or [], meta
-    except (OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+
+
+def build_alerts_via_bridge(records: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Return (alerts, meta). Prefer packaged Swift/JSC bridge (no system node); else node; else Python fallback."""
+    meta: dict[str, Any] = {"engine": "js-bridge", "warning": None}
+    js_ok = (WORKSPACE_JS / "risk-alerts.js").is_file()
+    payload = _bridge_payload(records)
+    payload_text = json.dumps(payload)
+
+    def _run(cmd: list[str], engine: str) -> tuple[list[dict[str, Any]], dict[str, Any]] | None:
+        try:
+            proc = subprocess.run(
+                cmd,
+                input=payload_text,
+                text=True,
+                capture_output=True,
+                timeout=20,
+                cwd=str(ROOT),
+                env={**os.environ, "AGENTREINS_WORKSPACE_JS": str(WORKSPACE_JS)},
+            )
+            if proc.returncode != 0:
+                return None
+            data = json.loads(proc.stdout)
+            return data.get("alerts") or [], {"engine": engine, "warning": None}
+        except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
+            return None
+
+    if js_ok and SWIFT_BRIDGE.is_file() and os.access(SWIFT_BRIDGE, os.X_OK):
+        hit = _run([str(SWIFT_BRIDGE)], "swift-jsc-bridge")
+        if hit:
+            return hit
+    if js_ok and BRIDGE.is_file():
+        # Dev / CI may still have node; packaged app prefers Swift bridge above.
+        hit = _run(["node", str(BRIDGE)], "js-bridge")
+        if hit:
+            return hit
         meta = {
             "engine": "python-fallback",
-            "warning": f"JS 规则桥接异常，已显式回退：{type(exc).__name__}",
+            "warning": "JS 规则桥接失败；已显式回退，结果可能不完整。",
         }
         return build_alerts_fallback(records), meta
+    meta = {
+        "engine": "python-fallback",
+        "warning": "未加载与 App 相同的 JS 规则引擎（risk-alerts.js）；Python 回退可能缺少完整 S03 关联。",
+    }
+    return build_alerts_fallback(records), meta
 
 
 def conf_label(kind: str | None) -> str:
@@ -461,10 +417,12 @@ def build_alerts_fallback(records: list[dict[str, Any]]) -> list[dict[str, Any]]
                 downloads.append((r, d))
         tool = str(r.get("tool") or "")
         cmd = " ".join([tool] + [str(a) for a in (r.get("args") or [])])
-        if tool in ("chmod", "sh", "bash", "open") or re.search(
-            r"chmod\s+\+x|/bin/(ba)?sh\b|\bsh\b|\bbash\b", cmd
+        if tool in ("sh", "bash", "open") or re.search(
+            r"/bin/(ba)?sh\b|(?:^|[\s;|&])sh\s+|\bbash\b|\bopen\s+", cmd
         ):
-            if not (r.get("downloads") or []):
+            if tool == "chmod" or re.match(r"^\s*chmod\b", cmd):
+                pass
+            elif not (r.get("downloads") or []):
                 execs.append(r)
     for dl_rec, d in downloads:
         full = str(d.get("path"))
@@ -484,21 +442,37 @@ def build_alerts_fallback(records: list[dict[str, Any]]) -> list[dict[str, Any]]
             dt = end - start
             if dt < 0 or dt > 300:
                 continue
+            tool = str(ex.get("tool") or "")
+            if tool == "chmod" or re.match(r"^\s*chmod\b", cmd):
+                continue  # chmod is not execution
             lineage = dl_rec.get("pid") and ex.get("parentPID") and str(dl_rec.get("pid")) == str(ex.get("parentPID"))
+            hash_hit = False
+            dl_sha = str(d.get("sha256") or "").lower()
+            ex_sha = str(ex.get("sha256") or (ex.get("fileResult") or {}).get("sha256") or "").lower()
+            if dl_sha and ex_sha and dl_sha == ex_sha:
+                hash_hit = True
+            conf = "Correlated" if lineage or hash_hit else "Inferred"
             alerts.append(
                 {
-                    "id": f"S03:{dl_rec.get('call')}:{name}:{ex.get('call')}",
+                    "id": f"S03:{dl_rec.get('call')}:{name}",
                     "rule": "S03",
                     "title": "下载后在 5 分钟内执行",
                     "agent": dl_rec.get("agent"),
                     "session": dl_rec.get("session"),
                     "call": ex.get("call") or dl_rec.get("call"),
-                    "confidence": "Correlated" if lineage or ex.get("tool") in ("chmod", "sh", "bash") else "Inferred",
+                    "confidence": conf,
                     "timestamp": ex.get("startedAt"),
                     "sub": name,
+                    "why": (
+                        f"分级依据 {conf}：lineage={bool(lineage)} hashMatch={hash_hit} Δt={int(dt)}s"
+                    ),
                 }
             )
-    return alerts
+    # Dedupe by id keep last
+    by_id: dict[str, dict[str, Any]] = {}
+    for a in alerts:
+        by_id[str(a.get("id"))] = a
+    return list(by_id.values())
 
 
 def list_alerts(
@@ -716,14 +690,84 @@ def entry_hmac(entry_body: dict[str, Any], key: bytes) -> str:
     return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
+def evidence_file_mac(path: pathlib.Path, key: bytes) -> str:
+    data = path.read_bytes()
+    return hmac.new(key, data, hashlib.sha256).hexdigest()
+
+
+def sign_evidence_tree(root: pathlib.Path | None = None) -> dict[str, Any]:
+    """HMAC-sign transport.json + manifest.json under the user transport root."""
+    ensure_audit_dir()
+    key = load_or_create_hmac_key()
+    base = root or DEFAULT_TRANSPORT
+    signed = 0
+    for path in list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json")):
+        mac = evidence_file_mac(path, key)
+        mac_path = path.with_suffix(path.suffix + ".mac")
+        mac_path.write_text(mac + "\n", encoding="utf-8")
+        try:
+            os.chmod(mac_path, 0o600)
+        except OSError:
+            pass
+        signed += 1
+    return {"signedFiles": signed, "root": str(base)}
+
+
+def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
+    """Detect tampering of transport/manifest evidence (missing or bad MAC after signing era)."""
+    ensure_audit_dir()
+    key = load_or_create_hmac_key()
+    base = root or DEFAULT_TRANSPORT
+    result: dict[str, Any] = {
+        "ok": True,
+        "checked": 0,
+        "tampered": [],
+        "missingMac": [],
+        "confidence": "Observed",
+    }
+    if not base.is_dir():
+        result["note"] = "无运输审计目录"
+        return result
+    files = list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json"))
+    any_mac = any(p.with_suffix(p.suffix + ".mac").is_file() for p in files)
+    for path in files:
+        result["checked"] += 1
+        mac_path = path.with_suffix(path.suffix + ".mac")
+        if not mac_path.is_file():
+            if any_mac:
+                result["ok"] = False
+                result["missingMac"].append(str(path))
+                result["tampered"].append({"path": str(path), "reason": "missing_mac_after_signed_era"})
+            continue
+        expected = mac_path.read_text(encoding="utf-8").strip()
+        actual = evidence_file_mac(path, key)
+        if not hmac.compare_digest(expected, actual):
+            result["ok"] = False
+            result["tampered"].append({"path": str(path), "reason": "evidence_mac_mismatch"})
+    return result
+
+
+def _write_seal(head_hash: str, count: int, key: bytes) -> None:
+    body = {"headHash": head_hash, "count": count, "schema": 1}
+    body["mac"] = entry_hmac(body, key)
+    AUDIT_SEAL.write_text(json.dumps(body, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    try:
+        os.chmod(AUDIT_SEAL, 0o600)
+    except OSError:
+        pass
+
+
 def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     ensure_audit_dir()
     key = load_or_create_hmac_key()
     prev = "0" * 64
+    count = 0
     if AUDIT_LOG.exists():
         try:
-            last = AUDIT_LOG.read_text(encoding="utf-8").splitlines()[-1]
-            prev = json.loads(last).get("hash") or prev
+            lines = [ln for ln in AUDIT_LOG.read_text(encoding="utf-8").splitlines() if ln.strip()]
+            count = len(lines)
+            if lines:
+                prev = json.loads(lines[-1]).get("hash") or prev
         except (OSError, json.JSONDecodeError, IndexError):
             prev = "0" * 64
     args_digest = sha256_hex(json.dumps(arguments, ensure_ascii=False, sort_keys=True))[:24]
@@ -742,14 +786,20 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
         os.chmod(AUDIT_LOG, 0o600)
     except OSError:
         pass
+    _write_seal(entry["hash"], count + 1, key)
+    # Keep transport/manifest under HMAC as well.
+    try:
+        sign_evidence_tree()
+    except OSError:
+        pass
     return entry
 
 
 def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
-    """Validate keyed HMAC chain; report tampered and deleted/missing links."""
+    """Validate keyed HMAC chain; missing MAC after first signed line is tamper; seal detects truncation."""
     log = path or AUDIT_LOG
     result: dict[str, Any] = {
-        "mode": "keyed-HMAC-SHA256 append-only",
+        "mode": "keyed-HMAC-SHA256 append-only + seal + evidence MAC",
         "keyPath": str(HMAC_KEY_FILE),
         "logPath": str(log),
         "ok": True,
@@ -758,6 +808,7 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         "deletedOrGap": [],
         "confidence": "Observed",
         "limitation": "持有本机 HMAC 密钥的进程仍可重写整条链；MCP 不提供删除接口。",
+        "legacyPathPolicy": "never_read_/private/tmp",
     }
     if not log.is_file():
         result["ok"] = True
@@ -769,11 +820,11 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         result["ok"] = False
         result["warning"] = f"无法读取 HMAC 密钥：{exc}"
         return result
-    lines = log.read_text(encoding="utf-8").splitlines()
+    lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
     prev = "0" * 64
+    seen_signed = False
+    head = prev
     for idx, line in enumerate(lines):
-        if not line.strip():
-            continue
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
@@ -793,16 +844,53 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
             )
         body = {k: entry[k] for k in ("at", "actor", "tool", "argsDigest", "prevHash") if k in entry}
         if "mac" not in entry:
-            # Pre-HMAC legacy lines: do not treat as tamper; report separately.
-            result.setdefault("legacyUnsigned", []).append({"index": idx, "tool": entry.get("tool")})
+            if seen_signed:
+                # After the first signed line, missing MAC is tamper (not legacy).
+                result["ok"] = False
+                result["tampered"].append(
+                    {"index": idx, "reason": "missing_mac_after_signed_era", "tool": entry.get("tool")}
+                )
+            else:
+                result.setdefault("legacyUnsigned", []).append({"index": idx, "tool": entry.get("tool")})
         else:
+            seen_signed = True
             expected_mac = entry_hmac(body, key)
             if entry.get("mac") != expected_mac:
                 result["ok"] = False
                 result["tampered"].append({"index": idx, "reason": "mac_mismatch", "tool": entry.get("tool")})
         prev = entry.get("hash") or prev
-    if result.get("legacyUnsigned") and not result["tampered"] and not result["deletedOrGap"]:
-        result["note"] = "含升级前无 HMAC 的旧行；新写入均带密钥 MAC。"
+        head = prev
+    # Seal anchors chain head + count → truncation detected
+    seal_path = AUDIT_SEAL if path is None else path.with_suffix(".seal")
+    if seal_path.is_file():
+        try:
+            seal = json.loads(seal_path.read_text(encoding="utf-8"))
+            seal_body = {k: seal[k] for k in ("headHash", "count", "schema") if k in seal}
+            if seal.get("mac") != entry_hmac(seal_body, key):
+                result["ok"] = False
+                result["tampered"].append({"reason": "seal_mac_mismatch"})
+            elif int(seal.get("count") or 0) != result["entriesChecked"] or seal.get("headHash") != head:
+                result["ok"] = False
+                result["deletedOrGap"].append(
+                    {
+                        "reason": "truncated_or_count_mismatch",
+                        "sealCount": seal.get("count"),
+                        "actualCount": result["entriesChecked"],
+                        "sealHead": seal.get("headHash"),
+                        "actualHead": head,
+                    }
+                )
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            result["ok"] = False
+            result["tampered"].append({"reason": "seal_unreadable", "error": type(exc).__name__})
+    # Evidence files under transport root
+    ev = validate_evidence_files()
+    result["evidenceFiles"] = ev
+    if not ev.get("ok", True):
+        result["ok"] = False
+        result["tampered"].extend(ev.get("tampered") or [])
+    if result.get("legacyUnsigned") and result["ok"]:
+        result["note"] = "含升级前无 HMAC 的旧行（均在首条签名之前）；其后缺 MAC 视为篡改。"
     return result
 
 
