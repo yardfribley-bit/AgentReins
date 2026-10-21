@@ -3,165 +3,318 @@
     "name": "curl_u_glued",
     "kind": "text",
     "input": "curl -uXalice:s3cret https://example.com/",
-    "must_absent": ["s3cret", "alice:s3cret"],
-    "must_keep": ["https://example.com/"]
+    "must_absent": [
+      "s3cret",
+      "alice:s3cret"
+    ],
+    "must_keep": [
+      "https://example.com/"
+    ]
   },
   {
     "name": "curl_u_glued_generic",
     "kind": "text",
     "input": "curl -ualice:s3cret https://example.com/",
-    "must_absent": ["s3cret", "alice:s3cret"],
-    "must_keep": ["https://example.com/"]
+    "must_absent": [
+      "s3cret",
+      "alice:s3cret"
+    ],
+    "must_keep": [
+      "https://example.com/"
+    ]
   },
   {
     "name": "curl_u_space",
     "kind": "text",
     "input": "curl -u alice:s3cret https://h/path",
-    "must_absent": ["s3cret"],
-    "must_keep": ["https://h/path"]
+    "must_absent": [
+      "s3cret"
+    ],
+    "must_keep": [
+      "https://h/path"
+    ]
   },
-
   {
     "name": "user_quoted_space",
     "kind": "text",
     "input": "curl --user 'alice:b c' https://h/",
-    "must_absent": ["alice:b c", "b c"],
-    "must_keep": ["https://h/"]
+    "must_absent": [
+      "alice:b c",
+      "b c"
+    ],
+    "must_keep": [
+      "https://h/"
+    ]
   },
   {
     "name": "short_bearer",
     "kind": "text",
     "input": "Authorization: Bearer abcd",
-    "must_absent": ["abcd"],
-    "must_keep": ["Bearer"]
+    "must_absent": [
+      "abcd"
+    ],
+    "must_keep": [
+      "Bearer"
+    ]
   },
   {
     "name": "short_bearer_3",
     "kind": "text",
     "input": "Authorization: Bearer abc",
-    "must_absent": ["abc"],
-    "must_keep": ["Bearer"]
+    "must_absent": [
+      "abc"
+    ],
+    "must_keep": [
+      "Bearer"
+    ]
   },
   {
     "name": "short_bearer_1",
     "kind": "text",
     "input": "Authorization: Bearer x",
-    "must_absent": ["Bearer x"],
-    "must_keep": ["Bearer"]
+    "must_absent": [
+      "Bearer x"
+    ],
+    "must_keep": [
+      "Bearer"
+    ]
   },
-
   {
     "name": "url_password_with_at",
     "kind": "text",
     "input": "https://user:p@ss@host.example/db",
-    "must_absent": ["p@ss"],
-    "must_keep": ["host.example"]
+    "must_absent": [
+      "p@ss"
+    ],
+    "must_keep": [
+      "host.example"
+    ]
   },
   {
     "name": "mongodb_srv",
     "kind": "text",
     "input": "mongodb+srv://user:dbpass@cluster0.example.net/app",
-    "must_absent": ["dbpass"],
-    "must_keep": ["cluster0.example.net"]
+    "must_absent": [
+      "dbpass"
+    ],
+    "must_keep": [
+      "cluster0.example.net"
+    ]
   },
   {
     "name": "json_password",
     "kind": "text",
     "input": "{\"password\":\"hunter2\",\"ok\":true}",
-    "must_absent": ["hunter2"],
-    "must_keep": ["ok"]
+    "must_absent": [
+      "hunter2"
+    ],
+    "must_keep": [
+      "ok"
+    ]
   },
   {
     "name": "json_passwd_client_secret",
     "kind": "text",
     "input": "{\"passwd\":\"pw1\",\"db_password\":\"pw2\",\"client_secret\":\"cs1\"}",
-    "must_absent": ["pw1", "pw2", "cs1"],
+    "must_absent": [
+      "pw1",
+      "pw2",
+      "cs1"
+    ],
     "must_keep": []
   },
   {
     "name": "pem_block",
     "kind": "text",
     "input": "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA0Z3VS5JJcds3xfn/ygWyF6PZXBT7\n-----END RSA PRIVATE KEY-----",
-    "must_absent": ["MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn"],
+    "must_absent": [
+      "MIIEowIBAAKCAQEA0Z3VS5JJcds3xfn"
+    ],
     "must_keep": []
   },
   {
     "name": "cookie_header",
     "kind": "text",
     "input": "Cookie: session=abc123xyz; path=/",
-    "must_absent": ["abc123xyz"],
-    "must_keep": ["Cookie"]
+    "must_absent": [
+      "abc123xyz"
+    ],
+    "must_keep": [
+      "Cookie"
+    ]
+  },
+  {
+    "name": "mcp_session_id",
+    "kind": "text",
+    "input": "curl -H 'Authorization: Bearer tok123' -H 'Mcp-Session-Id: sess-raw-abcdef' https://mcp.example/v1",
+    "must_absent": [
+      "sess-raw-abcdef",
+      "tok123"
+    ],
+    "must_keep": [
+      "Mcp-Session-Id",
+      "Bearer",
+      "https://mcp.example/v1"
+    ]
+  },
+  {
+    "name": "x_session_id",
+    "kind": "text",
+    "input": "X-Session-Id: raw-session-999",
+    "must_absent": [
+      "raw-session-999"
+    ],
+    "must_keep": [
+      "X-Session-Id"
+    ]
+  },
+  {
+    "name": "set_cookie_header",
+    "kind": "text",
+    "input": "Set-Cookie: sid=rawcookievalue; HttpOnly",
+    "must_absent": [
+      "rawcookievalue"
+    ],
+    "must_keep": [
+      "Set-Cookie"
+    ]
+  },
+  {
+    "name": "csrf_token_header",
+    "kind": "text",
+    "input": "X-CSRF-Token: csrf-secret-xyz",
+    "must_absent": [
+      "csrf-secret-xyz"
+    ],
+    "must_keep": [
+      "X-CSRF-Token"
+    ]
+  },
+  {
+    "name": "curl_H_mcp_session",
+    "kind": "text",
+    "input": "curl -H Mcp-Session-Id:sess-live-42 https://h/",
+    "must_absent": [
+      "sess-live-42"
+    ],
+    "must_keep": [
+      "Mcp-Session-Id",
+      "https://h/"
+    ]
   },
   {
     "name": "x_api_key",
     "kind": "text",
     "input": "x-api-key: super-secret-key",
-    "must_absent": ["super-secret-key"],
-    "must_keep": ["x-api-key"]
+    "must_absent": [
+      "super-secret-key"
+    ],
+    "must_keep": [
+      "x-api-key"
+    ]
   },
   {
     "name": "api_token_env",
     "kind": "text",
     "input": "API_TOKEN=tok_live_abc123",
-    "must_absent": ["tok_live_abc123"],
-    "must_keep": ["API_TOKEN="]
+    "must_absent": [
+      "tok_live_abc123"
+    ],
+    "must_keep": [
+      "API_TOKEN="
+    ]
   },
   {
     "name": "aws_secret_quoted",
     "kind": "text",
     "input": "aws_secret_access_key=\"wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY\"",
-    "must_absent": ["wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"],
+    "must_absent": [
+      "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
+    ],
     "must_keep": []
   },
   {
     "name": "mysql_p_glued",
     "kind": "text",
     "input": "mysql -uroot -pSecretPass -h 127.0.0.1 db",
-    "must_absent": ["SecretPass"],
-    "must_keep": ["mysql", "127.0.0.1"]
+    "must_absent": [
+      "SecretPass"
+    ],
+    "must_keep": [
+      "mysql",
+      "127.0.0.1"
+    ]
   },
   {
     "name": "sshpass_p_space",
     "kind": "text",
     "input": "sshpass -p secret123 ssh host",
-    "must_absent": ["secret123"],
-    "must_keep": ["sshpass", "ssh host"]
+    "must_absent": [
+      "secret123"
+    ],
+    "must_keep": [
+      "sshpass",
+      "ssh host"
+    ]
   },
   {
     "name": "sshpass_p_quoted_space",
     "kind": "text",
     "input": "sshpass -p 'my pass' ssh host",
-    "must_absent": ["my pass"],
-    "must_keep": ["sshpass", "ssh host"]
+    "must_absent": [
+      "my pass"
+    ],
+    "must_keep": [
+      "sshpass",
+      "ssh host"
+    ]
   },
-
   {
     "name": "keep_mkdir_p",
     "kind": "text",
     "input": "mkdir -p /tmp/agentreins/out",
     "must_absent": [],
-    "must_keep": ["mkdir -p /tmp/agentreins/out"]
+    "must_keep": [
+      "mkdir -p /tmp/agentreins/out"
+    ]
   },
   {
     "name": "keep_ssh_port",
     "kind": "text",
     "input": "ssh -p 2222 user@host",
     "must_absent": [],
-    "must_keep": ["ssh -p 2222"]
+    "must_keep": [
+      "ssh -p 2222"
+    ]
   },
   {
     "name": "keep_git_add_p",
     "kind": "text",
     "input": "git add -p README.md",
     "must_absent": [],
-    "must_keep": ["git add -p README.md"]
+    "must_keep": [
+      "git add -p README.md"
+    ]
   },
   {
     "name": "keep_find_print",
     "kind": "text",
     "input": "find . -print",
     "must_absent": [],
-    "must_keep": ["find . -print"]
+    "must_keep": [
+      "find . -print"
+    ]
+  },
+  {
+    "name": "session_id_header",
+    "kind": "text",
+    "input": "Session-Id: raw-session-token-aabbcc",
+    "must_absent": [
+      "raw-session-token-aabbcc"
+    ],
+    "must_keep": [
+      "Session-Id"
+    ]
   },
   {
     "name": "obj_cookie_and_list_pwd",
@@ -169,9 +322,17 @@
     "input": {
       "Cookie": "sid=rawcookie",
       "x-api-key": "rawkey",
-      "pwd": ["listsecret1", "listsecret2"],
+      "pwd": [
+        "listsecret1",
+        "listsecret2"
+      ],
       "note": "ok"
     },
-    "must_absent": ["rawcookie", "rawkey", "listsecret1", "listsecret2"]
+    "must_absent": [
+      "rawcookie",
+      "rawkey",
+      "listsecret1",
+      "listsecret2"
+    ]
   }
 ]

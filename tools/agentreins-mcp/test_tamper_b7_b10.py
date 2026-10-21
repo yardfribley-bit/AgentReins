@@ -20,6 +20,7 @@ class TamperB7B10Tests(unittest.TestCase):
         self.audit.mkdir()
         self.transport.mkdir()
         self.integrity.mkdir()
+        evidence._MEMORY_KEYCHAIN.clear()
         self.patches = [
             mock.patch.object(evidence, "AUDIT_DIR", self.audit),
             mock.patch.object(evidence, "DEFAULT_TRANSPORT", self.transport),
@@ -31,6 +32,7 @@ class TamperB7B10Tests(unittest.TestCase):
             mock.patch.object(evidence, "PROTECTED_SEAL_DIR", self.integrity / "seals"),
             mock.patch.object(evidence, "SIGNED_ERA_FLAG", self.integrity / "signed-era"),
             mock.patch.object(evidence, "RUN_INVENTORY_MAC", self.integrity / "transport-run-inventory.mac"),
+            mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "memory"}, clear=False),
         ]
         for p in self.patches:
             p.start()
@@ -38,6 +40,7 @@ class TamperB7B10Tests(unittest.TestCase):
     def tearDown(self) -> None:
         for p in self.patches:
             p.stop()
+        evidence._MEMORY_KEYCHAIN.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _seed(self) -> pathlib.Path:

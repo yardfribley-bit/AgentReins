@@ -1,0 +1,35 @@
+=== self_check en_d595e9da ===
+cwd=/Users/jatsmith/AgentSpec/AgentGuardApp
+git=1fccf8e0b6020b1d066907d8fe56920ff791f7bd
+--- 1 redaction ---
+REDACT leaks=0 over=0 total=30
+REDACT_VECTOR_OK 30
+OK  REDACT
+--- 2 XSS ---
+ESC_MUTANTS total=59 killed=59 survived=0
+xss escape via real DOM ok
+OK  XSS
+--- 3 tamper ---
+..
+----------------------------------------------------------------------
+Ran 2 tests in 0.069s
+
+OK
+.......
+----------------------------------------------------------------------
+Ran 7 tests in 0.188s
+
+OK
+....
+----------------------------------------------------------------------
+Ran 4 tests in 0.109s
+
+OK
+OK  tamper
+--- 4 screenshots ---
+distinctMd5 True build 137
+OK  screenshots
+--- 5 validate_audit ---
+validate_audit ok= True confidence= Observed
+REAL_MACHINE_OK= true
+=== self_check done fail=0 ===

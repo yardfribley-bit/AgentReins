@@ -1,0 +1,69 @@
+{
+  "validate_audit": {
+    "ok": true,
+    "confidence": "Observed",
+    "tampered": [],
+    "historicalMacMismatch": [
+      {
+        "index": 0,
+        "reason": "historical_mac_mismatch_quarantined",
+        "tool": "list_alerts",
+        "cause": "HMAC key rotated when integrity/era system was introduced; MAC was under prior key; never re-signed",
+        "at": "2026-10-20T22:12:23Z"
+      },
+      {
+        "index": 1,
+        "reason": "historical_mac_mismatch_quarantined",
+        "tool": "list_mcp_audit",
+        "cause": "Same prior-key cohort as index 0 (2026-10-20); key rotation; never re-signed",
+        "at": "2026-10-20T22:12:23Z"
+      },
+      {
+        "index": 5,
+        "reason": "historical_mac_mismatch_quarantined",
+        "tool": "list_alerts",
+        "cause": "CI-packaged AgentReinsMCP likely created/used a transient HMAC key under a different AUDIT_DIR view or race before shared key stabilized; never re-signed",
+        "at": "2026-10-21T07:37:55Z"
+      },
+      {
+        "index": 6,
+        "reason": "historical_mac_mismatch_quarantined",
+        "tool": "list_mcp_audit",
+        "cause": "Same CI-key cohort as index 5; never re-signed",
+        "at": "2026-10-21T07:37:55Z"
+      }
+    ]
+  },
+  "mac_mismatch_root_cause": [
+    {
+      "index": 0,
+      "at": "2026-10-20T22:12:23Z",
+      "tool": "list_alerts",
+      "actor": "Codex",
+      "cause": "HMAC key rotated when integrity/era system was introduced; MAC was under prior key; never re-signed"
+    },
+    {
+      "index": 1,
+      "at": "2026-10-20T22:12:23Z",
+      "tool": "list_mcp_audit",
+      "actor": "Codex",
+      "cause": "Same prior-key cohort as index 0 (2026-10-20); key rotation; never re-signed"
+    },
+    {
+      "index": 5,
+      "at": "2026-10-21T07:37:55Z",
+      "tool": "list_alerts",
+      "actor": "Codex CLI/0.45.0-ci-en11",
+      "cause": "CI-packaged AgentReinsMCP likely created/used a transient HMAC key under a different AUDIT_DIR view or race before shared key stabilized; never re-signed"
+    },
+    {
+      "index": 6,
+      "at": "2026-10-21T07:37:55Z",
+      "tool": "list_mcp_audit",
+      "actor": "Codex CLI/0.45.0-ci-en11",
+      "cause": "Same CI-key cohort as index 5; never re-signed"
+    }
+  ],
+  "inventory_seal": "synced via sign_run_inventory — prior mismatch was inventory growth after seal without refreshing seal.inventorySha256",
+  "keychain": "hmac+era stored via security generic-password -A; file key retained as migration fallback marker/binary"
+}

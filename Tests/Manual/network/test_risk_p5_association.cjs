@@ -292,4 +292,52 @@ const s01ok = risk.buildAlerts({
 });
 assert.ok(s01ok.some(a => a.rule === 'S01'), 'S01 with real resource.path');
 
+// en_d595e9da: downloadCall/downloadPID must point at curl — never the exec record.
+// Swapping ids / self-pairing must not yield Correlated(exec_hash) with identical calls.
+const shaOk = 'd'.repeat(64);
+const pathOk = '/tmp/agentreins-s03-swap.sh';
+net.setLocalTransports([
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T05:00:00.100Z',
+    pid: 501, parentPID: 500, parentName: '/bin/zsh', parentStartAt: '2026-10-21T05:00:00Z', parentArgv: '-zsh',
+    exitCode: 0, runID: 'dl-real', call: 'dl-real', session: 's03-swap',
+    args: ['-o', pathOk, 'https://cdn.agentreins-field.net/s03.sh'],
+    downloads: [{ path: pathOk, sha256: shaOk }],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
+    blocks: [],
+  },
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'sh', startedAt: '2026-10-21T05:00:01.100Z',
+    pid: 502, parentPID: 500, parentName: '/bin/zsh', parentStartAt: '2026-10-21T05:00:00Z', parentArgv: '-zsh',
+    exitCode: 0, runID: 'ex-real', call: 'ex-real', session: 's03-swap',
+    args: [pathOk], blocks: [],
+    execSha256: shaOk, fileResult: { path: pathOk, sha256: shaOk, hashedAt: 'pre-exec' }, sha256: shaOk,
+  },
+]);
+const s03ok = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03');
+assert.equal(s03ok.length, 1, 'one S03 for download→exec');
+assert.equal(s03ok[0].evidence.downloadCall, 'dl-real');
+assert.equal(s03ok[0].evidence.execCall, 'ex-real');
+assert.equal(s03ok[0].evidence.downloadPID, 501);
+assert.notEqual(s03ok[0].evidence.downloadCall, s03ok[0].evidence.execCall);
+assert.equal(s03ok[0].evidence.sameParentShell, true);
+assert.equal(s03ok[0].basis, 'exec_hash');
+
+// Same call id on download+exec must fail to pair (self-pair rejected).
+net.setLocalTransports([
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'sh', startedAt: '2026-10-21T05:10:00Z',
+    pid: 601, parentPID: 600, parentName: '/bin/zsh', parentStartAt: '2026-10-21T05:10:00Z', parentArgv: '-zsh',
+    exitCode: 0, runID: 'same-id', call: 'same-id', session: 's03-bad',
+    args: [pathOk], blocks: [],
+    downloads: [{ path: pathOk, sha256: shaOk }],
+    execSha256: shaOk, fileResult: { path: pathOk, sha256: shaOk }, sha256: shaOk,
+  },
+]);
+const s03bad = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03');
+assert.ok(
+  !s03bad.some(a => a.evidence && a.evidence.downloadCall === a.evidence.execCall),
+  'self-paired downloadCall===execCall must not appear'
+);
+
 console.log('risk p5 association ok');

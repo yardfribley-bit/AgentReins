@@ -39,8 +39,10 @@ def parent_process_facts(pid: int) -> dict:
         out['parentArgv'] = args
         if lstart:
             try:
-                dt = datetime.datetime.strptime(lstart, '%a %b %d %H:%M:%S %Y')
-                out['parentStartAt'] = dt.replace(tzinfo=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+                # ps lstart is local wall time — convert to real UTC (do not stamp Z on local).
+                local_tz = datetime.datetime.now().astimezone().tzinfo
+                dt = datetime.datetime.strptime(lstart, '%a %b %d %H:%M:%S %Y').replace(tzinfo=local_tz)
+                out['parentStartAt'] = dt.astimezone(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
             except ValueError:
                 out['parentStartAt'] = lstart
     except (OSError, subprocess.SubprocessError, ValueError):
@@ -500,6 +502,33 @@ def main():
                         break
             except OSError:
                 pass
+        # en_d595e9da: keep transportPeer=127.0.0.1 when proxied; expose realDestination.
+        argv_dest=command_destination(tool,args,env)
+        peer=None; real=None; dest_source=None
+        for conn in evidence.get('connections') or []:
+            for detail in (conn.get('detail') or []):
+                hostport=str(detail).split()[0]
+                host=hostport.split(':')[0].lower()
+                if host in ('127.0.0.1','localhost','::1'):
+                    peer=hostport
+                elif host and not real:
+                    real=host; dest_source='proxy_observed'
+        if not real and argv_dest:
+            host=str(argv_dest).split('://',1)[-1].split('/',1)[0].split('@')[-1].split(':')[0].lower()
+            if host and host not in ('127.0.0.1','localhost','::1'):
+                real=host; dest_source=dest_source or 'argv_parsed'
+            elif host:
+                peer=peer or host
+        audit=evidence.get('securityAudit') if isinstance(evidence.get('securityAudit'),dict) else {}
+        if not real and audit.get('destinationHost'):
+            h=str(audit['destinationHost']).split(':')[0].lower()
+            if h and h not in ('127.0.0.1','localhost','::1'):
+                real=h; dest_source=dest_source or 'proxy_observed'
+        evidence['transportPeer']=peer
+        evidence['realDestination']=real
+        evidence['destinationSource']=dest_source
+        if real:
+            evidence['destinationHost']=real
         save('transport.json',evidence)
         # Redact session log and any captured bodies before signing.
         redact_file_inplace(run/'session.log')

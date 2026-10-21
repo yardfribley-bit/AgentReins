@@ -1,0 +1,9 @@
+# ~/.codex/config.toml 片段 — 指向包内 AgentReinsMCP
+[mcp_servers.agentreins]
+command = "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP"
+# 若尚未安装到 /Applications，改为本机 .app 路径，例如：
+# command = "/Users/YOU/Downloads/AgentReins.app/Contents/MacOS/AgentReinsMCP"
+startup_timeout_sec = 20
+tool_timeout_sec = 30
+# AgentReinsMCP 工具均只读；writes 模式不会对只读工具弹确认。
+default_tools_approval_mode = "writes"

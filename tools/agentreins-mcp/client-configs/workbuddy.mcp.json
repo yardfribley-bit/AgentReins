@@ -1,0 +1,9 @@
+{
+  "mcpServers": {
+    "agentreins": {
+      "command": "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP",
+      "args": [],
+      "note": "粘贴后必须在 WorkBuddy 里点「信任」才会启用；未信任时 tools/list 不会出现 agentreins。"
+    }
+  }
+}

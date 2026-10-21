@@ -42,9 +42,16 @@ INTEGRITY_DIR = pathlib.Path.home() / "Library/Application Support/AgentReinsInt
 PROTECTED_SEAL_DIR = INTEGRITY_DIR / "seals"
 SIGNED_ERA_FLAG = INTEGRITY_DIR / "signed-era"
 RUN_INVENTORY_MAC = INTEGRITY_DIR / "transport-run-inventory.mac"
+# Acknowledged historical broken audit rows (never re-signed). JSONL of {index,at,tool,cause}.
+HISTORICAL_MAC_QUARANTINE = INTEGRITY_DIR / "historical-mac-mismatch.jsonl"
+KEYCHAIN_SERVICE = "com.agentreins.mcp-integrity"
+KEYCHAIN_ACCOUNT_HMAC = "hmac-key"
+KEYCHAIN_ACCOUNT_ERA = "signed-era"
+# In-memory Keychain for unit tests (survives wiping AUDIT_DIR + INTEGRITY_DIR).
+_MEMORY_KEYCHAIN: dict[str, bytes] = {}
 KEYCHAIN_LIMITATION = (
-    "HMAC 密钥位于用户目录 0600 文件（非 Keychain）。同一 uid 的被监督进程可读密钥并伪造 MAC；"
-    "相关完整性结论标为 Unknown，除非改用 Keychain/独立特权守护。"
+    "HMAC 密钥与安装锚点优先存 Keychain（security generic-password / kSecClassGenericPassword）。"
+    "文件副本仅作同机迁移回退；被监督进程读文件拿不到 Keychain 项时无法伪造 Observed。"
 )
 # Prefer packaged RealtimeWorkspace next to this MCP copy; fall back to repo Sources.
 _PACKAGED_JS = ROOT.parent / "RealtimeWorkspace"
@@ -102,19 +109,53 @@ def is_test_capture(record: dict[str, Any]) -> bool:
     return False
 
 
+def _redacted_match_context(finding: dict[str, Any], window: int = 80) -> str | None:
+    """INB: return redacted ±window chars around the hit; never raw secrets."""
+    raw = finding.get("matchedText") or finding.get("match") or finding.get("snippet")
+    context = finding.get("context") or finding.get("matchContext")
+    source = context or raw
+    if not isinstance(source, str) or not source:
+        # Synthesize a short reviewable stub from rule + offset when body was stripped.
+        offset = finding.get("characterOffset")
+        if offset is None:
+            return None
+        return redact_text(f"[offset={offset} rule={finding.get('rule')}]")
+    text = str(source)
+    if context is None and raw and len(text) > window * 2:
+        # Prefer surrounding context when only the raw match token is present.
+        mid = len(text) // 2
+        text = text[max(0, mid - window) : mid + window]
+    elif len(text) > window * 2 + 20:
+        offset = int(finding.get("characterOffset") or 0)
+        start = max(0, offset - window)
+        text = text[start : start + window * 2]
+    return redact_text(text)
+
+
 def credential_finding_summary(finding: dict[str, Any]) -> dict[str, Any]:
-    """S02-style findings: type/count/offset only — never matched plaintext."""
-    return {
-        "rule": finding.get("rule"),
+    """S02: metadata only. INB: redacted context snippet + rule id (en_d595e9da)."""
+    rule = finding.get("rule")
+    out: dict[str, Any] = {
+        "rule": rule,
         "direction": finding.get("direction"),
         "severity": finding.get("severity"),
         "count": finding.get("count"),
         "characterOffset": finding.get("characterOffset"),
-        "label": finding.get("label") or finding.get("rule"),
+        "label": finding.get("label") or rule,
         "matchedText": None,
+        "ruleId": rule,
         "note": "原始匹配文本不通过 MCP 返回",
         "confidence": "Observed",
     }
+    if rule == "instruction-override-inbound":
+        snippet = _redacted_match_context(finding)
+        out["matchContextRedacted"] = snippet
+        out["note"] = (
+            "MCP 仅返回脱敏上下文片段（约前后 80 字符）；完整片段见本机详情页。"
+            if snippet
+            else "无可用上下文片段；请在本机详情页核对。"
+        )
+    return out
 
 
 def _load_transport_dir(root: pathlib.Path, limit: int) -> list[dict[str, Any]]:
@@ -598,6 +639,42 @@ def get_execution(execution_id: str, records: list[dict[str, Any]] | None = None
     )
 
 
+def _real_destination(record: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
+    """Return (realHost, transportPeer, source) for proxied vs direct traffic.
+
+    Prefer proxy-observed CONNECT/Host; fall back to argv-parsed destination.
+    transportPeer stays 127.0.0.1 when the TCP peer is the local audit proxy.
+    """
+    peer = None
+    real = None
+    source = None
+    for conn in record.get("connections") or []:
+        if not isinstance(conn, dict):
+            continue
+        for detail in conn.get("detail") or []:
+            d = str(detail)
+            hostport = d.split()[0] if d else ""
+            host = hostport.split(":")[0].lower()
+            if host in ("127.0.0.1", "localhost", "::1"):
+                peer = hostport or host
+            elif host and not real:
+                real = host
+                source = "proxy_observed"
+    if not real:
+        # Argv / Host header / securityAudit destination
+        audit = record.get("securityAudit") if isinstance(record.get("securityAudit"), dict) else {}
+        cand = audit.get("destinationHost") or record.get("destinationHost") or host_of(record)
+        if cand and str(cand).lower() not in ("127.0.0.1", "localhost", "::1"):
+            real = str(cand).split(":")[0].lower()
+            source = "argv_parsed" if not source else source
+        elif cand:
+            peer = peer or str(cand)
+    if peer and not real:
+        # Proxied but no outer host recovered — keep peer, mark destination unknown.
+        source = source or "transport_peer_only"
+    return real, peer, source
+
+
 def list_network(
     agent: str | None = None,
     since: str | None = None,
@@ -608,15 +685,21 @@ def list_network(
     for r in records:
         if agent and agent != "all" and str(r.get("agent")) != agent:
             continue
-        host = host_of(r)
+        real, peer, dest_source = _real_destination(r)
+        host = real or host_of(r)
         rows.append(
             {
                 "executionId": r.get("call") or r.get("runID"),
                 "agent": r.get("agent"),
                 "tool": r.get("tool"),
                 "destination": host,
+                "realDestination": real,
+                "transportPeer": peer,
+                "destinationSource": dest_source,
                 "allowed": is_allowed_host(host) if host else None,
-                "nonWhitelist": bool(host and not is_allowed_host(host) and not str(host).startswith("127.")),
+                "nonWhitelist": bool(
+                    host and not is_allowed_host(host) and not str(host).startswith("127.")
+                ),
                 "auditBypass": r.get("auditBypass") is True,
                 "startedAt": r.get("startedAt"),
                 "exitCode": r.get("exitCode"),
@@ -626,7 +709,10 @@ def list_network(
     return {
         "network": redact_obj(rows),
         "confidence": "Observed" if rows else "Unknown",
-        "note": "目的地主机来自运输审计连接/参数；看不到正文的仍标 Unknown。",
+        "note": (
+            "destination/realDestination 优先取代理侧 CONNECT/Host（proxy_observed），"
+            "否则 argv 解析（argv_parsed）；transportPeer 保留本机代理对端。"
+        ),
     }
 
 
@@ -677,21 +763,130 @@ def ensure_audit_dir() -> None:
         pass
 
 
+def _keychain_backend() -> str:
+    """memory | security | file. Tests patch MEMORY; CI may force file."""
+    env = (os.environ.get("AGENTREINS_KEYCHAIN_BACKEND") or "").strip().lower()
+    if env in ("memory", "security", "file"):
+        return env
+    if sys.platform == "darwin":
+        return "security"
+    return "file"
+
+
+def keychain_get(account: str) -> bytes | None:
+    backend = _keychain_backend()
+    if backend == "memory":
+        return _MEMORY_KEYCHAIN.get(account)
+    if backend == "security":
+        try:
+            proc = subprocess.run(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    account,
+                    "-w",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=8,
+                check=False,
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                raw = proc.stdout.strip()
+                try:
+                    return bytes.fromhex(raw)
+                except ValueError:
+                    return raw.encode("utf-8")
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            return None
+        return None
+    return None
+
+
+def keychain_set(account: str, value: bytes) -> bool:
+    backend = _keychain_backend()
+    if backend == "memory":
+        _MEMORY_KEYCHAIN[account] = value
+        return True
+    if backend == "security":
+        hex_secret = value.hex()
+        try:
+            subprocess.run(
+                [
+                    "security",
+                    "delete-generic-password",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    account,
+                ],
+                capture_output=True,
+                timeout=5,
+                check=False,
+            )
+            # -A: allow all apps to read (unsigned MCP/python still needs non-interactive read).
+            # Item lives in login Keychain (not a world-readable file). Timeout avoids UI hangs.
+            proc = subprocess.run(
+                [
+                    "security",
+                    "add-generic-password",
+                    "-U",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    account,
+                    "-w",
+                    hex_secret,
+                    "-A",
+                ],
+                capture_output=True,
+                timeout=8,
+                check=False,
+            )
+            return proc.returncode == 0
+        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+            return False
+    return False
+
+
+def keychain_has_install_anchor() -> bool:
+    if keychain_get(KEYCHAIN_ACCOUNT_ERA) is not None:
+        return True
+    if keychain_get(KEYCHAIN_ACCOUNT_HMAC) is not None:
+        return True
+    return False
+
+
 def load_or_create_hmac_key() -> bytes:
-    """Keyed HMAC material in user-only 0600 file (Keychain-equivalent for local MCP)."""
+    """HMAC key: Keychain first, then 0600 file fallback (migrated into Keychain when possible)."""
     ensure_audit_dir()
+    existing = keychain_get(KEYCHAIN_ACCOUNT_HMAC)
+    if existing and len(existing) >= 16:
+        return existing
     if HMAC_KEY_FILE.is_file():
         key = HMAC_KEY_FILE.read_bytes()
         if len(key) >= 16:
+            keychain_set(KEYCHAIN_ACCOUNT_HMAC, key)
             return key
     key = os.urandom(32)
-    fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(key)
-    try:
-        os.chmod(HMAC_KEY_FILE, 0o600)
-    except OSError:
-        pass
+    if not keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
+        fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(key)
+        try:
+            os.chmod(HMAC_KEY_FILE, 0o600)
+        except OSError:
+            pass
+    else:
+        # Keep a non-secret marker file so operators see Keychain is in use.
+        try:
+            HMAC_KEY_FILE.write_text("keychain\n", encoding="utf-8")
+            os.chmod(HMAC_KEY_FILE, 0o600)
+        except OSError:
+            pass
     return key
 
 
@@ -718,30 +913,79 @@ def _ensure_integrity_dir() -> None:
         pass
 
 
+def _key_fingerprint(key: bytes) -> str:
+    return hashlib.sha256(key).hexdigest()[:32]
+
+
 def mark_signed_era() -> None:
-    """Persist that a signed era has started (survives wiping AUDIT_DIR)."""
-    _ensure_integrity_dir()
-    if not SIGNED_ERA_FLAG.is_file():
-        SIGNED_ERA_FLAG.write_text(
-            json.dumps(
-                {
-                    "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-                    "schema": 1,
-                },
-                ensure_ascii=False,
-                sort_keys=True,
-            )
-            + "\n",
-            encoding="utf-8",
-        )
+    """Persist that a signed era has started (Keychain + file; Keychain survives full wipe).
+
+    Once an era fingerprint exists it is never overwritten — a replaced HMAC key
+    must surface as tamper (B12), not a silent re-anchor.
+    """
+    key = load_or_create_hmac_key()
+    existing = keychain_get(KEYCHAIN_ACCOUNT_ERA)
+    if existing:
         try:
-            os.chmod(SIGNED_ERA_FLAG, 0o600)
-        except OSError:
+            prev = json.loads(existing.decode("utf-8"))
+            if prev.get("keyFingerprint"):
+                # Keep original fingerprint even if current key differs (B12 signal).
+                _ensure_integrity_dir()
+                if not SIGNED_ERA_FLAG.is_file():
+                    SIGNED_ERA_FLAG.write_bytes(existing + b"\n")
+                    try:
+                        os.chmod(SIGNED_ERA_FLAG, 0o600)
+                    except OSError:
+                        pass
+                return
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
             pass
+    payload_obj = {
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "schema": 2,
+        "keyFingerprint": _key_fingerprint(key),
+    }
+    payload = json.dumps(payload_obj, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    keychain_set(KEYCHAIN_ACCOUNT_ERA, payload)
+    _ensure_integrity_dir()
+    SIGNED_ERA_FLAG.write_bytes(payload + b"\n")
+    try:
+        os.chmod(SIGNED_ERA_FLAG, 0o600)
+    except OSError:
+        pass
 
 
 def signed_era_active() -> bool:
-    return SIGNED_ERA_FLAG.is_file() or (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file()
+    return (
+        keychain_has_install_anchor()
+        or SIGNED_ERA_FLAG.is_file()
+        or (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file()
+    )
+
+
+def era_key_mismatch(key: bytes | None = None) -> bool:
+    """True when Keychain/file era was sealed under a different HMAC key (B12)."""
+    key = key or load_or_create_hmac_key()
+    fp = _key_fingerprint(key)
+    for blob in (keychain_get(KEYCHAIN_ACCOUNT_ERA),):
+        if not blob:
+            continue
+        try:
+            data = json.loads(blob.decode("utf-8"))
+            stored = data.get("keyFingerprint")
+            if stored and stored != fp:
+                return True
+        except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
+            continue
+    if SIGNED_ERA_FLAG.is_file():
+        try:
+            data = json.loads(SIGNED_ERA_FLAG.read_text(encoding="utf-8"))
+            stored = data.get("keyFingerprint")
+            if stored and stored != fp:
+                return True
+        except (OSError, json.JSONDecodeError, TypeError):
+            pass
+    return False
 
 
 def sign_run_inventory(key: bytes | None = None) -> None:
@@ -756,7 +1000,62 @@ def sign_run_inventory(key: bytes | None = None) -> None:
         os.chmod(RUN_INVENTORY_MAC, 0o600)
     except OSError:
         pass
+    # Keep seal inventorySha256 in sync when inventory grows (not re-signing audit rows).
+    if AUDIT_SEAL.is_file():
+        try:
+            seal = json.loads(AUDIT_SEAL.read_text(encoding="utf-8"))
+            seal_body = {
+                k: seal[k]
+                for k in ("headHash", "count", "schema")
+                if k in seal
+            }
+            seal_body["inventorySha256"] = sha256_bytes(RUN_INVENTORY.read_bytes())
+            seal_body["mac"] = entry_hmac(seal_body, key)
+            text = canonical_json(seal_body) + "\n"
+            AUDIT_SEAL.write_text(text, encoding="utf-8")
+            mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
+            PROTECTED_SEAL_DIR.mkdir(parents=True, exist_ok=True)
+            mirror.write_text(text, encoding="utf-8")
+            try:
+                os.chmod(AUDIT_SEAL, 0o600)
+                os.chmod(mirror, 0o600)
+            except OSError:
+                pass
+        except (OSError, json.JSONDecodeError, TypeError, ValueError):
+            pass
     mark_signed_era()
+
+
+def load_historical_mac_quarantine() -> dict[int, dict[str, Any]]:
+    out: dict[int, dict[str, Any]] = {}
+    if not HISTORICAL_MAC_QUARANTINE.is_file():
+        return out
+    for line in HISTORICAL_MAC_QUARANTINE.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            row = json.loads(line)
+            out[int(row["index"])] = row
+        except (json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+    return out
+
+
+def quarantine_historical_mac_mismatch(rows: list[dict[str, Any]]) -> None:
+    """Record historically broken MAC rows without re-signing them."""
+    _ensure_integrity_dir()
+    existing = load_historical_mac_quarantine()
+    for row in rows:
+        existing[int(row["index"])] = row
+    lines = [
+        json.dumps(existing[i], ensure_ascii=False, sort_keys=True)
+        for i in sorted(existing)
+    ]
+    HISTORICAL_MAC_QUARANTINE.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+    try:
+        os.chmod(HISTORICAL_MAC_QUARANTINE, 0o600)
+    except OSError:
+        pass
 
 
 def validate_run_inventory(key: bytes | None = None) -> dict[str, Any]:
@@ -1015,15 +1314,19 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         result["ok"] = True
         result["note"] = "尚无审计日志"
         if signed_era_active():
-            # B9/B10: signed era then wipe log (+ often seals) is tamper, not a fresh install.
+            # B9/B10/B11: signed era (incl. Keychain) then wipe dirs/log is tamper, not a fresh install.
             result["ok"] = False
             result["tampered"].append({"reason": "audit_log_missing_after_signed_era"})
             result["confidence"] = "Unknown"
             mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
             if not AUDIT_SEAL.is_file() and not mirror.is_file():
                 result["tampered"].append({"reason": "seal_missing_after_signed_era"})
-        elif not SIGNED_ERA_FLAG.is_file() and not (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file():
-            # Playbook: never anchored → Unknown(never_anchored), not ok=true success claim.
+            if not INTEGRITY_DIR.is_dir() and not AUDIT_DIR.is_dir():
+                result["tampered"].append({"reason": "integrity_dirs_wiped_after_keychain_anchor"})
+        elif not keychain_has_install_anchor() and not SIGNED_ERA_FLAG.is_file() and not (
+            PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
+        ).is_file():
+            # Playbook: never anchored → Unknown(never_anchored), not Observed / not ok success claim.
             result["confidence"] = "Unknown"
             result["note"] = "never_anchored"
             result["neverAnchored"] = True
@@ -1042,6 +1345,11 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         result["warning"] = f"无法读取 HMAC 密钥：{exc}"
         result["confidence"] = "Unknown"
         return result
+    if era_key_mismatch(key):
+        # B12: wipe + forge under a replaced HMAC key while install era remains.
+        result["ok"] = False
+        result["tampered"].append({"reason": "hmac_key_replaced_after_signed_era"})
+        result["confidence"] = "Unknown"
     lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
     prev = "0" * 64
     seen_signed = False
@@ -1075,8 +1383,22 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
             seen_signed = True
             expected_mac = entry_hmac(body, key)
             if entry.get("mac") != expected_mac:
-                result["ok"] = False
-                result["tampered"].append({"index": idx, "reason": "mac_mismatch", "tool": entry.get("tool")})
+                quarantined = load_historical_mac_quarantine()
+                if idx in quarantined:
+                    result.setdefault("historicalMacMismatch", []).append(
+                        {
+                            "index": idx,
+                            "reason": "historical_mac_mismatch_quarantined",
+                            "tool": entry.get("tool"),
+                            "cause": quarantined[idx].get("cause"),
+                            "at": entry.get("at"),
+                        }
+                    )
+                else:
+                    result["ok"] = False
+                    result["tampered"].append(
+                        {"index": idx, "reason": "mac_mismatch", "tool": entry.get("tool")}
+                    )
         prev = entry.get("hash") or prev
         head = prev
     seal_path = AUDIT_SEAL if path is None else path.with_suffix(".seal")

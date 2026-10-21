@@ -1,11 +1,13 @@
-# Snippet for ~/.codex/config.toml — Codex supervises Cursor via AgentReins MCP.
-# Replace the absolute path with this machine's AgentGuardApp checkout.
+# Snippet for ~/.codex/config.toml — prefer packaged AgentReinsMCP binary.
+# Full client snippets (Codex / Claude / Cursor / WorkBuddy):
+#   tools/agentreins-mcp/client-configs/
 
 [mcp_servers.agentreins]
-command = "python3"
-args = ["/Users/jatsmith/AgentSpec/AgentGuardApp/tools/agentreins-mcp/server.py"]
-# Optional: point at a custom transport root (default /private/tmp/agentreins-transport-audit)
-# env = { AGENTREINS_TRANSPORT_ROOT = "/private/tmp/agentreins-transport-audit" }
+command = "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP"
+startup_timeout_sec = 20
+tool_timeout_sec = 30
+default_tools_approval_mode = "writes"
 
-# Tools exposed (all read-only):
-#   list_agents, list_alerts, get_execution, list_network, get_coverage, list_mcp_audit
+# Dev fallback (repo checkout):
+# command = "python3"
+# args = ["/ABS/PATH/AgentGuardApp/tools/agentreins-mcp/server.py"]

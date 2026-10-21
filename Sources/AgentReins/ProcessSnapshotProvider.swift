@@ -26,7 +26,8 @@ enum ProcessArgumentRedactor {
         (try! NSRegularExpression(pattern: #"(?i)(--?(?:token|api[-_]?key|secret|password)(?:=|\s+))[^\s]+"#), "$1[REDACTED]"),
         (try! NSRegularExpression(pattern: #"(?i)(\b(?:OPENROUTER|DEEPSEEK|OPENAI|ANTHROPIC|GITHUB|AWS)_[A-Z0-9_]*(?:KEY|TOKEN|SECRET|PASSWORD)=)[^\s]+"#), "$1[REDACTED]"),
         (try! NSRegularExpression(pattern: #"(?i)([\"']?Authorization[\"']?\s*[:=]\s*[\"']?Bearer\s+)[^\"',}\s]+"#), "$1[REDACTED]"),
-        (try! NSRegularExpression(pattern: #"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}"#), "$1[REDACTED]")
+        (try! NSRegularExpression(pattern: #"(?i)(Bearer\s+)[A-Za-z0-9._~+/=-]{8,}"#), "$1[REDACTED]"),
+        (try! NSRegularExpression(pattern: #"(?i)((?:Mcp-Session-Id|X-Session-Id|Session-Id|X-CSRF-Token|CSRF-Token|X-XSRF-Token|Cookie|Set-Cookie)\s*[:=]\s*)\S+"#), "$1[session:REDACTED]")
     ]
 
     static func redact(_ command: String) -> String {

@@ -1,0 +1,29 @@
+{
+  "version": "1.1.0",
+  "build": "137",
+  "files": {
+    "01-alerts-home.png": {
+      "bytes": 621661,
+      "md5": "88e042915bcd243f0a1c3292b29b42c2",
+      "sha256": "9d81c552e996fd17a36a4a3b80ccdedb6a117427012a1f7d55579da69de81aa5"
+    },
+    "02-s03-alert-detail.png": {
+      "bytes": 105529,
+      "md5": "4b432aab9197c6800cb0418bf1015f44",
+      "sha256": "fc3b1385ab1e804903e7903cb9ba3000331410acc93f54bc94290b6772099fa8"
+    },
+    "03-s07-alert-detail.png": {
+      "bytes": 110630,
+      "md5": "7d132b4852cd3840c187f14800e9304a",
+      "sha256": "ccab837ee3bf4d72a49cd4c947d8da11a9f81dc103b75d0412deb7193e09cbfa"
+    },
+    "04-about.png": {
+      "bytes": 148655,
+      "md5": "96595c7f0819323aa66ca008cd97565e",
+      "sha256": "71bbf990b98aed4c64cde600c115b19c93d8c47598e1b31dc0863dfe65933a59"
+    }
+  },
+  "screenUnlocked": true,
+  "captureNote": "Cursor screencapture of live AgentReins windows; About via window id with shadow",
+  "distinctMd5": true
+}

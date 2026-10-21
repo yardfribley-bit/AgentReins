@@ -201,6 +201,7 @@ enum Redact {
             (#"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)(\s+)(?:'([^']*)'|\"([^\"]*)\"|(\S+))"#, "$1$2[password:REDACTED]"),
             (#"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)([^\s\-]+)"#, "$1[password:REDACTED]"),
             (#"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)"#, "$1[cookie:REDACTED]"),
+            (#"(?i)((?:Mcp-Session-Id|X-Session-Id|Session-Id|X-CSRF-Token|CSRF-Token|X-XSRF-Token)\s*[:=]\s*)(\S+)"#, "$1[session:REDACTED]"),
             (#"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)"#, "$1[api_key:REDACTED]"),
             (#"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)"#, "$1[basic:REDACTED]"),
             (#"(?i)(Bearer\s+)(\S+)"#, "$1[bearer:REDACTED]"),

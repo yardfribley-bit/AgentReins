@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"01a15e71-13eb-7dc0-a1f1-db2e0d0dd6a7"}
+{"type":"item.completed","item":{"id":"item_0","type":"error","message":"Model metadata for `gpt-5.1` not found. Defaulting to fallback metadata; this can degrade performance and cause issues."}}
+{"type":"turn.started"}
+{"type":"error","message":"Reconnecting... 2/5 (stream disconnected before completion: invalid peer certificate: UnknownIssuer)"}
+{"type":"error","message":"Reconnecting... 3/5 (stream disconnected before completion: invalid peer certificate: UnknownIssuer)"}
+{"type":"error","message":"Reconnecting... 4/5 (stream disconnected before completion: invalid peer certificate: UnknownIssuer)"}
+{"type":"error","message":"Reconnecting... 5/5 (stream disconnected before completion: invalid peer certificate: UnknownIssuer)"}
+{"type":"item.completed","item":{"id":"item_1","type":"error","message":"Falling back from WebSockets to HTTPS transport. stream disconnected before completion: invalid peer certificate: UnknownIssuer"}}

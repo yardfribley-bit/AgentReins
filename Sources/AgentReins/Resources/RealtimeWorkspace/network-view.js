@@ -97,9 +97,12 @@
    const askedLoopback=(!asked&&askedRaw&&loopbackHost(askedRaw))?hostToken(askedRaw):null;
    const connectedLoopback=(!connectedHost&&connected&&loopbackHost(connected.detail?.[0])&&!tunnelHost)?hostToken(connected.detail?.[0]):null;
    const formula=list(run.formulas).find(Boolean);
-   const target=tunnelHost||headerHost||connectedHost||asked||askedLoopback||connectedLoopback||(run.tool==='brew'&&formula?'Homebrew':null);
+   const recordedReal=run.realDestination||run.destinationHost||null;
+   const target=recordedReal||tunnelHost||headerHost||connectedHost||asked||askedLoopback||connectedLoopback||(run.tool==='brew'&&formula?'Homebrew':null);
    // 127.0.0.1 is the local proxy or a local port, never the external site.
-   const proxied=!!tunnelHost||(!!(connected&&loopbackHost(connected.detail?.[0]))&&!!headerHost);
+   const proxied=!!tunnelHost||(!!(connected&&loopbackHost(connected.detail?.[0]))&&!!headerHost)||!!run.transportPeer;
+   const transportPeer=run.transportPeer||(proxied&&connected&&loopbackHost(connected.detail?.[0])?hostToken(connected.detail[0]):null);
+   const destinationSource=run.destinationSource||(recordedReal?'proxy_observed':headerHost?'proxy_observed':asked?'argv_parsed':null);
    const side=direction=>blocks.filter(b=>b.direction===direction);
    const hideLine=line=>/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(String(line).trim())||/connection established/i.test(String(line));
    const text=items=>items.map(b=>{
@@ -112,7 +115,10 @@
    const names=list(run.outboundFiles).filter(Boolean);
    const invocation=invocationArgs(run);
    const downloads=list(run.downloads).filter(item=>item&&typeof item==='object');
-   const fallback=run.fileResult&&typeof run.fileResult==='object'?[run.fileResult]:[];
+   // en_d595e9da: never promote sh/bash exec fileResult into downloads[] — that made
+   // downloadCall/downloadPID point at the exec record instead of curl.
+   const isExecTool=/^(sh|bash|zsh|dash|open|chmod)$/.test(String(run.tool||''));
+   const fallback=(!isExecTool&&run.fileResult&&typeof run.fileResult==='object')?[run.fileResult]:[];
    const downloadRecords=(downloads.length?downloads:fallback).filter(item=>item.path&&item.path!=='/dev/null');
    const downloaded=downloadRecords.map(item=>String(item.path).split(/[/\\]/).pop()).filter(name=>name&&name!=='null');
    const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
@@ -122,7 +128,7 @@
    const isLocalExec=/^(chmod|sh|bash|open)$/.test(String(run.tool||''));
    if(!target&&!isLocalExec&&!downloadRecords.length)return null;
    const host=target||(isLocalExec?'local-exec':null);
-   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,processStartAt:run.processStartAt||run.startedAt||null,host,pid:run.pid,parentPID:run.parentPID||run.launcherPID||null,parentName:run.parentName||null,parentArgv:run.parentArgv||null,parentStartAt:run.parentStartAt||null,launcherPID:run.launcherPID||null,runID:run.runID,provenance:run.provenance,testCapture:run.testCapture===true,accessKind:isLocalExec?'local-exec':'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:isLocalExec?'local_tool_exec':'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,auditBypass:run.auditBypass===true?true:run.auditBypass===false?false:undefined,sha256:run.sha256||run.fileResult?.sha256||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,fileResult:run.fileResult||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:isLocalExec?(run.tool+' 本地执行'):(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
+   return {id:'local-transport:'+(run.runID||run.startedAt+':'+run.pid),agent:run.agent,tool:run.tool,args:invocation,connections:list(run.connections),timestamp:run.startedAt,startedAt:run.startedAt,processStartAt:run.processStartAt||run.startedAt||null,host,realDestination:target&&!loopbackHost(target)?target:recordedReal||null,transportPeer,destinationSource,pid:run.pid,parentPID:run.parentPID||run.launcherPID||null,parentName:run.parentName||null,parentArgv:run.parentArgv||null,parentStartAt:run.parentStartAt||null,launcherPID:run.launcherPID||null,runID:run.runID,provenance:run.provenance,testCapture:run.testCapture===true,accessKind:isLocalExec?'local-exec':'local-tool',route:proxied?'proxied':'direct',source:'agentsight:local-transport',evidenceType:isLocalExec?'local_tool_exec':'local_tool_exchange',session:run.session||run.codexThreadID||null,codexThreadID:run.codexThreadID||null,call:run.call||run.runID||null,exitCode:run.exitCode,gap:run.gap||null,auditBypass:run.auditBypass===true?true:run.auditBypass===false?false:undefined,sha256:run.sha256||run.fileResult?.sha256||null,proxy:proxied?'本机代理':null,outboundFiles:names,downloadedFiles:downloaded,downloads:downloadRecords,formulas:list(run.formulas),gitOperation:run.gitOperation||null,fileResult:run.fileResult||null,networkBody:{flow:'local:'+(run.runID||run.pid),request:request||null,response:text(received)||null,requestBytes:bytes(sent),responseBytes:bytes(received),requestTruncated:sent.some(b=>b.previewTruncated),responseTruncated:received.some(b=>b.previewTruncated),responseComplete:run.exitCode===0,requestComplete:sent.length>0||names.length>0||downloaded.length>0,responseStatus:statusMatch?Number(statusMatch[1]):undefined,securityAudit:run.securityAudit||null},taskTitle:isLocalExec?(run.tool+' 本地执行'):(run.tool==='git'?'Git '+(run.gitOperation?.operation||'操作'):run.tool+' 访问')};
   }).filter(Boolean);
  }
  function localExchanges(){return projectLocal(localRuns);}

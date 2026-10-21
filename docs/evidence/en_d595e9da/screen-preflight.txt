@@ -1,0 +1,7 @@
+CGPreflightScreenCaptureAccess= true
+kCGSSessionOnConsoleKey= True
+CGSSessionScreenIsLocked= None
+kCGSSessionLoginwindowSafeLogin= False
+session_keys= ['CGSSessionUniqueSessionUUID', 'kCGSSessionAuditIDKey', 'kCGSSessionGroupIDKey', 'kCGSSessionLoginwindowSafeLogin', 'kCGSSessionOnConsoleKey', 'kCGSSessionSystemSafeBoot', 'kCGSSessionUserIDKey', 'kCGSSessionUserNameKey', 'kCGSessionLoginDoneKey', 'kCGSessionLongUserNameKey', 'kSCSecuritySessionID']
+foreground_apps= Google Chrome, WeChat, ChatGPT, TextEdit, Terminal, Calendar, Finder, Electron, SunloginRemote, AweSun, Doubao, app_mode_loader, App Store, Electron, wpsoffice, Safari, Antigravity, Cursor, AgentReins, Calculator
+NOTE=loginwindow present; if screen locked/asleep do not fake screenshots

@@ -36,6 +36,8 @@ class MCPReadonlyTests(unittest.TestCase):
         evidence.PROTECTED_SEAL_DIR = integrity / "seals"
         evidence.SIGNED_ERA_FLAG = integrity / "signed-era"
         evidence.RUN_INVENTORY_MAC = integrity / "transport-run-inventory.mac"
+        os.environ["AGENTREINS_KEYCHAIN_BACKEND"] = "memory"
+        evidence._MEMORY_KEYCHAIN.clear()
         self.evidence = evidence
         run = self.transport / "exec-s02"
         run.mkdir()
@@ -264,6 +266,13 @@ class MCPReadonlyTests(unittest.TestCase):
         self.assertTrue(any(f.get("rule") == "credential-outbound" for f in detail["securityFindings"]))
         for finding in detail["securityFindings"]:
             self.assertIsNone(finding.get("matchedText"))
+            if finding.get("rule") == "instruction-override-inbound":
+                self.assertIn("ruleId", finding)
+                # Redacted context may be absent if fixture has no body snippet.
+                self.assertTrue(
+                    finding.get("matchContextRedacted") is None
+                    or isinstance(finding.get("matchContextRedacted"), str)
+                )
         bypass = self.evidence.get_execution("exec-s07")
         self.assertTrue(bypass["auditBypass"])
 

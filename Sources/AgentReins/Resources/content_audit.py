@@ -53,7 +53,7 @@ def load_policy():
         return {"rules": [], "approvedModelHosts": []}, "自定义策略读取失败；本次仅执行内置规则"
 
 
-def _remember(found, rule, direction, severity, offset):
+def _remember(found, rule, direction, severity, offset, context=None):
     key = (rule, direction)
     item = found.get(key)
     if item is None:
@@ -61,11 +61,16 @@ def _remember(found, rule, direction, severity, offset):
             "rule": rule, "direction": direction, "severity": severity,
             "count": 1, "characterOffset": offset,
             "basis": "captured_body_pattern", "status": "needs_review",
+            # INB: keep a short context window for local detail / MCP redacted snippet.
+            # S02/credential rules must NOT store matched plaintext.
+            "matchContext": context if rule == "instruction-override-inbound" else None,
         }
         return
     item["count"] += 1
     if offset is not None and (item["characterOffset"] is None or offset < item["characterOffset"]):
         item["characterOffset"] = offset
+        if rule == "instruction-override-inbound" and context:
+            item["matchContext"] = context
 
 
 def _scan_text(text, direction, found, base_offset=0):
@@ -75,7 +80,12 @@ def _scan_text(text, direction, found, base_offset=0):
         if rule_direction != direction:
             continue
         for match in re.finditer(pattern, text):
-            _remember(found, rule, direction, severity, base_offset + match.start())
+            ctx = None
+            if rule == "instruction-override-inbound":
+                start = max(0, match.start() - 80)
+                end = min(len(text), match.end() + 80)
+                ctx = text[start:end]
+            _remember(found, rule, direction, severity, base_offset + match.start(), context=ctx)
 
 
 _HEX_DUMP = re.compile(r"^[0-9a-fA-F]+: ")

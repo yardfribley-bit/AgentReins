@@ -61,6 +61,18 @@ HEADER_PREFIXES = (
     "authorization:",
     "proxy-authorization:",
     "cookie:",
+    "set-cookie:",
+    "mcp-session-id:",
+    "x-session-id:",
+    "session-id:",
+    "x-csrf-token:",
+    "csrf-token:",
+    "x-xsrf-token:",
+)
+
+# Free-text session / CSRF header redaction (WorkBuddy P2 / en_d595e9da).
+RE_SESSION_HEADER = re.compile(
+    r"(?i)((?:Mcp-Session-Id|X-Session-Id|Session-Id|X-CSRF-Token|CSRF-Token|X-XSRF-Token)\s*[:=]\s*)(\S+)"
 )
 
 
@@ -83,15 +95,25 @@ def _is_sensitive_header(value: str) -> bool:
     low = value.lower().lstrip()
     if any(low.startswith(p) for p in HEADER_PREFIXES):
         return True
-    if re.match(r"(?i)x-[\w-]*(key|token)\s*:", low):
+    if re.match(r"(?i)x-[\w-]*(key|token|session|csrf|xsrf)\s*:", low):
+        return True
+    if re.match(r"(?i)(?:mcp-)?session-id\s*:", low):
         return True
     return False
 
 
 def _redact_header_value(value: str) -> str:
-    # Keep scheme / key name; wipe the credential portion. No minimum length.
+    # Keep header name (+ auth scheme when present); wipe the secret. No minimum length.
     if ":" in value:
         name, rest = value.split(":", 1)
+        rest_s = rest.strip()
+        auth = re.match(r"(?i)(Bearer|Basic)\s+(\S+)\s*$", rest_s)
+        if auth:
+            kind = "bearer" if auth.group(1).lower() == "bearer" else "basic"
+            return f"{name}: {auth.group(1)} {_mask(kind)}"
+        low = name.lower().strip()
+        if any(k in low for k in ("session", "csrf", "xsrf", "cookie")):
+            return name + ": " + _mask("session" if "cookie" not in low else "cookie")
         return name + ": " + _mask("header")
     return _mask("header")
 
@@ -247,6 +269,7 @@ def redact_text(text: str) -> str:
         out,
     )
     out = RE_COOKIE.sub(lambda m: m.group(1) + _mask("cookie"), out)
+    out = RE_SESSION_HEADER.sub(lambda m: m.group(1) + _mask("session"), out)
     out = RE_X_API_KEY.sub(lambda m: m.group(1) + _mask("api_key"), out)
     out = RE_BASIC.sub(lambda m: m.group(1) + _mask("basic"), out)
     out = RE_BEARER.sub(lambda m: m.group(1) + _mask("bearer"), out)

@@ -1,0 +1,5 @@
+[mcp_servers.agentreins]
+command = "/Users/jatsmith/AgentSpec/AgentGuardApp/AgentReins.app/Contents/MacOS/AgentReinsMCP"
+startup_timeout_sec = 20
+tool_timeout_sec = 30
+default_tools_approval_mode = "writes"

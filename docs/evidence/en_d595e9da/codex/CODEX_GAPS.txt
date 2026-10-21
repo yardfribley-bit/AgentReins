@@ -1,0 +1,5 @@
+Codex real exec attempted (codex-cli 0.151.0).
+- With default env (AgentReins MITM proxy present): WebSocket/HTTPS to chatgpt.com failed with invalid peer certificate: UnknownIssuer. JSONL + stderr + rollout attached.
+- With proxies/CA env cleared: request timed out (reconnect 2/5..5/5). JSONL + stderr + rollout attached.
+- No successful tools/call with clientInfo=codex-mcp-client in this session (MCP initialize/tools/call never reached because model transport failed before tool use).
+- mcp list shows agentreins enabled (codex-mcp-list.txt).
