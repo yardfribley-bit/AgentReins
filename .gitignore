@@ -10,3 +10,6 @@ DerivedData/
 __pycache__/
 .atlas/
 .runtime/
+
+# Dev-time build of Sources/AgentReinsKeychainHelper (evidence.py compiles it when not packaged)
+tools/agentreins-mcp/keychain_helper

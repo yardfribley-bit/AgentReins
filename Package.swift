@@ -10,7 +10,8 @@ let package = Package(
         .executable(name: "AgentReinsNativeHost", targets: ["AgentReinsNativeHost"]),
         .executable(name: "AgentReinsHook", targets: ["AgentReinsHook"]),
         .executable(name: "AgentReinsAlertsBridge", targets: ["AgentReinsAlertsBridge"]),
-        .executable(name: "AgentReinsMCP", targets: ["AgentReinsMCP"])
+        .executable(name: "AgentReinsMCP", targets: ["AgentReinsMCP"]),
+        .executable(name: "AgentReinsKeychainHelper", targets: ["AgentReinsKeychainHelper"])
     ],
     targets: [
         .executableTarget(
@@ -35,6 +36,11 @@ let package = Package(
         .executableTarget(
             name: "AgentReinsMCP",
             path: "Sources/AgentReinsMCP",
+            swiftSettings: [ .swiftLanguageMode(.v5) ]
+        ),
+        .executableTarget(
+            name: "AgentReinsKeychainHelper",
+            path: "Sources/AgentReinsKeychainHelper",
             swiftSettings: [ .swiftLanguageMode(.v5) ]
         ),
         .testTarget(

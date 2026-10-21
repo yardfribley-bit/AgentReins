@@ -59,36 +59,15 @@ def sign_run_evidence(run: pathlib.Path) -> None:
         sign_evidence_tree(run)
         register_run_id(run.name, run)
         return
-    except Exception:
-        pass
-    # Fallback when MCP helpers unavailable (packaged PATH entry without evidence.py).
+    except Exception as exc:
+        reason = '%s: %s' % (exc.__class__.__name__, str(exc)[:200])
+    # No fallback key: a second, private key file would sign this run with a key no verifier
+    # trusts (that is exactly how throwaway-key "tampered" entries appeared). Leave the run
+    # unsigned and say why; the integrity check reports it instead of hiding it.
     try:
-        import hashlib, hmac as hm
-        key_path = pathlib.Path.home() / 'Library/Application Support/AgentGuard/mcp-supervisor-hmac.key'
-        key_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
-        if key_path.is_file():
-            key = key_path.read_bytes()
-        else:
-            key = os.urandom(32)
-            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-            with os.fdopen(fd, 'wb') as fh:
-                fh.write(key)
-            try: os.chmod(key_path, 0o600)
-            except OSError: pass
-        for name in ('transport.json', 'manifest.json'):
-            path = run / name
-            if not path.is_file():
-                continue
-            mac = hm.new(key, path.read_bytes(), hashlib.sha256).hexdigest()
-            mac_path = path.with_suffix(path.suffix + '.mac')
-            mac_path.write_text(mac + '\n', encoding='utf-8')
-            try: os.chmod(mac_path, 0o600)
-            except OSError: pass
-        inv_dir = pathlib.Path.home() / 'Library/Application Support/AgentGuard'
-        inv_dir.mkdir(parents=True, exist_ok=True)
-        inv = inv_dir / 'transport-run-inventory.jsonl'
-        with inv.open('a', encoding='utf-8') as fh:
-            fh.write(json.dumps({'runID': run.name, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}, ensure_ascii=False) + '\n')
+        note = run / 'UNSIGNED.txt'
+        note.write_text('evidence signing unavailable at capture time: ' + reason + '\n', encoding='utf-8')
+        os.chmod(note, 0o600)
     except OSError:
         pass
 

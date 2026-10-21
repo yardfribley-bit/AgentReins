@@ -1,6 +1,7 @@
 """list_network must surface proxy-independent socket samples (read-only, redacted)."""
 from __future__ import annotations
 
+import datetime as dt
 import json
 import pathlib
 import sys
@@ -39,11 +40,15 @@ class ListNetworkSockets(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.TemporaryDirectory()
         self.path = pathlib.Path(self.tmp.name) / "socket-ledger.json"
-        self.path.write_text(json.dumps({"schema": 1, "connections": ROWS,
-                                         "samples": {"count": 9, "lastAt": "2026-10-21T10:00:06.000Z"},
-                                         "coverage": {"intervalSeconds": 3, "missesShorterThanSeconds": 3}}))
+        self.write_ledger(dt.datetime.now(dt.timezone.utc))
         self.old = evidence.SOCKET_LEDGER
         evidence.SOCKET_LEDGER = self.path
+
+    def write_ledger(self, last_at):
+        stamp = last_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        self.path.write_text(json.dumps({"schema": 1, "connections": ROWS,
+                                         "samples": {"count": 9, "lastAt": stamp},
+                                         "coverage": {"intervalSeconds": 3, "missesShorterThanSeconds": 3}}))
 
     def tearDown(self):
         evidence.SOCKET_LEDGER = self.old
@@ -60,6 +65,20 @@ class ListNetworkSockets(unittest.TestCase):
         self.assertEqual(out["socketCoverage"]["state"], "sampling")
         self.assertEqual(out["confidence"], "Observed")
         self.assertNotIn("key", by_id["a"])
+
+    def test_stale_ledger_is_stopped_not_sampling(self):
+        self.write_ledger(dt.datetime.now(dt.timezone.utc) - dt.timedelta(minutes=5))
+        out = evidence.list_network(records=[])
+        self.assertEqual(out["socketCoverage"]["state"], "stopped")
+        self.assertGreater(out["socketCoverage"]["staleSeconds"], 60)
+
+    def test_v1_ledger_coverage_is_flagged_as_configured_not_measured(self):
+        out = evidence.list_network(records=[])
+        cov = out["socketCoverage"]
+        self.assertEqual(cov["integrity"]["state"], "unsigned")
+        self.assertEqual(cov["measurementConfidence"], "Unknown")
+        self.assertIn("配置间隔", cov["measurementNote"])
+        self.assertEqual(cov["confidence"], "Unknown")  # unsigned ledger is not Observed coverage
 
     def test_redacted_and_filtered(self):
         out = evidence.list_network(agent="Codex", since="2026-10-21T00:00:00Z", records=[])

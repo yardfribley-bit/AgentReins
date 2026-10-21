@@ -79,7 +79,20 @@ def main():
         assert t["sampleCount"] >= 2, t["sampleCount"]
         assert t["firstSeen"].endswith("Z") and t["lastSeen"].endswith("Z")
         assert not [r for r in rows if r["pid"] == unrelated.pid], "unrelated process leaked into the ledger"
-        assert data["coverage"]["missesShorterThanSeconds"] == 0.5
+        cov = data["coverage"]
+        # Coverage is measured, not the configured interval: the blind window is the p95 gap between
+        # successful rounds, which can never be shorter than the interval actually achieved.
+        assert cov["configuredIntervalSeconds"] == 0.5, cov
+        assert cov["windowRounds"] >= 2, cov
+        assert cov["missesShorterThanSeconds"] == cov["successGapSecondsP95"], cov
+        if cov["missesShorterThanSeconds"] is not None:
+            assert cov["missesShorterThanSeconds"] >= 0.45, cov
+        assert data["samples"].get("failures", 0) == len([e for e in data["samples"].get("failureLog", [])
+                                                          if e.get("kind") not in ("stopped",)]), data["samples"]
+        print("LIVE_COVERAGE", json.dumps({k: cov.get(k) for k in (
+            "configuredIntervalSeconds", "observedCycleSecondsP50", "observedCycleSecondsP95",
+            "successGapSecondsP95", "maxFirstDetectionDelaySeconds", "roundDurationSecondsP50",
+            "roundDurationSecondsP95", "windowRounds", "windowFailedRounds", "measurementConfidence")}, sort_keys=True))
         print("LIVE_DIRECT_TCP", json.dumps({k: t.get(k) for k in (
             "agent", "pid", "ppid", "processName", "protocol", "localAddress", "remoteAddress", "state",
             "viaProxy", "realDestination", "destinationSource", "destinationEvidence", "firstSeen", "lastSeen",

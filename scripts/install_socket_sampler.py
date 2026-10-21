@@ -46,7 +46,7 @@ def plist(interval: float) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--interval", type=float, default=3.0)
+    ap.add_argument("--interval", type=float, default=2.0)
     ap.add_argument("--uninstall", action="store_true")
     ap.add_argument("--print", action="store_true")
     args = ap.parse_args()

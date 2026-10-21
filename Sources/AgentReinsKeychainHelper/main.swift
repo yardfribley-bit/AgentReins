@@ -1,8 +1,10 @@
-#!/usr/bin/env swift
 import Foundation
 import Security
 
 /// Trusted Keychain helper for MCP integrity keys (en_26fd4180).
+/// Shipped as AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper (SwiftPM target
+/// AgentReinsKeychainHelper). The Python MCP, the socket sampler and the Swift MCP all read
+/// the integrity key through this one binary, so there is exactly one key.
 /// Uses Security.framework (no `security -A` CLI). ACL is limited to this
 /// helper binary's code signature / path — other apps must prompt or fail.
 
@@ -26,11 +28,13 @@ func access() -> SecAccess? {
         trusted.append(selfApp)
     }
     // Prefer signed app bundle when present next to Resources.
+    let selfDir = URL(fileURLWithPath: selfPath).deletingLastPathComponent()
     let appCandidates = [
-        URL(fileURLWithPath: selfPath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("MacOS/AgentReins").path,
+        // Packaged: helper and app live side by side in Contents/MacOS.
+        selfDir.appendingPathComponent("AgentReins").path,
         "/Applications/AgentReins.app/Contents/MacOS/AgentReins",
-    ]
+        "/Applications/AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper",
+    ].filter { $0 != selfPath }
     for path in appCandidates {
         var app: SecTrustedApplication?
         if FileManager.default.isExecutableFile(atPath: path),

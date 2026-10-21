@@ -52,6 +52,17 @@ try:
     row = rows[0]
     assert row["viaProxy"] is False and row["evidence"] == "Observed" and row["protocol"] == "TCP", row
     assert out["socketCoverage"]["state"] == "sampling", out["socketCoverage"]
+    # Tamper evidence: if the packaged sampler signed the ledger (Keychain key via AgentReinsKeychainHelper),
+    # the packaged Swift MCP must verify that exact signature with the same key.
+    side = json.loads((ledger.parent / (ledger.name + ".mac")).read_text())
+    integrity = out["socketCoverage"]["integrity"]
+    print("LEDGER_INTEGRITY", json.dumps({"sidecarSigned": "mac" in side, "state": integrity.get("state"),
+                                          "reason": integrity.get("reason")}))
+    if "mac" in side:
+        assert integrity["state"] == "verified", integrity
+    else:
+        assert integrity["state"] == "unsigned", integrity
+    assert out["socketSummary"]["ledgerIntegrity"] == integrity["state"]
     assert out["socketSummary"]["total"] >= 1
     print("MCP_LIST_NETWORK_SOCKET_OK", json.dumps({k: row.get(k) for k in (
         "pid", "ppid", "processName", "protocol", "remoteAddress", "viaProxy", "realDestination",

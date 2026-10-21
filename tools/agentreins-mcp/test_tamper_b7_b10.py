@@ -96,6 +96,21 @@ class TamperB7B10Tests(unittest.TestCase):
             v,
         )
 
+    def test_b8_inventory_edit_not_laundered_by_later_reads_or_runs(self) -> None:
+        run = self._seed()
+        shutil.rmtree(run)
+        lines = [ln for ln in evidence.RUN_INVENTORY.read_text(encoding="utf-8").splitlines()
+                 if ln.strip() and "run-seed-1" not in ln]
+        evidence.RUN_INVENTORY.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        # Ordinary MCP reads append audit entries and rewrite the seal; a new run gets registered.
+        evidence.append_audit("Codex", "list_alerts", {})
+        evidence.append_audit("Codex", "get_coverage", {})
+        evidence.register_run_id("run-later", None)
+        v = evidence.validate_audit()
+        self.assertFalse(v["ok"], v)
+        self.assertTrue(any(t.get("reason") in ("inventory_mac_mismatch", "inventory_seal_anchor_mismatch")
+                            for t in v.get("tampered") or []), v)
+
     def test_b9_b10_wipe_all_treated_as_tamper_not_unsigned(self) -> None:
         self._seed()
         self.assertTrue(evidence.signed_era_active())
