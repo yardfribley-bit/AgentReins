@@ -10,6 +10,98 @@ for _p in (BASE.parents[1]/'tools', BASE.parent, BASE):
         sys.path.insert(0, str(_p)); break
 from redact_secrets import redact_text  # noqa: E402
 
+def parent_process_facts(pid: int) -> dict:
+    """Capture parent name/argv/start time for S03 lineage / same_shell_proven evidence."""
+    out = {'parentPID': pid, 'parentName': None, 'parentArgv': None, 'parentStartAt': None}
+    if not pid or pid <= 0:
+        return out
+    try:
+        # macOS: ps -p <pid> -o lstart=,comm=,args=
+        proc = subprocess.run(
+            ['ps', '-p', str(pid), '-o', 'lstart=,comm=,args='],
+            capture_output=True, text=True, timeout=2, check=False,
+        )
+        line = (proc.stdout or '').strip()
+        if not line:
+            return out
+        # lstart is like "Wed Oct 21 06:00:00 2026" then comm then args
+        # Prefer separate queries for reliability.
+        name = subprocess.run(
+            ['ps', '-p', str(pid), '-o', 'comm='], capture_output=True, text=True, timeout=2
+        ).stdout.strip() or None
+        args = subprocess.run(
+            ['ps', '-p', str(pid), '-o', 'args='], capture_output=True, text=True, timeout=2
+        ).stdout.strip() or None
+        lstart = subprocess.run(
+            ['ps', '-p', str(pid), '-o', 'lstart='], capture_output=True, text=True, timeout=2
+        ).stdout.strip() or None
+        out['parentName'] = name
+        out['parentArgv'] = args
+        if lstart:
+            try:
+                dt = datetime.datetime.strptime(lstart, '%a %b %d %H:%M:%S %Y')
+                out['parentStartAt'] = dt.replace(tzinfo=datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+            except ValueError:
+                out['parentStartAt'] = lstart
+    except (OSError, subprocess.SubprocessError, ValueError):
+        pass
+    return out
+
+def sign_run_evidence(run: pathlib.Path) -> None:
+    """HMAC-sign transport/manifest at collection time (never wait for MCP read)."""
+    try:
+        mcp = BASE.parents[1] / 'tools' / 'agentreins-mcp'
+        if str(mcp) not in sys.path:
+            sys.path.insert(0, str(mcp))
+        from evidence import sign_evidence_tree, register_run_id  # noqa: WPS433
+        sign_evidence_tree(run)
+        register_run_id(run.name, run)
+        return
+    except Exception:
+        pass
+    # Fallback when MCP helpers unavailable (packaged PATH entry without evidence.py).
+    try:
+        import hashlib, hmac as hm
+        key_path = pathlib.Path.home() / 'Library/Application Support/AgentGuard/mcp-supervisor-hmac.key'
+        key_path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
+        if key_path.is_file():
+            key = key_path.read_bytes()
+        else:
+            key = os.urandom(32)
+            fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, 'wb') as fh:
+                fh.write(key)
+            try: os.chmod(key_path, 0o600)
+            except OSError: pass
+        for name in ('transport.json', 'manifest.json'):
+            path = run / name
+            if not path.is_file():
+                continue
+            mac = hm.new(key, path.read_bytes(), hashlib.sha256).hexdigest()
+            mac_path = path.with_suffix(path.suffix + '.mac')
+            mac_path.write_text(mac + '\n', encoding='utf-8')
+            try: os.chmod(mac_path, 0o600)
+            except OSError: pass
+        inv_dir = pathlib.Path.home() / 'Library/Application Support/AgentGuard'
+        inv_dir.mkdir(parents=True, exist_ok=True)
+        inv = inv_dir / 'transport-run-inventory.jsonl'
+        with inv.open('a', encoding='utf-8') as fh:
+            fh.write(json.dumps({'runID': run.name, 'at': datetime.datetime.now(datetime.timezone.utc).isoformat()}, ensure_ascii=False) + '\n')
+    except OSError:
+        pass
+
+def redact_file_inplace(path: pathlib.Path) -> None:
+    if not path or not path.is_file():
+        return
+    try:
+        raw = path.read_bytes()
+        text = raw.decode('utf-8', 'replace')
+        red = redact_text(text)
+        if red != text:
+            path.write_text(red, encoding='utf-8')
+    except OSError:
+        pass
+
 def redact_argv(args):
     """Redact argv so `-u` / `--user` followed by `user:pass` never land as plaintext on disk."""
     out=[]; i=0; args=list(args)
@@ -187,8 +279,12 @@ def main():
         run=root/str(uuid.uuid4());run.mkdir(parents=True,mode=0o700)
         test_capture=env.get('AGENTREINS_TEST_CAPTURE','').strip() in ('1','true','yes')
         provenance='test' if test_capture else (env.get('AGENTREINS_PROVENANCE') or 'live')
-        manifest={'schema':1,'agent':agent,'tool':tool,'startedAt':datetime.datetime.now(datetime.timezone.utc).isoformat(),
-                  'launcherPID':os.getpid(),'parentPID':os.getppid(),'captureMode':'agent-path',
+        parent_facts=parent_process_facts(os.getppid())
+        started=datetime.datetime.now(datetime.timezone.utc).isoformat()
+        manifest={'schema':1,'agent':agent,'tool':tool,'startedAt':started,'processStartAt':started,
+                  'launcherPID':os.getpid(),'parentPID':os.getppid(),
+                  'parentName':parent_facts.get('parentName'),'parentArgv':parent_facts.get('parentArgv'),
+                  'parentStartAt':parent_facts.get('parentStartAt'),'captureMode':'agent-path',
                   'args':redact_argv(args),
                   'task':None,'call':run.name,'codexThreadID':env.get('CODEX_THREAD_ID') if agent=='Codex' else None,'session':env.get('CODEX_THREAD_ID') if agent=='Codex' else env.get('CODEBUDDY_SESSION_ID') if agent=='WorkBuddy' else env.get('CURSOR_CONVERSATION_ID'),'nativeRequestID':env.get('CODEBUDDY_CONVERSATION_REQUEST_ID'),'nativeMessageID':env.get('CODEBUDDY_CONVERSATION_MESSAGE_ID'),'coverage':'PATH-resolved command; absolute paths and overwritten PATH bypass this entry',
                   'provenance':provenance,'testCapture':test_capture}
@@ -344,9 +440,39 @@ def main():
             evidence['securityAudit']=content_audit(evidence, request_text=raw_request, response_text=raw_response, trace_dir=run)
         except Exception as audit_error:
             evidence['securityAudit']=audit_error_record(audit_error)
+        # Hash executed file when command points at a local path (enables S03 exec_hash).
+        try:
+            import hashlib
+            for token in list(args)[:8]:
+                p=pathlib.Path(token)
+                if p.is_file() and p.stat().st_size < 32*1024*1024:
+                    h=hashlib.sha256()
+                    with p.open('rb') as fh:
+                        for chunk in iter(lambda: fh.read(65536), b''):
+                            h.update(chunk)
+                    evidence.setdefault('fileResult', {})
+                    if isinstance(evidence['fileResult'], dict):
+                        evidence['fileResult'].setdefault('path', str(p.resolve()))
+                        evidence['fileResult'].setdefault('sha256', h.hexdigest())
+                    evidence['sha256']=h.hexdigest()
+                    break
+        except OSError:
+            pass
         save('transport.json',evidence)
+        # Redact session log and any captured bodies before signing.
+        redact_file_inplace(run/'session.log')
+        bodies=run/'bodies'
+        if bodies.is_dir():
+            for body in bodies.iterdir():
+                if body.is_file():
+                    redact_file_inplace(body)
+        for preview in run.glob('*.preview*'):
+            redact_file_inplace(preview)
+        sign_run_evidence(run)
     except Exception as error:
         manifest['projectionError']=type(error).__name__;save('manifest.json',manifest)
+        try:sign_run_evidence(run)
+        except Exception:pass
     if code<0:
         signal.signal(-code,signal.SIG_DFL);os.kill(os.getpid(),-code)
     return code

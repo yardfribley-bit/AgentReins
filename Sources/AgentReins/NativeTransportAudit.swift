@@ -38,11 +38,11 @@ enum NativeTransportAudit {
                   let invocation = item["invocation"] as? [String: Any],
                   invocation["captureMode"] as? String == "agent-path" else { continue }
             var row: [String: Any] = ["runID": file.deletingLastPathComponent().lastPathComponent]
-            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "captureMode", "gap", "auditBypass", "codexThreadID", "session", "parentPID", "launcherPID", "provenance", "testCapture"] {
+            for key in ["agent", "tool", "args", "task", "call", "startedAt", "processStartAt", "pid", "exitCode", "captureMode", "gap", "auditBypass", "codexThreadID", "session", "parentPID", "parentName", "parentArgv", "parentStartAt", "launcherPID", "provenance", "testCapture", "sha256"] {
                 row[key] = invocation[key] ?? NSNull()
             }
             for key in ["connections", "children", "blocks", "helpers", "packFiles"] { row[key] = item[key] as? [Any] ?? [] }
-            for key in ["fileResult", "repoResult", "gitOperation"] { row[key] = item[key] ?? NSNull() }
+            for key in ["fileResult", "repoResult", "gitOperation", "sha256"] { row[key] = item[key] ?? row[key] ?? NSNull() }
             row["outboundFiles"] = item["outboundFiles"] as? [Any] ?? []
             row["downloads"] = item["downloads"] as? [Any] ?? []
             row["formulas"] = item["formulas"] as? [Any] ?? []

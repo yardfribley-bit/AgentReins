@@ -36,6 +36,13 @@ LEGACY_TRANSPORT = pathlib.Path("/private/tmp/agentreins-transport-audit")
 AUDIT_LOG = AUDIT_DIR / "mcp-supervisor-audit.jsonl"
 AUDIT_SEAL = AUDIT_DIR / "mcp-supervisor-audit.seal"
 HMAC_KEY_FILE = AUDIT_DIR / "mcp-supervisor-hmac.key"
+RUN_INVENTORY = AUDIT_DIR / "transport-run-inventory.jsonl"
+# Seal copy outside the agent-writable transport tree (still same uid — document B6).
+PROTECTED_SEAL_DIR = AUDIT_DIR / "seals"
+KEYCHAIN_LIMITATION = (
+    "HMAC 密钥位于用户目录 0600 文件（非 Keychain）。同一 uid 的被监督进程可读密钥并伪造 MAC；"
+    "相关完整性结论标为 Unknown，除非改用 Keychain/独立特权守护。"
+)
 # Prefer packaged RealtimeWorkspace next to this MCP copy; fall back to repo Sources.
 _PACKAGED_JS = ROOT.parent / "RealtimeWorkspace"
 _REPO_JS = REPO / "Sources/AgentReins/Resources/RealtimeWorkspace"
@@ -685,8 +692,13 @@ def load_or_create_hmac_key() -> bytes:
     return key
 
 
+def canonical_json(obj: Any) -> str:
+    """Match Swift JSONSerialization sortedKeys compact form (no spaces)."""
+    return json.dumps(obj, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+
+
 def entry_hmac(entry_body: dict[str, Any], key: bytes) -> str:
-    payload = json.dumps(entry_body, ensure_ascii=False, sort_keys=True)
+    payload = canonical_json(entry_body)
     return hmac.new(key, payload.encode("utf-8"), hashlib.sha256).hexdigest()
 
 
@@ -695,26 +707,71 @@ def evidence_file_mac(path: pathlib.Path, key: bytes) -> str:
     return hmac.new(key, data, hashlib.sha256).hexdigest()
 
 
-def sign_evidence_tree(root: pathlib.Path | None = None) -> dict[str, Any]:
-    """HMAC-sign transport.json + manifest.json under the user transport root."""
+def register_run_id(run_id: str, run_path: pathlib.Path | None = None) -> None:
+    """Append run ID to durable inventory so deleted runs are detectable."""
+    ensure_audit_dir()
+    entry = {
+        "runID": run_id,
+        "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "path": str(run_path) if run_path else None,
+    }
+    with RUN_INVENTORY.open("a", encoding="utf-8") as fh:
+        fh.write(json.dumps(entry, ensure_ascii=False, sort_keys=True) + "\n")
+    try:
+        os.chmod(RUN_INVENTORY, 0o600)
+    except OSError:
+        pass
+
+
+def known_run_ids() -> set[str]:
+    if not RUN_INVENTORY.is_file():
+        return set()
+    out: set[str] = set()
+    for line in RUN_INVENTORY.read_text(encoding="utf-8").splitlines():
+        if not line.strip():
+            continue
+        try:
+            out.add(str(json.loads(line).get("runID") or ""))
+        except json.JSONDecodeError:
+            continue
+    out.discard("")
+    return out
+
+
+def sign_evidence_tree(root: pathlib.Path | None = None, *, allow_resign: bool = True) -> dict[str, Any]:
+    """HMAC-sign transport.json + manifest.json. Collection-time only — readers must not resign."""
     ensure_audit_dir()
     key = load_or_create_hmac_key()
     base = root or DEFAULT_TRANSPORT
     signed = 0
-    for path in list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json")):
-        mac = evidence_file_mac(path, key)
+    # Single run directory (contains transport.json directly) or transport root.
+    if (base / "transport.json").is_file() or (base / "manifest.json").is_file():
+        candidates = [p for p in (base / "transport.json", base / "manifest.json") if p.is_file()]
+    else:
+        candidates = list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json"))
+    for path in candidates:
         mac_path = path.with_suffix(path.suffix + ".mac")
+        if mac_path.is_file() and not allow_resign:
+            continue
+        if mac_path.is_file() and allow_resign:
+            # Never overwrite an existing MAC during read paths; collection may refresh.
+            pass
+        mac = evidence_file_mac(path, key)
         mac_path.write_text(mac + "\n", encoding="utf-8")
         try:
             os.chmod(mac_path, 0o600)
         except OSError:
             pass
         signed += 1
+        try:
+            register_run_id(path.parent.name, path.parent)
+        except OSError:
+            pass
     return {"signedFiles": signed, "root": str(base)}
 
 
 def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
-    """Detect tampering of transport/manifest evidence (missing or bad MAC after signing era)."""
+    """Detect tampering of transport/manifest evidence. Missing MAC is always failure once inventory exists."""
     ensure_audit_dir()
     key = load_or_create_hmac_key()
     base = root or DEFAULT_TRANSPORT
@@ -723,41 +780,72 @@ def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
         "checked": 0,
         "tampered": [],
         "missingMac": [],
+        "missingRuns": [],
         "confidence": "Observed",
+        "keyLimitation": KEYCHAIN_LIMITATION,
     }
     if not base.is_dir():
         result["note"] = "无运输审计目录"
+        # Inventory without on-disk runs → deleted evidence (B5).
+        known = known_run_ids()
+        if known:
+            result["ok"] = False
+            result["missingRuns"] = sorted(known)
+            result["confidence"] = "Unknown"
+            result["tampered"].append({"reason": "run_directory_missing", "runs": sorted(known)})
         return result
     files = list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json"))
-    any_mac = any(p.with_suffix(p.suffix + ".mac").is_file() for p in files)
+    # Signing era: inventory or any .mac or seal means MACs are required.
+    signing_era = bool(known_run_ids()) or any(
+        p.with_suffix(p.suffix + ".mac").is_file() for p in files
+    ) or AUDIT_SEAL.is_file()
     for path in files:
         result["checked"] += 1
         mac_path = path.with_suffix(path.suffix + ".mac")
         if not mac_path.is_file():
-            if any_mac:
+            if signing_era:
                 result["ok"] = False
                 result["missingMac"].append(str(path))
-                result["tampered"].append({"path": str(path), "reason": "missing_mac_after_signed_era"})
+                result["tampered"].append({"path": str(path), "reason": "missing_mac"})
             continue
         expected = mac_path.read_text(encoding="utf-8").strip()
         actual = evidence_file_mac(path, key)
         if not hmac.compare_digest(expected, actual):
             result["ok"] = False
             result["tampered"].append({"path": str(path), "reason": "evidence_mac_mismatch"})
+    # Deleted runs listed in inventory
+    on_disk = {p.parent.name for p in base.glob("*/transport.json")}
+    missing = sorted(known_run_ids() - on_disk)
+    if missing:
+        result["ok"] = False
+        result["missingRuns"] = missing
+        result["tampered"].append({"reason": "run_deleted_from_inventory", "runs": missing})
+        result["confidence"] = "Unknown"
     return result
 
 
 def _write_seal(head_hash: str, count: int, key: bytes) -> None:
     body = {"headHash": head_hash, "count": count, "schema": 1}
     body["mac"] = entry_hmac(body, key)
-    AUDIT_SEAL.write_text(json.dumps(body, ensure_ascii=False, sort_keys=True) + "\n", encoding="utf-8")
+    text = canonical_json(body) + "\n"
+    AUDIT_SEAL.write_text(text, encoding="utf-8")
     try:
         os.chmod(AUDIT_SEAL, 0o600)
+    except OSError:
+        pass
+    # Mirror seal outside transport tree; still same uid (B6 limitation documented).
+    try:
+        PROTECTED_SEAL_DIR.mkdir(parents=True, exist_ok=True)
+        os.chmod(PROTECTED_SEAL_DIR, 0o700)
+        mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
+        mirror.write_text(text, encoding="utf-8")
+        os.chmod(mirror, 0o600)
     except OSError:
         pass
 
 
 def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+    """Append one audit line. Readers must NEVER re-sign evidence trees (B3 wash prevention)."""
     ensure_audit_dir()
     key = load_or_create_hmac_key()
     prev = "0" * 64
@@ -770,7 +858,7 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
                 prev = json.loads(lines[-1]).get("hash") or prev
         except (OSError, json.JSONDecodeError, IndexError):
             prev = "0" * 64
-    args_digest = sha256_hex(json.dumps(arguments, ensure_ascii=False, sort_keys=True))[:24]
+    args_digest = sha256_hex(canonical_json(arguments))[:24]
     entry: dict[str, Any] = {
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "actor": actor,
@@ -779,27 +867,23 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
         "prevHash": prev,
     }
     entry["mac"] = entry_hmac(entry, key)
-    entry["hash"] = sha256_hex(json.dumps(entry, ensure_ascii=False, sort_keys=True) + prev)
+    entry["hash"] = sha256_hex(canonical_json(entry) + prev)
     with AUDIT_LOG.open("a", encoding="utf-8") as fh:
-        fh.write(json.dumps(entry, ensure_ascii=False) + "\n")
+        fh.write(canonical_json(entry) + "\n")
     try:
         os.chmod(AUDIT_LOG, 0o600)
     except OSError:
         pass
     _write_seal(entry["hash"], count + 1, key)
-    # Keep transport/manifest under HMAC as well.
-    try:
-        sign_evidence_tree()
-    except OSError:
-        pass
+    # Intentionally do NOT call sign_evidence_tree() here — collection signs; read only verifies.
     return entry
 
 
 def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
-    """Validate keyed HMAC chain; missing MAC after first signed line is tamper; seal detects truncation."""
+    """Validate keyed HMAC chain. Seal is mandatory once a signed era exists; no resign-on-read."""
     log = path or AUDIT_LOG
     result: dict[str, Any] = {
-        "mode": "keyed-HMAC-SHA256 append-only + seal + evidence MAC",
+        "mode": "keyed-HMAC-SHA256 append-only + required seal + evidence MAC + run inventory",
         "keyPath": str(HMAC_KEY_FILE),
         "logPath": str(log),
         "ok": True,
@@ -807,18 +891,26 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         "tampered": [],
         "deletedOrGap": [],
         "confidence": "Observed",
-        "limitation": "持有本机 HMAC 密钥的进程仍可重写整条链；MCP 不提供删除接口。",
+        "limitation": KEYCHAIN_LIMITATION,
         "legacyPathPolicy": "never_read_/private/tmp",
     }
     if not log.is_file():
         result["ok"] = True
         result["note"] = "尚无审计日志"
+        # Still check evidence / inventory.
+        ev = validate_evidence_files()
+        result["evidenceFiles"] = ev
+        if not ev.get("ok", True):
+            result["ok"] = False
+            result["tampered"].extend(ev.get("tampered") or [])
+            result["confidence"] = "Unknown"
         return result
     try:
         key = load_or_create_hmac_key()
     except OSError as exc:
         result["ok"] = False
         result["warning"] = f"无法读取 HMAC 密钥：{exc}"
+        result["confidence"] = "Unknown"
         return result
     lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
     prev = "0" * 64
@@ -844,14 +936,11 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
             )
         body = {k: entry[k] for k in ("at", "actor", "tool", "argsDigest", "prevHash") if k in entry}
         if "mac" not in entry:
-            if seen_signed:
-                # After the first signed line, missing MAC is tamper (not legacy).
-                result["ok"] = False
-                result["tampered"].append(
-                    {"index": idx, "reason": "missing_mac_after_signed_era", "tool": entry.get("tool")}
-                )
-            else:
-                result.setdefault("legacyUnsigned", []).append({"index": idx, "tool": entry.get("tool")})
+            # Any missing MAC is tamper once signing is in use (B2: strip MACs + rewrite).
+            result["ok"] = False
+            result["tampered"].append(
+                {"index": idx, "reason": "missing_mac", "tool": entry.get("tool")}
+            )
         else:
             seen_signed = True
             expected_mac = entry_hmac(body, key)
@@ -860,11 +949,18 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
                 result["tampered"].append({"index": idx, "reason": "mac_mismatch", "tool": entry.get("tool")})
         prev = entry.get("hash") or prev
         head = prev
-    # Seal anchors chain head + count → truncation detected
     seal_path = AUDIT_SEAL if path is None else path.with_suffix(".seal")
-    if seal_path.is_file():
+    mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
+    # Seal once present is mandatory (B1: truncate + delete seal). Prefer primary, fall back to mirror.
+    seal_required = seen_signed or result["entriesChecked"] > 0 or mirror.is_file()
+    active_seal = seal_path if seal_path.is_file() else (mirror if mirror.is_file() else None)
+    if seal_required and active_seal is None:
+        result["ok"] = False
+        result["tampered"].append({"reason": "seal_missing_required"})
+        result["confidence"] = "Unknown"
+    elif active_seal is not None:
         try:
-            seal = json.loads(seal_path.read_text(encoding="utf-8"))
+            seal = json.loads(active_seal.read_text(encoding="utf-8"))
             seal_body = {k: seal[k] for k in ("headHash", "count", "schema") if k in seal}
             if seal.get("mac") != entry_hmac(seal_body, key):
                 result["ok"] = False
@@ -883,14 +979,18 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
             result["ok"] = False
             result["tampered"].append({"reason": "seal_unreadable", "error": type(exc).__name__})
-    # Evidence files under transport root
     ev = validate_evidence_files()
     result["evidenceFiles"] = ev
     if not ev.get("ok", True):
         result["ok"] = False
         result["tampered"].extend(ev.get("tampered") or [])
-    if result.get("legacyUnsigned") and result["ok"]:
-        result["note"] = "含升级前无 HMAC 的旧行（均在首条签名之前）；其后缺 MAC 视为篡改。"
+        result["confidence"] = "Unknown"
+    # Same-uid key forgeability (B6): never claim Observed for integrity against same-uid attacker.
+    result["b6"] = {
+        "sameUidCanForge": True,
+        "confidence": "Unknown",
+        "note": KEYCHAIN_LIMITATION,
+    }
     return result
 
 

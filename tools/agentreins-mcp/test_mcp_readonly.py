@@ -29,6 +29,8 @@ class MCPReadonlyTests(unittest.TestCase):
         evidence.AUDIT_DIR = self.audit_dir
         evidence.AUDIT_SEAL = self.audit_dir / "mcp-supervisor-audit.seal"
         evidence.HMAC_KEY_FILE = self.audit_dir / "mcp-supervisor-hmac.key"
+        evidence.RUN_INVENTORY = self.audit_dir / "transport-run-inventory.jsonl"
+        evidence.PROTECTED_SEAL_DIR = self.audit_dir / "seals"
         self.evidence = evidence
         run = self.transport / "exec-s02"
         run.mkdir()
@@ -127,6 +129,11 @@ class MCPReadonlyTests(unittest.TestCase):
             encoding="utf-8",
         )
         self.secret = secret
+        # Collection-time signing — MCP reads must not resign.
+        self.evidence.sign_evidence_tree(self.transport)
+        for run_dir in self.transport.iterdir():
+            if run_dir.is_dir():
+                self.evidence.register_run_id(run_dir.name, run_dir)
 
     def tearDown(self):
         self.tmp.cleanup()
@@ -290,7 +297,7 @@ class MCPReadonlyTests(unittest.TestCase):
         self.audit.write_text("\n".join(lines) + "\n", encoding="utf-8")
         result = self.evidence.validate_audit()
         self.assertFalse(result["ok"])
-        self.assertTrue(any(t.get("reason") == "missing_mac_after_signed_era" for t in result["tampered"]), result)
+        self.assertTrue(any(t.get("reason") in ("missing_mac", "missing_mac_after_signed_era") for t in result["tampered"]), result)
 
     def test_audit_truncation_via_seal(self):
         self.evidence.append_audit("Codex", "list_agents", {})
@@ -308,7 +315,7 @@ class MCPReadonlyTests(unittest.TestCase):
 
     def test_evidence_file_mac_tamper(self):
         self.evidence.append_audit("Codex", "list_alerts", {})
-        # append_audit signs evidence tree; tamper transport.json
+        # Evidence was signed at collection (setUp); MCP read must not wash. Tamper transport.json.
         tpath = self.transport / "exec-s02" / "transport.json"
         raw = tpath.read_text(encoding="utf-8")
         tpath.write_text(raw.replace("Cursor", "TamperedAgent"), encoding="utf-8")

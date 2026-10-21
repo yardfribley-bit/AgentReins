@@ -218,9 +218,16 @@ function collectorPhrase(){
  const proxyFailed=!!(proxy&&(/failed|error/i.test(String(proxy.state||''))||/failed to bind/i.test(detail)));
  const proxyUp=!!(proxy&&!proxyFailed&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||(/\b18891\b/.test(detail)&&/running|listening|records received|proxy is running/i.test(detail))));
  const otherFailed=health.some(h=>h!==proxy&&/failed|error/i.test(String(h.state||'')));
+ const hasLiveAlerts=!!(window.AgentReinsRisk&&Array.isArray(window.AgentReinsRisk._lastAlerts)&&window.AgentReinsRisk._lastAlerts.length);
+ const hasTransport=typeof window.AgentReinsNetwork?.localExchanges==='function'&&(window.AgentReinsNetwork.localExchanges()||[]).length>0;
  if(proxyFailed)return '代理异常';
  if(otherFailed)return '采集有异常';
- if(shown.observing||proxyUp||health.some(h=>h.state==='healthy'))return proxyUp?'代理在线 · 正在监看':'采集进行中';
+ // Showing live alerts / transport means collection is active — never claim「采集未启动」.
+ if(shown.observing||proxyUp||health.some(h=>h.state==='healthy')||hasLiveAlerts||hasTransport){
+  if(proxyUp)return '代理在线 · 正在监看';
+  if(hasLiveAlerts||hasTransport||shown.observing)return '采集进行中';
+  return '采集进行中';
+ }
  if(health.length)return '已收到采集源状态';
  return '采集未启动';
 }

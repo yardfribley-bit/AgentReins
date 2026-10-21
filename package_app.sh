@@ -87,6 +87,7 @@ cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
    "$PROJECT_DIR/tools/agentreins-mcp/evidence.py" \
    "$PROJECT_DIR/tools/agentreins-mcp/alerts_bridge.cjs" \
    "$PROJECT_DIR/tools/redact_secrets.py" \
+   "$PROJECT_DIR/tools/redact_vectors.json" \
    "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
    "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
 # Point Codex at the packaged Swift MCP (no system python/node).

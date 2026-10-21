@@ -8,9 +8,13 @@ import Security
 @main
 enum AgentReinsMCP {
     static let protocolVersion = "2024-11-05"
-    static let actor = "Codex"
+    /// Real caller from initialize.clientInfo — never a hard-coded "Codex".
+    static var actorName: String = "unknown-client"
 
     static func main() {
+        if ProcessInfo.processInfo.environment["AGENTREINS_REDACT_SELFTEST"] == "1" {
+            Redact.selfTestAndExit()
+        }
         let tools: [[String: Any]] = [
             ["name": "list_agents", "description": "List observed agents. Read-only.",
              "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
@@ -39,6 +43,13 @@ enum AgentReinsMCP {
             let id = msg["id"]
             let params = msg["params"] as? [String: Any] ?? [:]
             if method == "initialize" {
+                if let info = params["clientInfo"] as? [String: Any] {
+                    let name = (info["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    let version = (info["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+                    if !name.isEmpty {
+                        actorName = version.isEmpty ? name : "\(name)/\(version)"
+                    }
+                }
                 respond(id, [
                     "protocolVersion": params["protocolVersion"] as? String ?? protocolVersion,
                     "capabilities": ["tools": ["listChanged": false]],
@@ -83,7 +94,7 @@ enum AgentReinsMCP {
         guard allowed.contains(name) else {
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown tool: \(name)"])
         }
-        Audit.append(actor: actor, tool: name, arguments: args)
+        Audit.append(actor: actorName, tool: name, arguments: args)
         let records = Transport.load()
         switch name {
         case "list_agents":
@@ -169,25 +180,35 @@ enum Paths {
     }
 }
 
-// MARK: - Redaction (subset matching tools/redact_secrets.py)
+// MARK: - Redaction (shared vectors with tools/redact_secrets.py)
 
 enum Redact {
     static func text(_ input: String) -> String {
         var out = input
         let patterns: [(String, String)] = [
-            (#"(?i)((?:https?|postgres|postgresql|mysql|mongodb|redis|amqp)://)([^/\s:@]+):([^/\s]+)@"#, "$1[url_userinfo:REDACTED]@"),
+            (#"-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\s\S]*?-----END (?:RSA |EC |OPENSSH )?PRIVATE KEY-----"#, "[pem:REDACTED]"),
+            (#"(?i)((?:https?|postgres|postgresql|mysql|mongodb(?:\+srv)?|redis|amqp)://)([^/\s]+)@"#, "$1[url_userinfo:REDACTED]@"),
             (#"(?i)(-uX?|--user|--username)(=)(\S+:\S+)"#, "$1$2[userpass:REDACTED]"),
+            (#"(?i)(-uX)([^\s:=][^:\s]*:[^\s]+)"#, "$1[userpass:REDACTED]"),
+            (#"(?i)(-uX?|--user|--username)(\s+)(['\"])([^'\"]+:[^'\"]+)\3"#, "$1$2$3[userpass:REDACTED]$3"),
             (#"(?i)(-uX?|--user|--username)(\s+)(\S+:\S+)"#, "$1$2[userpass:REDACTED]"),
-            (#"(?i)((?:export\s+)?(?:password|passwd|pwd|secret|client_secret|[_A-Z0-9]*(?:_PASS|_SECRET))\s*[=:]\s*)([^\s'\"&,;]+)"#, "$1[password:REDACTED]"),
-            (#"(?i)(--password|-p)(\s+|=)(\S+)"#, "$1$2[password:REDACTED]"),
+            (#"(?i)(\"(?:password|passwd|pwd|secret|client_secret|db_password)\"\s*:\s*\")([^\"\\]*(?:\\.[^\"\\]*)*)(\")"#, "$1[password:REDACTED]$3"),
+            (#"(?i)((?:password|passwd|pwd|secret|client_secret|db_password)\s*[=:]\s*)(['\"])([^'\"]+)\2"#, "$1$2[password:REDACTED]$2"),
+            (#"(?i)((?:export\s+)?(?:API_TOKEN|ACCESS_TOKEN|AUTH_TOKEN|TOKEN)\s*=\s*)([^\s'\"&,;]+)"#, "$1[token:REDACTED]"),
+            (#"(?i)((?:export\s+)?(?:password|passwd|pwd|secret|client_secret|db_password|[_A-Z0-9]*(?:_PASS|_SECRET|_PASSWORD))\s*[=:]\s*)([^\s'\"&,;]+)"#, "$1[password:REDACTED]"),
+            (#"(?i)(--password)(\s+|=)(\S+)"#, "$1$2[password:REDACTED]"),
+            (#"(?i)(\b(?:mysql|mysqldump|sshpass|mariadb)\b(?:\s+\S+){0,6}\s+-p)([^\s\-]+)"#, "$1[password:REDACTED]"),
+            (#"(?i)((?:Cookie|Set-Cookie)\s*[:=]\s*)([^\r\n]+)"#, "$1[cookie:REDACTED]"),
+            (#"(?i)((?:X-Api-Key|x-api-key)\s*[:=]\s*)(\S+)"#, "$1[api_key:REDACTED]"),
             (#"(?i)(Authorization:\s*Basic\s+)([A-Za-z0-9+/=]+)"#, "$1[basic:REDACTED]"),
             (#"(?i)(Bearer\s+)([A-Za-z0-9._\-+/=]{4,})"#, "$1[bearer:REDACTED]"),
             (#"\b(AKIA[0-9A-Z]{16})\b"#, "[aws_access_key:REDACTED]"),
+            (#"(?i)((?:aws_)?secret(?:_?access)?_?key\s*[=:]\s*)(['\"])([A-Za-z0-9/+=]{20,})\2"#, "$1$2[aws_secret:REDACTED]$2"),
             (#"(?i)((?:aws_)?secret(?:_?access)?_?key\s*[=:]\s*)([A-Za-z0-9/+=]{40})"#, "$1[aws_secret:REDACTED]"),
             (#"(?i)(sk-[A-Za-z0-9_-]{10,}|ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,})"#, "[credential:REDACTED]"),
         ]
         for (pattern, template) in patterns {
-            if let re = try? NSRegularExpression(pattern: pattern) {
+            if let re = try? NSRegularExpression(pattern: pattern, options: [.dotMatchesLineSeparators]) {
                 out = re.stringByReplacingMatches(in: out, range: NSRange(out.startIndex..., in: out), withTemplate: template)
             }
         }
@@ -201,8 +222,15 @@ enum Redact {
             var out: [String: Any] = [:]
             for (k, v) in dict {
                 let key = k.lowercased()
-                if key.contains("password") || key.contains("secret") || key == "token" || key == "authorization" {
-                    out[k] = "[key:\(k):REDACTED]"
+                if key.contains("password") || key.contains("secret") || key == "token"
+                    || key == "authorization" || key == "cookie" || key == "x-api-key" || key == "pwd" {
+                    if let list = v as? [Any] {
+                        out[k] = list.map { $0 is String ? "[key:\(k):REDACTED]" : any($0) }
+                    } else if v is String {
+                        out[k] = "[key:\(k):REDACTED]"
+                    } else {
+                        out[k] = any(v)
+                    }
                 } else {
                     out[k] = any(v)
                 }
@@ -210,6 +238,48 @@ enum Redact {
             return out
         }
         return value
+    }
+
+    /// Load tools/redact_vectors.json (or packaged copy) and exit 0/1.
+    static func selfTestAndExit() -> Never {
+        let candidates = [
+            URL(fileURLWithPath: CommandLine.arguments[0]).deletingLastPathComponent()
+                .deletingLastPathComponent().appendingPathComponent("Resources/agentreins-mcp/redact_vectors.json"),
+            URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+                .appendingPathComponent("tools/redact_vectors.json"),
+        ]
+        guard let url = candidates.first(where: { FileManager.default.fileExists(atPath: $0.path) }),
+              let data = try? Data(contentsOf: url),
+              let rows = try? JSONSerialization.jsonObject(with: data) as? [[String: Any]] else {
+            fputs("REDACT_VECTOR_FAIL missing vectors\n", stderr)
+            exit(1)
+        }
+        var failures = 0
+        for caseRow in rows {
+            let name = caseRow["name"] as? String ?? "?"
+            let kind = caseRow["kind"] as? String ?? "text"
+            if kind == "text", let input = caseRow["input"] as? String {
+                let out = text(input)
+                for secret in (caseRow["must_absent"] as? [String] ?? []) where !secret.isEmpty && out.contains(secret) {
+                    fputs("fail \(name): still present \(secret)\n", stderr); failures += 1
+                }
+                for keep in (caseRow["must_keep"] as? [String] ?? []) where !keep.isEmpty && !out.contains(keep) {
+                    fputs("fail \(name): false positive removed \(keep)\n", stderr); failures += 1
+                }
+            } else if kind == "obj", let input = caseRow["input"] {
+                let out = any(input)
+                let blob = AgentReinsMCP.jsonString(out)
+                for secret in (caseRow["must_absent"] as? [String] ?? []) where !secret.isEmpty && blob.contains(secret) {
+                    fputs("fail \(name): obj still present \(secret)\n", stderr); failures += 1
+                }
+            }
+        }
+        if failures > 0 {
+            fputs("REDACT_VECTOR_FAIL \(failures)\n", stderr)
+            exit(1)
+        }
+        fputs("REDACT_VECTOR_OK \(rows.count)\n", stdout)
+        exit(0)
     }
 }
 
@@ -239,10 +309,13 @@ enum Transport {
             if inv["testCapture"] as? Bool == true { continue }
             if let p = inv["provenance"] as? String, p == "test" || p == "seed" { continue }
             var row: [String: Any] = ["runID": file.deletingLastPathComponent().lastPathComponent]
-            for key in ["agent", "tool", "args", "task", "call", "startedAt", "pid", "exitCode", "gap", "auditBypass", "session", "parentPID", "launcherPID", "provenance", "testCapture", "codexThreadID"] {
+            for key in ["agent", "tool", "args", "task", "call", "startedAt", "processStartAt", "pid", "exitCode", "gap", "auditBypass", "session", "parentPID", "parentName", "parentArgv", "parentStartAt", "launcherPID", "provenance", "testCapture", "codexThreadID", "sha256"] {
                 row[key] = inv[key] ?? NSNull()
             }
             for key in ["connections", "blocks", "downloads"] { row[key] = item[key] as? [Any] ?? [] }
+            row["fileResult"] = item["fileResult"] ?? NSNull()
+            if let sha = item["sha256"] as? String { row["sha256"] = sha }
+            else if let fr = item["fileResult"] as? [String: Any], let sha = fr["sha256"] as? String { row["sha256"] = sha }
             row["securityAudit"] = item["securityAudit"] ?? NSNull()
             row["evidencePath"] = file.path
             rows.append(row)
@@ -479,22 +552,7 @@ enum Audit {
         var seal: [String: Any] = ["headHash": body["hash"] as Any, "count": count + 1, "schema": 1]
         seal["mac"] = macHex(AgentReinsMCP.jsonString(seal), key: key)
         try? AgentReinsMCP.jsonString(seal).write(to: Paths.auditSeal, atomically: true, encoding: .utf8)
-        signEvidence(key: key)
-    }
-
-    static func signEvidence(key: SymmetricKey) {
-        let root = Paths.transport
-        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil) else { return }
-        for dir in dirs {
-            for name in ["transport.json", "manifest.json"] {
-                let file = dir.appendingPathComponent(name)
-                guard let data = try? Data(contentsOf: file) else { continue }
-                let mac = HMAC<SHA256>.authenticationCode(for: data, using: key).map { String(format: "%02x", $0) }.joined()
-                let macFile = file.appendingPathExtension("mac")
-                try? (mac + "\n").write(to: macFile, atomically: true, encoding: .utf8)
-                try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: macFile.path)
-            }
-        }
+        // Do not re-sign evidence on MCP read — collection-time signing only (B3).
     }
 
     static func recent(limit: Int) -> [[String: Any]] {

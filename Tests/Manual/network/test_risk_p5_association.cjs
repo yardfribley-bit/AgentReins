@@ -83,6 +83,7 @@ assert.ok(!risk.isActualExecution('chmod +x /tmp/x.sh', 'chmod'));
 net.setLocalTransports([
   {
     captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:00:00Z',
+    processStartAt: '2026-10-21T02:00:00Z',
     pid: 11, exitCode: 0, runID: callDownload, call: callDownload, session,
     args: ['-o', filePath, 'https://cdn.agentreins-field.net/p5.sh'],
     downloads: [{ path: filePath, sha256: fileSha }],
@@ -97,6 +98,8 @@ net.setLocalTransports([
   },
   {
     captureMode: 'agent-path', agent: 'Cursor', tool: 'sh', startedAt: '2026-10-21T02:00:25Z',
+    processStartAt: '2026-10-21T02:00:25Z',
+    parentStartAt: '2026-10-21T02:00:00Z',
     pid: 13, parentPID: 11, exitCode: 0, runID: 'sh-run', call: 'sh-run', session,
     args: [filePath],
     connections: [], blocks: [], downloads: [],
@@ -105,7 +108,9 @@ net.setLocalTransports([
 const correlated = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03' && /下载后/.test(a.title));
 assert.equal(correlated.length, 1, 'chmod ignored; single S03 for sh');
 assert.ok(correlated.some(a => a.confidence === 'cor'), 'lineage parentPID→download pid is Correlated');
-assert.ok(correlated.some(a => /分级依据 Correlated|parentPID/.test(a.why || '')), 'why states Correlated basis');
+assert.ok(correlated.some(a => a.basis === 'lineage' || a.evidence?.basis === 'lineage'), 'basis=lineage');
+assert.ok(correlated.some(a => a.evidence?.lineage === true && a.confidence === 'cor'), 'evidence.lineage matches badge');
+assert.ok(correlated.some(a => /分级依据 Correlated|parentPID|basis=lineage/.test(a.why || '')), 'why states Correlated basis');
 
 // Same agent + same path without lineage/hash → Inferred (not Correlated)
 net.setLocalTransports([

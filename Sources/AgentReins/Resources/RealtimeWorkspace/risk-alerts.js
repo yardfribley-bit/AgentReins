@@ -1,6 +1,9 @@
 'use strict';
 (()=>{
-const list=v=>Array.isArray(v)?v:[],esc=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const list=v=>Array.isArray(v)?v:[];
+/** Single mutable escape binding — renderList/detail always call through escImpl. */
+let escImpl=s=>String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+function esc(s){return escImpl(s);}
 const cut=(s,n=72)=>{const a=Array.from(String(s??''));return a.slice(0,n).join('')+(a.length>n?'…':'')};
 const time=v=>{const d=new Date(v);return isNaN(d)?'—':d.toLocaleTimeString('zh-CN',{hour12:false});};
 const dayKey=v=>{const d=new Date(v);return isNaN(d)?'':d.toLocaleDateString('zh-CN');};
@@ -16,7 +19,7 @@ const RULES=[
   cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。'},
  {id:'S03',name:'下载后执行',mode:'告警',severity:'critical',
   desc:'curl / wget 下载的文件在 5 分钟内被 sh、bash 或 open 真正执行（chmod +x 只改权限，不算执行）。',
-  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s；仅 pid/ppid 血缘或被执行文件实际哈希一致为 Correlated；同 agent+同路径仅为 Inferred',
+  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s；Correlated 仅直接父子血缘（pid+启动时间）或执行文件哈希一致；同父兄弟进程为 Inferred，除非父进程有 shell 证据（名+argv+启动时间）且同会话',
   cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 sh/bash。'},
  {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
@@ -118,7 +121,15 @@ function commandCards(tasks){
    const cmd=String(c.execution?.command||c.input||'');
    if(!cmd)continue;
    const sha=String(c.resource?.sha256||c.execution?.sha256||c.sha256||'').toLowerCase();
-   out.push({task:t,card:c,cmd,sha,call:c.call||c.execution?.call||null,at:c.timestamp||c.execution?.startAt,pid:c.pid||c.execution?.pid,parentPID:c.parentPID||c.execution?.parentPID,agent:t.agent,fromTransport:false});
+   out.push({
+    task:t,card:c,cmd,sha,call:c.call||c.execution?.call||null,at:c.timestamp||c.execution?.startAt,
+    pid:c.pid||c.execution?.pid,parentPID:c.parentPID||c.execution?.parentPID,
+    parentName:c.parentName||c.execution?.parentName||null,
+    parentArgv:c.parentArgv||c.execution?.parentArgv||null,
+    parentStartAt:c.parentStartAt||c.execution?.parentStartAt||null,
+    processStartAt:c.processStartAt||c.execution?.processStartAt||c.execution?.startAt||null,
+    agent:t.agent,fromTransport:false
+   });
   }
  }
  return out;
@@ -153,10 +164,21 @@ function transportExecCommands(){
   out.push({
    task:{agent:r.agent,session:r.session},card:null,cmd,sha,
    call:r.call||r.runID||null,at:r.startedAt||r.timestamp,
-   pid:r.pid,parentPID:r.parentPID||r.launcherPID,agent:r.agent,fromTransport:true,record:r
+   pid:r.pid,parentPID:r.parentPID||r.launcherPID,
+   parentName:r.parentName||null,parentArgv:r.parentArgv||null,parentStartAt:r.parentStartAt||null,
+   processStartAt:r.processStartAt||r.startedAt||null,
+   agent:r.agent,fromTransport:true,record:r
   });
  }
  return out;
+}
+
+/** Parent is a proven interactive/login shell with name + argv + start time recorded. */
+function isProvenShellParent(c){
+ const name=String(c.parentName||'').toLowerCase();
+ const argv=String(Array.isArray(c.parentArgv)?c.parentArgv.join(' '):c.parentArgv||'');
+ if(!name||!argv||!c.parentStartAt)return false;
+ return /^(ba)?sh$|^zsh$|^fish$|^dash$|\/(ba)?sh$|\/zsh$/.test(name)||/\b(ba)?sh\b|\bzsh\b/.test(argv);
 }
 
 function alertId(rule,key){return rule+':'+String(key||'').replace(/[^\w.:@/-]+/g,'-').slice(0,80);}
@@ -270,8 +292,9 @@ function buildAlerts(payload){
    }
   }
 
-  // S03: 路径 + 时间窗（≤300s）；Correlated 仅真实血缘或被执行文件实际哈希；同 agent+同路径 = Inferred
-  // chmod +x 不算执行；同一下载路径全局只保留一条最优告警
+  // S03: 路径 + 时间窗（≤300s）。Correlated 仅：直接父子血缘(pid+启动时间) 或 执行文件哈希。
+  // 同父兄弟进程 → Inferred；same_shell_proven 需父进程 shell 证据(名+argv+启动时间)+同会话。
+  // chmod +x 不算执行；同一路径只保留一条，配对「该文件最近一次写入者」。
   const downloads=list(r.downloads).filter(d=>d&&d.path);
   for(const d of downloads){
    const fullPath=String(d.path);
@@ -280,6 +303,7 @@ function buildAlerts(payload){
    const start=new Date(when).getTime();
    if(isNaN(start))continue;
    const dlPid=r.pid;
+   const dlStart=r.processStartAt||r.startedAt||when;
    const dlCall=call||'缺口';
    let best=null;
    for(const c of cmds){
@@ -289,38 +313,53 @@ function buildAlerts(payload){
     if(!isActualExecution(c.cmd,c.card?.execution?.tool||c.record?.tool||(c.cmd||'').split(/\s+/)[0]))continue;
     const pathHit=c.cmd.includes(fullPath)||(name&&(new RegExp('(?:^|[\\s\'"`/=])'+name.replace(/[.*+?^${}()|[\]\\]/g,'\\$&')+'(?:$|[\\s\'"`;|&])')).test(c.cmd));
     if(!pathHit)continue;
-    const lineageHit=!!(dlPid&&c.parentPID&&String(c.parentPID)===String(dlPid));
-    const sameShell=!!(r.session&&c.task?.session&&String(r.session)===String(c.task.session)&&c.pid&&dlPid&&String(c.pid)!==String(dlPid)&&(c.parentPID&&(String(c.parentPID)===String(dlPid)||String(c.parentPID)===String(r.parentPID||r.launcherPID))));
+    // Direct parent→child lineage: exec's parentPID is the download pid, and start times are recorded.
+    const lineageHit=!!(dlPid&&c.parentPID&&String(c.parentPID)===String(dlPid)&&dlStart&&(c.parentStartAt||c.processStartAt||c.at));
+    const siblingSameParent=!!(c.parentPID&&r.parentPID&&String(c.parentPID)===String(r.parentPID||r.launcherPID)&&c.pid&&dlPid&&String(c.pid)!==String(dlPid));
+    const sameShellProven=!!(siblingSameParent&&isProvenShellParent(c)&&r.session&&c.task?.session&&String(r.session)===String(c.task.session));
     const hashHit=!!(sha&&c.sha&&c.sha===sha);
-    // Correlated：仅血缘（pid/ppid 或同 shell 会话链）或实际文件哈希；同 agent+同路径单独不够
-    const confidence=(lineageHit||sameShell||hashHit)?'cor':'inf';
+    let basis='path_only';
+    if(lineageHit)basis='lineage';
+    else if(hashHit)basis='exec_hash';
+    else if(sameShellProven)basis='same_shell_proven';
+    else if(siblingSameParent)basis='sibling_inferred';
+    // Correlated only for direct lineage or exec file hash (bot item 2).
+    const confidence=(basis==='lineage'||basis==='exec_hash')?'cor':'inf';
     const cmdCall=c.call||'缺口';
-    const rank=(confidence==='cor'?2:1)+(hashHit?1:0)+(lineageHit?1:0);
+    const rank=(confidence==='cor'?3:1)+(basis==='same_shell_proven'?1:0)+(hashHit?1:0)+(lineageHit?1:0);
+    const evidence={
+     downloadCall:dlCall,execCall:cmdCall,path:fullPath,basis,lineage:lineageHit,hashMatch:hashHit,
+     sameShellProven,dtSec:Math.round(dt),parentPID:c.parentPID||null,downloadPID:dlPid||null,
+     parentName:c.parentName||null,parentArgv:c.parentArgv||null,parentStartAt:c.parentStartAt||null,
+     downloadStartAt:dlStart||null
+    };
+    const why=basis==='lineage'
+     ?`分级依据 Correlated（basis=lineage）：路径「${cut(fullPath,60)}」与执行「${cut(c.cmd,80)}」对上，parentPID=${c.parentPID} 指向下载进程 ${dlPid}（启动时间已记录，Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+     :basis==='exec_hash'
+      ?`分级依据 Correlated（basis=exec_hash）：被执行文件 SHA-256 与下载哈希一致（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+      :basis==='same_shell_proven'
+       ?`分级依据 Inferred（basis=same_shell_proven）：同父 shell 会话有进程名/argv/启动时间证据，但非直接父子血缘、无文件哈希（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
+       :`分级依据 Inferred（basis=${basis}）：路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）；无直接血缘、无执行哈希。下载 ${dlCall} · 命令 ${cmdCall}。`;
     const candidate={
-     id:alertId('S03',dlCall+':'+name),rule:'S03',severity:'critical',confidence,rank,
+     id:alertId('S03',fullPath),rule:'S03',severity:'critical',confidence,basis,rank,
      title:'下载后在 5 分钟内执行',
      sub:`${name}${sha?' · SHA-256 '+sha.slice(0,12)+'…':''}`,
      agent,session:sess,call:c.call||call,record:r,execRecord:c.record||null,timestamp:c.at||when,status:'open',
-     evidence:{downloadCall:dlCall,execCall:cmdCall,path:fullPath,lineage:lineageHit,hashMatch:hashHit,dtSec:Math.round(dt),parentPID:c.parentPID||null,downloadPID:dlPid||null},
-     why:lineageHit
-      ?`分级依据 Correlated：路径「${cut(fullPath,60)}」与执行「${cut(c.cmd,80)}」对上，且 parentPID=${c.parentPID} 指向下载进程 ${dlPid}（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
-      :sameShell
-       ?`分级依据 Correlated：路径对上且同 shell 会话链（下载 pid ${dlPid} · 执行 parentPID ${c.parentPID}，Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
-       :hashHit
-        ?`分级依据 Correlated：被执行文件 SHA-256 与下载哈希一致（Δt ${Math.round(dt)}s）。下载 ${dlCall} · 命令 ${cmdCall}。`
-        :`分级依据 Inferred：仅同 agent + 同路径「${cut(fullPath,60)}」与命令「${cut(c.cmd,80)}」（Δt ${Math.round(dt)}s）；无 pid/ppid 血缘、无文件哈希。下载 ${dlCall} · 命令 ${cmdCall}。`
+     evidence,why
     };
     if(!best||candidate.rank>best.rank||(candidate.rank===best.rank&&new Date(candidate.timestamp)>=new Date(best.timestamp)))best=candidate;
    }
    if(best){
     delete best.rank;
-    // Collapse by absolute path so one download→exec chain yields one home alert.
+    // Collapse by absolute path; prefer higher confidence, then most recent download writer (this `r`).
     const existing=alerts.findIndex(a=>a.rule==='S03'&&a.evidence?.path===fullPath);
     if(existing>=0){
      const prev=alerts[existing];
-     const prevRank=(prev.confidence==='cor'?2:1);
-     const nextRank=(best.confidence==='cor'?2:1);
-     if(nextRank>=prevRank)alerts[existing]=best;
+     const prevRank=(prev.confidence==='cor'?3:1);
+     const nextRank=(best.confidence==='cor'?3:1);
+     const prevWrite=new Date(prev.record?.startedAt||prev.timestamp||0).getTime();
+     const nextWrite=new Date(r.startedAt||when||0).getTime();
+     if(nextRank>prevRank||(nextRank===prevRank&&nextWrite>=prevWrite))alerts[existing]=best;
     }else alerts.push(best);
    }
   }
@@ -430,6 +469,7 @@ function renderList(holder,payload,state){
  const alerts=applyDecisions(buildAlerts(payload),state.decisions||[]);
  const cov=coverageModel(payload);
  state.alerts=alerts;
+ if(window.AgentReinsRisk)window.AgentReinsRisk._lastAlerts=alerts;
  const f=state.filter||{sev:'all',rule:'all',agent:'all',q:''};
  let shown=alerts.filter(a=>(f.sev==='all'||a.severity===f.sev)&&(f.rule==='all'||a.rule===f.rule)&&(f.agent==='all'||a.agent===f.agent));
  if(f.q){const q=f.q.toLowerCase();shown=shown.filter(a=>[a.title,a.sub,a.agent,a.session,a.rule,hostOf(a.record||{})].join('\n').toLowerCase().includes(q));}
@@ -553,5 +593,10 @@ function packFields(a){
   decidedAt:a.decision?.decidedAt||null,evidenceText:evidenceTextFor(a)
  };
 }
-window.AgentReinsRisk={RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,esc};
+window.AgentReinsRisk={
+ RULES,buildAlerts,applyDecisions,renderList,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,isProvenShellParent,
+ get esc(){return escImpl;},
+ set esc(fn){escImpl=typeof fn==='function'?fn:escImpl;},
+ _lastAlerts:[]
+};
 })();
