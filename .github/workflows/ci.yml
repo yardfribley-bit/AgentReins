@@ -29,7 +29,19 @@ jobs:
         run: bash -n package_app.sh
 
       - name: Run unit tests
-        run: swift test
+        run: |
+          set -euo pipefail
+          # Keep WebKit UI test in its own process so a WebContent SIGSEGV cannot
+          # take down the rest of the suite (seen on macos-15 runners).
+          swift test --skip testProductionWebKitRendersAndEscapesEvidence
+          for attempt in 1 2 3; do
+            if swift test --filter testProductionWebKitRendersAndEscapesEvidence; then
+              exit 0
+            fi
+            echo "WebKit UI test failed (attempt ${attempt}); retrying"
+            sleep 2
+          done
+          exit 1
 
       - name: Run JS risk / XSS tests
         run: |

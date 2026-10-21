@@ -1,13 +1,13 @@
 import SwiftUI
 
 /// 菜单栏安全应用关闭窗口后继续运行，退出时清理扫描子进程。
-/// Status item is AppKit (not SwiftUI MenuBarExtra) so WindowGroup can present a real titled window at launch.
+/// Keep MenuBarExtra + WindowGroup, but force `.regular` activation so the titled
+/// WindowGroup is actually presented (accessory/menu-bar-only policy hid it before).
 final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     static var stopLiveCollectors: (() -> Void)?
-    static let openSecurityCenterNotification = Notification.Name("AgentReinsOpenSecurityCenter")
-    private var statusItem: NSStatusItem?
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        // Must run before SwiftUI applies MenuBarExtra's accessory defaults.
         NSApp.setActivationPolicy(.regular)
     }
 
@@ -19,10 +19,10 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
            let icon = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = icon
         }
-        installStatusItem()
+        // Bring the titled security-center window forward after launch.
         for delay in [0.0, 0.25, 0.75, 1.5] {
             DispatchQueue.main.asyncAfter(deadline: .now() + delay) {
-                for window in NSApp.windows where !window.title.isEmpty || window.canBecomeMain {
+                for window in NSApp.windows where window.canBecomeMain || !window.title.isEmpty {
                     window.makeKeyAndOrderFront(nil)
                 }
                 NSApp.activate(ignoringOtherApps: true)
@@ -31,34 +31,10 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
         NativeAlertSnapshot.scheduleIfRequested()
     }
 
-    private func installStatusItem() {
-        let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.squareLength)
-        if let button = item.button {
-            button.image = NSImage(systemSymbolName: "shield.lefthalf.filled", accessibilityDescription: "AgentReins")
-        }
-        let menu = NSMenu()
-        menu.addItem(NSMenuItem(title: "Open AgentReins", action: #selector(openMainWindow), keyEquivalent: "o"))
-        menu.addItem(NSMenuItem.separator())
-        menu.addItem(NSMenuItem(title: "Quit AgentReins", action: #selector(quitApp), keyEquivalent: "q"))
-        item.menu = menu
-        statusItem = item
-    }
-
-    @objc private func openMainWindow() {
-        for window in NSApp.windows where window.canBecomeMain || window.canBecomeKey {
-            window.makeKeyAndOrderFront(nil)
-        }
-        NSApp.activate(ignoringOtherApps: true)
-    }
-
-    @objc private func quitApp() {
-        NSApp.terminate(nil)
-    }
-
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
-        if !flag {
-            openMainWindow()
+        if !flag, let window = sender.windows.first(where: { $0.canBecomeMain }) {
+            window.makeKeyAndOrderFront(nil)
         }
         sender.activate(ignoringOtherApps: true)
         return true
@@ -236,6 +212,18 @@ struct AgentReinsApp: App {
                     // made the live posture screen compete with a CPU-heavy
                     // history reconstruction that the user did not request.
                 }
+        }
+
+        MenuBarExtra {
+            StatusMenuView()
+                .environmentObject(fileGuard)
+                .environmentObject(processGuard)
+                .environmentObject(eventStore)
+                .environmentObject(workBuddySight)
+                .environmentObject(appLanguage)
+                .environment(\.locale, appLanguage.language.locale)
+        } label: {
+            Image(systemName: "shield.lefthalf.filled")
         }
     }
 
