@@ -79,7 +79,8 @@ assert.notEqual(risk.associationOf(s03[0]).name, '已确认', 'association stren
 assert.ok(risk.isActualExecution('/bin/sh /tmp/x.sh', 'sh'));
 assert.ok(!risk.isActualExecution('chmod +x /tmp/x.sh', 'chmod'));
 
-// Correlated only with real lineage (parentPID→download pid) or file hash — same agent+path alone is Inferred
+// en_4088c393: Correlated ONLY from exec_hash. Lineage parentPID→download is Observed fact,
+// but confidence stays Inferred (real shells are siblings under zsh, not curl→sh).
 net.setLocalTransports([
   {
     captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:00:00Z',
@@ -105,12 +106,37 @@ net.setLocalTransports([
     connections: [], blocks: [], downloads: [],
   },
 ]);
+const lineageOnly = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03' && /下载后/.test(a.title));
+assert.equal(lineageOnly.length, 1, 'chmod ignored; single S03 for sh');
+assert.ok(lineageOnly.every(a => a.confidence === 'inf'), 'lineage alone is Inferred, not Correlated');
+assert.ok(lineageOnly.some(a => (a.basis || a.evidence?.basis) === 'lineage_observed'), 'basis=lineage_observed');
+
+// Correlated when exec sha256 matches download sha256 (pre-exec hash).
+net.setLocalTransports([
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'curl', startedAt: '2026-10-21T02:10:00Z',
+    pid: 21, parentPID: 20, parentName: '/bin/zsh', parentStartAt: '2026-10-21T02:09:00Z', parentArgv: '-zsh',
+    exitCode: 0, runID: 'dl-hash', call: 'dl-hash', session: 's-hash',
+    args: ['-o', filePath, 'https://cdn.agentreins-field.net/p5.sh'],
+    downloads: [{ path: filePath, sha256: fileSha }],
+    connections: [{ kind: 'connected', detail: ['cdn.agentreins-field.net:443'] }],
+    blocks: [],
+  },
+  {
+    captureMode: 'agent-path', agent: 'Cursor', tool: 'sh', startedAt: '2026-10-21T02:10:05Z',
+    pid: 22, parentPID: 20, parentName: '/bin/zsh', parentStartAt: '2026-10-21T02:09:00Z', parentArgv: '-zsh',
+    exitCode: 0, runID: 'sh-hash', call: 'sh-hash', session: 's-hash',
+    args: [filePath],
+    execSha256: fileSha, fileResult: { path: filePath, sha256: fileSha }, sha256: fileSha,
+    connections: [], blocks: [], downloads: [],
+  },
+]);
 const correlated = risk.buildAlerts({ tasks: [], collected: [], health: [] }).filter(a => a.rule === 'S03' && /下载后/.test(a.title));
-assert.equal(correlated.length, 1, 'chmod ignored; single S03 for sh');
-assert.ok(correlated.some(a => a.confidence === 'cor'), 'lineage parentPID→download pid is Correlated');
-assert.ok(correlated.some(a => a.basis === 'lineage' || a.evidence?.basis === 'lineage'), 'basis=lineage');
-assert.ok(correlated.some(a => a.evidence?.lineage === true && a.confidence === 'cor'), 'evidence.lineage matches badge');
-assert.ok(correlated.some(a => /分级依据 Correlated|parentPID|basis=lineage/.test(a.why || '')), 'why states Correlated basis');
+assert.equal(correlated.length, 1, 'single S03 for hash match');
+assert.ok(correlated.some(a => a.confidence === 'cor'), 'exec_hash is Correlated');
+assert.ok(correlated.some(a => (a.basis || a.evidence?.basis) === 'exec_hash'), 'basis=exec_hash');
+assert.ok(correlated.some(a => a.evidence?.hashMatch === true && a.confidence === 'cor'), 'hashMatch matches badge');
+assert.ok(correlated.some(a => /分级依据 Correlated|basis=exec_hash/.test(a.why || '')), 'why states Correlated exec_hash');
 
 // Same agent + same path without lineage/hash → Inferred (not Correlated)
 net.setLocalTransports([
