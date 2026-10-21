@@ -59,7 +59,10 @@ jobs:
           node Tests/Manual/network/test_socket_ledger_view.cjs
           echo "JS_TESTS_PASSED=4"
 
-      - name: Run MCP supervisor unit tests
+      - name: Run MCP supervisor unit tests (incl. Python <-> Swift MCP core parity)
+        env:
+          # test_swift_parity.py builds Sources/AgentReinsMCP/Core*.swift with swiftc; never skip it in CI.
+          AGENTREINS_REQUIRE_SWIFT_PARITY: "1"
         run: |
           python3 -m unittest discover -s tools/agentreins-mcp -p 'test_*.py' -v
 
@@ -96,8 +99,11 @@ jobs:
           test -f AgentReins.app/Contents/Resources/socket-sampler/socket_sampler.py
           test -f AgentReins.app/Contents/Resources/socket-sampler/install_socket_sampler.py
           test -x AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge
-          lipo -archs AgentReins.app/Contents/MacOS/AgentReinsMCP | grep arm64
-          lipo -archs AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge | grep x86_64
+          test -x AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper
+          for exe in AgentReinsMCP AgentReinsAlertsBridge AgentReinsKeychainHelper; do
+            lipo -archs "AgentReins.app/Contents/MacOS/$exe" | grep arm64
+            lipo -archs "AgentReins.app/Contents/MacOS/$exe" | grep x86_64  # Intel Macs (WorkBuddy's) run this slice
+          done
           ! git grep -n 'snapshot-alerts' -- . ':!.github' ':!*.md'
           ! git grep -n 'snapshot_risk_alerts' -- . ':!.github' ':!*.md'
           echo "PACKAGED_MCP_OK=1"
@@ -136,6 +142,13 @@ jobs:
           tools = read()
           names = [t["name"] for t in tools["result"]["tools"]]
           assert "list_alerts" in names and "list_mcp_audit" in names, names
+          send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_coverage","arguments":{}}})
+          cov = read()["result"]["structuredContent"]
+          summary = cov["integritySummary"]
+          print("MCP_INTEGRITY", json.dumps(summary, ensure_ascii=False))
+          assert summary["sameUidCanForge"] is True, summary
+          # Fresh runner: either the Keychain key works and everything verifies, or the key is honestly unavailable.
+          assert summary["status"] in ("ok", "key_unavailable"), cov["evidenceIntegrity"]
           print("MCP_SMOKE_OK", names)
           proc.terminate()
           PY
