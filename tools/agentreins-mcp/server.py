@@ -66,7 +66,7 @@ TOOLS = [
     },
     {
         "name": "list_network",
-        "description": "Summarize outbound network from transport audit; mark non-whitelist destinations.",
+        "description": "Outbound network: transport-audit commands plus per-process sampled TCP/UDP sockets (proxied or not), with realDestination/transportPeer. Read-only, redacted.",
         "inputSchema": {
             "type": "object",
             "properties": {

@@ -675,6 +675,70 @@ def _real_destination(record: dict[str, Any]) -> tuple[str | None, str | None, s
     return real, peer, source
 
 
+SOCKET_LEDGER = pathlib.Path(
+    os.environ.get("AGENTREINS_SOCKET_LEDGER", str(AUDIT_DIR / "socket-ledger.json"))
+)
+SOCKET_FIELDS = (
+    "id", "agent", "pid", "ppid", "processName", "processPath", "processStartAt", "protocol",
+    "localAddress", "remoteAddress", "remoteIP", "remotePort", "state", "firstSeen", "lastSeen",
+    "sampleCount", "scope", "viaProxy", "transportPeer", "realDestination", "realDestinationPort",
+    "destinationSource", "destinationEvidence", "destinationBasis", "forwardConfirmed", "transportCall",
+    "proxy", "evidence",
+)
+
+
+def _iso_ts(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        import datetime as _dt
+
+        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def load_socket_ledger(
+    agent: str | None = None,
+    since: str | None = None,
+    path: pathlib.Path | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Read-only view of tools/socket-sampler output (proxy-independent sockets)."""
+    path = path or SOCKET_LEDGER
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {
+            "connections": [],
+            "coverage": {
+                "state": "not_running",
+                "confidence": "Unknown",
+                "note": "未找到按进程采样的连接记录（socket-sampler 未运行）；未走代理的流量不可见。",
+            },
+        }
+    since_ts = _iso_ts(since)
+    rows = []
+    for row in data.get("connections") or []:
+        if not isinstance(row, dict):
+            continue
+        if agent and agent != "all" and str(row.get("agent")) != agent:
+            continue
+        if since_ts is not None and (_iso_ts(row.get("lastSeen")) or 0) < since_ts:
+            continue
+        rows.append({k: row.get(k) for k in SOCKET_FIELDS if k in row})
+    rows.sort(key=lambda r: str(r.get("lastSeen") or ""), reverse=True)
+    coverage = dict(data.get("coverage") or {})
+    samples = data.get("samples") or {}
+    coverage.update(
+        samples=samples.get("count"),
+        lastSampleAt=samples.get("lastAt"),
+        failures=samples.get("failures", 0),
+        state="sampling",
+    )
+    return {"connections": redact_obj(rows[:limit]), "total": len(rows), "coverage": coverage}
+
+
 def list_network(
     agent: str | None = None,
     since: str | None = None,
@@ -706,13 +770,39 @@ def list_network(
                 "confidence": "Observed" if host else "Unknown",
             }
         )
+    sockets = load_socket_ledger(agent=agent, since=since)
+    direct = [r for r in sockets["connections"] if r.get("viaProxy") is False and r.get("scope") == "public"]
     return {
         "network": redact_obj(rows),
-        "confidence": "Observed" if rows else "Unknown",
+        "sockets": sockets["connections"],
+        "socketSummary": {
+            "total": sockets.get("total", 0),
+            "notViaProxyPublic": len(direct),
+            "viaProxy": sum(1 for r in sockets["connections"] if r.get("viaProxy")),
+        },
+        "socketCoverage": sockets["coverage"],
+        "confidence": "Observed" if rows or sockets["connections"] else "Unknown",
         "note": (
-            "destination/realDestination 优先取代理侧 CONNECT/Host（proxy_observed），"
-            "否则 argv 解析（argv_parsed）；transportPeer 保留本机代理对端。"
+            "network = 经审计入口的命令（transport-audit）；sockets = 按进程采样的全部 TCP/UDP 连接，"
+            "与是否走代理无关（viaProxy=false 即未走代理）。realDestination：proxy_observed=代理路由日志按"
+            "本机客户端端口+时间对上（Correlated）；argv_parsed=命令参数里的主机正向解析到同一 IP（Correlated）；"
+            "dns_inferred=反向 DNS（Inferred）；socket_sampled=只有 IP（Observed）；proxy_unjoined=走了代理但"
+            "目的地未对上（Unknown）。transportPeer 保留实际对端（代理时为 127.0.0.1:18891）。"
+            "采样会漏掉短于采样间隔的连接。"
         ),
+    }
+
+
+def _socket_blind_spot() -> dict[str, Any]:
+    cov = load_socket_ledger(limit=0)["coverage"]
+    if cov.get("state") != "sampling":
+        return {"topic": "未走代理流量", "confidence": "Unknown", "note": "socket-sampler 未运行；不估算比例"}
+    return {
+        "topic": "未走代理流量",
+        "confidence": "Observed",
+        "status": "sampled",
+        "note": "按进程采样 TCP/UDP 连接（间隔 %ss，最近一次 %s）；短于采样间隔的连接、系统解析器发出的 DNS 不可见"
+        % (cov.get("intervalSeconds"), cov.get("lastSampleAt")),
     }
 
 
@@ -741,7 +831,7 @@ def get_coverage() -> dict[str, Any]:
             {"id": "S07", "status": "supported", "confidence": "Observed", "note": "仅认后端 auditBypass=true"},
         ],
         "blindSpots": [
-            {"topic": "未走代理流量", "confidence": "Unknown", "note": "不估算比例"},
+            _socket_blind_spot(),
             {"topic": "SSH 通道内正文", "confidence": "Unknown", "note": "只看到连到哪台主机"},
         ],
         "evidenceIntegrity": validate_audit(),

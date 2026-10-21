@@ -25,7 +25,7 @@ enum AgentReinsMCP {
             ["name": "get_execution", "description": "Get one execution; secrets redacted.",
              "inputSchema": ["type": "object", "properties": ["execution_id": ["type": "string"]],
                              "required": ["execution_id"], "additionalProperties": false]],
-            ["name": "list_network", "description": "Outbound network summary.",
+            ["name": "list_network", "description": "Outbound network: transport-audit commands plus per-process sampled TCP/UDP sockets (proxied or not). Read-only, redacted.",
              "inputSchema": ["type": "object", "properties": [
                 "agent": ["type": "string"], "since": ["type": "string"]
              ], "additionalProperties": false]],
@@ -484,7 +484,58 @@ enum Network {
                 "confidence": "Observed",
             ]
         }
-        return ["network": Redact.any(rows) as Any, "confidence": rows.isEmpty ? "Unknown" : "Observed"]
+        let sockets = SocketLedger.load(agent: agent)
+        let connections = sockets["connections"] as? [[String: Any]] ?? []
+        let direct = connections.filter { ($0["viaProxy"] as? Bool) == false && ($0["scope"] as? String) == "public" }.count
+        let proxied = connections.filter { ($0["viaProxy"] as? Bool) == true }.count
+        return [
+            "network": Redact.any(rows) as Any,
+            "sockets": Redact.any(connections) as Any,
+            "socketSummary": ["total": connections.count, "notViaProxyPublic": direct, "viaProxy": proxied],
+            "socketCoverage": sockets["coverage"] as Any,
+            "confidence": rows.isEmpty && connections.isEmpty ? "Unknown" : "Observed",
+            "note": "network = transport-audit commands; sockets = per-process sampled TCP/UDP sockets, proxied or not (viaProxy). realDestination: proxy_observed/argv_parsed = Correlated, dns_inferred = Inferred, socket_sampled = Observed IP, proxy_unjoined = Unknown. Sampling misses connections shorter than the interval.",
+        ]
+    }
+}
+
+/// Read-only view of tools/socket-sampler output (shared with evidence.py).
+enum SocketLedger {
+    static let fields = ["id", "agent", "pid", "ppid", "processName", "processPath", "processStartAt", "protocol",
+        "localAddress", "remoteAddress", "remoteIP", "remotePort", "state", "firstSeen", "lastSeen",
+        "sampleCount", "scope", "viaProxy", "transportPeer", "realDestination", "realDestinationPort",
+        "destinationSource", "destinationEvidence", "destinationBasis", "forwardConfirmed", "transportCall",
+        "proxy", "evidence"]
+
+    static var url: URL {
+        if let env = ProcessInfo.processInfo.environment["AGENTREINS_SOCKET_LEDGER"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return Paths.support.appendingPathComponent("socket-ledger.json")
+    }
+
+    static func load(agent: String?, limit: Int = 200) -> [String: Any] {
+        guard let data = try? Data(contentsOf: url),
+              let root = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return ["connections": [[String: Any]](),
+                    "coverage": ["state": "not_running", "confidence": "Unknown",
+                                 "note": "socket-sampler ledger not found; traffic that bypasses the proxy is not visible"]]
+        }
+        var rows: [[String: Any]] = []
+        for case let row as [String: Any] in (root["connections"] as? [Any] ?? []) {
+            if let agent, agent != "all", (row["agent"] as? String) != agent { continue }
+            var out: [String: Any] = [:]
+            for key in fields { if let value = row[key], !(value is NSNull) { out[key] = value } }
+            rows.append(out)
+        }
+        rows.sort { (($0["lastSeen"] as? String) ?? "") > (($1["lastSeen"] as? String) ?? "") }
+        var coverage = root["coverage"] as? [String: Any] ?? [:]
+        let samples = root["samples"] as? [String: Any] ?? [:]
+        coverage["samples"] = samples["count"] ?? 0
+        coverage["lastSampleAt"] = samples["lastAt"] ?? ""
+        coverage["failures"] = samples["failures"] ?? 0
+        coverage["state"] = "sampling"
+        return ["connections": Array(rows.prefix(limit)), "coverage": coverage]
     }
 }
 

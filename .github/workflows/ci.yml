@@ -56,11 +56,22 @@ jobs:
           node Tests/Manual/network/test_risk_review_store.cjs
           node Tests/Manual/network/test_xss_escape.cjs
           node tools/mutate_esc_calls.cjs
-          echo "JS_TESTS_PASSED=3"
+          node Tests/Manual/network/test_socket_ledger_view.cjs
+          echo "JS_TESTS_PASSED=4"
 
       - name: Run MCP supervisor unit tests
         run: |
           python3 -m unittest discover -s tools/agentreins-mcp -p 'test_*.py' -v
+
+      - name: Socket sampler unit tests (recorded lsof/ps fixtures)
+        run: |
+          python3 -m unittest discover -s tools/socket-sampler -p 'test_*.py' -v
+
+      - name: Live socket sampling (macOS, direct connection, proxy env unset)
+        run: |
+          set -euo pipefail
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+            python3 tools/socket-sampler/live_direct_check.py
 
       - name: Build release app
         env:
@@ -82,6 +93,8 @@ jobs:
           test -f AgentReins.app/Contents/Resources/agentreins-mcp/redact_vectors.json
           test -f AgentReins.app/Contents/Resources/RealtimeWorkspace/risk-alerts.js
           test -x AgentReins.app/Contents/MacOS/AgentReinsMCP
+          test -f AgentReins.app/Contents/Resources/socket-sampler/socket_sampler.py
+          test -f AgentReins.app/Contents/Resources/socket-sampler/install_socket_sampler.py
           test -x AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge
           lipo -archs AgentReins.app/Contents/MacOS/AgentReinsMCP | grep arm64
           lipo -archs AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge | grep x86_64
@@ -126,6 +139,11 @@ jobs:
           print("MCP_SMOKE_OK", names)
           proc.terminate()
           PY
+
+      - name: Live packaged sampler -> Swift MCP list_network
+        run: |
+          set -euo pipefail
+          python3 tools/socket-sampler/mcp_list_network_live.py AgentReins.app
 
       - name: Create CI artifact
         run: ditto -c -k --sequesterRsrc --keepParent AgentReins.app AgentReins-ci-universal.zip

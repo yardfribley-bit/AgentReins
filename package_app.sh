@@ -90,6 +90,11 @@ cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
    "$PROJECT_DIR/tools/redact_vectors.json" \
    "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
    "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
+# Proxy-independent per-process socket sampler (lsof/ps only) + LaunchAgent installer.
+mkdir -p "$APP_BUNDLE/Contents/Resources/socket-sampler"
+cp "$PROJECT_DIR/tools/socket-sampler/socket_sampler.py" \
+   "$PROJECT_DIR/scripts/install_socket_sampler.py" \
+   "$APP_BUNDLE/Contents/Resources/socket-sampler/"
 # Point Codex at the packaged Swift MCP (no system python/node).
 printf '%s\n' \
   '# Packaged with AgentReins.app — replace APP with the installed bundle path.' \

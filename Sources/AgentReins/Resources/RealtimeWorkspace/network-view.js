@@ -15,6 +15,20 @@
  let localRuns=[],capturedBodies=[];
  function setLocalTransports(records){localRuns=list(records).filter(agentTransport);}
  function setCapturedBodies(records){capturedBodies=list(records);}
+ let socketLedger={connections:[],coverage:{state:'not_loaded'}};
+ function setSocketLedger(value){socketLedger=value&&typeof value==='object'?{connections:list(value.connections),coverage:value.coverage&&typeof value.coverage==='object'?value.coverage:{}}:{connections:[],coverage:{state:'not_loaded'}};}
+ const socketSourceLabel={proxy_observed:'代理路由日志按本机端口+时间对上 · Correlated',argv_parsed:'命令参数中的主机，正向解析到同一 IP · Correlated',dns_inferred:'反向 DNS 推断 · Inferred',socket_sampled:'只有对端 IP · Observed',proxy_unjoined:'走了代理，真实目的地未对上 · Unknown',local:'本机服务'};
+ function socketTime(value){const d=new Date(value);return isNaN(d)?'未采到':d.toLocaleTimeString('zh-CN',{hour12:false});}
+ function socketLedgerMarkup(agent='all'){
+  const cov=socketLedger.coverage||{};
+  if(cov.state==='not_loaded')return '';
+  if(cov.state!=='sampling')return '<section class="socket-ledger"><h3>按进程采样的全部连接</h3><p class="network-notice">按进程连接采样没有运行：现在只看得到走审计代理或审计入口的访问，agent 直连外网的流量看不到。</p></section>';
+  const all=socketLedger.connections.filter(r=>agent==='all'||r.agent===agent);
+  const shown=all.filter(r=>r.scope!=='loopback'||r.viaProxy);
+  const direct=shown.filter(r=>r.viaProxy===false&&r.scope==='public').length;
+  const body=shown.slice(0,60).map(r=>'<tr><td>'+esc(r.agent)+'</td><td>'+esc(r.processName||'进程')+' · PID '+esc(r.pid)+'<br><small>父进程 '+esc(r.ppid)+'</small></td><td>'+esc(r.protocol)+'</td><td><b>'+esc(r.realDestination||'未知')+'</b><br><small>'+esc(socketSourceLabel[r.destinationSource]||r.destinationSource||'未提供')+'</small></td><td>'+esc(r.transportPeer||r.remoteAddress)+'</td><td>'+(r.viaProxy?'走代理':'<b>未走代理</b>')+'</td><td>'+esc(r.state||'未提供')+'</td><td>'+esc(socketTime(r.firstSeen))+' → '+esc(socketTime(r.lastSeen))+'<br><small>'+esc(r.sampleCount)+' 次采样</small></td><td>'+esc(r.evidence||'Observed')+'</td></tr>').join('');
+  return '<section class="socket-ledger"><h3>按进程采样的全部连接 · 不论是否走代理</h3><p class="network-notice">每 '+esc(cov.intervalSeconds)+' 秒采样一次 agent 进程树的 TCP/UDP 连接，最近一次 '+esc(socketTime(cov.lastSampleAt))+'。共 '+esc(shown.length)+' 条，其中未走代理的外网连接 '+esc(direct)+' 条。短于采样间隔的连接会漏掉；经系统解析器的 DNS 查询看不到；不含正文。</p>'+(shown.length?'<div class="network-table-wrap"><table class="network-table"><thead><tr><th>Agent</th><th>进程</th><th>协议</th><th>真实目的地</th><th>实际对端</th><th>代理</th><th>状态</th><th>首次 → 最近</th><th>证据</th></tr></thead><tbody>'+body+'</tbody></table></div>':'<p>采样在运行，暂未看到 agent 的外网连接。</p>')+'</section>';
+ }
  function hostToken(value){
   const s=String(value||'').trim();
   const m=s.match(/^(?:[a-z][a-z0-9+.-]*:\/\/)?(\[[^\]]+\]|[A-Za-z0-9.-]+)/i);
@@ -980,7 +994,7 @@
   const taskPill=activeTask?'<button type="button" aria-pressed="true">这次任务</button>':(focusTask?'<button type="button" data-network-scope="'+esc(focusTask)+'">这次任务</button>':'');
   const allPill=activeTask?'<button type="button" data-network-all>全部外网访问</button>':'<button type="button" aria-pressed="true">全部外网访问</button>';
   const back=activeTask?'<button type="button" data-task="'+esc(activeTask.id)+'">返回任务过程</button>':'';
-  holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id}):'<p>'+(activeTask?'这次任务还没有归上的外网访问。':'还没有采到外网访问。')+'</p>');
+  holder.innerHTML='<div class="network-scope-switch">'+taskPill+allPill+'</div><header class="network-task-bar">'+back+'<h2>'+esc(redact(title))+'</h2><p>'+esc(redact(note))+'</p></header>'+statsMarkup(records)+rollupMarkup(records,payload.tasks)+(records.length?tableMarkup(records,payload.tasks,{all:showAll,selected:current?.id}):'<p>'+(activeTask?'这次任务还没有归上的外网访问。':'还没有采到外网访问。')+'</p>')+(activeTask?'':socketLedgerMarkup(agent));
  }
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,localExchanges,rawLocalTransports,bypassedAudit,tlsFailed,tlsHandshakeFailed};
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,setSocketLedger,socketLedgerMarkup,localExchanges,rawLocalTransports,bypassedAudit,tlsFailed,tlsHandshakeFailed};
 })();

@@ -52,7 +52,8 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                     // Our capture files, not the 32 MB task checkpoint.
                     let payload: [String: Any] = [
                         "commands": CapturedNetworkArchive.commandRecords(),
-                        "captures": CapturedNetworkArchive.httpsRecords()
+                        "captures": CapturedNetworkArchive.httpsRecords(),
+                        "sockets": SocketLedgerArchive.pagePayload()
                     ]
                     Task { @MainActor in
                         _ = try? await view.callAsyncJavaScript("window.agentreinsTransportReceive(records)", arguments: ["records": payload], in: nil, contentWorld: .page)
