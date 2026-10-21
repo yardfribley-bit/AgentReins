@@ -13,7 +13,16 @@ Python（`tools/agentreins-mcp/evidence.py`）和打包的 Swift MCP（`Sources/
 - **执行清单** `transport-run-inventory.jsonl`：它的签名放在 `AgentReinsIntegrity/transport-run-inventory.mac`，它的哈希也写进封条。
 - **按进程采样的连接台账**：见 `docs/SOCKET-SAMPLING.zh-CN.md` 的"防篡改"。
 - **密钥**：只放在 macOS 钥匙串（服务名 `com.agentreins.mcp-integrity`）。所有读写都经过随 App 打包的 `AgentReinsKeychainHelper`。
-  - 拿不到密钥时（helper 不在、钥匙串出错、15 秒超时）：**不会**另造一把文件密钥，也不追加审计记录。状态报 `key_unavailable`，说明"读不到密钥，无法校验，不是篡改结论"。
+  - 拿不到密钥时（helper 不在、钥匙串出错、15 秒超时）：**不会**另造一把文件密钥，也不追加审计记录。状态报 `key_unavailable`，说明"读不到密钥，无法校验，不是篡改结论"，括号里写明具体原因。
+  - 钥匙串里没有密钥、但写入新密钥被拒绝时，同样报 `key_unavailable`，**不会**退回去写明文密钥文件。
+  - Python MCP 和 Swift MCP 一样：没有密钥时照常回答查询，只是不签名。
+
+## helper 永远不等弹窗
+采样器（LaunchAgent）、被 agent 拉起的 MCP、CI 都没有人能点钥匙串的授权弹窗。以前 helper 在这种情况下会一直卡住，直到调用方 15 秒超时；CI 运行 39655188074 就是这样失败的。现在规则如下：
+- `get`、`set`、`delete` 一律关闭钥匙串交互（`SecKeychainSetUserInteractionAllowed(false)`）。钥匙串锁着，或者这个 helper 还不在条目的访问列表里时，helper 立刻以**退出码 4** 结束（表示需要用户授权）。调用方把它记成 `error`，原因写"keychain needs user approval"。
+- 其他退出码：0 成功，3 没有这个条目，1 其他钥匙串错误。
+- 每次调用 helper 都限时 15 秒。超时算失败，而且同一进程 60 秒内不再调用 helper，直接报"timed out recently; not retried yet"。这样钥匙串卡住时，每分钟只耗一次超时，不会每个账户、每次 MCP 调用都等 15 秒。Python 与 Swift 规则相同。
+- `AgentReinsKeychainHelper authorize` 是唯一允许弹窗的操作，只在有人登录、主动运行时使用。它会让 macOS 弹出一次授权（选"始终允许"），不输出任何密钥。升级后如果出现"needs user approval"，运行一次即可。前端（第 2 步）应在 App 启动时、用户在场的情况下调用它。
 
 ## 为什么要分"当前"和"历史"
 早期版本把密钥放在普通文件里。迁移到钥匙串时，旧密钥被删掉了。用旧密钥签的那些记录，从此既证明不了完好，也证明不了被改。
@@ -93,4 +102,4 @@ Python（`tools/agentreins-mcp/evidence.py`）和打包的 Swift MCP（`Sources/
 ## 已知局限
 - 同一用户的恶意程序能拿到密钥，见 b6。要真正防住，需要 root 守护进程或远端锚点，这不在本步范围内。
 - 历史记录是 Unknown。它们没被证明完好，只是从分界点起字节没再变过。
-- 钥匙串里如果已有旧条目，其访问控制可能只认旧 helper 的路径，打包版 helper 第一次访问时，macOS 可能弹窗请求授权。
+- 钥匙串里如果已有旧条目，其访问控制可能只认旧 helper。打包版 helper 不会弹窗，而是报 `key_unavailable`（需要授权），直到有人运行一次 `AgentReinsKeychainHelper authorize`。

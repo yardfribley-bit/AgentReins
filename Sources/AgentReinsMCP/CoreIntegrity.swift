@@ -72,7 +72,10 @@ final class Integrity {
             try? fm.removeItem(at: hmacKeyFile)
             return existing
         }
-        if status == "error" { throw KeyUnavailable(reason: "keychain read failed; not creating a replacement integrity key") }
+        if status == "error" {
+            throw KeyUnavailable(reason: "keychain read failed (\(keychain.lastError ?? "unknown")); "
+                + "not creating a replacement integrity key")
+        }
         if status == "no_helper" { throw KeyUnavailable(reason: "AgentReinsKeychainHelper not found next to AgentReinsMCP") }
         if let raw = read(hmacKeyFile), raw.count >= 16,
            !["keychain", "keychain\n"].contains(String(decoding: raw, as: UTF8.self)) {
@@ -83,7 +86,8 @@ final class Integrity {
         guard create else { throw KeyUnavailable(reason: "no integrity key yet") }
         let key = crypto.random(32)
         guard keychain.set(Self.accountHmac, key) else {
-            throw KeyUnavailable(reason: "could not store a new integrity key in the Keychain")
+            throw KeyUnavailable(reason: "could not store a new integrity key in the Keychain ("
+                + "\(keychain.lastError ?? "helper set failed"))")
         }
         return key
     }

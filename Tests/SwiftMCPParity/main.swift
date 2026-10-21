@@ -79,6 +79,19 @@ case "record":
     let audit = rec["securityAudit"] as? [String: Any] ?? [:]
     let findings = (audit["findings"] as? [Any] ?? []).compactMap { $0 as? [String: Any] }.map { Inb.summary($0, rec) }
     emit(["destination": Destination.fields(rec), "findings": findings])
+case "helper-lookups":
+    // Shipped HelperKeychain against a given helper executable: n lookups, each timed.
+    let kc = HelperKeychain(helper: URL(fileURLWithPath: opts["helper"]!))
+    let integrity = Integrity(auditDir: url("audit"), integrityDir: url("integrity"), transport: url("transport"),
+                              keychain: kc, crypto: crypto)
+    var out: [[String: Any]] = []
+    for _ in 0..<(Int(opts["n"] ?? "1") ?? 1) {
+        let t0 = Date()
+        var reason: Any = NSNull()
+        do { _ = try integrity.loadKey(create: false) } catch { reason = (error as? KeyUnavailable)?.reason ?? "\(error)" }
+        out.append(["seconds": Date().timeIntervalSince(t0), "reason": reason])
+    }
+    emit(["calls": out, "keyFileExists": FileManager.default.fileExists(atPath: url("audit").appendingPathComponent("mcp-supervisor-hmac.key").path)])
 case "redact-vectors":
     let rows = JSON.parse(try? Data(contentsOf: url("vectors"))) as? [[String: Any]] ?? []
     let (n, fails) = Redact.runVectors(rows) { FileHandle.standardError.write(Data(($0 + "\n").utf8)) }

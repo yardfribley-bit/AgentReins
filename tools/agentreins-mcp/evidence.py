@@ -953,6 +953,8 @@ def load_socket_ledger(
     """Read-only view of tools/socket-sampler output (proxy-independent sockets)."""
     path = path or SOCKET_LEDGER
     raw, side, seal = _read_locked(path)
+    # Freshness is judged at the moment the ledger was read, not after a (possibly slow) Keychain lookup.
+    read_at = time.time()
     integrity = verify_socket_ledger(raw, side, seal, _ledger_key())
     try:
         data = json.loads(raw.decode("utf-8")) if raw is not None else None
@@ -993,7 +995,7 @@ def load_socket_ledger(
     rows.sort(key=lambda r: str(r.get("lastSeen") or ""), reverse=True)
     coverage = dict(data.get("coverage") or {})
     samples = data.get("samples") or {}
-    fresh = socket_freshness(samples, coverage)
+    fresh = socket_freshness(samples, coverage, now=read_at)
     coverage.update(
         samples=samples.get("count"),
         lastSampleAt=samples.get("lastAt"),
@@ -1173,11 +1175,44 @@ def _find_keychain_helper(compile_if_missing: bool = True) -> pathlib.Path | Non
     return dev if dev.is_file() else None
 
 
+KEYCHAIN_HELPER_TIMEOUT = 15.0
+# After a helper timeout, answer "error" without calling it again for this long (per process), so a
+# Keychain that blocks costs one timeout, not one per account per MCP call.
+KEYCHAIN_UNRESPONSIVE_BACKOFF = 60.0
+_KEYCHAIN_STATE: dict[str, Any] = {"unresponsiveUntil": 0.0, "lastError": None}
+HELPER_EXIT_NOT_FOUND = 3
+HELPER_EXIT_NEEDS_APPROVAL = 4
+
+
+class KeychainHelperUnresponsive(OSError):
+    """The helper timed out recently; not retried until the backoff passes."""
+
+
 def _run_keychain_helper(args: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
     helper = _find_keychain_helper()
     if helper is None:
         raise FileNotFoundError("AgentReins keychain helper not installed")
-    return subprocess.run([str(helper), *args], input=stdin, capture_output=True, timeout=15, check=False)
+    if time.monotonic() < _KEYCHAIN_STATE["unresponsiveUntil"]:
+        raise KeychainHelperUnresponsive("keychain helper timed out recently; not retried yet")
+    try:
+        return subprocess.run([str(helper), *args], input=stdin, capture_output=True,
+                              timeout=KEYCHAIN_HELPER_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        _KEYCHAIN_STATE["unresponsiveUntil"] = time.monotonic() + KEYCHAIN_UNRESPONSIVE_BACKOFF
+        raise
+
+
+def keychain_last_error() -> str | None:
+    """Why the last Keychain lookup failed (no secret material), for status texts."""
+    return _KEYCHAIN_STATE["lastError"]
+
+
+def _helper_failure(proc: subprocess.CompletedProcess[bytes]) -> str:
+    if proc.returncode == HELPER_EXIT_NEEDS_APPROVAL:
+        return ("keychain needs user approval (locked, or this helper is not yet on the item's access list; "
+                "run AgentReinsKeychainHelper authorize in a logged-in session)")
+    detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] if proc.stderr else []
+    return "keychain helper exit %s%s" % (proc.returncode, (": " + detail[0][:120]) if detail else "")
 
 
 def _keychain_lookup(account: str) -> tuple[str, bytes | None]:
@@ -1192,11 +1227,16 @@ def _keychain_lookup(account: str) -> tuple[str, bytes | None]:
         proc = _run_keychain_helper(["get", account])
     except FileNotFoundError:
         return "no_helper", None
-    except (OSError, subprocess.SubprocessError):
+    except subprocess.TimeoutExpired:
+        _KEYCHAIN_STATE["lastError"] = "keychain helper timed out after %.0fs" % KEYCHAIN_HELPER_TIMEOUT
         return "error", None
-    if proc.returncode == 3:
+    except (OSError, subprocess.SubprocessError) as exc:
+        _KEYCHAIN_STATE["lastError"] = str(exc)[:160] or exc.__class__.__name__
+        return "error", None
+    if proc.returncode == HELPER_EXIT_NOT_FOUND:
         return "missing", None
     if proc.returncode != 0 or not proc.stdout.strip():
+        _KEYCHAIN_STATE["lastError"] = _helper_failure(proc)
         return "error", None
     raw = proc.stdout.decode("utf-8", "replace").strip()
     try:
@@ -1226,9 +1266,15 @@ def keychain_set(account: str, value: bytes) -> bool:
         # Never put the secret on argv; never use `security -A`.
         try:
             proc = _run_keychain_helper(["set", account], stdin=value.hex().encode("ascii"))
-            return proc.returncode == 0
-        except (OSError, subprocess.SubprocessError):
+        except subprocess.TimeoutExpired:
+            _KEYCHAIN_STATE["lastError"] = "keychain helper timed out after %.0fs" % KEYCHAIN_HELPER_TIMEOUT
             return False
+        except (OSError, subprocess.SubprocessError) as exc:
+            _KEYCHAIN_STATE["lastError"] = str(exc)[:160] or exc.__class__.__name__
+            return False
+        if proc.returncode != 0:
+            _KEYCHAIN_STATE["lastError"] = _helper_failure(proc)
+        return proc.returncode == 0
     return False
 
 
@@ -1274,7 +1320,8 @@ def load_or_create_hmac_key(create: bool = True) -> bytes:
         _delete_hmac_key_file()
         return existing
     if status == "error":
-        raise KeychainUnavailable("keychain read failed; not creating a replacement integrity key")
+        raise KeychainUnavailable("keychain read failed (%s); not creating a replacement integrity key"
+                                  % (keychain_last_error() or "unknown"))
     if HMAC_KEY_FILE.is_file():
         raw = HMAC_KEY_FILE.read_bytes()
         # Ignore non-secret marker left by older builds.
@@ -1289,9 +1336,14 @@ def load_or_create_hmac_key(create: bool = True) -> bytes:
     ):
         raise KeychainUnavailable("keychain helper missing but a signed era exists; not minting a new key")
     key = os.urandom(32)
-    if status == "missing" and keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
-        _delete_hmac_key_file()
-        return key
+    if status == "missing":
+        if keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
+            _delete_hmac_key_file()
+            return key
+        # The Keychain is there but refused the write (locked / needs approval / timeout): a plaintext
+        # replacement key would be readable by anything and would fork the key from the Swift MCP's.
+        raise KeychainUnavailable("could not store a new integrity key in the Keychain (%s)"
+                                  % (keychain_last_error() or "helper set failed"))
     # Last resort: file backend (non-Darwin / helper missing on a fresh install). Still 0600.
     fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "wb") as fh:

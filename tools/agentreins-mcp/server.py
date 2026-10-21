@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from evidence import (
+    KeychainUnavailable,
     append_audit,
     get_coverage,
     get_execution,
@@ -117,7 +118,12 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     lowered = name.lower()
     if any(b in lowered for b in banned):
         raise PermissionError("write tools are not available")
-    append_audit(ACTOR, name, arguments or {})
+    try:
+        append_audit(ACTOR, name, arguments or {})
+    except KeychainUnavailable:
+        # Same as the Swift MCP: without the Keychain key nothing is signed (never a throwaway key) and the
+        # read is still answered; validate_audit / get_coverage report status key_unavailable.
+        pass
     if name == "list_agents":
         return list_agents()
     if name == "list_alerts":

@@ -44,7 +44,9 @@
   - `restart_gap`：采样器重启前有多久没采样，以及上次是正常停止还是被杀；
   - `integrity`：启动时发现台账被改，见"防篡改"；
   - `stopped`：收到停止信号，不计入失败数。
-- MCP 读台账时还会看新鲜度：最后一次成功采样早于 `max(10 秒, 3 × 实测间隔)` 就报 `stopped`，并给出 `staleSeconds`，不会把停掉的采样器说成"正在采样"。
+- MCP 读台账时还会看新鲜度：最后一次成功采样早于 `max(10 秒, 3 × 间隔)` 就报 `stopped`，并给出 `staleSeconds`，不会把停掉的采样器说成"正在采样"。
+  - 间隔优先用实测的成功采样间隔 p95；不足 6 轮、还没有实测值时，用配置间隔；
+  - 新鲜度按**读到台账的那一刻**计算，不会把读钥匙串的等待时间算进去。
 - 旧版（v1）台账没有实测数据：MCP 标 `measurementConfidence=Unknown`，注明"配置间隔，不是实测"。
 
 ## 接线
@@ -68,7 +70,7 @@
   - 代码异常；
   - 重启间隙、停止。
   同一文件还测台账签名链：篡改、换钥匙、回滚、删台账，以及 MCP 的校验结果和采样器自己的判断是否一致。
-- CI（macOS runner）现场：`live_direct_check.py` 清空代理变量，起 bash→python 孙进程直连外网（TCP 443 + 已连接 UDP 53），并起一个无关进程做对照；断言台账里 PID/PPID、`viaProxy=false`、`ESTABLISHED`、≥2 次采样、无关进程不出现；覆盖率断言用实测字段（`missesShorterThanSeconds` 必须等于实测的 `successGapSecondsP95`，失败数和失败日志对得上），并打印 `LIVE_COVERAGE`；顺带报告短命的 `git ls-remote` 是否被 0.2 秒采样抓到（不作为失败）。`mcp_list_network_live.py` 用**安装包里**的采样器 + 打包的 Swift MCP 端到端验证 `list_network.sockets`。
+- CI（macOS runner）现场：`live_direct_check.py` 清空代理变量，起 bash→python 孙进程直连外网（TCP 443 + 已连接 UDP 53），并起一个无关进程做对照；断言台账里 PID/PPID、`viaProxy=false`、`ESTABLISHED`、≥2 次采样、无关进程不出现；覆盖率断言用实测字段（`missesShorterThanSeconds` 必须等于实测的 `successGapSecondsP95`，失败数和失败日志对得上），并打印 `LIVE_COVERAGE`；顺带报告短命的 `git ls-remote` 是否被 0.2 秒采样抓到（不作为失败）。`mcp_list_network_live.py` 用**安装包里**的采样器 + 打包的 Swift MCP 端到端验证 `list_network.sockets`：采样器像 LaunchAgent 一样持续运行（0.5 秒），等到至少 3 轮（最多 60 秒）才查询 MCP，然后断言 `sampling`；失败时打印采样器日志、台账的 `samples` 和 `failureLog`、签名状态，以及 MCP 调用耗时。CI 用一个专用的、不会自动上锁的钥匙串（`scripts/ci_keychain.sh`），并在测打包版之前把它重建，让打包版 helper 自己创建密钥。
 
 ## 已知局限
 - 采样不是拦截：短连接可能漏，漏多短的看 `missesShorterThanSeconds`（实测）；`lsof` 有开销，默认 2 秒。
@@ -92,5 +94,9 @@
   - `unsigned`：老版本采样器从没签过名，标 Unknown 并注明。
   - `unverifiable`：读的人拿不到密钥，标 Unknown。
 - 采样器启动时如果发现台账被改：不会在被改的内容上继续签名。它把原文件改名为 `socket-ledger.json.tampered-<时间>` 留着备查，从空台账重新开始，并在 `failureLog` 里记一条 `integrity`。
-- 拿不到密钥时采样器照常采样，但在 `.mac` 里写明"未签名"和原因，不会自己造一把文件密钥。
+- 拿不到密钥时（helper 超时、需要授权、出错），采样器照常采样，不会卡住，也不会退出：
+  - `.mac` 里写明"未签名"和原因；
+  - `failureLog` 里记一条计入失败数的 `key_unavailable`（阶段 `keychain`）；
+  - 不会自己造一把文件密钥。
+  helper 的规则见 `docs/EVIDENCE-INTEGRITY.zh-CN.md`"helper 永远不等弹窗"。
 - **边界**：同一用户的进程能通过钥匙串 helper 拿到密钥（见 `docs/EVIDENCE-INTEGRITY.zh-CN.md` 的 b6），所以签名只能证明"没被不知道密钥的程序改过"，挡不住有心的同用户恶意程序。因此 `get_coverage` 的完整性摘要里写着 `sameUidCanForge=true`，摘要置信度固定为 Unknown；`verified` 只说明签名链本身是通的。

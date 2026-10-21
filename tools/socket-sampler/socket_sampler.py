@@ -968,6 +968,8 @@ def load_integrity_key() -> tuple[bytes | None, pathlib.Path | None, str | None]
     except Exception as exc:  # pragma: no cover - packaging problem, reported in the ledger
         return None, None, "evidence.py not importable: %s" % exc.__class__.__name__
     try:
+        # Every helper call is bounded (evidence.KEYCHAIN_HELPER_TIMEOUT) and the helper never waits for a
+        # Keychain prompt, so this cannot hang the sampler; any failure means "sample unsigned".
         key = evidence.load_or_create_hmac_key()
     except Exception as exc:
         return None, evidence.INTEGRITY_DIR, "integrity key unavailable: %s: %s" % (exc.__class__.__name__,
@@ -1142,6 +1144,10 @@ class Sampler:
                             "no sample for %.1fs before this start%s" % (now - last, " (after a clean stop)" if clean
                                                                          else " (previous sampler exited or was killed)"),
                             at=now, gapFrom=stats.get("lastAt"), gapSeconds=round(now - last, 1))
+            if self.key is None and self.key_reason:
+                # The key load failed (helper timeout / needs approval / error): sampling continues unsigned,
+                # and the Keychain problem is a counted failure with its reason, never silent.
+                self._event(ledger, "key_unavailable", "keychain", self.key_reason, at=now)
             self._save(ledger)
 
     def note_stop(self, reason: str) -> None:

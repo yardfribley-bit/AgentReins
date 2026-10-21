@@ -397,5 +397,41 @@ class RecordParity(Base):
         self.assertEqual(out["failures"], 0)
 
 
+class SwiftHelperKeychainFailures(Base):
+    """The shipped Swift HelperKeychain against fake helpers (fixtures): CI run 39655188074 regression."""
+
+    def fake(self, body: str) -> pathlib.Path:
+        path = self.tmp / "fake-helper.sh"
+        path.write_text("#!/bin/sh\n# FIXTURE: stands in for AgentReinsKeychainHelper\n" + body + "\n")
+        path.chmod(0o700)
+        for d in ("audit", "integrity", "transport"):
+            (self.tmp / d).mkdir(exist_ok=True)
+        return path
+
+    def lookups(self, helper: pathlib.Path, n: int) -> dict:
+        return harness("helper-lookups", "--helper", str(helper), "--n", str(n), "--audit", str(self.tmp / "audit"),
+                       "--integrity", str(self.tmp / "integrity"), "--transport", str(self.tmp / "transport"))
+
+    def test_needs_approval_fails_fast_with_reason(self) -> None:
+        out = self.lookups(self.fake('echo "get failed: OSStatus -25308" >&2\nexit 4'), 2)
+        for call in out["calls"]:
+            self.assertLess(call["seconds"], 5)
+            self.assertIn("needs user approval", call["reason"])
+        self.assertFalse(out["keyFileExists"])
+
+    def test_hang_costs_one_timeout_then_backs_off(self) -> None:
+        calls = self.tmp / "calls"
+        out = self.lookups(self.fake('echo x >> "%s"\nexec sleep 40' % calls), 3)
+        first, *rest = out["calls"]
+        self.assertGreaterEqual(first["seconds"], 14)
+        self.assertLess(first["seconds"], 20)
+        self.assertIn("timed out", first["reason"])
+        for call in rest:
+            self.assertLess(call["seconds"], 1)
+            self.assertIn("not retried yet", call["reason"])
+        self.assertEqual(calls.read_text().count("x"), 1)
+        self.assertFalse(out["keyFileExists"])
+
+
 if __name__ == "__main__":
     unittest.main()

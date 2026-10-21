@@ -28,6 +28,9 @@ jobs:
       - name: Validate packaging script
         run: bash -n package_app.sh
 
+      - name: Dedicated unlocked CI keychain (integrity key never waits for a prompt)
+        run: scripts/ci_keychain.sh setup
+
       - name: Shared redaction vectors (Python)
         run: |
           set -euo pipefail
@@ -108,6 +111,11 @@ jobs:
           ! git grep -n 'snapshot_risk_alerts' -- . ':!.github' ':!*.md'
           echo "PACKAGED_MCP_OK=1"
 
+      - name: Fresh CI keychain for the packaged helper
+        # Items created above by the dev-built helper only trust that binary; the packaged
+        # AgentReinsKeychainHelper must create (and own) the integrity key itself.
+        run: scripts/ci_keychain.sh reset
+
       - name: Shared redaction vectors (Swift MCP) + MCP smoke
         run: |
           set -euo pipefail
@@ -142,10 +150,13 @@ jobs:
           tools = read()
           names = [t["name"] for t in tools["result"]["tools"]]
           assert "list_alerts" in names and "list_mcp_audit" in names, names
+          import time
+          t0 = time.time()
           send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_coverage","arguments":{}}})
           cov = read()["result"]["structuredContent"]
           summary = cov["integritySummary"]
-          print("MCP_INTEGRITY", json.dumps(summary, ensure_ascii=False))
+          print("MCP_INTEGRITY", json.dumps(summary, ensure_ascii=False), "seconds=%.2f" % (time.time() - t0))
+          print("MCP_INTEGRITY_WARNING", cov["evidenceIntegrity"].get("warning"))
           assert summary["sameUidCanForge"] is True, summary
           # Fresh runner: either the Keychain key works and everything verifies, or the key is honestly unavailable.
           assert summary["status"] in ("ok", "key_unavailable"), cov["evidenceIntegrity"]

@@ -218,6 +218,12 @@ protocol KeychainStore: AnyObject {
     func set(_ account: String, _ value: Data) -> Bool
     var backend: String { get }
     var helperPath: String? { get }
+    /// Why the last lookup/set failed (never secret material).
+    var lastError: String? { get }
+}
+
+extension KeychainStore {
+    var lastError: String? { nil }
 }
 
 /// Per-request cache in front of the helper (each lookup is a process launch).
@@ -238,6 +244,7 @@ final class CachedKeychain: KeychainStore {
     }
     var backend: String { inner.backend }
     var helperPath: String? { inner.helperPath }
+    var lastError: String? { inner.lastError }
 }
 
 final class HelperKeychain: KeychainStore {
@@ -253,8 +260,23 @@ final class HelperKeychain: KeychainStore {
         return FileManager.default.isExecutableFile(atPath: url.path) ? url : nil
     }
 
+    static let timeoutSeconds: TimeInterval = 15
+    /// After a timeout the helper is not called again for this long (process-wide), so a Keychain that
+    /// blocks costs one timeout per minute, not one per account per MCP call. Same rule as evidence.py.
+    static let unresponsiveBackoff: TimeInterval = 60
+    nonisolated(unsafe) private static var unresponsiveUntil = Date.distantPast
+    nonisolated(unsafe) private static var lastFailure: String?
+    var lastError: String? { Self.lastFailure }
+
+    static let exitNotFound: Int32 = 3
+    static let exitNeedsApproval: Int32 = 4
+
     private func run(_ args: [String], stdin: Data? = nil) -> (Int32, Data)? {
         guard let helper else { return nil }
+        if Date() < Self.unresponsiveUntil {
+            Self.lastFailure = "keychain helper timed out recently; not retried yet"
+            return (-2, Data())
+        }
         let p = Process()
         p.executableURL = helper
         p.arguments = args
@@ -267,18 +289,27 @@ final class HelperKeychain: KeychainStore {
         try? inp.fileHandleForWriting.close()
         // Same 15 s limit as evidence.py: a Keychain prompt nobody answers must not hang the MCP.
         // A timeout is reported as "error" (never as "missing", which would mint a new key).
-        let deadline = Date().addingTimeInterval(15)
+        let deadline = Date().addingTimeInterval(Self.timeoutSeconds)
         while p.isRunning && Date() < deadline { usleep(20_000) }
         if p.isRunning {
             p.terminate()
+            Self.unresponsiveUntil = Date().addingTimeInterval(Self.unresponsiveBackoff)
+            Self.lastFailure = "keychain helper timed out after \(Int(Self.timeoutSeconds))s"
             return (-2, Data())
         }
-        return (p.terminationStatus, out.fileHandleForReading.readDataToEndOfFile())
+        let code = p.terminationStatus
+        if code == Self.exitNeedsApproval {
+            Self.lastFailure = "keychain needs user approval (locked, or this helper is not yet on the item's access "
+                + "list; run AgentReinsKeychainHelper authorize in a logged-in session)"
+        } else if code != 0 && code != Self.exitNotFound {
+            Self.lastFailure = "keychain helper exit \(code)"
+        }
+        return (code, out.fileHandleForReading.readDataToEndOfFile())
     }
 
     func lookup(_ account: String) -> (String, Data?) {
         guard let (code, data) = run(["get", account]) else { return ("no_helper", nil) }
-        if code == 3 { return ("missing", nil) }
+        if code == Self.exitNotFound { return ("missing", nil) }
         let raw = String(decoding: data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines)
         guard code == 0, !raw.isEmpty else { return ("error", nil) }
         var bytes = Hex.decode(raw) ?? Data(raw.utf8)

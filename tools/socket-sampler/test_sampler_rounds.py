@@ -186,6 +186,26 @@ class Lifecycle(Base):
         self.sampler().note_start()
         self.assertNotIn("restart_gap", [e["kind"] for e in self.data()["samples"].get("failureLog", [])])
 
+    def test_key_unavailable_keeps_sampling_unsigned_and_is_a_counted_failure(self) -> None:
+        # CI run 39655188074: the Keychain helper timed out. The sampler must keep sampling, unsigned, and say why.
+        reason = "integrity key unavailable: KeychainUnavailable: keychain read failed (keychain helper timed out after 15s)"
+        s = self.sampler(key=None, key_reason=reason)
+        s.note_start()
+        for _ in range(3):
+            self.assertIsNone(s.sample()["failure"])
+        data = self.data()
+        stats = data["samples"]
+        self.assertEqual(stats["count"], 3)
+        self.assertEqual([e["kind"] for e in stats["failureLog"]], ["key_unavailable"])
+        self.assertEqual(stats["failureLog"][0]["stage"], "keychain")
+        self.assertIn("timed out", stats["failureLog"][0]["reason"])
+        self.assertEqual(stats["failures"], 1)
+        self.assertEqual(data["coverage"]["windowFailedRounds"], 0)  # sampling itself did not fail
+        side = json.loads(ss.sidecar_path(self.ledger).read_text())
+        self.assertEqual(side, {"unsigned": True, "reason": reason})
+        verdict = ss.verify_snapshot(self.ledger.read_bytes(), side, None, KEY)
+        self.assertEqual(verdict["state"], "unsigned")
+
     def test_stop_is_logged_but_not_a_failure(self) -> None:
         s = self.sampler()
         s.sample()
