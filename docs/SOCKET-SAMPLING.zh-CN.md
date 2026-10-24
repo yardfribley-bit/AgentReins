@@ -49,6 +49,19 @@
   - 新鲜度按**读到台账的那一刻**计算，不会把读钥匙串的等待时间算进去。
 - 旧版（v1）台账没有实测数据：MCP 标 `measurementConfidence=Unknown`，注明"配置间隔，不是实测"。
 
+## 界面上的「采集有异常」
+
+首页顶栏按钮、风险告警上的覆盖横幅、覆盖度页，读的是同一份 `socketCoverage` / `integrity`。别的采集源写成 `degraded` 或 `failed`，不会单独把按钮粘成「采集有异常」。
+
+- `state` 为 `stopped`、`not_running` 或 `tampered`，或 `integrity.state` 为 `tampered`：按钮写「采集有异常」。采样没在跑，或台账不能当证据。
+- `state` 为 `sampling`：终身 `failures` 只出现在横幅里。几次历史超时很常见，**不**因此点亮「采集有异常」。
+- 采样进行中，只有保留窗口里的失败轮次同时满足下面两条，才算超过阈值、点亮「采集有异常」：
+  - `windowFailedRounds ≥ 6`
+  - `windowFailedRounds / windowRounds ≥ 0.5`
+  窗口最多 300 轮（采样器 `ROUND_WINDOW`）。没有这两个字段的旧台账，采样进行中不把终身失败数当成异常。
+- `state` 为 `sampling` 时，未走代理流量不写「看不到」。正常写「按进程采样」；达到上面的阈值时写「采样失败过多」。系统解析器发出的 DNS 仍然看不到，那是另一件事。
+- 没有台账（`not_running`）才对未走代理流量写「看不到」。`stopped` 写「采样已停止」：停止之后的新连接看不到，已经采到的仍列在外网访问。
+
 ## 接线
 - MCP `list_network`（Python 与打包的 Swift 版同时改）：原 `network` 不变，新增 `sockets`（字段白名单 + 脱敏）、`socketSummary`（其中 `notViaProxyPublic` = 未走代理的外网连接数）、`socketCoverage`；台账不存在时明确 `not_running / Unknown`。`get_coverage` 的"未走代理流量"盲区随采样状态如实改变。
 - 外网访问页：`loadTransportAudit` 载荷新增 `sockets`（`SocketLedgerArchive.swift`，只读、字段白名单），"全部外网访问"下方新增"按进程采样的全部连接 · 不论是否走代理"表，逐列转义。

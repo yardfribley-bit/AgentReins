@@ -961,6 +961,8 @@
  // Prototype table: 任务｜时间｜谁｜去了哪里｜协议｜结果｜关联｜内容审计. 结果 comes only from structured
  // fields (HTTP status, TLS check outcome, exit code); 关联 and 内容审计 are their own columns.
  const TABLE_HEADERS=['任务','时间','谁','去了哪里','协议','结果','关联','内容审计'];
+ // Static badge. Sampling is not a task title; the phrase never comes from captured data.
+ const SAMPLE_BADGE='<span class="sample-badge" title="按进程采样看到的连接，没有会话，不能归到某次工具调用">按进程采样 · 无会话</span>';
  function insecureFlag(r){return list(r.args).map(String).some(a=>a==='--insecure'||a==='--no-check-certificate'||/^-[A-Za-z]*k[A-Za-z]*$/.test(a));}
  // HTTPS judged from structured fields only: URL scheme (record or command argument), port 443 on the connection.
  function httpsLike(r){return /^https:/i.test(String(httpURL(r)||r.url||''))||list(r.args).some(a=>/^https:\/\//i.test(String(a)))||String(r.port||r.resource?.remotePort||'')==='443'||/:443(?:$|\/)/.test(String(r.host||''))||list(r.connections).some(c=>list(c&&c.detail).some(d=>/:443$/.test(String(d))));}
@@ -1005,9 +1007,10 @@
  function socketWhen(s){return s.firstSeen&&s.lastSeen&&s.firstSeen!==s.lastSeen?socketTime(s.firstSeen)+' → '+socketTime(s.lastSeen):socketTime(s.lastSeen||s.firstSeen);}
  function socketCells(s){
   const dest=socketDestination(s),peer=s.remoteAddress&&s.remoteAddress!==dest?'（'+s.remoteAddress+'）':'';
-  return ['未归属任务（按进程采样）',socketWhen(s),(s.agent||'Agent 未确认')+' · '+(s.processName||'进程')+' · PID '+(s.pid??'?'),dest+peer+(s.remotePort?':'+s.remotePort:''),(s.protocol||'连接'),
+  // 任务 column is the row title. 「按进程采样 · 无会话」 is a badge beside it, not the title.
+  return ['尚未归入任务',socketWhen(s),(s.agent||'Agent 未确认')+' · '+(s.processName||'进程')+' · PID '+(s.pid??'?'),dest+peer+(s.remotePort?':'+s.remotePort:''),(s.protocol||'连接'),
    '连接 '+(s.state||'状态未采到')+' · '+(s.viaProxy?'经审计代理':'未走代理（直连）'),
-   '没有执行编号（按进程采样）· '+(socketSourceLabel[s.destinationSource]||s.destinationSource||'目的地来源未提供')+(s.ledgerIntegrity==='tampered'?' · 台账校验失败':''),
+   '没有执行编号 · '+(socketSourceLabel[s.destinationSource]||s.destinationSource||'目的地来源未提供')+(s.ledgerIntegrity==='tampered'?' · 台账校验失败':''),
    s.viaProxy?'经代理：正文审计见同一目的地的代理记录':'没有审计（流量没经过代理）'];
  }
  function rowCells(record,tasks){return [taskNameOf(record,tasks),clock(record),toolName(record,tasks)+(record.agent?' · '+record.agent:''),showWhere(record),protocolOf(record),resultCell(record),associationCell(record),auditCell(record)];}
@@ -1018,7 +1021,11 @@
    const row='<tr'+(callFailed(record)?' class="is-fail"':bypassedAudit(record)?' class="is-bypass"':'')+'>'+tds+'</tr>';
    return row+(open?'<tr class="network-read-row"><td colspan="'+TABLE_HEADERS.length+'">'+exchangeMarkupFor(record,tasks)+'</td></tr>':'');
   }).join('');
-  const socketRows=list(sockets).map(s=>'<tr class="is-socket'+(s.viaProxy===false&&socketPublic(s)?' is-bypass':'')+'">'+socketCells(s).map(cell=>'<td>'+esc(redact(cell))+'</td>').join('')+'</tr>').join('');
+  const socketRows=list(sockets).map(s=>{
+   const cells=socketCells(s);
+   const tds=cells.map((cell,i)=>'<td'+(i===0?' class="socket-task"':'')+'>'+esc(redact(cell))+(i===0?SAMPLE_BADGE:'')+'</td>').join('');
+   return '<tr class="is-socket'+(s.viaProxy===false&&socketPublic(s)?' is-bypass':'')+'">'+tds+'</tr>';
+  }).join('');
   return recordRows+socketRows;
  }
  function tableMarkup(records,tasks,{selected=null,sockets=[]}={}){
@@ -1096,10 +1103,34 @@
  function socketCoverageSummary(){
   const cov=socketLedger.coverage||{},key=socketLedger.keychain||{},integ=cov.integrity||{};
   const p95=cov.measurementConfidence==='Observed'&&cov.observedCycleSecondsP95!=null?cov.observedCycleSecondsP95:null;
+  const rounds=Number(cov.windowRounds),failedRounds=Number(cov.windowFailedRounds);
   return {state:cov.state||'not_loaded',p95,p95Text:p95!=null?'实测周期 p95 '+p95+' 秒':'实测周期：Unknown（样本不足）',
    misses:cov.measurementConfidence==='Observed'?cov.missesShorterThanSeconds:null,failures:cov.failures??0,lastFailure:cov.lastFailure||null,
    staleSeconds:cov.staleSeconds,lastSampleAt:cov.lastSampleAt||null,integrity:integ.state||'unknown',integrityReason:integ.reason||'',
-   keyState:key.state||'unknown',keyHelper:key.helper||null,keyReason:key.reason||'',connections:socketLedger.connections.length};
+   keyState:key.state||'unknown',keyHelper:key.helper||null,keyReason:key.reason||'',connections:socketLedger.connections.length,
+   windowRounds:Number.isFinite(rounds)?rounds:null,windowFailedRounds:Number.isFinite(failedRounds)?failedRounds:null};
+ }
+ // 「采集有异常」阈值：docs/SOCKET-SAMPLING.zh-CN.md「界面上的采集有异常」.
+ // Lifetime failures are shown on the banner. They do not stick the label on.
+ // While sampling, only a retained round window that is at least half failures, and at least 6 failed rounds, counts.
+ const COLLECTION_ANOMALY_MIN_FAILED_ROUNDS=6;
+ const COLLECTION_ANOMALY_FAIL_RATIO=0.5;
+ function collectionAnomaly(summary){
+  const c=summary||socketCoverageSummary();
+  if(c.integrity==='tampered'||c.state==='tampered'||c.state==='stopped'||c.state==='not_running')return true;
+  if(c.state!=='sampling')return false;
+  const rounds=c.windowRounds,failed=c.windowFailedRounds;
+  if(rounds==null||failed==null||rounds<=0)return false;
+  return failed>=COLLECTION_ANOMALY_MIN_FAILED_ROUNDS&&failed/rounds>=COLLECTION_ANOMALY_FAIL_RATIO;
+ }
+ function nonProxyVisibility(summary){
+  const c=summary||socketCoverageSummary();
+  // Sampling is running: never claim the non-proxy path is unseen. DNS is a separate sentence.
+  if(c.state==='sampling')return collectionAnomaly(c)?'采样失败过多':'按进程采样';
+  if(c.state==='stopped')return '采样已停止';
+  if(c.state==='tampered'||c.integrity==='tampered')return '台账无法校验';
+  if(c.state==='not_loaded')return '尚未读取台账';
+  return '看不到';
  }
  const integrityText={verified:'台账已签名并校验通过',unsigned:'台账未签名',unverifiable:'台账已签名，但本机读不到密钥，无法校验',tampered:'台账校验失败（按篡改处理）',missing:'没有台账'};
  const stateText={sampling:'按进程采样运行中',stopped:'采样已停止',not_running:'采样没有运行',tampered:'台账校验失败',not_loaded:'尚未读取采样台账'};
@@ -1247,5 +1278,5 @@
    +socketLedgerMarkup(agent,{collapsed:true});
  }
  // ESC-MUTATION-REGION-END
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,setSocketLedger,socketLedgerMarkup,socketLedgerData,socketCoverageSummary,destinationGroups,resultCell,associationCell,auditCell,mapMarkup,destinationDetailMarkup,localExchanges,rawLocalTransports,bypassedAudit,tlsFailed,tlsHandshakeFailed};
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,setSocketLedger,socketLedgerMarkup,socketLedgerData,socketCoverageSummary,collectionAnomaly,nonProxyVisibility,destinationGroups,resultCell,associationCell,auditCell,mapMarkup,destinationDetailMarkup,localExchanges,rawLocalTransports,bypassedAudit,tlsFailed,tlsHandshakeFailed};
 })();

@@ -85,7 +85,7 @@ function renderTasks(){
  const subtasks=shown.tasks.filter(t=>t.subagentPath&&(agentFilter==='all'||t.agent===agentFilter)&&[t.title,t.subagentPath,...cards(t).map(c=>c.title)].join(' ').toLowerCase().includes(q));
  if(subtasks.length)$('tasks').innerHTML+=`<details class="subtask-group" ${subtasksExpanded?'open':''}><summary>Agent 子任务 · ${subtasks.length}</summary>${subtasks.map(t=>`<button class="task-item ${t.id===taskID?'selected':''}" data-task="${esc(t.id)}"><strong>${esc(t.title)}</strong><small>${esc(state(t))} · ${esc(time(t.lastActivity))}</small><span class="task-summary">${esc(cut(current(t),70))}</span></button>`).join('')}</details>`;
  const childGroup=$('tasks').querySelector('.subtask-group');if(childGroup)childGroup.addEventListener('toggle',()=>{subtasksExpanded=childGroup.open;});
- $('agent-health').innerHTML=['WorkBuddy','Codex','Cursor'].map(a=>{const hs=shown.health.filter(h=>h.source.toLowerCase().includes(a.toLowerCase()));return `<button type="button" class="agent-health" data-view="collection"><b>${a}</b><span>${hs.length?esc(hs.map(h=>h.state).join(' / ')):'来源状态未提供'}</span></button>`;}).join('')+'<p>本机独立运行 · 仅实时任务<br>无任务身份的观察保留在采集现场</p>';
+ $('agent-health').innerHTML=agentHealthMarkup();
 }
 function stopExcerpt(t){const paragraphs=String(t?.nativeEndMessage||'').split(/\n\s*\n/).map(s=>s.trim()).filter(s=>s&&!/^#{1,6}\s/.test(s));return paragraphs.length?cut(paragraphs[0].replace(/\*\*/g,''),140):'执行已结束，尚无目标验证记录。点击核对最后答复与执行详情。';}
 function renderHeading(){const t=task();
@@ -215,24 +215,40 @@ function renderCollection(){
 }
 function boardCard(t){const as=taskArtifacts(t);return `<button class="board-card" data-board-task="${esc(t.id)}"><small>${esc(t.agent)} · ${esc(time(t.lastActivity))}</small><strong>${esc(cut(taskLabel(t),110))}</strong><p>${esc(current(t))}</p><div class="artifact-chip">${esc(taskStatus(t)==='completed'?as.length?as.map(a=>a.name).join(' · ')+' →':'完成记录已收到 · 交付物待核对':taskStatus(t)==='stopped'?'查看停止原文、最后一步与未完成事项 →':taskStatus(t)==='awaiting_confirmation'?'查看当前等待记录 →':taskStatus(t)==='failed'?'查看失败原因与执行返回 →':'定位当前步骤 →')}</div></button>`;}
 function renderBoard(){const ts=listTasks(),columns=[['awaiting_confirmation','等我确认'],['running','进行中'],['stopped','已停止 · 交付未确认'],['completed','已完成未读'],['failed','失败']];$('result-screen').innerHTML=`<div class="board-summary"><span>${ts.length} 个带任务身份的任务</span><span>已识别产物 ${shown.artifacts.length} 项</span><span>工具调用显示在任务内部</span></div><div class="board">${columns.map(([status,title])=>{const list=ts.filter(t=>taskStatus(t)===status&&(status!=='completed'||!read(t)));return `<section class="board-column kanban-column" data-status="${status}"><div class="board-head"><i class="status-dot ${status}"></i>${title}<span>${list.length}</span></div>${list.map(boardCard).join('')||empty('当前没有此状态任务')}</section>`;}).join('')}</div>${[['observed','状态待确认'],['cancelled','已取消'],['read','已完成已读']].map(([status,title])=>{const list=ts.filter(t=>status==='read'?taskStatus(t)==='completed'&&read(t):taskStatus(t)===status);return `<details class="board-extra"><summary>${title} · ${list.length}</summary><div class="board-extra-list">${list.map(boardCard).join('')||empty('当前无此状态任务')}</div></details>`;}).join('')}`;}
+function agentHealthMarkup(){
+ // One readable status word per agent. Duplicate "degraded / degraded" used to clip to "degrad".
+ const rank=s=>/fail|error/i.test(s)?0:/degrad/i.test(s)?1:/partial|warn/i.test(s)?2:/healthy|running|listening/i.test(s)?4:3;
+ return ['WorkBuddy','Codex','Cursor'].map(a=>{
+  const hs=array(shown.health).filter(h=>String(h.source||'').toLowerCase().includes(a.toLowerCase()));
+  let text='来源状态未提供',title=a+'：来源状态未提供';
+  if(hs.length){
+   const states=[...new Set(hs.map(h=>String(h.state||'未知')))].sort((x,y)=>rank(x)-rank(y));
+   text=states.join(' · ');
+   title=hs.map(h=>String(h.source||a)+'：'+String(h.state||'未知')).join(' · ');
+  }
+  return `<button type="button" class="agent-health" data-view="collection" title="${esc(title)}"><b>${esc(a)}</b><span>${esc(text)}</span></button>`;
+ }).join('')+'<p>本机独立运行 · 仅实时任务<br>无任务身份的观察保留在采集现场</p>';
+}
 function collectorPhrase(){
  if(paused)return '画面已暂停 · 采集继续';
- const health=array(shown.health);
- const proxy=health.find(h=>/workbuddy-network|proxy|mitm/i.test(String(h.source||'')));
- const detail=String(proxy?.detail||'');
- const proxyFailed=!!(proxy&&(/failed|error/i.test(String(proxy.state||''))||/failed to bind/i.test(detail)));
- const proxyUp=!!(proxy&&!proxyFailed&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||(/\b18891\b/.test(detail)&&/running|listening|records received|proxy is running/i.test(detail))));
- const otherFailed=health.some(h=>h!==proxy&&/failed|error/i.test(String(h.state||'')));
- const hasLiveAlerts=!!(window.AgentReinsRisk&&Array.isArray(window.AgentReinsRisk._lastAlerts)&&window.AgentReinsRisk._lastAlerts.length);
- const hasTransport=typeof window.AgentReinsNetwork?.localExchanges==='function'&&(window.AgentReinsNetwork.localExchanges()||[]).length>0;
- if(proxyFailed)return '代理异常';
- if(otherFailed)return '采集有异常';
- // Showing live alerts / transport means collection is active — never claim「采集未启动」.
- if(shown.observing||proxyUp||health.some(h=>h.state==='healthy')||hasLiveAlerts||hasTransport){
-  if(proxyUp)return '代理在线 · 正在监看';
-  if(hasLiveAlerts||hasTransport||shown.observing)return '采集进行中';
-  return '采集进行中';
+ // Same socketCoverage / integrity as the banner and 覆盖度. Unrelated source health must not stick「采集有异常」.
+ const net=window.AgentReinsNetwork;
+ const c=typeof net?.socketCoverageSummary==='function'?net.socketCoverageSummary():null;
+ if(c&&c.state&&c.state!=='not_loaded'){
+  if(typeof net.collectionAnomaly==='function'&&net.collectionAnomaly(c))return '采集有异常';
+  if(c.state==='sampling'){
+   const health=array(shown.health);
+   const proxy=health.find(h=>/workbuddy-network|proxy|mitm/i.test(String(h.source||'')));
+   const detail=String(proxy?.detail||'');
+   const proxyFailed=!!(proxy&&(/failed|error/i.test(String(proxy.state||''))||/failed to bind/i.test(detail)));
+   const proxyUp=!!(proxy&&!proxyFailed&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||(/\b18891\b/.test(detail)&&/running|listening|records received|proxy is running/i.test(detail))));
+   if(proxyFailed)return '代理异常';
+   if(proxyUp)return '代理在线 · 正在监看';
+   return '采集进行中';
+  }
  }
+ const health=array(shown.health);
+ if(shown.observing||health.some(h=>/healthy|degraded|running|listening/i.test(String(h.state||''))))return '采集进行中';
  if(health.length)return '已收到采集源状态';
  return '采集未启动';
 }
