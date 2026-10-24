@@ -26,7 +26,7 @@ const output=path.join(source,'ui');fs.mkdirSync(output,{recursive:true});
  assert((await page.locator('#detail-code').textContent()).includes('a password is required'));
  await page.screenshot({path:path.join(output,'architecture.png'),fullPage:true});
  const stoppedDetail=await page.locator('#detail-code').textContent();
- await page.locator('[data-graph-mode=spider]').click();
+ await page.locator('details.canvas-tools').evaluate(el=>{el.open=true});await page.locator('[data-graph-mode=spider]').click();
  assert.equal(await page.locator('#detail-code').textContent(),stoppedDetail);assert.equal(await page.locator('[data-flow-node]').count(),radial.nodes.length);
  await page.screenshot({path:path.join(output,'spider.png'),fullPage:true});
  await page.locator('[data-graph-mode=architecture]').click();

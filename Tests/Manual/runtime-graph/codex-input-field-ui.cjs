@@ -24,7 +24,7 @@ const root=process.env.AGENTREINS_CODEX_INPUT_FIELD_DIR;if(!root)throw Error('Ac
  assert.equal(await page.locator('#detail-code h3').count(),2);
  assert.equal(await page.locator('[data-flow-node]').count(),16);
  await page.screenshot({path:path.join(root,'input-timeline.png'),fullPage:true});
- await page.locator('[data-graph-mode=spider]').click();assert.equal(await page.locator('#detail-code').textContent(),detail);
+ await page.locator('details.canvas-tools').evaluate(el=>{el.open=true});await page.locator('[data-graph-mode=spider]').click();assert.equal(await page.locator('#detail-code').textContent(),detail);
  await page.screenshot({path:path.join(root,'input-spider.png'),fullPage:true});
  assert.deepEqual(errors,[]);console.log(JSON.stringify({passed:true,actualRawInputs:3,displayedInputs:3,sourceEvidenceIDs:6,steeringVisible:true,pageContextExcluded:true,bothModes:true}));
  await browser.close();
