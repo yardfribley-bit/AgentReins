@@ -9,7 +9,7 @@ const typeNames={user:'用户原话',context:'模型上下文',model:'模型往�
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
 const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
-let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
+let graphMode='architecture',processFocus='architecture',subtasksExpanded=false,pendingOpenKey=null,revealEvidence=false,evidenceTaskID=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
 let objects=new Map(),runtimeExchangeID=null,runtimeCallID=null,runtimeTaskID=null,timelineMode='tools',runtimeProjection=null;
 function normalize(p){return {...p,tasks:array(p.tasks),contexts:array(p.contexts),collected:array(p.collected),processes:array(p.processes),health:array(p.health),artifacts:array(p.artifacts),readTaskIDs:array(p.readTaskIDs),ipGeolocations:array(p.ipGeolocations)};}
@@ -54,7 +54,7 @@ function evidence(o){const d=o.data||{},t=o.task;return `<details class="technic
 function recordButton(c){return `<button class="event-item" data-select="card:${esc(c.id)}"><b>${esc(c.title)}</b><small>${esc(c.tag)} · ${esc(time(c.timestamp))}</small><small>${esc(c.summary)}</small></button>`;}
 function toast(s){$('toast').textContent=s;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,3200);}
 function bridge(action,fields){const handler=window.webkit?.messageHandlers?.agentreins;if(!handler){toast('此操作需要 AgentReins 原生应用；当前浏览器未连接原生通道。');return false;}handler.postMessage({action,...fields});return true;}
-function selectTask(id,openKey=null){pendingOpenKey=openKey;taskID=id;following=false;selection=null;snapshot=null;contextBlockID=null;detailTab='output';view='process';render();if(openKey&&objects.has(openKey)){pendingOpenKey=null;choose(openKey);}}
+function selectTask(id,openKey=null){pendingOpenKey=openKey;taskID=id;following=false;revealEvidence=!!openKey;selection=null;snapshot=null;contextBlockID=null;detailTab='output';view='process';render();if(openKey&&objects.has(openKey)){pendingOpenKey=null;choose(openKey);}}
 function revision(o){return JSON.stringify([o?.type,o?.data]);}
 function object(key,type,data,t=task()){const o={key,type,data,task:t};objects.set(key,o);return o;}
 function rebuildObjects(){
@@ -75,7 +75,7 @@ function rebuildObjects(){
  for(const h of shown.health)object('health:'+h.source,'health',h,null);
  for(const a of shown.artifacts)object('artifact:'+a.id,'artifact-item',a,shown.tasks.find(t=>t.id===a.taskID));
 }
-function choose(key){const o=objects.get(key);if(!o)return;if(document.body.classList.contains('details-collapsed')){document.body.classList.remove('details-collapsed');$('toggle-details').textContent='收起详情';}if(key.startsWith('card:')&&o.data?.id?.startsWith('call:')){runtimeCallID=o.data.id;const origin=taskContexts().find(c=>window.AgentReinsRuntimeGraph.instructionCalls(c).some(i=>i.id===o.data.call));if(origin)runtimeExchangeID=origin.id;}selection=key;snapshot=clone(o);snapshotRevision=revision(o);following=false;contextBlockID=o.type==='transfer'?o.data.preferredBlockID||null:null;detailTab='output';renderGraph();renderStages();if(view==='collection')renderCollectionDetail();else renderDetail(true);const panel=view==='collection'?$('collection-detail'):$('detail');if(panel)panel.scrollTop=0;renderTasks();}
+function choose(key){const o=objects.get(key);if(!o)return;revealEvidence=true;if(document.body.classList.contains('details-collapsed')){document.body.classList.remove('details-collapsed');$('toggle-details').textContent='收起详情';}if(key.startsWith('card:')&&o.data?.id?.startsWith('call:')){runtimeCallID=o.data.id;const origin=taskContexts().find(c=>window.AgentReinsRuntimeGraph.instructionCalls(c).some(i=>i.id===o.data.call));if(origin)runtimeExchangeID=origin.id;}selection=key;snapshot=clone(o);snapshotRevision=revision(o);following=false;contextBlockID=o.type==='transfer'?o.data.preferredBlockID||null:null;detailTab='output';renderGraph();renderStages();if(view==='collection')renderCollectionDetail();else renderDetail(true);const panel=view==='collection'?$('collection-detail'):$('detail');if(panel)panel.scrollTop=0;renderTasks();}
 function refreshDetail(){const o=objects.get(selection);if(!o)return;snapshot=clone(o);snapshotRevision=revision(o);if(view==='collection')renderCollectionDetail();else renderDetail(true);}
 function defaultObject(){const t=task();if(taskStatus(t)==='completed'&&taskArtifacts(t).length)return objects.get('artifact');if(runtimeProjection?.currentKey&&objects.has(runtimeProjection.currentKey))return objects.get(runtimeProjection.currentKey);return objects.get(t?.currentCardID?'card:'+t.currentCardID:'')||objects.get(t?.lifecycle?.currentStageID?'stage:'+t.lifecycle.currentStageID:'')||objects.get('user')||objects.get('process');}
 function renderTasks(){
@@ -85,16 +85,24 @@ function renderTasks(){
  const subtasks=shown.tasks.filter(t=>t.subagentPath&&(agentFilter==='all'||t.agent===agentFilter)&&[t.title,t.subagentPath,...cards(t).map(c=>c.title)].join(' ').toLowerCase().includes(q));
  if(subtasks.length)$('tasks').innerHTML+=`<details class="subtask-group" ${subtasksExpanded?'open':''}><summary>Agent 子任务 · ${subtasks.length}</summary>${subtasks.map(t=>`<button class="task-item ${t.id===taskID?'selected':''}" data-task="${esc(t.id)}"><strong>${esc(t.title)}</strong><small>${esc(state(t))} · ${esc(time(t.lastActivity))}</small><span class="task-summary">${esc(cut(current(t),70))}</span></button>`).join('')}</details>`;
  const childGroup=$('tasks').querySelector('.subtask-group');if(childGroup)childGroup.addEventListener('toggle',()=>{subtasksExpanded=childGroup.open;});
- $('agent-health').innerHTML=['WorkBuddy','Codex','Cursor'].map(a=>{const hs=shown.health.filter(h=>h.source.toLowerCase().includes(a.toLowerCase()));return `<button type="button" class="agent-health" data-view="collection"><b>${a}</b><span>${hs.length?esc(hs.map(h=>h.state).join(' / ')):'来源状态未提供'}</span></button>`;}).join('')+'<p>本机独立运行 · 仅实时任务<br>无任务身份的观察保留在采集现场</p>';
+ $('agent-health').innerHTML=agentHealthMarkup();
 }
 function stopExcerpt(t){const paragraphs=String(t?.nativeEndMessage||'').split(/\n\s*\n/).map(s=>s.trim()).filter(s=>s&&!/^#{1,6}\s/.test(s));return paragraphs.length?cut(paragraphs[0].replace(/\*\*/g,''),140):'执行已结束，尚无目标验证记录。点击核对最后答复与执行详情。';}
+function observedText(t){if(!t)return '';const duration=Math.max(0,Math.round((new Date(t.lastActivity)-new Date(t.startedAt))/1000));if(!Number.isFinite(duration))return '';const text=duration>=86400?Math.floor(duration/86400)+' 天 '+Math.floor(duration%86400/3600)+' 小时':duration>=3600?Math.floor(duration/3600)+' 小时 '+Math.floor(duration%3600/60)+' 分钟':String(Math.floor(duration/60)).padStart(2,'0')+':'+String(duration%60).padStart(2,'0');return text;}
+function requestBody(t){if(!t)return '<p class="request">这里将从你的原话开始，展示模型往返、执行过程与结果。</p>';if(t.originalRequest){const main=machineInput(t.originalRequest)?'<p class="request">这条记录是心跳或自动化标记，不是用户写下的需求。原始标记可以在「查看原始输入」里看。</p>':`<p class="request"><b>起始原话：</b>${esc(readableTask(t.originalRequest))}</p>`;const latest=t.latestUserInput?.content&&t.latestUserInput.content!==t.originalRequest&&!machineInput(t.latestUserInput.content)?`<p class="request latest-input"><b>最新补充：</b>${esc(readableTask(t.latestUserInput.content))}</p>`:'';return main+latest+(t?`<button class="link-button" data-select="user">查看原始输入</button>`:'');}if(t.subagentPath)return `<p class="request">Agent 委派的子任务 · ${esc(t.subagentPath)}<br>工具与执行结果属于当前子任务，用户原始需求归属父会话。</p>`;if(array(t.inputAttachments).length)return '<p class="request">本次输入为附件，没有附带文字需求。点击原始输入查看路径。</p><button class="link-button" data-select="user">查看原始输入</button>';return '<p class="request-missing">本轮用户原话尚未采到。后续活动保留，任务起点待补齐。</p>';}
 function renderHeading(){const t=task();
  if(view==='network'&&networkTask){const scoped=shown.tasks.find(x=>x.id===networkTask);$('heading').innerHTML=scoped?`<div class="heading-meta">这次任务的外网访问</div><div class="heading-row"><h1>${esc(taskLabel(scoped))}</h1><button class="task-jump" data-task="${esc(scoped.id)}">返回任务过程</button></div><p class="request">${esc(scoped.agent)} · 下面只列归到这次任务的外网访问。</p>`:`<h1>这次任务已不在列表里</h1><button class="task-jump" data-view="process">返回任务过程</button>`;return;}
  if(view!=='process'){const titles={alerts:['风险告警','这台 Mac 上的编码 agent 今天有没有做危险的事。'],network:['外网访问，追查目标和发起来源','查看 WorkBuddy、Codex、Cursor 的目标地址、位置、会话与实际证据。'],collection:['采集现场，确认数据从哪里来','应用进程、文件与网络观察独立保留；缺少任务身份的记录可以查找。'],rules:['规则','少而准的高危行为规则；默认只告警。'],coverage:['覆盖度 · 看不到什么','告警只来自看得到的部分；没有告警不等于安全。'],results:['任务结果看板','按任务归列，点击找到当前步骤、失败原因和实际交付物。']};const meta=titles[view]||titles.alerts;$('heading').innerHTML=`<div class="heading-meta">本机运行时安全 · WorkBuddy / Codex / Cursor</div><h1>${meta[0]}</h1><p class="request">${meta[1]}</p>`;return;}
- const duration=t?Math.max(0,Math.round((new Date(t.lastActivity)-new Date(t.startedAt))/1000)):null;const durationText=duration==null?'':duration>=86400?Math.floor(duration/86400)+' 天 '+Math.floor(duration%86400/3600)+' 小时':duration>=3600?Math.floor(duration/3600)+' 小时 '+Math.floor(duration%3600/60)+' 分钟':String(Math.floor(duration/60)).padStart(2,'0')+':'+String(duration%60).padStart(2,'0');
- const requestLine=t?.originalRequest?(machineInput(t.originalRequest)?'<p class="request">这条记录是心跳或自动化标记，不是用户写下的需求。原始标记可以在「查看原始输入」里看。</p>':`<p class="request"><b>起始原话：</b>${esc(readableTask(t.originalRequest))}</p>`)+(t?.latestUserInput?.content&&t.latestUserInput.content!==t.originalRequest&&!machineInput(t.latestUserInput.content)?`<p class="request latest-input"><b>最新补充：</b>${esc(readableTask(t.latestUserInput.content))}</p>`:''):t?.subagentPath?`<p class="request">Agent 委派的子任务 · ${esc(t.subagentPath)}<br>工具与执行结果属于当前子任务，用户原始需求归属父会话。</p>`:array(t?.inputAttachments).length?'<p class="request">本次输入为附件，没有附带文字需求。点击原始输入查看路径。</p>':t?'<p class="request-missing">本轮用户原话尚未采到。后续活动保留，任务起点待补齐。</p>':'<p class="request">这里将从你的原话开始，展示模型往返、执行过程与结果。</p>';
- $('heading').innerHTML=`<div class="heading-meta"><span class="agent-label">${esc(t?.agent||'等待 Agent')}</span><span>${esc(t?.model||'模型身份未采集')}</span>${t?`<span>开始 ${esc(time(t.startedAt))}</span>`:''}</div><div class="heading-row"><h1>${esc(t?taskLabel(t):'等待一个真实任务')}</h1><div class="heading-side">${t?`<button class="task-jump" data-network-scope="${esc(t.id)}">看这次任务的外网</button>`:''}${duration!=null?`<strong>${durationText}</strong>已观察跨度`:''}</div></div>${requestLine}<div class="status-line">${badge(t?state(t):'等待新任务',cls(t))}<span id="task-state">${esc(t?current(t):'等待真实采集数据')}</span>${t?`<span class="divider"></span><button class="link-button" data-select="user">查看原始输入</button>`:''}</div>${t&&taskStatus(t)==='stopped'?`<div class="stopped-callout"><strong>Agent 已停止 · 目标达成尚未确认</strong><span>${esc(stopExcerpt(t))}</span><br><button class="link-button" data-select="closure">查看停止原文与最后一步 →</button></div>`:''}`;
+ const label=t?taskLabel(t):'';const open=$('heading')?.querySelector('.request-fold')?.open;
+ const duration=observedText(t);
+ $('heading').innerHTML=`<div class="task-status-row"><span class="agent-chip">${esc(t?.agent||'等待 Agent')}</span><h1 title="${esc(label)}">${esc(t?cut(label,36):'等待一个真实任务')}</h1>${badge(t?state(t):'等待新任务',cls(t))}${duration?`<span class="observed">已观察 ${esc(duration)}</span>`:''}${t?`<button type="button" class="task-jump" data-network-scope="${esc(t.id)}">看这次外网</button>`:''}</div>${t?`<details class="request-fold"${open?' open':''}><summary>起始原话</summary>${requestBody(t)}</details>`:requestBody(t)}`;
 }
+function roundFacts(t){const facts=[];const exchanges=taskContexts(t).length;const tools=(window.AgentReinsRuntimeGraph?.nativeCalls?.(t)||[]).length;const net=cards(t).filter(c=>['web','network'].includes(detailType(c))).length;if(exchanges)facts.push(['模型往返',String(exchanges)]);if(tools)facts.push(['工具',String(tools)]);if(net)facts.push(['外网',String(net)]);return facts;}
+function renderNow(){const host=$('now-card');if(!host)return;const t=view==='process'?task():null;if(!t){host.hidden=true;host.innerHTML='';return;}host.hidden=false;const facts=roundFacts(t);const stopped=taskStatus(t)==='stopped';
+ host.innerHTML=`<p class="now-kicker">当前步骤</p><p class="now-line" id="task-state">${esc(current(t))}</p>${facts.length?`<p class="now-facts">${facts.map(([k,n])=>`<span>${esc(k)} <b>${n}</b></span>`).join('')}</p>`:''}${stopped?`<div class="stopped-callout"><strong>Agent 已停止 · 目标达成尚未确认</strong><span>${esc(stopExcerpt(t))}</span><button type="button" class="link-button" data-select="closure">查看停止原文与最后一步</button></div>`:''}`;
+}
+function applyProcessFocus(){const root=$('process-view');if(!root)return;root.dataset.focus=processFocus;root.querySelectorAll('[data-process-focus]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.processFocus===processFocus)));}
+function noteTaskEvidence(){const id=task()?.id||null;if(id===evidenceTaskID)return;evidenceTaskID=id;snapshot=null;selection=null;revealEvidence=false;}
 function renderStages(){const t=task(),stages=stageRows();$('stages').innerHTML=stages.map(s=>`<button data-select="stage:${esc(s.id)}" class="${t?.lifecycle?.currentStageID===s.id?'current':s.status==='returned'?'done':''}" title="${esc(s.summary)}" ${!t?'disabled':''}><span>${esc(s.title)}</span><span class="stage-count">${s.status==='absent'?'—':s.status==='running'?'进行中':s.status==='waiting'?'等待':s.status==='failed'?'失败':s.status==='returned'?'已返回':s.status==='cancelled'?'取消':'已记录'}</span></button>`).join('');}
 function renderGraph(animate=false){
  const t=task();if(runtimeTaskID!==t?.id){runtimeTaskID=t?.id;runtimeExchangeID=null;runtimeCallID=null;}
@@ -171,7 +179,7 @@ function taskStateDetail(t){
  (array(t?.coverage).length?section('本轮数据覆盖',coverageMarkup(t.coverage)):'');
 }
 function renderDetail(force=false,panel=$('detail')){
- const o=snapshot||defaultObject();if(!o)return;
+ const o=snapshot||(revealEvidence?defaultObject():null);if(!o){if(!panel||panel.id==='detail'){if(panel)panel.innerHTML='<p class="empty inspector-empty">点左侧节点查看证据</p>';}return;}
  const scroll=panel.scrollTop,changed=selection&&objects.has(selection)&&revision(objects.get(selection))!==snapshotRevision;
  if(snapshot&&!force&&panel.querySelector('#detail-code')){const updated=panel.querySelector('#detail-updated');if(updated)updated.hidden=!changed;const ip=panel.querySelector('#ip-info');if(ip)ip.innerHTML=ipInfo(ip.dataset.ip,o.task?.id);return;}
  const d=o.data||{},t=o.task;let title=typeNames[o.type]||'当前任务',type=typeNames[o.type]||'任务全貌',body='';
@@ -215,24 +223,40 @@ function renderCollection(){
 }
 function boardCard(t){const as=taskArtifacts(t);return `<button class="board-card" data-board-task="${esc(t.id)}"><small>${esc(t.agent)} · ${esc(time(t.lastActivity))}</small><strong>${esc(cut(taskLabel(t),110))}</strong><p>${esc(current(t))}</p><div class="artifact-chip">${esc(taskStatus(t)==='completed'?as.length?as.map(a=>a.name).join(' · ')+' →':'完成记录已收到 · 交付物待核对':taskStatus(t)==='stopped'?'查看停止原文、最后一步与未完成事项 →':taskStatus(t)==='awaiting_confirmation'?'查看当前等待记录 →':taskStatus(t)==='failed'?'查看失败原因与执行返回 →':'定位当前步骤 →')}</div></button>`;}
 function renderBoard(){const ts=listTasks(),columns=[['awaiting_confirmation','等我确认'],['running','进行中'],['stopped','已停止 · 交付未确认'],['completed','已完成未读'],['failed','失败']];$('result-screen').innerHTML=`<div class="board-summary"><span>${ts.length} 个带任务身份的任务</span><span>已识别产物 ${shown.artifacts.length} 项</span><span>工具调用显示在任务内部</span></div><div class="board">${columns.map(([status,title])=>{const list=ts.filter(t=>taskStatus(t)===status&&(status!=='completed'||!read(t)));return `<section class="board-column kanban-column" data-status="${status}"><div class="board-head"><i class="status-dot ${status}"></i>${title}<span>${list.length}</span></div>${list.map(boardCard).join('')||empty('当前没有此状态任务')}</section>`;}).join('')}</div>${[['observed','状态待确认'],['cancelled','已取消'],['read','已完成已读']].map(([status,title])=>{const list=ts.filter(t=>status==='read'?taskStatus(t)==='completed'&&read(t):taskStatus(t)===status);return `<details class="board-extra"><summary>${title} · ${list.length}</summary><div class="board-extra-list">${list.map(boardCard).join('')||empty('当前无此状态任务')}</div></details>`;}).join('')}`;}
+function agentHealthMarkup(){
+ // One readable status word per agent. Duplicate "degraded / degraded" used to clip to "degrad".
+ const rank=s=>/fail|error/i.test(s)?0:/degrad/i.test(s)?1:/partial|warn/i.test(s)?2:/healthy|running|listening/i.test(s)?4:3;
+ return ['WorkBuddy','Codex','Cursor'].map(a=>{
+  const hs=array(shown.health).filter(h=>String(h.source||'').toLowerCase().includes(a.toLowerCase()));
+  let text='来源状态未提供',title=a+'：来源状态未提供';
+  if(hs.length){
+   const states=[...new Set(hs.map(h=>String(h.state||'未知')))].sort((x,y)=>rank(x)-rank(y));
+   text=states.join(' · ');
+   title=hs.map(h=>String(h.source||a)+'：'+String(h.state||'未知')).join(' · ');
+  }
+  return `<button type="button" class="agent-health" data-view="collection" title="${esc(title)}"><b>${esc(a)}</b><span>${esc(text)}</span></button>`;
+ }).join('')+'<p>本机独立运行 · 仅实时任务<br>无任务身份的观察保留在采集现场</p>';
+}
 function collectorPhrase(){
  if(paused)return '画面已暂停 · 采集继续';
- const health=array(shown.health);
- const proxy=health.find(h=>/workbuddy-network|proxy|mitm/i.test(String(h.source||'')));
- const detail=String(proxy?.detail||'');
- const proxyFailed=!!(proxy&&(/failed|error/i.test(String(proxy.state||''))||/failed to bind/i.test(detail)));
- const proxyUp=!!(proxy&&!proxyFailed&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||(/\b18891\b/.test(detail)&&/running|listening|records received|proxy is running/i.test(detail))));
- const otherFailed=health.some(h=>h!==proxy&&/failed|error/i.test(String(h.state||'')));
- const hasLiveAlerts=!!(window.AgentReinsRisk&&Array.isArray(window.AgentReinsRisk._lastAlerts)&&window.AgentReinsRisk._lastAlerts.length);
- const hasTransport=typeof window.AgentReinsNetwork?.localExchanges==='function'&&(window.AgentReinsNetwork.localExchanges()||[]).length>0;
- if(proxyFailed)return '代理异常';
- if(otherFailed)return '采集有异常';
- // Showing live alerts / transport means collection is active — never claim「采集未启动」.
- if(shown.observing||proxyUp||health.some(h=>h.state==='healthy')||hasLiveAlerts||hasTransport){
-  if(proxyUp)return '代理在线 · 正在监看';
-  if(hasLiveAlerts||hasTransport||shown.observing)return '采集进行中';
-  return '采集进行中';
+ // Same socketCoverage / integrity as the banner and 覆盖度. Unrelated source health must not stick「采集有异常」.
+ const net=window.AgentReinsNetwork;
+ const c=typeof net?.socketCoverageSummary==='function'?net.socketCoverageSummary():null;
+ if(c&&c.state&&c.state!=='not_loaded'){
+  if(typeof net.collectionAnomaly==='function'&&net.collectionAnomaly(c))return '采集有异常';
+  if(c.state==='sampling'){
+   const health=array(shown.health);
+   const proxy=health.find(h=>/workbuddy-network|proxy|mitm/i.test(String(h.source||'')));
+   const detail=String(proxy?.detail||'');
+   const proxyFailed=!!(proxy&&(/failed|error/i.test(String(proxy.state||''))||/failed to bind/i.test(detail)));
+   const proxyUp=!!(proxy&&!proxyFailed&&(/healthy|degraded|running|listening/i.test(String(proxy.state||''))||(/\b18891\b/.test(detail)&&/running|listening|records received|proxy is running/i.test(detail))));
+   if(proxyFailed)return '代理异常';
+   if(proxyUp)return '代理在线 · 正在监看';
+   return '采集进行中';
+  }
  }
+ const health=array(shown.health);
+ if(shown.observing||health.some(h=>/healthy|degraded|running|listening/i.test(String(h.state||''))))return '采集进行中';
  if(health.length)return '已收到采集源状态';
  return '采集未启动';
 }
@@ -280,7 +304,7 @@ function renderRisk(){
 }
 window.agentreinsRenderRisk=()=>{if(view==='alerts'||view==='rules'||view==='coverage'){riskState.transportsRequested=true;renderRisk();}};
 function render(animate=false){
- if(following)taskID=newest();if(task()?.detailsLoaded===false)requestTask(taskID);rebuildObjects();renderTasks();renderHeading();
+ if(following)taskID=newest();noteTaskEvidence();if(task()?.detailsLoaded===false)requestTask(taskID);rebuildObjects();renderTasks();renderHeading();renderNow();applyProcessFocus();
  document.querySelectorAll('nav [data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
  $('view-name').textContent=window.agentreinsCommandsOpen?'命令外联':{alerts:'风险告警',network:'外网访问',process:'任务过程',collection:'采集现场',rules:'规则',coverage:'覆盖度',results:'结果看板'}[view]||'风险告警';
  $('alerts-view').hidden=view!=='alerts';$('rules-view').hidden=view!=='rules';$('coverage-view').hidden=view!=='coverage';
@@ -289,7 +313,7 @@ function render(animate=false){
  if($('heading'))$('heading').hidden=['alerts','rules','coverage'].includes(view);
  $('live-label').textContent=collectorPhrase();$('pause').textContent=paused?'恢复画面':'暂停画面';
  $('follow-latest').textContent=following?'正在跟随最新任务':'跟随最新任务';
- const warning=[shown.persistenceError&&'证据保存异常：'+shown.persistenceError,shown.truncated&&'先前展示发生过容量截断；早期任务可能缺少证据，不能据此确认完整性。'].filter(Boolean).join(' · ');$('workspace-warning').hidden=!warning&&!shown.continuityNotice;$('workspace-warning').textContent=[warning,shown.continuityNotice].filter(Boolean).join(' · ');
+ const warning=[shown.persistenceError&&('证据保存异常：'+shown.persistenceError),shown.truncated&&'先前展示发生过容量截断；早期任务可能缺少证据，不能据此确认完整性。',shown.continuityNotice].filter(Boolean).join(' · ');const warnEl=$('workspace-warning');if(!warning){warnEl.hidden=true;warnEl.innerHTML='';}else{const opened=warnEl.querySelector('.warning-fold')?.open;warnEl.hidden=false;warnEl.innerHTML=`<details class="warning-fold"${opened?' open':''}><summary>${esc(cut(warning,72))}</summary><p>${esc(warning)}</p></details>`;}
  $('footer-state').textContent=`${shown.publishedAt?'更新 '+time(shown.publishedAt)+' · ':''}${paused?'画面固定，采集继续':'真实采集数据'} · 当前任务 ${primaryTasks().length} 个`;
  if(view==='alerts'||view==='rules'||view==='coverage')renderRisk();
  else if(view==='process'){if($('collection-detail'))$('collection-detail').innerHTML='';const vacant=!task();if($('empty-guide'))$('empty-guide').hidden=!vacant;if($('graph-screen'))$('graph-screen').hidden=vacant;if(!vacant){renderStages();renderGraph(animate);renderTimeline();renderDetail();}else{$('stages').innerHTML='';$('detail').innerHTML='';}}
@@ -297,7 +321,7 @@ function render(animate=false){
  else if(view==='network')renderNetwork();
  else if(view==='results')renderBoard();
  if(view!=='alerts'&&view!=='rules'&&view!=='coverage'&&window.AgentReinsRisk){const n=window.AgentReinsRisk.buildAlerts(shown).filter(a=>a.status==='todo'||a.status==='ask').length;const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}}
- if(view==='process'&&task()?.detailsLoaded===false){$('current-bar').textContent='正在读取该任务的完整执行证据…';$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
+ if(view==='process'&&task()?.detailsLoaded===false){const line=$('task-state');if(line)line.textContent='正在读取该任务的完整执行证据…';$('current-bar').textContent='正在读取该任务的完整执行证据…';$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
 }
 function renderNetwork(){if(networkTask&&shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);const focused=document.activeElement?.id==='network-search',position=focused?document.activeElement.selectionStart:null;window.AgentReinsNetwork.render($('network-view'),shown,{agent:networkAgent,query:networkQuery,taskOnly:networkTask,selected:networkSelected,focusTask:taskID,mode:networkMode,destination:networkDestination,suspicious:networkSuspicious,alerts:riskState.alerts||window.AgentReinsRisk?._lastAlerts||[]});if(focused){$('network-search').focus();$('network-search').setSelectionRange(position,position);}}
 window.agentreinsRenderNetwork=()=>{if(view==='network')renderNetwork();};
@@ -421,7 +445,8 @@ document.addEventListener('click',e=>{
  else if(el.dataset.action==='refresh-artifacts'){bridge('refreshArtifacts',{});}
  else if(el.dataset.openArtifact){bridge('openArtifact',{taskID:el.dataset.artifactTask,artifactID:el.dataset.openArtifact});}
  else if(el.id==='detail-updated'){refreshDetail();}
- else if(el.dataset.action==='follow-current'){runtimeExchangeID=null;runtimeCallID=null;selection=null;snapshot=null;contextBlockID=null;render();}
+ else if(el.dataset.processFocus){processFocus=el.dataset.processFocus==='timeline'?'timeline':'architecture';applyProcessFocus();}
+ else if(el.dataset.action==='follow-current'){revealEvidence=true;runtimeExchangeID=null;runtimeCallID=null;selection=null;snapshot=null;contextBlockID=null;render();}
  else if(el.id==='follow-latest'){runtimeExchangeID=null;runtimeCallID=null;following=true;selection=null;snapshot=null;render();}
  else if(el.id==='pause'){paused=!paused;if(!paused)shown=latest;render();}
  else if(el.dataset.riskAlert){riskState.selected=el.dataset.riskAlert;renderRisk();}

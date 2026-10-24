@@ -466,11 +466,20 @@ function socketCoverage(){
 const SOCKET_STATE={sampling:'运行中',stopped:'已停止',not_running:'没有运行',tampered:'台账校验失败',not_loaded:'尚未读取'};
 const LEDGER_INTEGRITY={verified:'台账已签名 · 校验通过',unsigned:'台账未签名',unverifiable:'台账已签名 · 本机无法校验',tampered:'台账被改动（按篡改处理）',missing:'没有台账'};
 const KEY_HELPER={needs_approval:'需要你在钥匙串里批准',missing:'密钥尚未创建',timeout:'钥匙串没有响应',error:'钥匙串读取失败',no_helper:'找不到 AgentReinsKeychainHelper'};
+function samplingAnomaly(){
+ return typeof window.AgentReinsNetwork?.collectionAnomaly==='function'&&window.AgentReinsNetwork.collectionAnomaly();
+}
+function nonProxyLabel(){
+ return typeof window.AgentReinsNetwork?.nonProxyVisibility==='function'?window.AgentReinsNetwork.nonProxyVisibility():'尚未读取台账';
+}
 function socketBanner(){
  const c=socketCoverage();
- const level=c.state==='sampling'&&c.integrity==='verified'&&c.keyState!=='key_unavailable'?'ok':c.state==='sampling'?'warn':'bad';
+ const anomaly=samplingAnomaly();
+ const level=anomaly?'bad':c.state==='sampling'&&c.integrity==='verified'&&c.keyState!=='key_unavailable'?'ok':c.state==='sampling'?'warn':'bad';
  if(c.state==='not_loaded')return `<div class="cov-banner warn" data-coverage-banner><b>未走代理的连接：尚未读取采样台账</b><span>读取之前，首页告警只来自经过审计代理或审计入口的流量。</span></div>`;
+ const anomalyNote=anomaly?(c.state==='sampling'?'<span>采集有异常：近期失败轮次达到阈值</span>':'<span>采集有异常</span>'):'';
  const parts=[
+  anomalyNote,
   `<span>${esc(c.p95Text)}${c.misses!=null?esc(' · 短于 '+c.misses+' 秒的连接可能漏掉'):''}</span>`,
   `<span>失败 ${esc(c.failures)} 次${c.lastFailure?esc('（最近：'+cut(c.lastFailure,60)+'）'):''}</span>`,
   c.state==='stopped'?`<span>最近一次采样在 ${esc(c.staleSeconds==null?'未知时间':c.staleSeconds+' 秒前')}</span>`:'',
@@ -510,8 +519,14 @@ function coverageModel(payload){
 
 function socketBlind(){
  const c=socketCoverage();
- if(c.state==='sampling')return {t:'未走代理的流量',s:'按进程采样 agent 进程树的 TCP/UDP 连接（不含正文）',v:c.p95Text+(c.misses!=null?'；短于 '+c.misses+' 秒的连接可能漏掉':'')+'；系统解析器发出的 DNS 看不到'};
- return {t:'未走代理的流量',s:'按进程连接采样'+(SOCKET_STATE[c.state]||c.state),v:'现在看不到，也不估算比例'};
+ if(c.state==='sampling'){
+  const head=samplingAnomaly()?'近期失败轮次达到阈值，覆盖不可靠。':'';
+  return {t:'未走代理的流量',s:'按进程采样 agent 进程树的 TCP/UDP 连接（不含正文）',v:head+c.p95Text+(c.misses!=null?'；短于 '+c.misses+' 秒的连接可能漏掉':'')+'；系统解析器发出的 DNS 看不到'};
+ }
+ if(c.state==='stopped')return {t:'未走代理的流量',s:'按进程采样已停止',v:'停止之后的新连接看不到；已经采到的连接仍列在外网访问。不估算漏掉的比例。'};
+ if(c.state==='tampered'||c.integrity==='tampered')return {t:'未走代理的流量',s:'台账校验失败',v:'采样记录不能当证据，不估算比例。'};
+ if(c.state==='not_loaded')return {t:'未走代理的流量',s:'尚未读取采样台账',v:'读取之前不声称看得到，也不估算比例。'};
+ return {t:'未走代理的流量',s:'按进程连接采样没有运行',v:'现在看不到，也不估算比例'};
 }
 /** 已知悉只影响显示样式，不改变告警本身、不做验收处置。 */
 function applyDecisions(alerts,decisions){
@@ -532,7 +547,7 @@ function renderStats(alerts,cov){
  const unread=alerts.filter(a=>!a.acked).length;
  const chips=cov.chips.map(c=>`<span class="risk-chip ${c.level==='full'?'ok':c.level==='part'?'warn':'bad'}"><i></i>${esc(c.a)} ${esc(c.label)}</span>`).join('')
   +`<span class="risk-chip ${cov.proxyUp?'ok':'bad'}"><i></i>${cov.proxyUp?'代理在听':'代理未确认'}</span>`
-  +`<span class="risk-chip ${socketCoverage().state==='sampling'?'ok':'bad'}"><i></i>${socketCoverage().state==='sampling'?'未走代理流量：按进程采样':'未走代理流量：看不到'}</span>`;
+  +`<span class="risk-chip ${socketCoverage().state==='sampling'&&!samplingAnomaly()?'ok':samplingAnomaly()?'bad':'warn'}"><i></i>未走代理流量：${nonProxyLabel()}</span>`;
  return `<div class="risk-stats">
   <div class="risk-stat crit"><b>${crit}</b><span>今日 Critical</span></div>
   <div class="risk-stat high"><b>${high}</b><span>今日 High</span></div>
@@ -696,7 +711,7 @@ function renderCoverage(holder,payload,riskState){
   <div class="risk-stat"><b class="${cov.proxyUp?'ok':''}">${cov.proxyUp?'在听':'未确认'}</b><span>审计代理 18891</span></div>
   <div class="risk-stat"><b>S01</b><span>文件读 · 盲区（无 ES）</span></div>
   <div class="risk-stat"><b>S06</b><span>配置监看 · 未接入</span></div>
-  <div class="risk-stat"><b>${socketCoverage().state==='sampling'?'采样中':'看不到'}</b><span>未走代理流量 · ${socketCoverage().state==='sampling'?esc(socketCoverage().p95Text):'不估算'}</span></div>
+  <div class="risk-stat"><b>${socketCoverage().state==='sampling'?(samplingAnomaly()?'异常':'采样中'):socketCoverage().state==='stopped'?'已停止':socketCoverage().state==='not_running'?'看不到':nonProxyLabel()}</b><span>未走代理流量 · ${socketCoverage().state==='sampling'?esc(socketCoverage().p95Text):'不估算'}</span></div>
  </div>
  <div class="risk-covg">
   <section class="risk-card"><h3>Agent 接入情况</h3><table class="risk-table"><thead><tr><th>Agent</th><th>接入</th><th>说明</th></tr></thead><tbody>${rows}</tbody></table>

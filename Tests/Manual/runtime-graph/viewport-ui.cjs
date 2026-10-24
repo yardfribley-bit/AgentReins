@@ -8,6 +8,7 @@ await page.goto('file://'+path.resolve(__dirname,'../../../Sources/AgentReins/Re
 await page.evaluate(p=>window.agentreinsReceive(p),payload);
 assert.equal(await page.locator('#graph-scale').textContent(),'85%');assert(await page.locator('[data-zoom=readable]').getAttribute('aria-pressed')==='true');assert(await page.locator('#graph-nav [data-nav-node]').count()===16);
 await page.locator('#toggle-details').click();assert(!(await page.locator('#detail').isVisible()));await page.locator('#toggle-details').click();assert(await page.locator('#detail').isVisible());
+await page.locator('details.canvas-tools').evaluate(el=>{el.open=true});
 for(const [width,height] of [[1366,768],[1680,900],[1024,768]]){
  await page.setViewportSize({width,height});
  await page.locator('[data-zoom=fit]').click();assert(parseInt(await page.locator('#graph-scale').textContent())>=35,'Overview uses compact layout instead of a tiny portrait thumbnail');

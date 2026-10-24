@@ -9,7 +9,7 @@ const {chromium}=require(process.env.AGENTREINS_PLAYWRIGHT||'playwright');
  const task=payload.tasks[0],cs=payload.contexts.filter(c=>c.agent===task.agent&&c.session===task.session&&c.turn===task.turn);
  const calls=task.cards.filter(c=>c.id.startsWith('call:'));
  await page.evaluate(p=>window.agentreinsReceive(p),payload);
- assert((await page.locator('h1').textContent()).includes(task.originalRequest));
+ assert((await page.locator('#heading .request').first().textContent()).includes(task.originalRequest));
  assert.equal(await page.locator('#runtime-exchange option').count(),cs.length+1);
  assert.equal(await page.locator('#timeline .timeline-row').count(),calls.length);
  assert.equal(await page.locator('[data-flow-node=closure]').count(),1);

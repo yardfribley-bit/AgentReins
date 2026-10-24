@@ -65,14 +65,14 @@
 #graph .ar-packet{display:block}
 .architecture-mobile{display:none}
 @media(min-width:1450px){.process-layout{grid-template-columns:minmax(0,1fr) 370px}#graph .ar-node strong{font-size:18px}#graph .ar-node .ar-node-note{font-size:12px}}
-@media(max-width:1250px){.shell{grid-template-columns:130px minmax(0,1fr)}.sidebar{padding:18px 10px}.brand{font-size:16px}.process-layout{grid-template-columns:minmax(0,1fr)}.detail-panel{border-left:0;border-top:1px solid var(--line)}#graph{min-height:1500px}#graph .ar-inner small{display:none}#graph .ar-node strong{font-size:13px}#graph .ar-node{padding:10px 9px 10px 12px}}
+@media(max-width:1250px){.shell{grid-template-columns:130px minmax(0,1fr)}.sidebar{padding:18px 10px}.brand{font-size:16px}.process-layout{grid-template-columns:minmax(0,1fr)}.detail-panel{border-left:0;border-top:1px solid var(--line)}#graph{min-height:0}#graph .ar-inner small{display:none}#graph .ar-node strong{font-size:13px}#graph .ar-node{padding:10px 9px 10px 12px}}
 @media(max-width:600px){.shell{grid-template-columns:minmax(0,1fr)}.sidebar{display:none}.process-layout{margin:0 10px}#graph{min-height:0;aspect-ratio:auto!important}#graph>svg,.architecture-nodes,.architecture-labels{display:none}.architecture-mobile{display:grid;padding:12px;gap:8px}.architecture-mobile button{padding:10px;text-align:left;border:1px solid var(--line);border-radius:6px;background:#f8f7f3}.architecture-mobile button.selected{border-color:var(--purple)}.architecture-mobile small{display:block;color:var(--muted)}.architecture-toolbar{padding:10px}.runtime-controls label{min-width:0;flex-basis:100%}}
 @media(prefers-reduced-motion:reduce){#graph .ar-node{transition:none}#graph .ar-packet{display:none}}
 
 /* Keep the approved map geometry, fit it inside the available desktop viewport. */
 @media(min-width:851px){
  body{overflow:hidden}.shell{height:100dvh;min-height:0}.sidebar{height:100dvh;min-height:0;overflow:hidden}.sidebar-bottom{padding-top:10px}#tasks{flex:1;min-height:40px;max-height:none;overflow:auto}.section-label{margin-top:16px}
- main{height:100dvh;display:flex;flex-direction:column;min-height:0;overflow:hidden}.topbar{height:44px;min-height:44px;padding:0 18px}#heading{flex:none;padding:9px 18px;max-height:145px;overflow:auto}h1{font-size:19px;line-height:1.35}.heading-meta{margin-bottom:3px}.heading-side strong{font-size:18px}.request{font-size:12px;max-height:34px;margin-top:4px;line-height:1.4}.status-line{margin-top:6px;gap:8px}#task-state{max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stopped-callout{margin-top:6px;padding:6px 10px;max-height:70px;overflow:auto}.warning-bar{flex:none;font-size:10px;margin:0 18px 6px;max-height:28px;overflow:auto}
+ main{height:100dvh;display:flex;flex-direction:column;min-height:0;overflow:hidden}.topbar{height:44px;min-height:44px;padding:0 18px}#heading{flex:none;padding:9px 18px;max-height:168px;min-height:0;overflow:auto}h1{font-size:19px;line-height:1.45}.heading-meta{margin-bottom:3px}.heading-side strong{font-size:18px}.request{font-size:12px;max-height:64px;margin-top:4px;line-height:1.6}.status-line{margin-top:6px;gap:8px}#task-state{max-width:55%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}.stopped-callout{margin-top:6px;padding:6px 10px;max-height:70px;overflow:auto}.warning-bar{flex:none;font-size:10px;margin:0 18px 6px;max-height:28px;overflow:auto}
  #process-view{flex:1;min-height:0;padding-bottom:0}.process-layout{height:100%;min-height:0;grid-template-columns:minmax(0,1fr) 300px;margin:0 18px;align-items:stretch}.canvas-panel{height:100%;min-height:0;display:grid;grid-template-rows:auto auto minmax(120px,1fr) auto auto auto 86px}.architecture-toolbar{padding:5px 10px;gap:8px}.architecture-modes button{padding:5px 8px;font-size:11px}.runtime-controls{padding:6px 10px;gap:8px}.runtime-controls label{font-size:10px}.runtime-controls select{font-size:11px;max-width:100%;padding:4px}.runtime-note{padding:4px 10px;font-size:10px;max-height:34px;overflow:auto}#current-bar{margin:0 10px 5px;padding:6px 10px;max-height:46px;overflow:auto;font-size:11px}#current-bar small{font-size:10px;margin-top:0}.timeline-head{padding:5px 10px}.timeline-viewport{height:86px;max-height:86px;overflow:auto}#timeline{padding:0 10px 8px}.timeline-row{padding:5px 0}.detail-panel{height:100%;min-height:0;max-height:none;overflow:auto;padding:15px;border-left:1px solid var(--line);border-top:0}.detail-panel h2{font-size:17px}footer{flex:none;margin:6px 18px;font-size:10px}.board,.collection-body,.collection-grid{margin-left:18px;margin-right:18px}#collection-view,#result-screen,#network-view,#alerts-view,#rules-view,#coverage-view{flex:1;min-height:0;overflow:auto}.transport-audit{flex:none;max-height:42vh;overflow:auto}
 }
 .graph-zoom{display:flex;align-items:center;gap:5px;font-size:11px}.graph-zoom button{padding:4px 7px;border:1px solid var(--line);border-radius:4px;background:white}.graph-zoom button[aria-pressed=true]{color:var(--purple);background:var(--soft)}.graph-zoom output{min-width:32px;text-align:center;font-variant-numeric:tabular-nums}
@@ -88,7 +88,7 @@
 #graph:not(.overview) .ar-node strong{font-size:18px}#graph:not(.overview) .ar-node .ar-node-tag,#graph:not(.overview) .ar-node .ar-node-note{font-size:13px}#graph:not(.overview) .ar-edge-text{font-size:13px}
 
 .overview-state{display:none}.overview-mode #graph-nav{display:none}.overview-mode #graph .ar-edge-text{display:none}.overview-mode #graph .ar-edge.structural{opacity:.35}.overview-mode #graph .ar-edge{stroke-width:2px}.overview-mode #graph .ar-node.current{outline:3px solid var(--purple);outline-offset:4px}#graph.overview .ar-node{flex-direction:column;gap:calc(3px / var(--graph-scale))}#graph.overview .overview-state{display:block;color:#827e78;font-size:calc(9px / var(--graph-scale));line-height:1.1}#graph.overview .ar-node strong{font-size:calc(12px / var(--graph-scale));line-height:1.15}#graph.overview .ar-node.resource strong{font-size:calc(11px / var(--graph-scale))}
-@media(min-width:851px){.overview-mode .canvas-panel{grid-template-rows:auto auto minmax(120px,1fr) auto auto auto 0}.overview-mode .timeline-viewport{display:none}.overview-mode #heading{max-height:112px}.overview-mode .runtime-note{max-height:28px}}
+@media(min-width:851px){.overview-mode .canvas-panel{grid-template-rows:auto auto minmax(120px,1fr) auto auto auto 0}.overview-mode .timeline-viewport{display:none}.overview-mode #heading{max-height:168px}.overview-mode .runtime-note{max-height:28px}}
 
 #graph.overview .ar-node{padding:calc(2px / var(--graph-scale));gap:calc(2px / var(--graph-scale))}#graph.overview .ar-node strong{flex:none;overflow:visible;max-height:none}#graph.overview .overview-state{flex:none;max-width:100%;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}
 
@@ -139,8 +139,8 @@
 .task-open{display:block;min-width:0;padding:0;text-align:left}
 .task-open strong{display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden}
 .task-net,.task-jump{border:1px solid var(--line);background:#fff;color:var(--purple);border-radius:6px;padding:4px 8px;font-size:12px;white-space:nowrap}
-.heading-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px}
-.heading-row h1{min-width:0}
+.heading-row{display:flex;align-items:flex-start;justify-content:space-between;gap:12px;min-width:0}
+.heading-row h1{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;line-height:1.45}
 .heading-side{display:flex;align-items:center;gap:8px;flex:none}
 .network-task-bar{display:flex;flex-wrap:wrap;align-items:center;gap:12px;margin:8px 0 16px}
 .network-task-bar h2{flex-basis:100%}
@@ -275,3 +275,92 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 .cov-key button{border:1px solid var(--purple);color:var(--purple);border-radius:6px;padding:2px 10px;background:#fff}
 .cov-key small{color:var(--muted)}
 .graph-empty{padding:60px 30px;text-align:center;color:var(--muted)}.graph-empty h3{color:var(--ink);margin-bottom:6px}
+
+/* Sidebar stays wide enough for one-line nav labels and a full status word.
+   158px / 130px columns wrapped 风险告警 mid-phrase and clipped "degraded". */
+@media(min-width:721px){
+ .shell{grid-template-columns:260px minmax(0,1fr)}
+ .sidebar{padding:22px 16px 16px}
+ .brand{font-size:20px;letter-spacing:-.4px}
+}
+@media(max-width:720px) and (min-width:601px){
+ .shell{grid-template-columns:minmax(0,1fr)}
+}
+.sidebar nav{gap:4px}
+.sidebar nav button{align-items:center;gap:8px;padding:8px 12px;min-height:32px;min-width:0;flex-wrap:nowrap}
+.sidebar nav button span{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1;line-height:1.4}
+.workspace-label{align-items:center;gap:8px;margin:18px 4px 14px;white-space:nowrap;flex-wrap:nowrap}
+.workspace-label span{flex:none;white-space:nowrap}
+.sidebar .section-label{margin:20px 4px 10px}
+.sidebar #search{margin-bottom:10px}
+button.agent-health{display:flex;align-items:baseline;justify-content:space-between;gap:12px;width:100%;padding:5px 2px;min-width:0}
+button.agent-health b{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;font-weight:600;color:var(--ink)}
+button.agent-health span{float:none;flex:none;max-width:none;overflow:visible;text-overflow:clip;white-space:nowrap;text-align:right;color:var(--muted)}
+.sidebar-bottom{padding:16px 4px 0;line-height:1.5}
+.sidebar-bottom p{margin-top:12px;line-height:1.6}
+@media(min-width:851px){
+ .sidebar-bottom{padding-top:16px}
+ .section-label{margin-top:18px}
+}
+.sample-badge{display:inline-block;margin-left:6px;padding:0 6px;border-radius:4px;font-size:11px;line-height:1.7;background:var(--tint);color:#5c5852;border:1px solid var(--line);white-space:nowrap;vertical-align:1px}
+.socket-task{white-space:nowrap}
+
+/* Desktop process view: title stays one line, graph and detail stay side by side.
+   The old max-width:1250px rule stretched #graph to 1500px and folded the detail pane. */
+@media(min-width:1100px){
+ .process-layout{grid-template-columns:minmax(0,1fr) minmax(300px,360px)}
+ #graph{min-height:0!important}
+ .detail-panel{border-left:1px solid var(--line);border-top:0;max-height:none}
+}
+
+/* Process page: one status line, one current-step card, one primary visual. */
+.task-status-row{display:flex;align-items:center;gap:8px;min-height:32px;min-width:0}
+.task-status-row h1{flex:1;min-width:0;font-size:15px;line-height:1.4;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.agent-chip,.task-status-row .status-pill,.task-status-row .observed,.task-status-row .task-jump{flex:none}
+.agent-chip{display:inline-flex;align-items:center;min-height:28px;padding:0 8px;border-radius:999px;background:var(--soft);color:var(--purple);font-size:12px;font-weight:600}
+.task-status-row .status-pill{display:inline-flex;align-items:center;min-height:28px;padding:0 8px;white-space:nowrap}
+.task-status-row .observed{color:var(--muted);font-size:12px;white-space:nowrap;font-variant-numeric:tabular-nums}
+.task-status-row .task-jump{display:inline-flex;align-items:center;min-height:28px;padding:0 10px}
+.request-fold{margin-top:8px}
+.request-fold summary,.warning-fold summary,.canvas-tools summary{min-height:28px;display:flex;align-items:center;cursor:pointer;color:var(--muted);font-size:13px;line-height:1.5}
+.request-fold summary{width:fit-content;padding-right:8px}
+.request-fold[open]{max-height:160px;overflow:auto}
+.request-fold .request,.request-fold .request-missing{max-height:none;margin-top:8px;line-height:1.6}
+.warning-bar{flex:none;max-height:none;overflow:visible;font-size:13px;line-height:1.5;margin:0 16px 8px;padding:0 8px}
+.warning-fold summary{white-space:nowrap;overflow:hidden;text-overflow:ellipsis;display:block;line-height:28px;min-height:28px}
+.warning-fold p{margin:0 0 8px;line-height:1.6;white-space:pre-wrap}
+.now-card{flex:none;margin:8px 8px 0;padding:16px;background:var(--surface);border:1px solid var(--line);border-radius:10px}
+.now-kicker{font-size:12px;line-height:1.4;color:var(--muted);margin-bottom:4px}
+.now-line{font-size:22px;line-height:1.35;font-weight:600;letter-spacing:-.2px}
+.now-facts{display:flex;flex-wrap:wrap;gap:8px 16px;margin-top:8px;font-size:13px;line-height:1.5;color:var(--muted)}
+.now-facts b{color:var(--ink);font-weight:600}
+.now-card .stopped-callout{max-height:none;overflow:visible;margin-top:8px}
+.now-card .stopped-callout .link-button{min-height:28px}
+.canvas-panel{display:flex;flex-direction:column;min-height:0;height:100%;gap:0}
+.canvas-panel .panel-head,#current-bar{display:none}
+.process-toolbar{display:flex;align-items:center;gap:8px;padding:8px;min-height:40px;flex:none}
+.segmented{display:inline-flex;align-items:center;padding:2px;background:var(--tint);border-radius:8px;gap:2px}
+.segmented button,.process-toolbar .quiet,#toggle-details{min-height:28px;padding:0 12px;border-radius:6px;font-size:13px}
+.segmented button{color:var(--muted)}
+.segmented button[aria-pressed="true"]{background:var(--surface);color:var(--ink);box-shadow:0 1px 2px #00000014}
+.process-toolbar .quiet,#toggle-details{color:var(--ink)}
+.canvas-tools{margin-left:auto}
+.canvas-tools summary{list-style:none;padding:0 8px}
+.canvas-tools summary::-webkit-details-marker{display:none}
+.canvas-tools[open] summary{color:var(--ink)}
+.canvas-tools .architecture-modes,.canvas-tools .graph-zoom{display:flex;flex-wrap:wrap;align-items:center;gap:4px;padding:8px 0 0}
+.canvas-tools .graph-zoom button,.canvas-tools .architecture-modes button{min-height:28px;padding:0 8px}
+#graph-viewport{flex:1;min-height:0;height:auto}
+.runtime-controls{flex:none;padding:0 8px 8px}
+.runtime-note{flex:none;max-height:32px;overflow:hidden;padding:0 8px 8px;font-size:12px;line-height:1.5;color:var(--muted)}
+.runtime-note:empty{display:none;padding:0}
+#process-view[data-focus="architecture"] .timeline-head,#process-view[data-focus="architecture"] .timeline-viewport{display:none}
+#process-view[data-focus="timeline"] .panel-head,#process-view[data-focus="timeline"] .runtime-controls,#process-view[data-focus="timeline"] #graph-viewport,#process-view[data-focus="timeline"] .runtime-note,#process-view[data-focus="timeline"] #current-bar,#process-view[data-focus="timeline"] .canvas-tools{display:none}
+#process-view[data-focus="timeline"] .timeline-head{display:flex}
+#process-view[data-focus="timeline"] .timeline-viewport{display:block;flex:1;height:auto;max-height:none;min-height:0;overflow:auto}
+.inspector-empty{padding:24px 16px;color:var(--muted);font-size:14px;line-height:1.6}
+.timeline-head button,.timeline-row{min-height:28px}
+@media(min-width:851px){
+ #heading{max-height:none;overflow:visible;padding:8px 16px}
+ .overview-mode #heading{max-height:none}
+}

@@ -7,7 +7,7 @@ const install=payload.tasks.find(t=>t.turn==='b1e18ff8-d028-4b83-bb37-fd55b4643f
 const browser=await chromium.launch({executablePath:'/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',headless:true});const page=await browser.newPage({viewport:{width:1440,height:1000}});const errors=[];page.on('pageerror',e=>errors.push(e.message));
 await page.goto('http://127.0.0.1:18955/');await page.locator('#tasks .task-item').first().waitFor({timeout:20000});
 await page.locator('#agent-filter').selectOption('Codex');await page.locator('#tasks [data-task]').filter({hasText:'你现在这种'}).click();
-await page.locator('[data-zoom=fit]').click();await page.locator('[data-flow-node=user]').click();
+await page.locator('details.canvas-tools').evaluate(el=>{el.open=true});await page.locator('[data-zoom=fit]').click();await page.locator('[data-flow-node=user]').click();
 assert((await page.locator('#detail-code').textContent()).includes('你现在这种'));assert(!(await page.locator('#heading').textContent()).includes('codex-auto-review'));assert.equal(await page.locator('[data-flow-node]').count(),16);
 await page.screenshot({path:output+'/current-overview.png',fullPage:true});
 await page.locator('[data-graph-mode=spider]').click();assert(await page.locator('[data-flow-node^="card:"]').count()>0);assert(!await page.locator('[data-flow-node=database]').count());await page.screenshot({path:output+'/current-spider.png',fullPage:true});

@@ -138,6 +138,12 @@ const sock = (o) => Object.assign({ agent: 'Codex', pid: 10, ppid: 1, processNam
   assert.strictEqual(net.resultCell({ exitCode: 0, downloads: [{ path: '/tmp/x/pkg.tgz', state: 'verified' }, { path: '/tmp/y', state: 'failed' }] }), '退出码 0 · 下载了 pkg.tgz');
   assert.match(html, /没有审计（流量没经过代理）/);
   assert.match(html, /data-network-destination="direct.example"/, 'records and sockets grouped under one destination');
+  assert.match(html, /class="sample-badge"/, 'sampled rows carry a badge');
+  assert.match(html, /按进程采样 · 无会话/, 'badge names the sample, not a task');
+  assert.ok(!html.includes('未归属任务（按进程采样）'), 'sampling phrase is not the row title');
+  assert.match(html, /尚未归入任务/, 'row title stays the task column');
+  const socketRow = html.split('<tr').find((r) => r.includes('sample-badge') && r.includes('direct.example'));
+  assert.ok(socketRow && socketRow.indexOf('尚未归入任务') < socketRow.indexOf('sample-badge'), 'task title comes before the badge');
   const groups = net.destinationGroups([], net.socketLedgerData().connections);
   assert.strictEqual(groups.length, 1);
   const map = { innerHTML: '' };
@@ -184,6 +190,52 @@ for (const f of fs.readdirSync(dir)) {
   assert.strictEqual(s07.filter((a) => a.record).length, 1, 'record S07 kept');
   assert.strictEqual(s07.filter((a) => Array.isArray(a.sockets) && a.sockets.some((x) => x.processName === 'curl')).length, 0, 'socket S07 for the same bypass is dropped');
   assert.strictEqual(s07.filter((a) => Array.isArray(a.sockets) && a.sockets.some((x) => x.processName === 'node')).length, 1, 'unrelated direct process still alerts');
+}
+
+// Banner, 覆盖度, and 「采集有异常」 share socketCoverage. Sampling never says the non-proxy path is unseen.
+{
+  const w = load('network-view.js', 'risk-alerts.js');
+  const net = w.AgentReinsNetwork, risk = w.AgentReinsRisk;
+  const home = () => { const h = { innerHTML: '' }; risk.renderList(h, { tasks: [], health: [] }, { decisions: [] }); return h.innerHTML; };
+  const coverage = () => { const h = { innerHTML: '' }; risk.renderCoverage(h, { tasks: [], health: [] }, { decisions: [] }); return h.innerHTML; };
+  net.setSocketLedger({ coverage: { state: 'sampling', measurementConfidence: 'Observed', observedCycleSecondsP95: 7.15,
+    missesShorterThanSeconds: 7.34, failures: 4, windowRounds: 100, windowFailedRounds: 2, integrity: { state: 'verified' } },
+    keychain: { state: 'ok' }, connections: [] });
+  assert.strictEqual(net.collectionAnomaly(), false, 'four lifetime failures in a healthy window are not 采集有异常');
+  assert.strictEqual(net.nonProxyVisibility(), '按进程采样');
+  let html = home();
+  assert.match(html, /未走代理流量：按进程采样/);
+  assert.ok(!html.includes('未走代理流量：看不到'), 'sampling must not claim 看不到');
+  assert.ok(!html.includes('采集有异常'), 'healthy sampling does not light 采集有异常');
+  html = coverage();
+  assert.match(html, />采样中</);
+  assert.ok(!html.includes('>看不到<'), 'coverage stat does not say 看不到 while sampling');
+  assert.ok(!/现在看不到/.test(html), 'blind spot does not say the path is unseen while sampling');
+
+  net.setSocketLedger({ coverage: { state: 'sampling', windowRounds: 10, windowFailedRounds: 6, failures: 6, integrity: { state: 'verified' } },
+    keychain: { state: 'ok' }, connections: [] });
+  assert.strictEqual(net.collectionAnomaly(), true, 'half the window failed and at least 6 rounds failed');
+  assert.strictEqual(net.nonProxyVisibility(), '采样失败过多');
+  html = home();
+  assert.match(html, /采集有异常：近期失败轮次达到阈值/);
+  assert.match(html, /未走代理流量：采样失败过多/);
+  assert.ok(!html.includes('未走代理流量：看不到'));
+
+  net.setSocketLedger({ coverage: { state: 'sampling', windowRounds: 20, windowFailedRounds: 6, failures: 40, integrity: { state: 'verified' } },
+    keychain: { state: 'ok' }, connections: [] });
+  assert.strictEqual(net.collectionAnomaly(), false, 'six failures out of twenty is under the half-window ratio');
+
+  net.setSocketLedger({ coverage: { state: 'stopped', staleSeconds: 12.8, failures: 1, integrity: { state: 'verified' } },
+    keychain: { state: 'ok' }, connections: [] });
+  assert.strictEqual(net.collectionAnomaly(), true, 'stopped sampler is 采集有异常');
+  assert.strictEqual(net.nonProxyVisibility(), '采样已停止');
+  html = home();
+  assert.match(html, /采集有异常/);
+  assert.match(html, /未走代理流量：采样已停止/);
+  assert.ok(!html.includes('未走代理流量：看不到'));
+  html = coverage();
+  assert.match(html, />已停止</);
+  assert.match(html, /停止之后的新连接看不到/);
 }
 
 console.log('phase2 views ok');
