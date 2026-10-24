@@ -1,0 +1,7 @@
+    1 /sbin/launchd
+  777 /Applications/Safari.app/Contents/MacOS/Safari
+ 4100 /Applications/Cursor.app/Contents/MacOS/Cursor
+ 4188 /Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin) --type=utility
+ 4250 ssh -T git@github.com git-upload-pack 'org/repo.git'
+ 5000 node /opt/homebrew/bin/codex exec --json
+ 5001 git ls-remote https://github.com/org/repo

@@ -52,10 +52,28 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                     // Our capture files, not the 32 MB task checkpoint.
                     let payload: [String: Any] = [
                         "commands": CapturedNetworkArchive.commandRecords(),
-                        "captures": CapturedNetworkArchive.httpsRecords()
+                        "captures": CapturedNetworkArchive.httpsRecords(),
+                        "sockets": SocketLedgerArchive.pagePayload()
                     ]
                     Task { @MainActor in
                         _ = try? await view.callAsyncJavaScript("window.agentreinsTransportReceive(records)", arguments: ["records": payload], in: nil, contentWorld: .page)
+                    }
+                }
+                return
+            }
+            if action == "authorizeKeychain" {
+                // From the 首页 coverage banner button: same visible ask as at launch, then refresh the page.
+                weak var view = message.webView
+                let current = body["state"] as? String
+                Task { @MainActor in
+                    KeychainAuthorization.request(currentState: current) { state in
+                        Task { @MainActor in
+                            _ = try? await view?.callAsyncJavaScript(
+                                "window.agentreinsHostResult && window.agentreinsHostResult(result)",
+                                arguments: ["result": ["action": "keychainAuthorize", "state": state,
+                                                       "message": "钥匙串：" + KeychainAuthorization.label(state)]],
+                                in: nil, contentWorld: .page)
+                        }
                     }
                 }
                 return

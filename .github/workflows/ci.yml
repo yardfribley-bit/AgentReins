@@ -28,6 +28,9 @@ jobs:
       - name: Validate packaging script
         run: bash -n package_app.sh
 
+      - name: Dedicated unlocked CI keychain (integrity key never waits for a prompt)
+        run: scripts/ci_keychain.sh setup
+
       - name: Shared redaction vectors (Python)
         run: |
           set -euo pipefail
@@ -55,12 +58,29 @@ jobs:
           node Tests/Manual/network/test_risk_p5_association.cjs
           node Tests/Manual/network/test_risk_review_store.cjs
           node Tests/Manual/network/test_xss_escape.cjs
-          node tools/mutate_esc_calls.cjs
-          echo "JS_TESTS_PASSED=3"
+          ESC_MUTANT_MIN_KILL=84 node tools/mutate_esc_calls.cjs
+          node Tests/Manual/network/test_socket_ledger_view.cjs
+          node Tests/Manual/network/test_xss_network_views.cjs
+          ESC_MUTANT_MIN_KILL=33 node tools/mutate_esc_calls.cjs Sources/AgentReins/Resources/RealtimeWorkspace/network-view.js Tests/Manual/network/test_xss_network_views.cjs
+          node Tests/Manual/network/test_phase2_views.cjs
+          echo "JS_TESTS_PASSED=6"
 
-      - name: Run MCP supervisor unit tests
+      - name: Run MCP supervisor unit tests (incl. Python <-> Swift MCP core parity)
+        env:
+          # test_swift_parity.py builds Sources/AgentReinsCore/Core*.swift with swiftc; never skip it in CI.
+          AGENTREINS_REQUIRE_SWIFT_PARITY: "1"
         run: |
           python3 -m unittest discover -s tools/agentreins-mcp -p 'test_*.py' -v
+
+      - name: Socket sampler unit tests (recorded lsof/ps fixtures)
+        run: |
+          python3 -m unittest discover -s tools/socket-sampler -p 'test_*.py' -v
+
+      - name: Live socket sampling (macOS, direct connection, proxy env unset)
+        run: |
+          set -euo pipefail
+          env -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY -u http_proxy -u https_proxy -u all_proxy \
+            python3 tools/socket-sampler/live_direct_check.py
 
       - name: Build release app
         env:
@@ -82,22 +102,38 @@ jobs:
           test -f AgentReins.app/Contents/Resources/agentreins-mcp/redact_vectors.json
           test -f AgentReins.app/Contents/Resources/RealtimeWorkspace/risk-alerts.js
           test -x AgentReins.app/Contents/MacOS/AgentReinsMCP
+          test -f AgentReins.app/Contents/Resources/socket-sampler/socket_sampler.py
+          test -f AgentReins.app/Contents/Resources/socket-sampler/install_socket_sampler.py
           test -x AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge
-          lipo -archs AgentReins.app/Contents/MacOS/AgentReinsMCP | grep arm64
-          lipo -archs AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge | grep x86_64
+          test -x AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper
+          for exe in AgentReinsMCP AgentReinsAlertsBridge AgentReinsKeychainHelper; do
+            lipo -archs "AgentReins.app/Contents/MacOS/$exe" | grep arm64
+            lipo -archs "AgentReins.app/Contents/MacOS/$exe" | grep x86_64  # Intel Macs (WorkBuddy's) run this slice
+          done
           ! git grep -n 'snapshot-alerts' -- . ':!.github' ':!*.md'
           ! git grep -n 'snapshot_risk_alerts' -- . ':!.github' ':!*.md'
+          # Test switches must not ship (tests inject fakes from test-only code instead).
+          # (`! cmd` does not trip `set -e`, so these use explicit exits.)
+          if git grep -n -e 'AGENTREINS_REDACT_SELFTEST' -e 'AGENTREINS_KEYCHAIN_BACKEND' -e '_MEMORY_KEYCHAIN' -- Sources tools/agentreins-mcp/evidence.py tools/agentreins-mcp/server.py tools/socket-sampler/socket_sampler.py; then exit 1; fi
+          if git grep -n -e 'set esc' -- Sources/AgentReins/Resources/RealtimeWorkspace; then exit 1; fi
+          if strings AgentReins.app/Contents/MacOS/AgentReinsMCP | grep -e AGENTREINS_REDACT_SELFTEST -e AGENTREINS_KEYCHAIN_BACKEND; then exit 1; fi
+          if grep -rn -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN AgentReins.app/Contents/Resources/agentreins-mcp; then exit 1; fi
           echo "PACKAGED_MCP_OK=1"
 
-      - name: Shared redaction vectors (Swift MCP) + MCP smoke
+      - name: Fresh CI keychain for the packaged helper
+        # Items created above by the dev-built helper only trust that binary; the packaged
+        # AgentReinsKeychainHelper must create (and own) the integrity key itself.
+        run: scripts/ci_keychain.sh reset
+
+      - name: Packaged MCP smoke
+        # Redaction vectors run against the same AgentReinsCore sources in test_swift_parity.py
+        # (redact-vectors); the shipped binary has no self-test switch.
         run: |
           set -euo pipefail
-          AGENTREINS_REDACT_SELFTEST=1 AgentReins.app/Contents/MacOS/AgentReinsMCP
           python3 - <<'PY'
           import json, subprocess, os, tempfile, pathlib
           mcp = pathlib.Path("AgentReins.app/Contents/MacOS/AgentReinsMCP").resolve()
           env = os.environ.copy()
-          env.pop("AGENTREINS_REDACT_SELFTEST", None)
           proc = subprocess.Popen(
               [str(mcp)],
               stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -123,9 +159,24 @@ jobs:
           tools = read()
           names = [t["name"] for t in tools["result"]["tools"]]
           assert "list_alerts" in names and "list_mcp_audit" in names, names
+          import time
+          t0 = time.time()
+          send({"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"get_coverage","arguments":{}}})
+          cov = read()["result"]["structuredContent"]
+          summary = cov["integritySummary"]
+          print("MCP_INTEGRITY", json.dumps(summary, ensure_ascii=False), "seconds=%.2f" % (time.time() - t0))
+          print("MCP_INTEGRITY_WARNING", cov["evidenceIntegrity"].get("warning"))
+          assert summary["sameUidCanForge"] is True, summary
+          # Fresh runner: either the Keychain key works and everything verifies, or the key is honestly unavailable.
+          assert summary["status"] in ("ok", "key_unavailable"), cov["evidenceIntegrity"]
           print("MCP_SMOKE_OK", names)
           proc.terminate()
           PY
+
+      - name: Live packaged sampler -> Swift MCP list_network
+        run: |
+          set -euo pipefail
+          python3 tools/socket-sampler/mcp_list_network_live.py AgentReins.app
 
       - name: Create CI artifact
         run: ditto -c -k --sequesterRsrc --keepParent AgentReins.app AgentReins-ci-universal.zip

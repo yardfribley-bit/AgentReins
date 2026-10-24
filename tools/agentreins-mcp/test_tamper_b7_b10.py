@@ -9,6 +9,7 @@ import unittest
 from unittest import mock
 
 import evidence
+from keychain_fake import FAKE as FAKE_KEYCHAIN
 
 
 class TamperB7B10Tests(unittest.TestCase):
@@ -20,7 +21,7 @@ class TamperB7B10Tests(unittest.TestCase):
         self.audit.mkdir()
         self.transport.mkdir()
         self.integrity.mkdir()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         self.patches = [
             mock.patch.object(evidence, "AUDIT_DIR", self.audit),
             mock.patch.object(evidence, "DEFAULT_TRANSPORT", self.transport),
@@ -32,7 +33,7 @@ class TamperB7B10Tests(unittest.TestCase):
             mock.patch.object(evidence, "PROTECTED_SEAL_DIR", self.integrity / "seals"),
             mock.patch.object(evidence, "SIGNED_ERA_FLAG", self.integrity / "signed-era"),
             mock.patch.object(evidence, "RUN_INVENTORY_MAC", self.integrity / "transport-run-inventory.mac"),
-            mock.patch.dict("os.environ", {"AGENTREINS_KEYCHAIN_BACKEND": "memory"}, clear=False),
+            *FAKE_KEYCHAIN.patches(evidence),
         ]
         for p in self.patches:
             p.start()
@@ -40,7 +41,7 @@ class TamperB7B10Tests(unittest.TestCase):
     def tearDown(self) -> None:
         for p in self.patches:
             p.stop()
-        evidence._MEMORY_KEYCHAIN.clear()
+        FAKE_KEYCHAIN.items.clear()
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def _seed(self) -> pathlib.Path:
@@ -95,6 +96,21 @@ class TamperB7B10Tests(unittest.TestCase):
             ),
             v,
         )
+
+    def test_b8_inventory_edit_not_laundered_by_later_reads_or_runs(self) -> None:
+        run = self._seed()
+        shutil.rmtree(run)
+        lines = [ln for ln in evidence.RUN_INVENTORY.read_text(encoding="utf-8").splitlines()
+                 if ln.strip() and "run-seed-1" not in ln]
+        evidence.RUN_INVENTORY.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        # Ordinary MCP reads append audit entries and rewrite the seal; a new run gets registered.
+        evidence.append_audit("Codex", "list_alerts", {})
+        evidence.append_audit("Codex", "get_coverage", {})
+        evidence.register_run_id("run-later", None)
+        v = evidence.validate_audit()
+        self.assertFalse(v["ok"], v)
+        self.assertTrue(any(t.get("reason") in ("inventory_mac_mismatch", "inventory_seal_anchor_mismatch")
+                            for t in v.get("tampered") or []), v)
 
     def test_b9_b10_wipe_all_treated_as_tamper_not_unsigned(self) -> None:
         self._seed()

@@ -12,10 +12,20 @@ const TEST = process.argv[3] || path.join(root, 'Tests/Manual/network/test_xss_e
 const MIN_KILL = Number(process.env.ESC_MUTANT_MIN_KILL || 57);
 const orig = fs.readFileSync(SRC, 'utf8');
 
+// Optional region: when SRC carries ESC-MUTATION-REGION-START/END markers, only esc() calls between them are
+// mutated (used for the phase-2 views in network-view.js; risk-alerts.js has no markers, so all sites count).
+const REGION_START = orig.indexOf('ESC-MUTATION-REGION-START');
+const REGION_END = orig.indexOf('ESC-MUTATION-REGION-END');
+function inRegion(i) {
+  if (REGION_START < 0 || REGION_END < 0) return true;
+  return i > REGION_START && i < REGION_END;
+}
+
 function findSites(src) {
   const sites = [];
   for (const m of src.matchAll(/\besc\(/g)) {
     const i = m.index;
+    if (!inRegion(i)) continue;
     const before = src.slice(Math.max(0, i - 20), i);
     // Skip function esc( definition and get/set esc() accessors / empty esc().
     if (/function\s+$/.test(before)) continue;

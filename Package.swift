@@ -10,11 +10,20 @@ let package = Package(
         .executable(name: "AgentReinsNativeHost", targets: ["AgentReinsNativeHost"]),
         .executable(name: "AgentReinsHook", targets: ["AgentReinsHook"]),
         .executable(name: "AgentReinsAlertsBridge", targets: ["AgentReinsAlertsBridge"]),
-        .executable(name: "AgentReinsMCP", targets: ["AgentReinsMCP"])
+        .executable(name: "AgentReinsMCP", targets: ["AgentReinsMCP"]),
+        .executable(name: "AgentReinsKeychainHelper", targets: ["AgentReinsKeychainHelper"])
     ],
     targets: [
+        // Pure-Foundation evidence core shared by the app and the packaged MCP: one implementation of
+        // ledger/audit verification, freshness and redaction (the parity harness checks it against evidence.py).
+        .target(
+            name: "AgentReinsCore",
+            path: "Sources/AgentReinsCore",
+            swiftSettings: [ .swiftLanguageMode(.v5) ]
+        ),
         .executableTarget(
             name: "AgentReins",
+            dependencies: ["AgentReinsCore"],
             path: "Sources/AgentReins",
             resources: [.copy("Resources")],
             swiftSettings: [ .swiftLanguageMode(.v5) ],
@@ -34,7 +43,13 @@ let package = Package(
         ),
         .executableTarget(
             name: "AgentReinsMCP",
+            dependencies: ["AgentReinsCore"],
             path: "Sources/AgentReinsMCP",
+            swiftSettings: [ .swiftLanguageMode(.v5) ]
+        ),
+        .executableTarget(
+            name: "AgentReinsKeychainHelper",
+            path: "Sources/AgentReinsKeychainHelper",
             swiftSettings: [ .swiftLanguageMode(.v5) ]
         ),
         .testTarget(

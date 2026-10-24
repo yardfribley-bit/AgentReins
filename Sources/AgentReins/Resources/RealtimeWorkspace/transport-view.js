@@ -29,6 +29,7 @@
   const commands=Array.isArray(payload)?payload:list(payload&&payload.commands);
   const captures=Array.isArray(payload)?[]:list(payload&&payload.captures);
   window.AgentReinsNetwork?.setCapturedBodies?.(captures);
+  window.AgentReinsNetwork?.setSocketLedger?.(Array.isArray(payload)?null:payload&&payload.sockets);
   publish(commands);
   if(!area.hidden)render();
  };

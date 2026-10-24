@@ -303,14 +303,11 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertEqual(contextText?.contains("XSS-PROBE-原文"), true, "detail-code must contain XSS probe text; got=\(contextText ?? "nil")")
         let rawHTML = try await browser.evaluateJavaScript("document.getElementById('detail-code')?.innerHTML || ''") as? String
         XCTAssertEqual(rawHTML?.contains("<img src=x"), false, "injection must be escaped in detail-code HTML")
-        let escapedExact = try await browser.evaluateJavaScript(
-            #"window.AgentReinsRisk.esc("<img src=x onerror='window.hacked=1'>XSS-PROBE-原文")"#
-        ) as? String
-        XCTAssertEqual(escapedExact, "&lt;img src=x onerror=&#39;window.hacked=1&#39;&gt;XSS-PROBE-原文")
-        let brokenWouldPass = try await browser.evaluateJavaScript(
-            #"(function(){const real=window.AgentReinsRisk.esc; window.AgentReinsRisk.esc=s=>String(s); let failed=false; try{ if(window.AgentReinsRisk.esc("<img>")!=="&lt;img&gt;") failed=true; }catch(e){failed=true;} window.AgentReinsRisk.esc=real; return failed;})()"#
-        ) as? Bool
-        XCTAssertEqual(brokenWouldPass, true, "deliberately breaking app esc must fail the exact assertion")
+        XCTAssertEqual(rawHTML?.contains("&lt;img src=x onerror="), true, "the probe is shown escaped, not dropped")
+        // No replaceable escape hook ships (the identity-esc negative control lives in AppRiskEscapeTests and
+        // Tests/Manual/network/test_xss_escape.cjs, which load a modified copy of the source instead).
+        let escHook = try await browser.evaluateJavaScript("typeof window.AgentReinsRisk.esc") as? String
+        XCTAssertEqual(escHook, "undefined")
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=rules]')?.click()")
         try await Task.sleep(for: .milliseconds(200))
         let rulesBody = try await browser.evaluateJavaScript("document.body.innerHTML") as? String

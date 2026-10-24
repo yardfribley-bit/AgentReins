@@ -95,14 +95,17 @@
   const resourceCards=arr(t?.cards).filter(c=>['files','web','network'].includes(c.detailType||c.kind));
   const ps=arr(processes).filter(p=>!t||p.agent===t.agent);
   if(resourceCards.length||ps.length)node('observation',35,558,235,140,'执行现场','独立观察与资源证据',`${ps.filter(p=>p.active!==false).length} 个进程 · ${resourceCards.length} 项文件 / 网络记录`,'observe','observation',{cards:resourceCards,processes:ps},'recorded');
-  if(!t)node('agent',355,230,240,112,'等待用户任务','采集仍在运行','无归属记录保留在采集现场','observe','agent',null,'recorded');
+  // No task: no placeholder bubble (D3). The caller shows an honest empty state instead.
   let currentKey=terminal?'closure':t?.currentCardID&&nodes.some(n=>n.key==='card:'+t.currentCardID)?'card:'+t.currentCardID:t?.lifecycleStatus==='awaiting_confirmation'&&approvals.length?'approval':!exchange?.responseID&&exchange?'model':chosen&&!returned(chosen)?'card:'+chosen.id:null;
   return {nodes,edges,objects,currentKey,width:1000,height:Math.max(740,...nodes.map(n=>n.y+n.h+20)),exchange,choices,calls,relevant,chosen,next,unlinked,instructions};
  }
 
  // The approved architecture stays visible. A visible scaffold is not capture evidence:
  // missing modules and unpaired paths remain explicitly grey/dashed.
+ // Without a task there is nothing to draw: return an empty graph, never a scaffold that looks like evidence.
+ function emptyGraph(g){return Object.assign({},g,{nodes:[],edges:[],objects:[],currentKey:null,empty:true});}
  function buildArchitecture(input){
+  if(!input?.task)return emptyGraph(build(input||{}));
   const g=build(input),t=input.task,cards=arr(t?.cards),exchange=g.exchange,chosen=g.chosen;
   const source=new Map(g.objects.map(o=>[o.key,o]));
   const nodes=[],objects=[],edges=[];
@@ -175,6 +178,7 @@
  }
  // Preserve the original evidence relation view independently of the fixed architecture.
  function buildRelations(input){
+  if(!input?.task)return emptyGraph(build(input||{}));
   const g=build(input),t=input.task,nodes=g.nodes.filter(n=>!n.key.startsWith('card:')&&n.key!=='approval'),edges=g.edges.filter(e=>nodes.some(n=>n.key===e.from)&&nodes.some(n=>n.key===e.to)),objects=g.objects.filter(o=>nodes.some(n=>n.key===o.key)||edges.some(e=>e.key===o.key));
   let hub=nodes.find(n=>n.key==='model'||n.key==='agent');
   if(!hub){hub={key:'agent',w:250,h:140,title:t?.agent||'Agent',tag:'原生任务与调用',subtitle:'完整模型请求关系尚未取得',tone:'model',phase:'recorded'};nodes.push(hub);objects.push({key:'agent',type:'agent',data:t});}

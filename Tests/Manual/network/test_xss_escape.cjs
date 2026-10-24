@@ -16,12 +16,12 @@ const netPath = path.join(root, 'Sources/AgentReins/Resources/RealtimeWorkspace/
 const probe = "<img src=x onerror='window.hacked=1'>XSS-PROBE-原文";
 const exact = '&lt;img src=x onerror=&#39;window.hacked=1&#39;&gt;XSS-PROBE-原文';
 
-function loadPair() {
+function loadPair(riskSource) {
   const window = {};
   const sandbox = { window, console };
   vm.createContext(sandbox);
   vm.runInContext(fs.readFileSync(netPath, 'utf8'), sandbox);
-  vm.runInContext(fs.readFileSync(riskPath, 'utf8'), sandbox);
+  vm.runInContext(riskSource || fs.readFileSync(riskPath, 'utf8'), sandbox);
   return sandbox.window;
 }
 
@@ -269,24 +269,22 @@ function fullRender(risk, win) {
   const s03 = alerts[1];
 
   const s07Holder = { innerHTML: '' };
-  risk.renderList(s07Holder, payload, {
-    alerts,
+  risk.renderAlerts(s07Holder, payload, {
     coverage: probeCoverage(),
     filter: { sev: 'all', rule: 'all', agent: 'all', q: probe },
     selected: s07.id,
     decisions: [],
-  });
+  }, alerts);
   assert.ok(!s07Holder.innerHTML.includes('risk-empty'), 'S07 detail must render alerts');
   assertSafeDOM(s07Holder.innerHTML, 's07-detail');
 
   const listHolder = { innerHTML: '' };
-  risk.renderList(listHolder, payload, {
-    alerts,
+  risk.renderAlerts(listHolder, payload, {
     coverage: probeCoverage(),
     filter: { sev: 'all', rule: 'all', agent: 'all', q: '' },
     selected: s03.id,
     decisions: [],
-  });
+  }, alerts);
   assertSafeDOM(listHolder.innerHTML, 's03-detail');
 
   const combined = s07Holder.innerHTML + listHolder.innerHTML;
@@ -317,10 +315,10 @@ function fullRender(risk, win) {
 
 const win = loadPair();
 const risk = win.AgentReinsRisk;
-assert.equal(typeof risk.esc, 'function');
+// No replaceable escape hook ships: esc is private to risk-alerts.js.
+assert.equal(typeof risk.esc, 'undefined', 'esc must not be exported or settable');
+assert.ok(!Object.getOwnPropertyDescriptor(risk, 'esc'), 'no esc accessor on AgentReinsRisk');
 assert.equal(typeof risk.setTestProbe, 'undefined');
-assert.strictEqual(risk.esc(probe), exact);
-assert.ok(!risk.esc(probe).includes('<img'));
 
 const src = fs.readFileSync(riskPath, 'utf8') + fs.readFileSync(netPath, 'utf8');
 assert.ok(!/\bTEST_PROBE\b/.test(src), 'TEST_PROBE must not ship');
@@ -329,20 +327,62 @@ assert.ok(!/\bwithProbe\b/.test(src), 'withProbe must not ship');
 
 fullRender(risk, win);
 
-risk.esc = (s) => String(s);
-seedTransports(win);
+// Socket-ledger driven alerts + the 首页 coverage banner: probes in every ledger field, fed through the
+// same setSocketLedger() input the app's transport bridge uses (data-driven, no hooks).
+function probeSocket(extra) {
+  return Object.assign({
+    agent: probe, pid: probe, ppid: probe, processName: probe, protocol: probe, scope: 'public', viaProxy: false,
+    remoteAddress: probe, remotePort: probe, realDestination: probe, destinationSource: probe,
+    destinationEvidence: probe, evidence: 'Observed', state: probe, firstSeen: probe, lastSeen: probe, sampleCount: probe,
+  }, extra || {});
+}
+function socketLedger(state, extra) {
+  return {
+    connections: [probeSocket(), probeSocket({ realDestination: 'evil-' + 'x.example', processName: 'node' })],
+    coverage: Object.assign({
+      state, measurementConfidence: 'Observed', observedCycleSecondsP95: probe, missesShorterThanSeconds: probe,
+      failures: probe, lastFailure: probe, staleSeconds: probe, lastSampleAt: probe,
+      integrity: { state: probe, reason: probe },
+    }, extra || {}),
+    keychain: { state: 'key_unavailable', helper: probe, reason: probe },
+  };
+}
+for (const state of ['sampling', 'stopped', probe]) {
+  win.AgentReinsNetwork.setSocketLedger(socketLedger(state));
+  const payload = probePayload();
+  const socketBuilt = risk.buildAlerts(payload).filter((a) => Array.isArray(a.sockets) && a.sockets.length);
+  assert.ok(socketBuilt.some((a) => a.rule === 'S07') && socketBuilt.some((a) => a.rule === 'S04'),
+    'socket ledger must drive S07 and S04 alerts');
+  for (const pick of socketBuilt) {
+    const holder = { innerHTML: '' };
+    risk.renderList(holder, payload, { filter: { sev: 'all', rule: 'all', agent: 'all', q: '' }, selected: pick.id, decisions: [] });
+    assertSafeDOM(holder.innerHTML, 'socket-alert-' + pick.rule + '-' + state);
+    assert.ok(holder.innerHTML.includes('data-coverage-banner'), 'home page shows the coverage banner');
+  }
+  const cov = { innerHTML: '' };
+  risk.renderCoverage(cov, payload, { coverage: probeCoverage(), mcpAudit: [] });
+  assertSafeDOM(cov.innerHTML, 'socket-coverage-' + state);
+}
+win.AgentReinsNetwork.setSocketLedger(null);
+
+// Negative control without a hook: load a copy of the shipped source whose esc() is the identity.
+const shipped = fs.readFileSync(riskPath, 'utf8');
+const identity = shipped.replace(/function esc\(s\)\{return String\(s\?\?''\)\.replace\([^\n]*\}/, "function esc(s){return String(s??'');}");
+assert.notStrictEqual(identity, shipped, 'negative control must find esc() in risk-alerts.js');
+const brokenWin = loadPair(identity);
+const brokenRisk = brokenWin.AgentReinsRisk;
+seedTransports(brokenWin);
 const broken = { innerHTML: '' };
 const payload = probePayload();
-const built = risk.buildAlerts(payload);
+const built = brokenRisk.buildAlerts(payload);
 const alerts = [poisonAlert(built.find((a) => a.rule === 'S07') || built[0])];
 alerts[0].id = probe;
-risk.renderList(broken, payload, {
-  alerts,
+brokenRisk.renderAlerts(broken, payload, {
   coverage: probeCoverage(),
   filter: { sev: 'all', rule: 'all', agent: 'all', q: '' },
   selected: probe,
   decisions: [],
-});
+}, alerts);
 assert.ok(broken.innerHTML.includes('<img src=x'), 'identity esc must expose raw probe');
 
 console.log('xss escape via real DOM ok');

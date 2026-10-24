@@ -1,21 +1,52 @@
-#!/usr/bin/env swift
 import Foundation
 import Security
 
 /// Trusted Keychain helper for MCP integrity keys (en_26fd4180).
+/// Shipped as AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper (SwiftPM target
+/// AgentReinsKeychainHelper). The Python MCP, the socket sampler and the Swift MCP all read
+/// the integrity key through this one binary, so there is exactly one key.
 /// Uses Security.framework (no `security -A` CLI). ACL is limited to this
 /// helper binary's code signature / path — other apps must prompt or fail.
 
 let service = "com.agentreins.mcp-integrity"
 
+/// Exit codes: 0 ok, 1 Keychain error, 2 usage, 3 item not found,
+/// 4 Keychain needs user interaction (locked, or this binary is not on the item's access list yet).
 func usage() -> Never {
-    fputs("usage: keychain_helper get|set|delete <account>  (set reads hex secret from stdin)\n", stderr)
+    fputs("usage: AgentReinsKeychainHelper get|set|delete <account>  (set reads hex secret from stdin)\n"
+          + "       AgentReinsKeychainHelper status [<account>]  (non-interactive read check; prints nothing; exit 0/1/3/4)\n"
+          + "       AgentReinsKeychainHelper authorize [<account>]  (only from a logged-in user session: allows the\n"
+          + "       macOS Keychain approval prompt once, prints nothing secret)\n", stderr)
     exit(2)
 }
 
-guard CommandLine.arguments.count >= 3 else { usage() }
-let op = CommandLine.arguments[1]
-let account = CommandLine.arguments[2]
+var positional = Array(CommandLine.arguments.dropFirst())
+guard let op = positional.first else { usage() }
+positional.removeFirst()
+let account: String
+if op == "authorize" || op == "status" {
+    account = positional.first ?? "hmac-key"
+} else {
+    guard let first = positional.first else { usage() }
+    account = first
+}
+
+// The sampler (LaunchAgent), the MCP (spawned by an agent) and CI have nobody to answer a Keychain
+// prompt: SecItem* would block until the caller's timeout. Fail fast instead (exit 4 = needs approval).
+// Only `authorize`, which a person runs on purpose, may show the prompt.
+let interactive = op == "authorize"
+if !interactive {
+    _ = SecKeychainSetUserInteractionAllowed(false)
+}
+
+func needsInteraction(_ status: OSStatus) -> Bool {
+    status == errSecInteractionNotAllowed || status == errSecInteractionRequired || status == errSecAuthFailed
+}
+
+func fail(_ what: String, _ status: OSStatus) -> Never {
+    fputs("\(what) failed: OSStatus \(status)\n", stderr)
+    exit(needsInteraction(status) ? 4 : 1)
+}
 
 func access() -> SecAccess? {
     // Trusted apps: this helper only. Expanding requires re-storing the item.
@@ -26,11 +57,13 @@ func access() -> SecAccess? {
         trusted.append(selfApp)
     }
     // Prefer signed app bundle when present next to Resources.
+    let selfDir = URL(fileURLWithPath: selfPath).deletingLastPathComponent()
     let appCandidates = [
-        URL(fileURLWithPath: selfPath).deletingLastPathComponent().deletingLastPathComponent()
-            .deletingLastPathComponent().appendingPathComponent("MacOS/AgentReins").path,
+        // Packaged: helper and app live side by side in Contents/MacOS.
+        selfDir.appendingPathComponent("AgentReins").path,
         "/Applications/AgentReins.app/Contents/MacOS/AgentReins",
-    ]
+        "/Applications/AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper",
+    ].filter { $0 != selfPath }
     for path in appCandidates {
         var app: SecTrustedApplication?
         if FileManager.default.isExecutableFile(atPath: path),
@@ -54,10 +87,11 @@ case "delete":
     ]
     let status = SecItemDelete(query as CFDictionary)
     if status == errSecSuccess || status == errSecItemNotFound { exit(0) }
-    fputs("delete failed: \(status)\n", stderr)
-    exit(1)
+    fail("delete", status)
 
-case "get":
+case "get", "authorize", "status":
+    // `status` reads the secret too (an attributes-only query would not hit the item's access list,
+    // so it could report ok while `get` still needs approval) but never prints it.
     let query: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: service,
@@ -67,8 +101,12 @@ case "get":
     ]
     var out: AnyObject?
     let status = SecItemCopyMatching(query as CFDictionary, &out)
-    guard status == errSecSuccess, let data = out as? Data else {
-        exit(status == errSecItemNotFound ? 3 : 1)
+    if status == errSecItemNotFound { exit(3) }
+    guard status == errSecSuccess, let data = out as? Data else { fail(op, status) }
+    if op == "status" { exit(0) }
+    if op == "authorize" {
+        fputs("Keychain access for \(account) is allowed for this helper.\n", stderr)
+        exit(0)
     }
     FileHandle.standardOutput.write(Data(data.map { String(format: "%02x", $0) }.joined().utf8))
     FileHandle.standardOutput.write(Data("\n".utf8))
@@ -87,7 +125,7 @@ case "set":
         kSecAttrService as String: service,
         kSecAttrAccount as String: account,
     ]
-    SecItemDelete(del as CFDictionary)
+    _ = SecItemDelete(del as CFDictionary)
     var attrs: [String: Any] = [
         kSecClass as String: kSecClassGenericPassword,
         kSecAttrService as String: service,
@@ -99,10 +137,7 @@ case "set":
         attrs[kSecAttrAccess as String] = access
     }
     let status = SecItemAdd(attrs as CFDictionary, nil)
-    guard status == errSecSuccess else {
-        fputs("set failed: \(status)\n", stderr)
-        exit(1)
-    }
+    guard status == errSecSuccess else { fail("set", status) }
     exit(0)
 
 default:

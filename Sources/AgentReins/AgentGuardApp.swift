@@ -15,6 +15,8 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
         NSApp.setActivationPolicy(.regular)
         AppNotifier.requestAuthorization()
         BrowserProtectionInstaller.installBundledAssets()
+        // Integrity key readable? If macOS needs the user's approval, ask visibly (never silently).
+        Task { @MainActor in KeychainAuthorization.checkAtLaunch() }
         if let url = Bundle.main.url(forResource: "AgentReins", withExtension: "icns"),
            let icon = NSImage(contentsOf: url) {
             NSApplication.shared.applicationIconImage = icon

@@ -75,6 +75,8 @@ chmod +x "$APP_BUNDLE/Contents/MacOS/AgentReinsNativeHost"
 # Swift MCP + JSC alerts bridge — no system node/python required for Codex.
 copy_helper AgentReinsAlertsBridge
 copy_helper AgentReinsMCP
+# Keychain access for the integrity key (Python MCP, socket sampler and Swift MCP all use this one binary).
+copy_helper AgentReinsKeychainHelper
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
 cp "$INTEL_BIN_DIR/AgentReins_AgentReins.bundle/Resources/workbuddy_network_capture.py" \
   "$APP_BUNDLE/Contents/Resources/"
@@ -90,6 +92,11 @@ cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
    "$PROJECT_DIR/tools/redact_vectors.json" \
    "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
    "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
+# Proxy-independent per-process socket sampler (lsof/ps only) + LaunchAgent installer.
+mkdir -p "$APP_BUNDLE/Contents/Resources/socket-sampler"
+cp "$PROJECT_DIR/tools/socket-sampler/socket_sampler.py" \
+   "$PROJECT_DIR/scripts/install_socket_sampler.py" \
+   "$APP_BUNDLE/Contents/Resources/socket-sampler/"
 # Point Codex at the packaged Swift MCP (no system python/node).
 printf '%s\n' \
   '# Packaged with AgentReins.app — replace APP with the installed bundle path.' \
@@ -135,6 +142,49 @@ else
     exit 1
   }
 fi
+
+echo "==> Checking bundle contents (fails loudly if anything the MCP / sampler needs is missing)"
+GUARD_FAILURES=0
+guard_fail() { echo "error: PACKAGE GUARD: $*" >&2; GUARD_FAILURES=$((GUARD_FAILURES + 1)); }
+if [[ "$CONFIGURATION" == "release" && "$INTEL_BIN_DIR" != *"/release"* ]]; then
+  guard_fail "release package must be built from a release build directory (got $INTEL_BIN_DIR)"
+fi
+for exe in "$APP_NAME" AgentReinsNativeHost AgentReinsAlertsBridge AgentReinsMCP AgentReinsKeychainHelper; do
+  bin="$APP_BUNDLE/Contents/MacOS/$exe"
+  if [[ ! -s "$bin" || ! -x "$bin" ]]; then
+    guard_fail "missing or empty executable Contents/MacOS/$exe"
+    continue
+  fi
+  archs="$(lipo -archs "$bin" 2>/dev/null || true)"
+  if [[ "$CONFIGURATION" == "release" && "$TARGET_ARCHS" != "x86_64" ]]; then
+    [[ "$archs" == *arm64* && "$archs" == *x86_64* ]] || guard_fail "$exe is not universal (arm64 + x86_64): '$archs'"
+  else
+    [[ "$archs" == *"$TARGET_ARCHS"* ]] || guard_fail "$exe architecture '$archs' does not match $TARGET_ARCHS"
+  fi
+done
+for res in \
+  socket-sampler/socket_sampler.py \
+  socket-sampler/install_socket_sampler.py \
+  agentreins-mcp/evidence.py \
+  agentreins-mcp/server.py \
+  agentreins-mcp/alerts_bridge.cjs \
+  agentreins-mcp/redact_secrets.py \
+  agentreins-mcp/redact_vectors.json \
+  RealtimeWorkspace/risk-alerts.js \
+  RealtimeWorkspace/network-view.js; do
+  [[ -s "$APP_BUNDLE/Contents/Resources/$res" ]] || guard_fail "missing or empty Contents/Resources/$res"
+done
+if grep -l -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN -e AGENTREINS_REDACT_SELFTEST \
+     "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"*.py "$APP_BUNDLE/Contents/Resources/socket-sampler/"*.py 2>/dev/null; then
+  guard_fail "a packaged script still carries a test-only Keychain/self-test switch"
+fi
+grep -q 'SAMPLER_VERSION = "socket-sampler/2"' "$APP_BUNDLE/Contents/Resources/socket-sampler/socket_sampler.py" 2>/dev/null \
+  || guard_fail "packaged socket_sampler.py is not socket-sampler/2 (measured coverage + signed ledger)"
+if [[ "$GUARD_FAILURES" -gt 0 ]]; then
+  echo "error: PACKAGE GUARD FAILED ($GUARD_FAILURES problem(s)); not shipping $APP_BUNDLE" >&2
+  exit 1
+fi
+echo "    package guard: all executables + MCP/sampler resources present"
 
 echo "==> Complete: $APP_BUNDLE"
 echo "    Version: $VERSION ($BUILD_NUMBER)"

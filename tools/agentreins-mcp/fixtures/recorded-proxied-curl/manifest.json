@@ -1,0 +1,1 @@
+{"schema":1,"agent":"Codex","tool":"curl","startedAt":"2026-10-21T18:20:00+00:00","captureMode":"agent-path","args":["-sS","--proxy","http://127.0.0.1:18999","https://example.com/"],"call":"rec-proxied-curl","provenance":"live","testCapture":false,"pid":4242}

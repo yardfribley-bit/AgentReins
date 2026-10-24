@@ -1,0 +1,7 @@
+    1     0 Mon Oct 19 08:00:01 2026 /sbin/launchd
+  777     1 Wed Oct 21 09:00:00 2026 /Applications/Safari.app/Contents/MacOS/Safari
+ 4100     1 Wed Oct 21 10:00:00 2026 /Applications/Cursor.app/Contents/MacOS/Cursor
+ 4188  4100 Wed Oct 21 10:00:02 2026 /Applications/Cursor.app/Contents/Frameworks/Cursor Helper (Plugin).app/Contents/MacOS/Cursor Helper (Plugin)
+ 4250  4188 Wed Oct 21 10:05:00 2026 /usr/bin/ssh
+ 5000     1 Wed Oct 21 10:06:00 2026 /opt/homebrew/bin/node
+ 5001  5000 Wed Oct 21 10:06:01 2026 /usr/bin/git

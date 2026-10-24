@@ -45,11 +45,13 @@ RUN_INVENTORY_MAC = INTEGRITY_DIR / "transport-run-inventory.mac"
 KEYCHAIN_SERVICE = "com.agentreins.mcp-integrity"
 KEYCHAIN_ACCOUNT_HMAC = "hmac-key"
 KEYCHAIN_ACCOUNT_ERA = "signed-era"
+KEYCHAIN_ACCOUNT_BOUNDARY = "integrity-boundary"
+BOUNDARY_TOOL = "integrity-boundary"
+BOUNDARY_ACTOR = "agentreins-integrity"
+LEGACY_REASON = "signed with deleted pre-migration key"
 KEYCHAIN_HELPER = ROOT / "keychain_helper"
-# In-memory Keychain for unit tests (survives wiping AUDIT_DIR + INTEGRITY_DIR).
-_MEMORY_KEYCHAIN: dict[str, bytes] = {}
 KEYCHAIN_LIMITATION = (
-    "HMAC 密钥与安装锚点经 Security.framework（tools/agentreins-mcp/keychain_helper）写入 Keychain，"
+    "HMAC 密钥与安装锚点经 Security.framework（AgentReinsKeychainHelper）写入 Keychain，"
     "不经 `security -A`、不把密钥放进 argv。旧明文 hmac 文件在迁入后删除。"
     "无无签名豁免清单：mac_mismatch 一律 ok=false。"
 )
@@ -109,31 +111,62 @@ def is_test_capture(record: dict[str, Any]) -> bool:
     return False
 
 
+INB_RULE_IDS = ("INB", "instruction-override-inbound")
+INB_PATTERN = re.compile(
+    r"(?i)(?:ignore (?:all |the )?(?:previous|prior|system) instructions|忽略(?:之前|上述|系统)(?:的)?(?:指令|规则))"
+)
+
+
+def normalize_rule(rule: Any) -> Any:
+    """Alerts say 'INB'; content_audit findings say 'instruction-override-inbound'. Same rule."""
+    return "INB" if rule in INB_RULE_IDS else rule
+
+
+def _window(text: str, start: int, end: int, window: int = 80) -> str:
+    return text[max(0, start - window): min(len(text), end + window)]
+
+
 def _redacted_match_context(finding: dict[str, Any], window: int = 80) -> str | None:
-    """INB: return redacted ±window chars around the hit; never raw secrets."""
-    raw = finding.get("matchedText") or finding.get("match") or finding.get("snippet")
-    context = finding.get("context") or finding.get("matchContext")
-    source = context or raw
-    if not isinstance(source, str) or not source:
-        # Synthesize a short reviewable stub from rule + offset when body was stripped.
-        offset = finding.get("characterOffset")
-        if offset is None:
-            return None
-        return redact_text(f"[offset={offset} rule={finding.get('rule')}]")
-    text = str(source)
-    if context is None and raw and len(text) > window * 2:
-        # Prefer surrounding context when only the raw match token is present.
-        mid = len(text) // 2
-        text = text[max(0, mid - window) : mid + window]
-    elif len(text) > window * 2 + 20:
-        offset = int(finding.get("characterOffset") or 0)
-        start = max(0, offset - window)
-        text = text[start : start + window * 2]
+    """INB: redacted ±window chars around the stored hit. Never invents a stub when nothing was stored."""
+    context = finding.get("matchContext") or finding.get("context")
+    if not isinstance(context, str) or not context:
+        return None
+    text = context
+    hit = INB_PATTERN.search(text)
+    if hit and len(text) > 2 * window + len(hit.group(0)):
+        text = _window(text, hit.start(), hit.end(), window)
     return redact_text(text)
 
 
-def credential_finding_summary(finding: dict[str, Any]) -> dict[str, Any]:
-    """S02: metadata only. INB: redacted context snippet + rule id (en_d595e9da)."""
+def rescan_stored_response(record: dict[str, Any], window: int = 80, max_bytes: int = 2_000_000) -> str | None:
+    """Older captures stored only rule + offset. Re-run the same INB pattern on the stored
+    response bodies of that run (read-only) and return a redacted window, or None."""
+    path = record.get("evidencePath")
+    if not path:
+        return None
+    run = pathlib.Path(str(path)).parent
+    budget = max_bytes
+    for block in record.get("blocks") or []:
+        if not isinstance(block, dict) or block.get("direction") != "receive" or not block.get("bodyFile"):
+            continue
+        body = (run / str(block["bodyFile"])).resolve()
+        if run.resolve() not in body.parents or not body.is_file():
+            continue
+        try:
+            text = body.read_bytes()[:budget].decode("utf-8", "replace")
+        except OSError:
+            continue
+        budget -= len(text)
+        hit = INB_PATTERN.search(text)
+        if hit:
+            return redact_text(_window(text, hit.start(), hit.end(), window))
+        if budget <= 0:
+            break
+    return None
+
+
+def credential_finding_summary(finding: dict[str, Any], record: dict[str, Any] | None = None) -> dict[str, Any]:
+    """S02: metadata only. INB: redacted context snippet + rule id."""
     rule = finding.get("rule")
     out: dict[str, Any] = {
         "rule": rule,
@@ -147,15 +180,28 @@ def credential_finding_summary(finding: dict[str, Any]) -> dict[str, Any]:
         "note": "原始匹配文本不通过 MCP 返回",
         "confidence": "Observed",
     }
-    if rule == "instruction-override-inbound":
+    if normalize_rule(rule) == "INB":
         snippet = _redacted_match_context(finding)
+        source = "stored_match_context" if snippet else None
+        if snippet is None and record is not None:
+            snippet = rescan_stored_response(record)
+            source = "rescan_stored_response_body" if snippet else None
         out["matchContextRedacted"] = snippet
+        out["matchContextSource"] = source
         out["note"] = (
-            "MCP 仅返回脱敏上下文片段（约前后 80 字符）；完整片段见本机详情页。"
+            "MCP 仅返回脱敏上下文片段（命中处前后约 80 字符）；完整内容见本机详情页。"
             if snippet
-            else "无可用上下文片段；请在本机详情页核对。"
+            else "这次采集没有保存命中上下文，存下来的返回正文里也没有再次命中（可能是压缩或分块传输）；只有规则和字符位置。"
         )
     return out
+
+
+def inb_finding_for(record: dict[str, Any] | None) -> dict[str, Any] | None:
+    audit = (record or {}).get("securityAudit") or {}
+    for finding in audit.get("findings") or []:
+        if isinstance(finding, dict) and normalize_rule(finding.get("rule")) == "INB":
+            return finding
+    return None
 
 
 def _load_transport_dir(root: pathlib.Path, limit: int) -> list[dict[str, Any]]:
@@ -420,7 +466,7 @@ def build_alerts_fallback(records: list[dict[str, Any]]) -> list[dict[str, Any]]
                         "timestamp": r.get("startedAt"),
                     }
                 )
-            if rule == "instruction-override-inbound":
+            if normalize_rule(rule) == "INB":
                 alerts.append(
                     {
                         "id": f"INB:{call}",
@@ -431,7 +477,7 @@ def build_alerts_fallback(records: list[dict[str, Any]]) -> list[dict[str, Any]]
                         "call": call,
                         "host": host,
                         "confidence": "Observed",
-                        "finding": credential_finding_summary(finding),
+                        "finding": credential_finding_summary(finding, r),
                         "timestamp": r.get("startedAt"),
                     }
                 )
@@ -540,12 +586,23 @@ def list_alerts(
             since_ts = time.mktime(time.strptime(since[:19], "%Y-%m-%dT%H:%M:%S"))
         except ValueError:
             since_ts = None
+    by_call: dict[str, dict[str, Any]] = {}
+    for r in records:
+        for k in (r.get("call"), r.get("runID")):
+            if k:
+                by_call.setdefault(str(k), r)
     out = []
     for alert in alerts:
         conf = conf_label(alert.get("confidence"))
+        finding = alert.get("finding")
+        if normalize_rule(alert.get("rule")) == "INB" and not finding:
+            record = by_call.get(str(alert.get("call") or alert.get("executionId") or ""))
+            raw = inb_finding_for(record)
+            if raw is not None:
+                finding = credential_finding_summary(raw, record)
         item = {
             "id": alert.get("id"),
-            "rule": alert.get("rule"),
+            "rule": normalize_rule(alert.get("rule")),
             "title": alert.get("title"),
             "agent": alert.get("agent"),
             "session": alert.get("session"),
@@ -553,8 +610,10 @@ def list_alerts(
             "confidence": conf,
             "timestamp": alert.get("timestamp") or alert.get("startedAt"),
             "sub": alert.get("sub"),
-            "finding": alert.get("finding"),
+            "finding": finding,
         }
+        if isinstance(finding, dict) and "matchContextRedacted" in finding:
+            item["matchContextRedacted"] = finding.get("matchContextRedacted")
         if agent and agent != "all" and str(item.get("agent")) != agent:
             continue
         if rule and rule != "all" and str(item.get("rule")) != rule:
@@ -608,9 +667,10 @@ def get_execution(execution_id: str, records: list[dict[str, Any]] | None = None
             }
         )
     audit = hit.get("securityAudit") or {}
-    findings = [credential_finding_summary(f) for f in (audit.get("findings") or [])]
+    findings = [credential_finding_summary(f, hit) for f in (audit.get("findings") or [])]
     return redact_obj(
-        {
+        dict(
+            {
             "executionId": hit.get("call") or hit.get("runID"),
             "agent": hit.get("agent"),
             "session": hit.get("session"),
@@ -618,7 +678,6 @@ def get_execution(execution_id: str, records: list[dict[str, Any]] | None = None
             "commandArgs": hit.get("args") or [],
             "startedAt": hit.get("startedAt"),
             "exitCode": hit.get("exitCode"),
-            "destination": host_of(hit),
             "auditBypass": hit.get("auditBypass") is True,
             "downloads": downloads,
             "securityFindings": findings,
@@ -634,45 +693,328 @@ def get_execution(execution_id: str, records: list[dict[str, Any]] | None = None
             ),
             "evidenceSha256": hit.get("evidenceSha256"),
             "confidence": "Observed",
-            "note": "正文预览已脱敏；S02 仅返回 finding 元数据。",
-        }
+            "note": "正文预览已脱敏；S02 仅返回 finding 元数据。目的地字段与 list_network 同源（destination_fields）。",
+            },
+            **destination_fields(hit),
+        )
     )
+
+
+LOOPBACK_NAMES = ("localhost", "::1", "[::1]")
+PROXY_VALUE_OPTIONS = {"-x", "--proxy", "--preproxy", "--socks4", "--socks4a", "--socks5", "--socks5-hostname",
+                       "--proxy1.0", "--connect-to", "--resolve", "-e", "--referer", "-H", "--header"}
+DESTINATION_EVIDENCE = {
+    "proxy_observed": "Observed",       # curl/git trace of this execution: proxy CONNECT / Connected to <host>
+    "connection_observed": "Observed",  # direct connection recorded in the trace of this execution
+    "argv_parsed": "Inferred",          # host the command asked for; not seen on the wire
+    "transport_peer_only": "Unknown",   # only the loopback proxy hop is known
+}
+
+
+def _is_loopback(host: str | None) -> bool:
+    h = str(host or "").strip().lower()
+    return h in LOOPBACK_NAMES or h.startswith("127.")
+
+
+def argv_destination(args: list[Any]) -> str | None:
+    """First destination host in argv; values of proxy / header options are skipped (shared rule with the sampler)."""
+    from urllib.parse import urlparse
+
+    skip = False
+    for arg in args or []:
+        s = str(arg)
+        if skip:
+            skip = False
+            continue
+        if s in PROXY_VALUE_OPTIONS:
+            skip = True
+            continue
+        if s.startswith("-"):
+            continue
+        if "://" in s:
+            try:
+                host = urlparse(s).hostname
+            except ValueError:
+                host = None
+            if host and not _is_loopback(host):
+                return host.lower()
+            continue
+        m = re.match(r"^(?:[^@\s/]+@)([A-Za-z0-9.-]+\.[A-Za-z]{2,})(?::|$)", s)
+        if m:
+            return m.group(1).lower()
+    return None
 
 
 def _real_destination(record: dict[str, Any]) -> tuple[str | None, str | None, str | None]:
     """Return (realHost, transportPeer, source) for proxied vs direct traffic.
 
-    Prefer proxy-observed CONNECT/Host; fall back to argv-parsed destination.
-    transportPeer stays 127.0.0.1 when the TCP peer is the local audit proxy.
+    transportPeer stays the loopback proxy hop (e.g. 127.0.0.1:1087) when the TCP peer is a local proxy.
     """
     peer = None
     real = None
     source = None
+    proxied = False
     for conn in record.get("connections") or []:
         if not isinstance(conn, dict):
             continue
+        kind = conn.get("kind")
+        if conn.get("source") == "argv":
+            continue  # auto.py writes the argv target as a pseudo-connection for untraced tools; not observed
+        if kind not in (None, "attempt", "connected", "proxyTunnel", "reuse"):
+            continue  # e.g. connectionState detail[0] is a connection number, not a host
         for detail in conn.get("detail") or []:
             d = str(detail)
-            hostport = d.split()[0] if d else ""
-            host = hostport.split(":")[0].lower()
-            if host in ("127.0.0.1", "localhost", "::1"):
-                peer = hostport or host
+            hostport = (d.split()[0] if d else "").rstrip(".")
+            if not re.search(r"[.:]", hostport) and hostport.lower() != "localhost":
+                break
+            host = hostport.rsplit(":", 1)[0] if hostport.count(":") == 1 else hostport
+            host = host.strip("[]").lower()
+            if _is_loopback(host):
+                port = re.search(r"port (\d+)", d)
+                peer = peer or (f"{host}:{port.group(1)}" if port and ":" not in hostport else hostport or host)
+                proxied = True
             elif host and not real:
                 real = host
-                source = "proxy_observed"
+                source = "proxy_observed" if (kind == "proxyTunnel" or proxied) else "connection_observed"
+            break  # only the first detail item names the endpoint
+    if real and peer:
+        source = "proxy_observed"
     if not real:
-        # Argv / Host header / securityAudit destination
         audit = record.get("securityAudit") if isinstance(record.get("securityAudit"), dict) else {}
-        cand = audit.get("destinationHost") or record.get("destinationHost") or host_of(record)
-        if cand and str(cand).lower() not in ("127.0.0.1", "localhost", "::1"):
+        argv_conn = next((str((c.get("detail") or [""])[0]).split()[0] for c in record.get("connections") or []
+                          if isinstance(c, dict) and c.get("source") == "argv" and c.get("detail")), None)
+        cand = (audit.get("destinationHost") or record.get("destinationHost") or argv_destination(record.get("args") or [])
+                or argv_conn)
+        if cand and not _is_loopback(cand):
             real = str(cand).split(":")[0].lower()
-            source = "argv_parsed" if not source else source
-        elif cand:
-            peer = peer or str(cand)
+            source = "argv_parsed"
     if peer and not real:
-        # Proxied but no outer host recovered — keep peer, mark destination unknown.
-        source = source or "transport_peer_only"
+        source = "transport_peer_only"
     return real, peer, source
+
+
+def destination_fields(record: dict[str, Any]) -> dict[str, Any]:
+    """One definition for get_execution and list_network (Python and Swift MCP mirror this)."""
+    real, peer, source = _real_destination(record)
+    # Never fall back to the loopback proxy hop as "the destination" (that is transportPeer).
+    host = real or (None if source == "transport_peer_only" else host_of(record))
+    if host and _is_loopback(host) and peer:
+        host = None
+    return {
+        "destination": host,
+        "realDestination": real,
+        "transportPeer": peer,
+        "destinationSource": source,
+        "destinationEvidence": DESTINATION_EVIDENCE.get(source or "", "Unknown"),
+        "viaProxy": bool(peer) if source else None,
+    }
+
+
+SOCKET_LEDGER = pathlib.Path(
+    os.environ.get("AGENTREINS_SOCKET_LEDGER", str(AUDIT_DIR / "socket-ledger.json"))
+)
+SOCKET_FIELDS = (
+    "id", "agent", "pid", "ppid", "processName", "processPath", "processStartAt", "protocol",
+    "localAddress", "remoteAddress", "remoteIP", "remotePort", "state", "firstSeen", "lastSeen",
+    "sampleCount", "scope", "viaProxy", "transportPeer", "realDestination", "realDestinationPort",
+    "destinationSource", "destinationEvidence", "destinationBasis", "forwardConfirmed", "transportCall",
+    "proxy", "evidence",
+)
+
+
+def _iso_ts(value: Any) -> float | None:
+    if not value:
+        return None
+    try:
+        import datetime as _dt
+
+        return _dt.datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
+
+
+def socket_ledger_seal_path(path: pathlib.Path) -> pathlib.Path:
+    """Must match tools/socket-sampler/socket_sampler.py default_seal_path()."""
+    home = AUDIT_DIR / "socket-ledger.json"
+    try:
+        if path.resolve() == home.resolve():
+            return PROTECTED_SEAL_DIR / "socket-ledger.seal"
+    except OSError:
+        pass
+    return path.with_name(path.name + ".seal")
+
+
+def _read_locked(path: pathlib.Path) -> tuple[bytes | None, Any, Any]:
+    """Read ledger + sidecar + seal under a shared lock so a concurrent sampler write is never seen half-done.
+    The lock file is only opened if it already exists (read-only MCP never creates files here)."""
+    import fcntl
+
+    lock_path = path.with_name(path.name + ".lock")
+    fh = None
+    try:
+        if lock_path.is_file():
+            fh = open(lock_path, "rb")
+            fcntl.flock(fh, fcntl.LOCK_SH)
+        try:
+            data = path.read_bytes()
+        except OSError:
+            data = None
+
+        def rj(p: pathlib.Path) -> Any:
+            try:
+                return json.loads(p.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return None
+
+        return data, rj(path.with_name(path.name + ".mac")), rj(socket_ledger_seal_path(path))
+    finally:
+        if fh is not None:
+            fh.close()
+
+
+def verify_socket_ledger(data: bytes | None, side: Any, seal: Any, key: bytes | None) -> dict[str, Any]:
+    """Mirror of socket_sampler.verify_snapshot (kept in sync; Swift MCP ports the same rules)."""
+    def bad(reason: str, **extra: Any) -> dict[str, Any]:
+        return dict({"state": "tampered", "ok": False, "reason": reason, "confidence": "Unknown"}, **extra)
+
+    sealed = isinstance(seal, dict) and not seal.get("unsigned")
+    if data is None:
+        if sealed:
+            return bad("ledger_deleted_after_signed", sealSeq=seal.get("seq"))
+        return {"state": "missing", "ok": None, "confidence": "Unknown", "reason": "no ledger"}
+    if not isinstance(side, dict):
+        if sealed:
+            return bad("ledger_mac_missing_after_signed", sealSeq=seal.get("seq"))
+        return {"state": "unsigned", "ok": None, "confidence": "Unknown",
+                "reason": "no .mac sidecar (sampler older than tamper evidence, or never signed)"}
+    if side.get("unsigned"):
+        if sealed:
+            return bad("unsigned_snapshot_after_signed", sealSeq=seal.get("seq"))
+        return {"state": "unsigned", "ok": None, "confidence": "Unknown",
+                "reason": str(side.get("reason") or "integrity key unavailable to the sampler")}
+    if key is None:
+        return {"state": "unverifiable", "ok": None, "confidence": "Unknown",
+                "reason": "integrity key not available to this reader", "seq": side.get("seq")}
+    fields = ("schema", "seq", "prevHash", "fileSha256", "at")
+    body = {k: side[k] for k in fields if k in side}
+    if not hmac.compare_digest(str(side.get("mac") or ""), entry_hmac(body, key)):
+        return bad("ledger_mac_mismatch", seq=side.get("seq"))
+    if side.get("fileSha256") != sha256_bytes(data):
+        return bad("ledger_content_modified", seq=side.get("seq"))
+    if side.get("hash") != sha256_hex(canonical_json(dict(body, mac=side.get("mac")))):
+        return bad("ledger_sidecar_hash_mismatch", seq=side.get("seq"))
+    seq = int(side.get("seq") or 0)
+    if sealed:
+        seal_body = {k: seal[k] for k in fields if k in seal}
+        if not hmac.compare_digest(str(seal.get("mac") or ""), entry_hmac(seal_body, key)):
+            return bad("ledger_seal_mac_mismatch", seq=seq)
+        sseq = int(seal.get("seq") or 0)
+        if sseq > seq:
+            return bad("ledger_rolled_back", seq=seq, sealSeq=sseq)
+        if sseq == seq and seal.get("hash") != side.get("hash"):
+            return bad("ledger_seal_mismatch", seq=seq, sealSeq=sseq)
+        if sseq < seq and not (sseq == seq - 1 and side.get("prevHash") == seal.get("hash")):
+            return bad("ledger_seal_behind", seq=seq, sealSeq=sseq)
+    elif seq > 1:
+        return bad("ledger_seal_missing", seq=seq)
+    return {"state": "verified", "ok": True, "confidence": "Observed", "seq": seq, "signedAt": side.get("at"),
+            "reason": "HMAC over the exact ledger bytes verified; sequence matches the external seal"}
+
+
+def _ledger_key() -> bytes | None:
+    try:
+        return load_or_create_hmac_key(create=False)
+    except OSError:
+        return None
+
+
+def socket_freshness(samples: dict[str, Any], coverage: dict[str, Any], now: float | None = None) -> dict[str, Any]:
+    """'sampling' only while samples keep arriving; otherwise 'stopped' with how long ago."""
+    now = time.time() if now is None else now
+    last = _iso_ts(samples.get("lastAt"))
+    cadence = [coverage.get(k) for k in ("successGapSecondsP95", "configuredIntervalSeconds", "intervalSeconds")]
+    base = max([float(c) for c in cadence if isinstance(c, (int, float))] or [3.0])
+    limit = max(10.0, 3 * base)
+    if last is None:
+        return {"state": "stopped", "staleSeconds": None, "staleAfterSeconds": limit}
+    age = now - last
+    return {"state": "sampling" if age <= limit else "stopped", "staleSeconds": round(age, 1),
+            "staleAfterSeconds": round(limit, 1)}
+
+
+def load_socket_ledger(
+    agent: str | None = None,
+    since: str | None = None,
+    path: pathlib.Path | None = None,
+    limit: int = 200,
+) -> dict[str, Any]:
+    """Read-only view of tools/socket-sampler output (proxy-independent sockets)."""
+    path = path or SOCKET_LEDGER
+    raw, side, seal = _read_locked(path)
+    # Freshness is judged at the moment the ledger was read, not after a (possibly slow) Keychain lookup.
+    read_at = time.time()
+    integrity = verify_socket_ledger(raw, side, seal, _ledger_key())
+    try:
+        data = json.loads(raw.decode("utf-8")) if raw is not None else None
+        if not isinstance(data, dict):
+            raise ValueError
+    except (ValueError, UnicodeDecodeError):
+        data = None
+    if data is None:
+        state = "tampered" if integrity["state"] == "tampered" else "not_running"
+        return {
+            "connections": [],
+            "total": 0,
+            "coverage": {
+                "state": state,
+                "confidence": "Unknown",
+                "integrity": integrity,
+                "note": "未找到按进程采样的连接记录（socket-sampler 未运行）；未走代理的流量不可见。"
+                if state == "not_running" else "台账已签过名但现在不见了：按篡改处理，未走代理的流量不可见。",
+            },
+        }
+    since_ts = _iso_ts(since)
+    tampered = integrity["state"] == "tampered"
+    rows = []
+    for row in data.get("connections") or []:
+        if not isinstance(row, dict):
+            continue
+        if agent and agent != "all" and str(row.get("agent")) != agent:
+            continue
+        if since_ts is not None and (_iso_ts(row.get("lastSeen")) or 0) < since_ts:
+            continue
+        out = {k: row.get(k) for k in SOCKET_FIELDS if k in row}
+        if tampered:
+            # Content no longer matches its signature: nothing in it can be called observed.
+            out["evidence"] = "Unknown"
+            out["destinationEvidence"] = "Unknown"
+            out["ledgerIntegrity"] = "tampered"
+        rows.append(out)
+    rows.sort(key=lambda r: str(r.get("lastSeen") or ""), reverse=True)
+    coverage = dict(data.get("coverage") or {})
+    samples = data.get("samples") or {}
+    fresh = socket_freshness(samples, coverage, now=read_at)
+    coverage.update(
+        samples=samples.get("count"),
+        lastSampleAt=samples.get("lastAt"),
+        failures=samples.get("failures", 0),
+        lastFailure=samples.get("lastFailure"),
+        lastFailureAt=samples.get("lastFailureAt"),
+        failureLog=(samples.get("failureLog") or [])[-20:],
+        samplerStartedAt=samples.get("samplerStartedAt"),
+        integrity=dict(integrity, integritySince=data.get("integritySince"),
+                       events=data.get("integrityEvents") or []),
+        **fresh,
+    )
+    if tampered:
+        coverage["state"] = "tampered"
+    if tampered or fresh["state"] != "sampling" or integrity["state"] != "verified":
+        coverage["confidence"] = "Unknown"
+    if "missesShorterThanSeconds" in coverage and coverage.get("measurementConfidence") is None:
+        # Ledger written by socket-sampler/1: its value was the configured interval, not a measurement.
+        coverage["measurementConfidence"] = "Unknown"
+        coverage["measurementNote"] = "采样器版本过旧：该值是配置间隔，不是实测周期"
+    return {"connections": redact_obj(rows[:limit]), "total": len(rows), "coverage": coverage}
 
 
 def list_network(
@@ -685,17 +1027,14 @@ def list_network(
     for r in records:
         if agent and agent != "all" and str(r.get("agent")) != agent:
             continue
-        real, peer, dest_source = _real_destination(r)
-        host = real or host_of(r)
+        dest = destination_fields(r)
+        host = dest["destination"]
         rows.append(
             {
                 "executionId": r.get("call") or r.get("runID"),
                 "agent": r.get("agent"),
                 "tool": r.get("tool"),
-                "destination": host,
-                "realDestination": real,
-                "transportPeer": peer,
-                "destinationSource": dest_source,
+                **dest,
                 "allowed": is_allowed_host(host) if host else None,
                 "nonWhitelist": bool(
                     host and not is_allowed_host(host) and not str(host).startswith("127.")
@@ -706,17 +1045,52 @@ def list_network(
                 "confidence": "Observed" if host else "Unknown",
             }
         )
+    sockets = load_socket_ledger(agent=agent, since=since)
+    direct = [r for r in sockets["connections"] if r.get("viaProxy") is False and r.get("scope") == "public"]
     return {
         "network": redact_obj(rows),
-        "confidence": "Observed" if rows else "Unknown",
+        "sockets": sockets["connections"],
+        "socketSummary": {
+            "total": sockets.get("total", 0),
+            "notViaProxyPublic": len(direct),
+            "viaProxy": sum(1 for r in sockets["connections"] if r.get("viaProxy")),
+            "ledgerIntegrity": (sockets["coverage"].get("integrity") or {}).get("state"),
+        },
+        "socketCoverage": sockets["coverage"],
+        "confidence": "Observed" if rows or sockets["connections"] else "Unknown",
         "note": (
-            "destination/realDestination 优先取代理侧 CONNECT/Host（proxy_observed），"
-            "否则 argv 解析（argv_parsed）；transportPeer 保留本机代理对端。"
+            "network = 经审计入口的命令（transport-audit）。每条的 realDestination / destinationSource / transportPeer"
+            "与 get_execution 同源：proxy_observed=本次 trace 里看到经代理连到该主机（Observed）；"
+            "connection_observed=trace 里直连该主机（Observed）；argv_parsed=只从命令参数推出，线上没看到（Inferred）；"
+            "transport_peer_only=只知道连到本机代理口（Unknown）。"
+            "sockets = 按进程采样的全部 TCP/UDP 连接，与是否走代理无关（viaProxy=false 即未走代理）；其 realDestination："
+            "proxy_observed=代理路由日志按本机端口+时间对上（Correlated）；argv_parsed=命令参数主机正向解析到同一 IP"
+            "（Correlated）；dns_inferred=反向 DNS（Inferred）；socket_sampled=只有 IP（Observed）；proxy_unjoined="
+            "走了代理但目的地未对上（Unknown）。transportPeer 保留实际对端（代理时为 127.0.0.1:端口）。"
+            "采样会漏掉短于实测间隔（socketCoverage.missesShorterThanSeconds）的连接。"
         ),
     }
 
 
+def _socket_blind_spot() -> dict[str, Any]:
+    cov = load_socket_ledger(limit=0)["coverage"]
+    if cov.get("state") != "sampling":
+        return {"topic": "未走代理流量", "confidence": "Unknown", "status": cov.get("state"),
+                "note": "socket-sampler 当前没有在采样（%s）；不估算比例" % cov.get("state")}
+    return {
+        "topic": "未走代理流量",
+        "confidence": "Observed" if cov.get("measurementConfidence") == "Observed" else "Unknown",
+        "status": "sampled",
+        "note": "按进程采样 TCP/UDP 连接：实测周期 p50 %ss / p95 %ss，最长首次发现延迟 %ss，短于 %ss 的连接可能漏掉"
+        "（最近一次 %s；失败 %s 次）；系统解析器发出的 DNS 不可见"
+        % (cov.get("observedCycleSecondsP50"), cov.get("observedCycleSecondsP95"),
+           cov.get("maxFirstDetectionDelaySeconds"), cov.get("missesShorterThanSeconds"),
+           cov.get("lastSampleAt"), cov.get("failures")),
+    }
+
+
 def get_coverage() -> dict[str, Any]:
+    integrity = validate_audit()
     proxy_up = False
     detail = "未探测"
     # Lightweight local listen check — does not open Network Extension.
@@ -741,10 +1115,12 @@ def get_coverage() -> dict[str, Any]:
             {"id": "S07", "status": "supported", "confidence": "Observed", "note": "仅认后端 auditBypass=true"},
         ],
         "blindSpots": [
-            {"topic": "未走代理流量", "confidence": "Unknown", "note": "不估算比例"},
+            _socket_blind_spot(),
             {"topic": "SSH 通道内正文", "confidence": "Unknown", "note": "只看到连到哪台主机"},
         ],
-        "evidenceIntegrity": validate_audit(),
+        "evidenceIntegrity": integrity,
+        "integritySummary": integrity_summary(integrity),
+        "socketLedgerIntegrity": load_socket_ledger(limit=0)["coverage"].get("integrity"),
         "transportRoot": str(DEFAULT_TRANSPORT),
         "confidence": "Observed" if proxy_up else "Unknown",
     }
@@ -764,96 +1140,144 @@ def ensure_audit_dir() -> None:
 
 
 def _keychain_backend() -> str:
-    """memory | security | file. Tests patch MEMORY; CI may force file."""
-    env = (os.environ.get("AGENTREINS_KEYCHAIN_BACKEND") or "").strip().lower()
-    if env in ("memory", "security", "file"):
-        return env
-    if sys.platform == "darwin":
-        return "security"
-    return "file"
+    """'security' (macOS Keychain via AgentReinsKeychainHelper) or 'unsupported'. There is no file or
+    in-memory key store in shipped code: unit tests inject a fake from test-only code (keychain_fake.py)."""
+    return "security" if sys.platform == "darwin" else "unsupported"
+
+
+class KeychainUnavailable(OSError):
+    """The Keychain could not be read (as opposed to: the item does not exist). Never mint a new key then."""
+
+
+def _find_keychain_helper(compile_if_missing: bool = True) -> pathlib.Path | None:
+    """Packaged helper (Contents/MacOS/AgentReinsKeychainHelper) first; dev tree builds tools/.../keychain_helper.
+    Never compiles into a signed .app bundle."""
+    packaged = ROOT.parent.parent / "MacOS" / "AgentReinsKeychainHelper"
+    if packaged.is_file():
+        return packaged
+    dev = ROOT / "keychain_helper"
+    if dev.is_file():
+        return dev
+    if not compile_if_missing or ".app/Contents/" in str(ROOT):
+        return None
+    src = ROOT.parents[1] / "Sources" / "AgentReinsKeychainHelper" / "main.swift"
+    if src.is_file():
+        try:
+            subprocess.run(["swiftc", "-O", "-o", str(dev), str(src)], capture_output=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError):
+            return None
+    return dev if dev.is_file() else None
+
+
+KEYCHAIN_HELPER_TIMEOUT = 15.0
+# After a helper timeout, answer "error" without calling it again for this long (per process), so a
+# Keychain that blocks costs one timeout, not one per account per MCP call.
+KEYCHAIN_UNRESPONSIVE_BACKOFF = 60.0
+_KEYCHAIN_STATE: dict[str, Any] = {"unresponsiveUntil": 0.0, "lastError": None}
+HELPER_EXIT_NOT_FOUND = 3
+HELPER_EXIT_NEEDS_APPROVAL = 4
+
+
+class KeychainHelperUnresponsive(OSError):
+    """The helper timed out recently; not retried until the backoff passes."""
 
 
 def _run_keychain_helper(args: list[str], stdin: bytes | None = None) -> subprocess.CompletedProcess[bytes]:
-    helper = KEYCHAIN_HELPER
-    if not helper.is_file():
-        # Dev tree: try compiling once.
-        src = ROOT / "keychain_helper.swift"
-        if src.is_file():
-            subprocess.run(
-                ["swiftc", "-O", "-o", str(helper), str(src)],
-                capture_output=True,
-                timeout=120,
-                check=False,
-            )
-    return subprocess.run(
-        [str(helper), *args],
-        input=stdin,
-        capture_output=True,
-        timeout=15,
-        check=False,
-    )
+    helper = _find_keychain_helper()
+    if helper is None:
+        raise FileNotFoundError("AgentReins keychain helper not installed")
+    if time.monotonic() < _KEYCHAIN_STATE["unresponsiveUntil"]:
+        raise KeychainHelperUnresponsive("keychain helper timed out recently; not retried yet")
+    try:
+        return subprocess.run([str(helper), *args], input=stdin, capture_output=True,
+                              timeout=KEYCHAIN_HELPER_TIMEOUT, check=False)
+    except subprocess.TimeoutExpired:
+        _KEYCHAIN_STATE["unresponsiveUntil"] = time.monotonic() + KEYCHAIN_UNRESPONSIVE_BACKOFF
+        raise
+
+
+def keychain_last_error() -> str | None:
+    """Why the last Keychain lookup failed (no secret material), for status texts."""
+    return _KEYCHAIN_STATE["lastError"]
+
+
+def _helper_failure(proc: subprocess.CompletedProcess[bytes]) -> str:
+    if proc.returncode == HELPER_EXIT_NEEDS_APPROVAL:
+        return ("keychain needs user approval (locked, or this helper is not yet on the item's access list; "
+                "run AgentReinsKeychainHelper authorize in a logged-in session)")
+    detail = proc.stderr.decode("utf-8", "replace").strip().splitlines()[-1:] if proc.stderr else []
+    return "keychain helper exit %s%s" % (proc.returncode, (": " + detail[0][:120]) if detail else "")
+
+
+def _keychain_lookup(account: str) -> tuple[str, bytes | None]:
+    """('found', data) | ('missing', None) | ('error', None) | ('no_helper', None) | ('no_backend', None)."""
+    if _keychain_backend() != "security":
+        return "no_backend", None
+    try:
+        proc = _run_keychain_helper(["get", account])
+    except FileNotFoundError:
+        return "no_helper", None
+    except subprocess.TimeoutExpired:
+        _KEYCHAIN_STATE["lastError"] = "keychain helper timed out after %.0fs" % KEYCHAIN_HELPER_TIMEOUT
+        return "error", None
+    except (OSError, subprocess.SubprocessError) as exc:
+        _KEYCHAIN_STATE["lastError"] = str(exc)[:160] or exc.__class__.__name__
+        return "error", None
+    if proc.returncode == HELPER_EXIT_NOT_FOUND:
+        return "missing", None
+    if proc.returncode != 0 or not proc.stdout.strip():
+        _KEYCHAIN_STATE["lastError"] = _helper_failure(proc)
+        return "error", None
+    raw = proc.stdout.decode("utf-8", "replace").strip()
+    try:
+        data = bytes.fromhex(raw)
+    except ValueError:
+        data = raw.encode("utf-8")
+    # Legacy `security -A -w <hex>` stored ASCII hex digits as the secret.
+    if len(data) == 64 and all(chr(b) in "0123456789abcdef" for b in data):
+        try:
+            return "found", bytes.fromhex(data.decode("ascii"))
+        except ValueError:
+            return "found", data
+    return "found", data
 
 
 def keychain_get(account: str) -> bytes | None:
-    backend = _keychain_backend()
-    if backend == "memory":
-        return _MEMORY_KEYCHAIN.get(account)
-    if backend == "security":
-        try:
-            proc = _run_keychain_helper(["get", account])
-            if proc.returncode == 0 and proc.stdout.strip():
-                raw = proc.stdout.decode("utf-8", "replace").strip()
-                try:
-                    data = bytes.fromhex(raw)
-                except ValueError:
-                    data = raw.encode("utf-8")
-                # Legacy `security -A -w <hex>` stored ASCII hex digits as the secret.
-                if len(data) == 64 and all(chr(b) in "0123456789abcdef" for b in data):
-                    try:
-                        return bytes.fromhex(data.decode("ascii"))
-                    except ValueError:
-                        return data
-                return data
-        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
-            return None
-        return None
-    return None
+    status, data = _keychain_lookup(account)
+    return data if status == "found" else None
 
 
 def keychain_set(account: str, value: bytes) -> bool:
-    backend = _keychain_backend()
-    if backend == "memory":
-        _MEMORY_KEYCHAIN[account] = value
-        return True
-    if backend == "security":
+    if _keychain_backend() == "security":
         # Never put the secret on argv; never use `security -A`.
         try:
             proc = _run_keychain_helper(["set", account], stdin=value.hex().encode("ascii"))
-            return proc.returncode == 0
-        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        except subprocess.TimeoutExpired:
+            _KEYCHAIN_STATE["lastError"] = "keychain helper timed out after %.0fs" % KEYCHAIN_HELPER_TIMEOUT
             return False
+        except (OSError, subprocess.SubprocessError) as exc:
+            _KEYCHAIN_STATE["lastError"] = str(exc)[:160] or exc.__class__.__name__
+            return False
+        if proc.returncode != 0:
+            _KEYCHAIN_STATE["lastError"] = _helper_failure(proc)
+        return proc.returncode == 0
     return False
 
 
 def keychain_delete(account: str) -> bool:
-    backend = _keychain_backend()
-    if backend == "memory":
-        _MEMORY_KEYCHAIN.pop(account, None)
-        return True
-    if backend == "security":
+    if _keychain_backend() == "security":
         try:
             proc = _run_keychain_helper(["delete", account])
             return proc.returncode == 0
-        except (OSError, subprocess.SubprocessError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.SubprocessError):
             return False
     return False
 
 
 def keychain_has_install_anchor() -> bool:
-    if keychain_get(KEYCHAIN_ACCOUNT_ERA) is not None:
-        return True
-    if keychain_get(KEYCHAIN_ACCOUNT_HMAC) is not None:
-        return True
+    for account in (KEYCHAIN_ACCOUNT_ERA, KEYCHAIN_ACCOUNT_HMAC, KEYCHAIN_ACCOUNT_BOUNDARY):
+        if keychain_get(account) is not None:
+            return True
     return False
 
 
@@ -866,34 +1290,41 @@ def _delete_hmac_key_file() -> None:
         pass
 
 
-def load_or_create_hmac_key() -> bytes:
-    """HMAC key: Keychain first, then one-time file migrate (file deleted after)."""
+def load_or_create_hmac_key(create: bool = True) -> bytes:
+    """HMAC key: Keychain first, then one-time file migrate (file deleted after).
+
+    A Keychain *read error* (locked, helper failed, timeout) raises KeychainUnavailable: minting a fresh
+    key in that case would silently replace the real one and turn every later entry into a mismatch.
+    """
     ensure_audit_dir()
-    existing = keychain_get(KEYCHAIN_ACCOUNT_HMAC)
-    if existing and len(existing) >= 16:
+    status, existing = _keychain_lookup(KEYCHAIN_ACCOUNT_HMAC)
+    if status == "found" and existing and len(existing) >= 16:
         _delete_hmac_key_file()
         return existing
+    if status == "error":
+        raise KeychainUnavailable("keychain read failed (%s); not creating a replacement integrity key"
+                                  % (keychain_last_error() or "unknown"))
     if HMAC_KEY_FILE.is_file():
         raw = HMAC_KEY_FILE.read_bytes()
         # Ignore non-secret marker left by older builds.
         if len(raw) >= 16 and raw.strip() not in (b"keychain", b"keychain\n"):
-            if keychain_set(KEYCHAIN_ACCOUNT_HMAC, raw):
+            if status == "missing" and keychain_set(KEYCHAIN_ACCOUNT_HMAC, raw):
                 _delete_hmac_key_file()
-                return raw
             return raw
+    if not create:
+        raise KeychainUnavailable("no integrity key yet")
+    if status == "no_helper":
+        raise KeychainUnavailable("AgentReinsKeychainHelper not found; nothing is signed (no file-key fallback)")
+    if status != "missing":
+        raise KeychainUnavailable("no Keychain on this platform (%s); nothing is signed" % sys.platform)
     key = os.urandom(32)
     if keychain_set(KEYCHAIN_ACCOUNT_HMAC, key):
         _delete_hmac_key_file()
         return key
-    # Last resort: file backend (non-Darwin / helper missing). Still 0600.
-    fd = os.open(HMAC_KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "wb") as fh:
-        fh.write(key)
-    try:
-        os.chmod(HMAC_KEY_FILE, 0o600)
-    except OSError:
-        pass
-    return key
+    # The Keychain is there but refused the write (locked / needs approval / timeout): a plaintext
+    # replacement key would be readable by anything and would fork the key from the Swift MCP's.
+    raise KeychainUnavailable("could not store a new integrity key in the Keychain (%s)"
+                              % (keychain_last_error() or "helper set failed"))
 
 
 def canonical_json(obj: Any) -> str:
@@ -943,6 +1374,8 @@ def mark_signed_era() -> None:
                         os.chmod(SIGNED_ERA_FLAG, 0o600)
                     except OSError:
                         pass
+                if prev.get("keyFingerprint") == _key_fingerprint(key):
+                    establish_boundary(key, fresh=False)  # upgrade path: era predates the marker
                 return
         except (UnicodeDecodeError, json.JSONDecodeError, TypeError):
             pass
@@ -959,11 +1392,201 @@ def mark_signed_era() -> None:
         os.chmod(SIGNED_ERA_FLAG, 0o600)
     except OSError:
         pass
+    establish_boundary(key, fresh=True)
+
+
+# ------------------------------------------------------------------------------------------------
+# Migration boundary (legacy vs current). Recorded once, HMAC-sealed with the current key, stored in the
+# Keychain (survives wiping both data directories) and mirrored to INTEGRITY_DIR for reading; the audit
+# chain itself gets an `integrity-boundary` entry, so deleting the marker later is detectable and can
+# never move more entries into "legacy".
+#   * fresh install: established when the signed era starts -> boundary index 0, no legacy at all.
+#   * upgrade (era already existed, no marker): legacy = audit entries before BOTH the first entry that
+#     verifies with the Keychain key AND the era start time (and in time order); evidence files whose MAC
+#     fails and whose mtime predates that time. Those exact bytes are pinned (prefix sha256 + a manifest of
+#     file hashes), so editing a legacy item afterwards is current tampering. The upgrade split is inferred
+#     and labelled as such.
+
+def _boundary_mirror() -> pathlib.Path:
+    return INTEGRITY_DIR / "integrity-boundary.json"
+
+
+def _legacy_manifest_path() -> pathlib.Path:
+    return INTEGRITY_DIR / "legacy-evidence-manifest.json"
+
+
+def _audit_lines(log: pathlib.Path | None = None) -> list[str]:
+    log = log or AUDIT_LOG
+    try:
+        return [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    except OSError:
+        return []
+
+
+def _prefix_sha(lines: list[str], count: int) -> str:
+    return sha256_hex("\n".join(lines[:count]))
+
+
+def _entry_verifies(line: str, key: bytes) -> bool:
+    try:
+        entry = json.loads(line)
+    except json.JSONDecodeError:
+        return False
+    if "mac" not in entry:
+        return False
+    body = {k: entry[k] for k in ("at", "actor", "tool", "argsDigest", "prevHash") if k in entry}
+    return hmac.compare_digest(str(entry.get("mac")), entry_hmac(body, key))
+
+
+def _entry_at(line: str) -> str:
+    try:
+        return str(json.loads(line).get("at") or "")
+    except json.JSONDecodeError:
+        return ""
+
+
+def _era_at() -> str | None:
+    blob = keychain_get(KEYCHAIN_ACCOUNT_ERA)
+    if blob is None and SIGNED_ERA_FLAG.is_file():
+        try:
+            blob = SIGNED_ERA_FLAG.read_bytes()
+        except OSError:
+            blob = None
+    try:
+        return json.loads(blob.decode("utf-8")).get("at") if blob else None
+    except (UnicodeDecodeError, json.JSONDecodeError, AttributeError):
+        return None
+
+
+def _iso_from_epoch(ts: float) -> str:
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(ts))
+
+
+def load_boundary(key: bytes) -> tuple[dict[str, Any] | None, str | None]:
+    """(marker, problem). problem = 'boundary_marker_unreadable' | 'boundary_marker_mac_mismatch'."""
+    blob = keychain_get(KEYCHAIN_ACCOUNT_BOUNDARY)
+    if blob is None:
+        return None, None
+    try:
+        marker = json.loads(blob.decode("utf-8"))
+        assert isinstance(marker, dict)
+    except (UnicodeDecodeError, json.JSONDecodeError, AssertionError):
+        return None, "boundary_marker_unreadable"
+    body = {k: v for k, v in marker.items() if k != "mac"}
+    if not hmac.compare_digest(str(marker.get("mac") or ""), entry_hmac(body, key)):
+        return None, "boundary_marker_mac_mismatch"
+    return marker, None
+
+
+def _log_has_boundary_entry(lines: list[str]) -> bool:
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if entry.get("tool") == BOUNDARY_TOOL and entry.get("actor") == BOUNDARY_ACTOR:
+            return True
+    return False
+
+
+def establish_boundary(key: bytes, fresh: bool) -> dict[str, Any] | None:
+    """Record the legacy/current boundary exactly once. Returns the marker (or None if it already exists)."""
+    if keychain_get(KEYCHAIN_ACCOUNT_BOUNDARY) is not None:
+        return None
+    lines = _audit_lines()
+    if _log_has_boundary_entry(lines):
+        return None  # marker was deleted after being recorded: never re-establish (would launder entries)
+    now = time.time()
+    era_at = _era_at()
+    if fresh or not lines:
+        index = len(lines) if not fresh else 0
+        source = "recorded-at-signed-era-start" if fresh else "recorded-going-forward"
+        cutoff_iso = _iso_from_epoch(now)
+    else:
+        first_ok = next((i for i, ln in enumerate(lines) if _entry_verifies(ln, key)), len(lines))
+        by_time = next((i for i, ln in enumerate(lines) if era_at and _entry_at(ln) >= era_at), len(lines))
+        index = min(first_ok, by_time)
+        for i in range(index):  # legacy must be in time order; stop at the first out-of-order entry
+            if i + 1 < len(lines) and _entry_at(lines[i]) > _entry_at(lines[i + 1]):
+                index = i + 1
+                break
+        source = "upgrade-inferred"
+        cutoff_iso = era_at or (_entry_at(lines[first_ok]) if first_ok < len(lines) else _iso_from_epoch(now))
+    if fresh and lines:
+        # Era starts now but a log already exists (older unsigned build): everything so far is legacy.
+        index, source = len(lines), "recorded-at-signed-era-start"
+    legacy_audit = [ln for ln in lines[:index] if not _entry_verifies(ln, key)]
+    # Evidence files that no longer verify and were written before the cutoff.
+    legacy_files = []
+    cutoff_ts = _iso_ts(cutoff_iso) or now
+    base = DEFAULT_TRANSPORT
+    if base.is_dir():
+        for path in sorted(list(base.glob("*/transport.json")) + list(base.glob("*/manifest.json"))):
+            mac_path = path.with_suffix(path.suffix + ".mac")
+            if not mac_path.is_file():
+                continue
+            try:
+                ok = hmac.compare_digest(mac_path.read_text(encoding="utf-8").strip(), evidence_file_mac(path, key))
+                mtime = path.stat().st_mtime
+            except OSError:
+                continue
+            if not ok and mtime < cutoff_ts:
+                legacy_files.append({"path": f"{path.parent.name}/{path.name}",
+                                     "sha256": sha256_bytes(path.read_bytes()),
+                                     "macSha256": sha256_bytes(mac_path.read_bytes()),
+                                     "mtime": _iso_from_epoch(mtime)})
+    manifest_text = canonical_json({"schema": 1, "files": legacy_files}) + "\n"
+    times = sorted([t for t in (_entry_at(ln) for ln in legacy_audit) if t] + [f["mtime"] for f in legacy_files])
+    marker: dict[str, Any] = {
+        "schema": 1,
+        "establishedAt": _iso_from_epoch(now),
+        "source": source,
+        "eraAt": era_at,
+        "cutoff": cutoff_iso,
+        "keyFingerprint": _key_fingerprint(key),
+        "auditBoundaryIndex": index,
+        "auditPrefixSha256": _prefix_sha(lines, index),
+        "legacyAuditCount": len(legacy_audit),
+        "legacyEvidenceCount": len(legacy_files),
+        "legacyManifestSha256": sha256_hex(manifest_text),
+        "legacyFrom": times[0] if times else None,
+        "legacyTo": times[-1] if times else None,
+    }
+    marker["mac"] = entry_hmac(marker, key)
+    blob = canonical_json(marker).encode("utf-8")
+    if not keychain_set(KEYCHAIN_ACCOUNT_BOUNDARY, blob):
+        return None  # without the Keychain anchor the boundary would be deletable; do not record a weak one
+    _ensure_integrity_dir()
+    for target, text in ((_legacy_manifest_path(), manifest_text), (_boundary_mirror(), blob.decode() + "\n")):
+        target.write_text(text, encoding="utf-8")
+        try:
+            os.chmod(target, 0o600)
+        except OSError:
+            pass
+    append_audit(BOUNDARY_ACTOR, BOUNDARY_TOOL, {"auditBoundaryIndex": index, "markerSha256": sha256_bytes(blob)})
+    return marker
+
+
+def _load_legacy_manifest(marker: dict[str, Any] | None) -> tuple[dict[str, str], str | None]:
+    """{relative path: sha256} of legacy evidence pinned at the boundary, or a problem reason."""
+    if not marker or not marker.get("legacyEvidenceCount"):
+        return {}, None
+    try:
+        text = _legacy_manifest_path().read_text(encoding="utf-8")
+    except OSError:
+        return {}, "legacy_manifest_missing"
+    if sha256_hex(text) != marker.get("legacyManifestSha256"):
+        return {}, "legacy_manifest_modified"
+    try:
+        return {f["path"]: f["sha256"] for f in json.loads(text).get("files") or []}, None
+    except (json.JSONDecodeError, KeyError, TypeError, AttributeError):
+        return {}, "legacy_manifest_unreadable"
 
 
 def signed_era_active() -> bool:
     return (
         keychain_has_install_anchor()
+        or _boundary_mirror().is_file()
         or SIGNED_ERA_FLAG.is_file()
         or (PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal").is_file()
     )
@@ -1054,8 +1677,15 @@ def validate_run_inventory(key: bytes | None = None) -> dict[str, Any]:
 
 
 def register_run_id(run_id: str, run_path: pathlib.Path | None = None) -> None:
-    """Append run ID to durable inventory so deleted runs are detectable."""
+    """Append run ID to durable inventory so deleted runs are detectable.
+
+    The inventory is re-signed only if it still verifies before this append; otherwise an edit made
+    by someone else would be laundered into a fresh MAC. A mismatch stays visible as tampering."""
     ensure_audit_dir()
+    try:
+        was_intact = validate_run_inventory().get("ok", False)
+    except OSError:
+        was_intact = False
     entry = {
         "runID": run_id,
         "at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
@@ -1067,6 +1697,8 @@ def register_run_id(run_id: str, run_path: pathlib.Path | None = None) -> None:
         os.chmod(RUN_INVENTORY, 0o600)
     except OSError:
         pass
+    if not was_intact:
+        return
     try:
         sign_run_inventory()
     except OSError:
@@ -1128,24 +1760,30 @@ def sign_evidence_tree(root: pathlib.Path | None = None) -> dict[str, Any]:
     return {"signedFiles": signed, "root": str(base), "refused": refused, "ok": not refused}
 
 
-def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
+def validate_evidence_files(root: pathlib.Path | None = None, key: bytes | None = None,
+                            marker: dict[str, Any] | None = None) -> dict[str, Any]:
     """Detect tampering of transport/manifest evidence.
 
     MAC is required only for inventory-registered runs (not every historical folder).
     External signed-era flag makes wipe-everything look like tamper (B9/B10), not 'unsigned'.
     """
     ensure_audit_dir()
-    key = load_or_create_hmac_key()
+    key = key or load_or_create_hmac_key()
     base = root or DEFAULT_TRANSPORT
     result: dict[str, Any] = {
         "ok": True,
         "checked": 0,
         "tampered": [],
+        "legacyUnverifiable": [],
         "missingMac": [],
         "missingRuns": [],
         "confidence": "Observed",
         "keyLimitation": KEYCHAIN_LIMITATION,
     }
+    legacy, legacy_problem = _load_legacy_manifest(marker)
+    if legacy_problem:
+        result["ok"] = False
+        result["tampered"].append({"reason": legacy_problem})
     inv = validate_run_inventory(key)
     if not inv.get("ok", True):
         result["ok"] = False
@@ -1195,8 +1833,17 @@ def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
         expected = mac_path.read_text(encoding="utf-8").strip()
         actual = evidence_file_mac(path, key)
         if not hmac.compare_digest(expected, actual):
+            rel = f"{path.parent.name}/{path.name}"
+            pinned = legacy.get(rel)
+            if pinned is not None and pinned == sha256_bytes(path.read_bytes()):
+                # Unchanged since the boundary was recorded; signed with a key that no longer exists.
+                result["legacyUnverifiable"].append({"path": str(path), "reason": LEGACY_REASON})
+                continue
             result["ok"] = False
-            result["tampered"].append({"path": str(path), "reason": "evidence_mac_mismatch"})
+            result["tampered"].append({
+                "path": str(path),
+                "reason": "legacy_evidence_modified_after_boundary" if pinned is not None else "evidence_mac_mismatch",
+            })
     # Deleted runs listed in inventory
     on_disk = {p.parent.name for p in base.glob("*/transport.json")}
     missing = sorted(known - on_disk)
@@ -1210,9 +1857,11 @@ def validate_evidence_files(root: pathlib.Path | None = None) -> dict[str, Any]:
 
 def _write_seal(head_hash: str, count: int, key: bytes) -> None:
     body: dict[str, Any] = {"headHash": head_hash, "count": count, "schema": 1}
-    # Anchor inventory hash inside seal when inventory exists (B8).
-    if RUN_INVENTORY.is_file():
-        body["inventorySha256"] = sha256_bytes(RUN_INVENTORY.read_bytes())
+    # Anchor the inventory hash inside the seal (B8) only while the inventory still verifies;
+    # otherwise keep the previously sealed anchor so an edit is not re-sealed by the next read.
+    anchor = _inventory_anchor(key)
+    if anchor:
+        body["inventorySha256"] = anchor
     body["mac"] = entry_hmac(body, key)
     text = canonical_json(body) + "\n"
     AUDIT_SEAL.write_text(text, encoding="utf-8")
@@ -1229,9 +1878,23 @@ def _write_seal(head_hash: str, count: int, key: bytes) -> None:
         mirror.write_text(text, encoding="utf-8")
         os.chmod(mirror, 0o600)
         mark_signed_era()
-        sign_run_inventory(key)
     except OSError:
         pass
+
+
+def _inventory_anchor(key: bytes) -> str | None:
+    if not RUN_INVENTORY.is_file():
+        return None
+    if not RUN_INVENTORY_MAC.is_file() or validate_run_inventory(key).get("ok"):
+        return sha256_bytes(RUN_INVENTORY.read_bytes())
+    for seal in (AUDIT_SEAL, PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"):
+        try:
+            prev = json.loads(seal.read_text(encoding="utf-8")).get("inventorySha256")
+        except (OSError, ValueError, AttributeError):
+            continue
+        if prev:
+            return str(prev)
+    return None
 
 
 def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
@@ -1269,8 +1932,84 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
     return entry
 
 
+def key_storage_facts() -> dict[str, Any]:
+    """What actually protects the integrity key on this machine (drives b6.sameUidCanForge)."""
+    backend = _keychain_backend()
+    status, _ = _keychain_lookup(KEYCHAIN_ACCOUNT_HMAC)
+    helper = _find_keychain_helper(compile_if_missing=False)
+    facts: dict[str, Any] = {
+        "backend": backend,
+        "keyInKeychain": status == "found",
+        "keychainLookup": status,
+        "plaintextKeyFile": HMAC_KEY_FILE.is_file(),
+        "helperPath": str(helper) if helper else None,
+    }
+    reasons = []
+    if facts["plaintextKeyFile"]:
+        reasons.append("密钥在同一用户可读的文件里")
+    if backend == "security":
+        facts["keychainAclTrustsHelperByPath"] = True
+        facts["helperVerifiesCaller"] = False
+        reasons.append(
+            "钥匙串条目的访问控制只信任 keychain helper 这个程序本身；同一用户的任何进程都能直接运行它"
+            "（get hmac-key）拿到密钥，helper 不检查是谁在调用它"
+        )
+    reasons.append("签名、日志、封条都由同一用户写入，没有 root 守护进程或远端锚点")
+    # Every backend available today is readable by same-uid code, so this is True by fact, not by default.
+    return {"sameUidCanForge": True, "keyStorage": facts, "reasons": reasons}
+
+
+def _boundary_public(marker: dict[str, Any] | None, problem: str | None) -> dict[str, Any]:
+    if marker is None:
+        return {"state": problem or "not_recorded"}
+    return {
+        "state": "recorded",
+        "anchoredIn": "Keychain (HMAC-sealed) + integrity mirror + audit chain entry",
+        **{k: marker.get(k) for k in ("establishedAt", "source", "eraAt", "cutoff", "auditBoundaryIndex",
+                                      "legacyAuditCount", "legacyEvidenceCount", "legacyFrom", "legacyTo")},
+        "confidence": "Inferred" if marker.get("source") == "upgrade-inferred" else "Observed",
+    }
+
+
+def _finish_split(result: dict[str, Any], legacy_audit: list[dict[str, Any]], marker: dict[str, Any] | None) -> None:
+    """Fill ok/currentTampered/legacyUnverifiable/status. `tampered` and `deletedOrGap` hold CURRENT problems only."""
+    ev = result.get("evidenceFiles") or {}
+    legacy_files = ev.get("legacyUnverifiable") or []
+    current = list(result["tampered"]) + list(result["deletedOrGap"])
+    result["ok"] = not current
+    reasons: dict[str, int] = {}
+    for item in current:
+        reasons[str(item.get("reason"))] = reasons.get(str(item.get("reason")), 0) + 1
+    result["currentTampered"] = {"count": len(current), "reasons": reasons}
+    times = sorted(t for t in [str(e.get("at") or "") for e in legacy_audit] if t)
+    result["legacyUnverifiable"] = {
+        "count": len(legacy_audit) + len(legacy_files),
+        "auditEntries": len(legacy_audit),
+        "evidenceFiles": len(legacy_files),
+        "from": (marker or {}).get("legacyFrom") or (times[0] if times else None),
+        "to": (marker or {}).get("legacyTo") or (times[-1] if times else None),
+        "reason": LEGACY_REASON,
+        "confidence": "Unknown",
+        "note": "迁移前用旧密钥签的历史记录：旧密钥已删除，既不能证明完好，也不能证明被改；"
+                "它们自分界点记录后未再变动（字节已固定），不计入 ok。",
+        "items": (legacy_audit + legacy_files)[:50],
+    }
+    if current:
+        status = "current_tampered"
+        text = "当前记录有 %d 处校验失败（迁移后的记录被改、删或伪造），ok=false。" % len(current)
+    elif legacy_audit or legacy_files:
+        status = "current_ok_legacy_unverifiable"
+        text = "迁移后的记录全部校验通过；另有 %d 条迁移前的历史记录无法验证（旧密钥已删除），按 Unknown 处理。" % (
+            len(legacy_audit) + len(legacy_files))
+    else:
+        status = "ok"
+        text = "全部记录校验通过。"
+    result["status"] = status
+    result["statusText"] = text + " 注意：同一用户的进程能拿到密钥并重写记录（b6），所以这只证明没有被不懂密钥的程序改过。"
+
+
 def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
-    """Validate keyed HMAC chain. Seal is mandatory once a signed era exists; no resign-on-read."""
+    """Validate keyed HMAC chain, split into current (ok) vs legacy (Unknown). No resign-on-read."""
     log = path or AUDIT_LOG
     result: dict[str, Any] = {
         "mode": "keyed-HMAC-SHA256 append-only + required seal + evidence MAC + run inventory",
@@ -1284,12 +2023,33 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
         "limitation": KEYCHAIN_LIMITATION,
         "legacyPathPolicy": "never_read_/private/tmp",
     }
+    legacy_audit: list[dict[str, Any]] = []
+    marker: dict[str, Any] | None = None
+    try:
+        key = load_or_create_hmac_key()
+    except OSError as exc:
+        result["ok"] = False
+        result["warning"] = f"无法读取 HMAC 密钥：{exc}"
+        result["confidence"] = "Unknown"
+        result["status"] = "key_unavailable"
+        result["statusText"] = "读不到完整性密钥，无法校验（不是篡改结论）。"
+        result["b6"] = dict(key_storage_facts(), confidence="Unknown")
+        return result
+    marker, problem = load_boundary(key)
+    if marker is None and problem is None and log.is_file():
+        if _log_has_boundary_entry(_audit_lines(log)):
+            problem = "boundary_marker_deleted"
+        elif path is None:
+            marker = establish_boundary(key, fresh=not signed_era_active())
+            marker, problem = load_boundary(key) if marker else (None, None)
+    if problem:
+        result["tampered"].append({"reason": problem})
+        result["confidence"] = "Unknown"
+    result["boundary"] = _boundary_public(marker, problem)
     if not log.is_file():
-        result["ok"] = True
         result["note"] = "尚无审计日志"
         if signed_era_active():
             # B9/B10/B11: signed era (incl. Keychain) then wipe dirs/log is tamper, not a fresh install.
-            result["ok"] = False
             result["tampered"].append({"reason": "audit_log_missing_after_signed_era"})
             result["confidence"] = "Unknown"
             mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
@@ -1304,85 +2064,74 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
             result["confidence"] = "Unknown"
             result["note"] = "never_anchored"
             result["neverAnchored"] = True
-        # Still check evidence / inventory.
-        ev = validate_evidence_files()
+        ev = validate_evidence_files(key=key, marker=marker)
         result["evidenceFiles"] = ev
         if not ev.get("ok", True):
-            result["ok"] = False
             result["tampered"].extend(ev.get("tampered") or [])
             result["confidence"] = "Unknown"
-        return result
-    try:
-        key = load_or_create_hmac_key()
-    except OSError as exc:
-        result["ok"] = False
-        result["warning"] = f"无法读取 HMAC 密钥：{exc}"
-        result["confidence"] = "Unknown"
+        _finish_split(result, legacy_audit, marker)
+        result["b6"] = dict(key_storage_facts(), confidence="Unknown", note=KEYCHAIN_LIMITATION)
         return result
     if era_key_mismatch(key):
         # B12: wipe + forge under a replaced HMAC key while install era remains.
-        result["ok"] = False
         result["tampered"].append({"reason": "hmac_key_replaced_after_signed_era"})
         result["confidence"] = "Unknown"
-    lines = [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+    lines = _audit_lines(log)
+    boundary = int((marker or {}).get("auditBoundaryIndex") or 0)
+    if marker is not None:
+        if len(lines) < boundary:
+            result["tampered"].append({"reason": "audit_truncated_below_boundary", "boundary": boundary})
+            boundary = len(lines)
+        elif _prefix_sha(lines, boundary) != marker.get("auditPrefixSha256"):
+            result["tampered"].append({"reason": "legacy_audit_prefix_modified", "boundary": boundary})
+            boundary = 0  # pinned legacy bytes changed: nothing before the boundary can be excused any more
     prev = "0" * 64
     seen_signed = False
     head = prev
     for idx, line in enumerate(lines):
+        legacy_zone = idx < boundary
         try:
             entry = json.loads(line)
         except json.JSONDecodeError:
-            result["ok"] = False
-            result["tampered"].append({"index": idx, "reason": "invalid_json"})
+            if legacy_zone:
+                legacy_audit.append({"index": idx, "reason": "invalid_json"})
+            else:
+                result["tampered"].append({"index": idx, "reason": "invalid_json"})
             continue
         result["entriesChecked"] += 1
         if entry.get("prevHash") != prev:
-            result["ok"] = False
-            result["deletedOrGap"].append(
-                {
-                    "index": idx,
-                    "reason": "prevHash_mismatch",
-                    "expectedPrev": prev,
-                    "gotPrev": entry.get("prevHash"),
-                }
-            )
+            gap = {"index": idx, "reason": "prevHash_mismatch", "expectedPrev": prev, "gotPrev": entry.get("prevHash")}
+            if legacy_zone:
+                legacy_audit.append(dict(gap, at=entry.get("at")))
+            else:
+                result["deletedOrGap"].append(gap)
         body = {k: entry[k] for k in ("at", "actor", "tool", "argsDigest", "prevHash") if k in entry}
         if "mac" not in entry:
-            # Any missing MAC is tamper once signing is in use (B2: strip MACs + rewrite).
-            result["ok"] = False
-            result["tampered"].append(
-                {"index": idx, "reason": "missing_mac", "tool": entry.get("tool")}
-            )
+            item = {"index": idx, "reason": "missing_mac", "tool": entry.get("tool"), "at": entry.get("at")}
+            if legacy_zone:
+                legacy_audit.append(item)
+            else:
+                # Any missing MAC is tamper once signing is in use (B2: strip MACs + rewrite).
+                result["tampered"].append(item)
         else:
             seen_signed = True
-            expected_mac = entry_hmac(body, key)
-            if entry.get("mac") != expected_mac:
-                # en_26fd4180: no unsigned quarantine / allowlist can wash this to ok=true.
-                result["ok"] = False
-                result["tampered"].append(
-                    {
-                        "index": idx,
-                        "reason": "mac_mismatch",
-                        "tool": entry.get("tool"),
-                        "at": entry.get("at"),
-                    }
-                )
-                result["confidence"] = "Unknown"
+            if entry.get("mac") != entry_hmac(body, key):
+                item = {"index": idx, "reason": "mac_mismatch", "tool": entry.get("tool"), "at": entry.get("at"),
+                        "actor": entry.get("actor")}
+                if legacy_zone:
+                    legacy_audit.append(dict(item, reason=LEGACY_REASON))
+                else:
+                    # en_26fd4180: no unsigned quarantine / allowlist can wash this to ok=true.
+                    result["tampered"].append(item)
+                    result["confidence"] = "Unknown"
         prev = entry.get("hash") or prev
         head = prev
     seal_path = AUDIT_SEAL if path is None else path.with_suffix(".seal")
     mirror = PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"
     # Seal once present is mandatory (B1: truncate + delete seal). Prefer primary, fall back to mirror.
-    # B9/B10: external signed-era flag also requires a seal to still exist somewhere.
-    seal_required = (
-        seen_signed
-        or result["entriesChecked"] > 0
-        or mirror.is_file()
-        or signed_era_active()
-    )
+    seal_required = seen_signed or result["entriesChecked"] > 0 or mirror.is_file() or signed_era_active()
     active_seal = seal_path if seal_path.is_file() else (mirror if mirror.is_file() else None)
     if seal_required and active_seal is None:
-        result["ok"] = False
         result["tampered"].append(
             {"reason": "seal_missing_after_signed_era" if signed_era_active() else "seal_missing_required"}
         )
@@ -1390,16 +2139,10 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
     elif active_seal is not None:
         try:
             seal = json.loads(active_seal.read_text(encoding="utf-8"))
-            seal_body = {
-                k: seal[k]
-                for k in ("headHash", "count", "schema", "inventorySha256")
-                if k in seal
-            }
+            seal_body = {k: seal[k] for k in ("headHash", "count", "schema", "inventorySha256") if k in seal}
             if seal.get("mac") != entry_hmac(seal_body, key):
-                result["ok"] = False
                 result["tampered"].append({"reason": "seal_mac_mismatch"})
             elif int(seal.get("count") or 0) != result["entriesChecked"] or seal.get("headHash") != head:
-                result["ok"] = False
                 result["deletedOrGap"].append(
                     {
                         "reason": "truncated_or_count_mismatch",
@@ -1410,36 +2153,38 @@ def validate_audit(path: pathlib.Path | None = None) -> dict[str, Any]:
                     }
                 )
             elif "inventorySha256" in seal and RUN_INVENTORY.is_file():
-                actual_inv = sha256_bytes(RUN_INVENTORY.read_bytes())
-                if seal.get("inventorySha256") != actual_inv:
-                    result["ok"] = False
+                if seal.get("inventorySha256") != sha256_bytes(RUN_INVENTORY.read_bytes()):
                     result["tampered"].append({"reason": "inventory_seal_anchor_mismatch"})
         except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
-            result["ok"] = False
             result["tampered"].append({"reason": "seal_unreadable", "error": type(exc).__name__})
-    # B9/B10: log wiped but signed-era flag remains.
-    if signed_era_active() and not log.is_file() and result["entriesChecked"] == 0:
-        result["ok"] = False
-        result["tampered"].append({"reason": "audit_log_missing_after_signed_era"})
-        result["confidence"] = "Unknown"
-    ev = validate_evidence_files()
+    ev = validate_evidence_files(key=key, marker=marker)
     result["evidenceFiles"] = ev
     if not ev.get("ok", True):
-        result["ok"] = False
         result["tampered"].extend(ev.get("tampered") or [])
         result["confidence"] = "Unknown"
-    # Same-uid key forgeability (B6/B15): an attacker who can read the Keychain item
-    # can rewrite log+seal under the stolen key. Without an external (root/remote)
+    _finish_split(result, legacy_audit, marker)
+    if not result["ok"]:
+        result["confidence"] = "Unknown"
+    # Same-uid key forgeability (B6/B15): see key_storage_facts(). Without an external (root/remote)
     # anchor, local MACs alone must never claim Observed — even when ok=true.
-    result["b6"] = {
-        "sameUidCanForge": True,
-        "confidence": "Unknown",
-        "note": KEYCHAIN_LIMITATION,
-    }
+    result["b6"] = dict(key_storage_facts(), confidence="Unknown", note=KEYCHAIN_LIMITATION)
     if result.get("confidence") == "Observed":
         result["confidence"] = "Unknown"
         result["observedBlockedBy"] = "same_uid_no_external_anchor"
     return result
+
+
+def integrity_summary(v: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "ok": v.get("ok"),
+        "status": v.get("status"),
+        "statusText": v.get("statusText"),
+        "currentTampered": (v.get("currentTampered") or {}).get("count"),
+        "legacyUnverifiable": (v.get("legacyUnverifiable") or {}).get("count"),
+        "legacyRange": [(v.get("legacyUnverifiable") or {}).get("from"), (v.get("legacyUnverifiable") or {}).get("to")],
+        "sameUidCanForge": (v.get("b6") or {}).get("sameUidCanForge"),
+        "confidence": "Unknown",
+    }
 
 
 def recent_audit(limit: int = 30) -> list[dict[str, Any]]:
