@@ -20,7 +20,7 @@ const output=path.join(source,'ui');fs.mkdirSync(output,{recursive:true});
  page.on('pageerror',e=>errors.push(e.message));page.on('request',r=>{if(/^https?:/.test(r.url()))requests.push(r.url())});
  await page.goto('file://'+path.resolve(__dirname,'../../../Sources/AgentReins/Resources/RealtimeWorkspace/index.html'));
  await page.evaluate(p=>window.agentreinsReceive(p),payload);
- assert((await page.locator('h1').textContent()).includes(t.originalRequest));
+ assert((await page.locator('#heading .request').first().textContent()).includes(t.originalRequest));
  assert.equal(await page.locator('[data-flow-node]').count(),16);assert.equal(await page.locator('#timeline .timeline-row').count(),20);
  await page.locator('[data-flow-node=closure]').click();
  assert((await page.locator('#detail-code').textContent()).includes('a password is required'));
