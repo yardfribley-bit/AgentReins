@@ -5,11 +5,6 @@ import Darwin
 import Glibc
 #endif
 
-/// `Darwin.flock` is the `struct flock` initializer (fcntl), not `flock(2)`.
-/// The syscall symbol is still `flock`.
-@_silgen_name("flock")
-private func agentreins_flock(_ fd: Int32, _ operation: Int32) -> Int32
-
 /// Cross-process lock for the audit chain. `flock` is per-process on Darwin and Linux, so a
 /// re-entrant append (seal → boundary → append) must not unlock early, and two threads in one
 /// process need a recursive mutex as well. HTTP serializes tools/call; this lock covers a
@@ -55,12 +50,13 @@ private enum AuditFileLock {
 
     static func lock(_ fd: Int32) {
         guard fd >= 0 else { return }
-        _ = agentreins_flock(fd, 2) // LOCK_EX
+        // Unqualified `flock` is flock(2). `Darwin.flock` is the struct flock initializer.
+        _ = flock(fd, LOCK_EX)
     }
 
     static func unlock(_ fd: Int32) {
         guard fd >= 0 else { return }
-        _ = agentreins_flock(fd, 8) // LOCK_UN
+        _ = flock(fd, LOCK_UN)
     }
 
     static func close(_ fd: Int32) {
