@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Foundation
 
 /// One MCP session. Stdio has a single session; HTTP has one per `Mcp-Session-Id`.

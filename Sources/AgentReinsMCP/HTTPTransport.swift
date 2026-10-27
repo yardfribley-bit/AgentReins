@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Darwin
 import Foundation
 import Network
@@ -219,7 +220,7 @@ private final class ServerState {
         }
         let local = port(of: conn.currentPath?.localEndpoint)
         let remote = port(of: conn.currentPath?.remoteEndpoint) ?? port(of: conn.endpoint)
-        let listen = UInt16(port)
+        let listen = UInt16(self.port)
         // Prefer the side that is not our listen port (the client's ephemeral port).
         if let remote, remote != listen { return remote }
         if let local, local != listen { return local }
