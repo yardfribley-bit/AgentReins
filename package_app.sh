@@ -97,6 +97,9 @@ mkdir -p "$APP_BUNDLE/Contents/Resources/socket-sampler"
 cp "$PROJECT_DIR/tools/socket-sampler/socket_sampler.py" \
    "$PROJECT_DIR/scripts/install_socket_sampler.py" \
    "$APP_BUNDLE/Contents/Resources/socket-sampler/"
+# Loopback HTTP MCP LaunchAgent installer (same binary as stdio; --http).
+cp "$PROJECT_DIR/scripts/install_mcp_http.py" \
+   "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
 # Point Codex at the packaged Swift MCP (no system python/node).
 printf '%s\n' \
   '# Packaged with AgentReins.app — replace APP with the installed bundle path.' \
@@ -167,6 +170,7 @@ for res in \
   socket-sampler/install_socket_sampler.py \
   agentreins-mcp/evidence.py \
   agentreins-mcp/server.py \
+  agentreins-mcp/install_mcp_http.py \
   agentreins-mcp/alerts_bridge.cjs \
   agentreins-mcp/redact_secrets.py \
   agentreins-mcp/redact_vectors.json \

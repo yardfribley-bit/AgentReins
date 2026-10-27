@@ -104,6 +104,7 @@ jobs:
           test -x AgentReins.app/Contents/MacOS/AgentReinsMCP
           test -f AgentReins.app/Contents/Resources/socket-sampler/socket_sampler.py
           test -f AgentReins.app/Contents/Resources/socket-sampler/install_socket_sampler.py
+          test -f AgentReins.app/Contents/Resources/agentreins-mcp/install_mcp_http.py
           test -x AgentReins.app/Contents/MacOS/AgentReinsAlertsBridge
           test -x AgentReins.app/Contents/MacOS/AgentReinsKeychainHelper
           for exe in AgentReinsMCP AgentReinsAlertsBridge AgentReinsKeychainHelper; do
@@ -172,6 +173,11 @@ jobs:
           print("MCP_SMOKE_OK", names)
           proc.terminate()
           PY
+
+      - name: Packaged HTTP MCP smoke
+        run: |
+          set -euo pipefail
+          python3 tools/agentreins-mcp/test_http_transport.py AgentReins.app/Contents/MacOS/AgentReinsMCP
 
       - name: Live packaged sampler -> Swift MCP list_network
         run: |

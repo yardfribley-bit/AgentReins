@@ -5,135 +5,71 @@ import JavaScriptCore
 import Security
 
 /// Packaged read-only supervisor MCP — no system node/python.
-/// Codex: command = "…/AgentReins.app/Contents/MacOS/AgentReinsMCP"
+/// Stdio (default): Codex command = "…/AgentReins.app/Contents/MacOS/AgentReinsMCP"
+/// Loopback HTTP: AgentReinsMCP --http [--port 18977]  →  http://127.0.0.1:18977/mcp
 @main
 enum AgentReinsMCP {
-    static let protocolVersion = "2024-11-05"
-    /// Real caller from initialize.clientInfo — never a hard-coded "Codex".
-    static var actorName: String = "unknown-client"
-
     static func main() {
-        let tools: [[String: Any]] = [
-            ["name": "list_agents", "description": "List observed agents. Read-only.",
-             "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
-            ["name": "list_alerts", "description": "List risk alerts. Read-only.",
-             "inputSchema": ["type": "object", "properties": [
-                "agent": ["type": "string"], "since": ["type": "string"], "rule": ["type": "string"]
-             ], "additionalProperties": false]],
-            ["name": "get_execution", "description": "Get one execution; secrets redacted.",
-             "inputSchema": ["type": "object", "properties": ["execution_id": ["type": "string"]],
-                             "required": ["execution_id"], "additionalProperties": false]],
-            ["name": "list_network", "description": "Outbound network: transport-audit commands plus per-process sampled TCP/UDP sockets (proxied or not). Read-only, redacted.",
-             "inputSchema": ["type": "object", "properties": [
-                "agent": ["type": "string"], "since": ["type": "string"]
-             ], "additionalProperties": false]],
-            ["name": "get_coverage", "description": "Rule coverage and integrity.",
-             "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
-            ["name": "list_mcp_audit", "description": "HMAC-chained MCP read audit.",
-             "inputSchema": ["type": "object", "properties": ["limit": ["type": "integer"]],
-                             "additionalProperties": false]],
-        ]
+        var http = false
+        var port = EndpointDiscovery.defaultPort
+        var portFromArg = false
+        var envPortInvalid = false
+        var requireToken = ProcessInfo.processInfo.environment["AGENTREINS_MCP_REQUIRE_TOKEN"] == "1"
+        if let raw = ProcessInfo.processInfo.environment["AGENTREINS_MCP_PORT"], !raw.isEmpty {
+            if let parsed = Int(raw) { port = parsed }
+            else { envPortInvalid = true }
+        }
+        var index = 1
+        let args = CommandLine.arguments
+        while index < args.count {
+            let arg = args[index]
+            if arg == "--http" {
+                http = true
+            } else if arg == "--require-token" {
+                requireToken = true
+            } else if arg == "--port" {
+                index += 1
+                guard index < args.count, let parsed = Int(args[index]) else {
+                    failArgs("missing value for --port")
+                }
+                port = parsed
+                portFromArg = true
+            } else if arg.hasPrefix("--port=") {
+                guard let parsed = Int(arg.dropFirst("--port=".count)) else { failArgs("bad --port") }
+                port = parsed
+                portFromArg = true
+            } else if arg == "--help" || arg == "-h" {
+                FileHandle.standardError.write(Data("usage: AgentReinsMCP [--http] [--port 18977] [--require-token]\n".utf8))
+                exit(0)
+            } else {
+                failArgs("unknown argument: \(arg)")
+            }
+            index += 1
+        }
+        if http {
+            if envPortInvalid && !portFromArg { failArgs("invalid AGENTREINS_MCP_PORT") }
+            guard (1...65535).contains(port) else { failArgs("port must be 1...65535") }
+            HTTPTransport.run(port: port, requireToken: requireToken)
+        }
+        runStdio()
+    }
 
+    static func runStdio() {
+        let session = MCPSession(id: "stdio", transport: "stdio")
         while let line = readLine(strippingNewline: true) {
             guard !line.isEmpty, let data = line.data(using: .utf8),
                   let msg = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else { continue }
-            let method = msg["method"] as? String
-            let id = msg["id"]
-            let params = msg["params"] as? [String: Any] ?? [:]
-            if method == "initialize" {
-                if let info = params["clientInfo"] as? [String: Any] {
-                    let name = (info["name"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    let version = (info["version"] as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
-                    if !name.isEmpty {
-                        actorName = version.isEmpty ? name : "\(name)/\(version)"
-                    }
-                }
-                respond(id, [
-                    "protocolVersion": params["protocolVersion"] as? String ?? protocolVersion,
-                    "capabilities": ["tools": ["listChanged": false]],
-                    "serverInfo": ["name": "agentreins-supervisor", "version": "0.2.0-swift"],
-                    "instructions": "Read-only AgentReins supervisor MCP (Swift, no system node/python).",
-                ])
-                continue
+            if let reply = MCPDispatcher.handle(msg, session: session, auditActor: session.actorName) {
+                print(JSON.string(reply))
+                fflush(stdout)
             }
-            if method == "notifications/initialized" || method == "initialized" { continue }
-            if method == "ping" { respond(id, [:] as [String: Any]); continue }
-            if method == "tools/list" { respond(id, ["tools": tools]); continue }
-            if method == "tools/call" {
-                let name = params["name"] as? String ?? ""
-                let args = params["arguments"] as? [String: Any] ?? [:]
-                do {
-                    let result = try callTool(name, args)
-                    let text = pretty(result)
-                    respond(id, [
-                        "content": [["type": "text", "text": text]],
-                        "structuredContent": result,
-                        "isError": false,
-                    ])
-                } catch {
-                    respond(id, [
-                        "content": [["type": "text", "text": "error: \(error.localizedDescription)"]],
-                        "isError": true,
-                    ])
-                }
-                continue
-            }
-            if id != nil { respondError(id, -32601, "method not found: \(method ?? "")") }
         }
     }
 
-    static func callTool(_ name: String, _ args: [String: Any]) throws -> [String: Any] {
-        let banned = ["write", "delete", "update", "set_", "save", "dismiss", "accept", "whitelist", "mute"]
-        let lower = name.lowercased()
-        if banned.contains(where: { lower.contains($0) }) {
-            throw NSError(domain: "AgentReinsMCP", code: 1, userInfo: [NSLocalizedDescriptionKey: "write tools are not available"])
-        }
-        let allowed = Set(["list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit"])
-        guard allowed.contains(name) else {
-            throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown tool: \(name)"])
-        }
-        let integrity = Ctx.integrity()
-        Ctx.appendAudit(integrity, actor: actorName, tool: name, arguments: args)
-        let records = Transport.load()
-        switch name {
-        case "list_agents":
-            return Agents.list(records)
-        case "list_alerts":
-            return Alerts.list(records, agent: args["agent"] as? String, rule: args["rule"] as? String,
-                               since: args["since"] as? String)
-        case "get_execution":
-            guard let eid = args["execution_id"] as? String else {
-                throw NSError(domain: "AgentReinsMCP", code: 3, userInfo: [NSLocalizedDescriptionKey: "execution_id required"])
-            }
-            return Execution.get(eid, records)
-        case "list_network":
-            return Network.list(records, agent: args["agent"] as? String, since: args["since"] as? String, integrity: integrity)
-        case "get_coverage":
-            return Coverage.get(integrity)
-        case "list_mcp_audit":
-            let limit = (args["limit"] as? Int) ?? 30
-            return ["entries": Ctx.recent(integrity, limit: limit), "validation": integrity.validate(), "confidence": "Observed"]
-        default:
-            throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: name])
-        }
+    static func failArgs(_ message: String) -> Never {
+        FileHandle.standardError.write(Data("AgentReinsMCP: \(message)\n".utf8))
+        exit(2)
     }
-
-    static func respond(_ id: Any?, _ result: Any) {
-        guard id != nil else { return }
-        let out: [String: Any] = ["jsonrpc": "2.0", "id": id as Any, "result": result]
-        print(jsonString(out))
-        fflush(stdout)
-    }
-
-    static func respondError(_ id: Any?, _ code: Int, _ message: String) {
-        let out: [String: Any] = ["jsonrpc": "2.0", "id": id as Any, "error": ["code": code, "message": message]]
-        print(jsonString(out))
-        fflush(stdout)
-    }
-
-    static func pretty(_ value: Any) -> String { JSON.pretty(value) }
-
-    static func jsonString(_ value: Any) -> String { JSON.string(value) }
 }
 
 // MARK: - Paths
@@ -379,7 +315,8 @@ enum Execution {
     }
 }
 
-enum Network {
+/// Renamed from `Network` so `import Network` (NWListener) does not clash with this tool.
+enum NetworkTool {
     static func list(_ records: [[String: Any]], agent: String?, since: String?, integrity: Integrity) -> [String: Any] {
         let rows = records.compactMap { r -> [String: Any]? in
             if let agent, agent != "all", str(r["agent"]) != agent { return nil }
@@ -470,6 +407,7 @@ enum Coverage {
             "transportRoot": Paths.transport.path,
             "legacyPathPolicy": "never_read_/private/tmp",
             "runtime": "swift-mcp-no-system-node-python",
+            "mcpEndpoint": EndpointDiscovery.snapshot(),
             "confidence": "Unknown",
         ]
     }

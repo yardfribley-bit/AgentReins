@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "agentreins": {
+      "url": "http://127.0.0.1:18977/mcp",
+      "note": "粘贴后若客户端要求信任，在 WorkBuddy 里点「信任」。WorkBuddy 对 Streamable HTTP 的支持未在本仓库实测；不支持时继续用上一层目录里的 stdio 配置。"
+    }
+  }
+}

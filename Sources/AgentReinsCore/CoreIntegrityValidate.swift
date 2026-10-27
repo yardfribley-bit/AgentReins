@@ -1,4 +1,80 @@
 import Foundation
+#if canImport(Darwin)
+import Darwin
+#elseif canImport(Glibc)
+import Glibc
+#endif
+
+/// Cross-process lock for the audit chain. `flock` is per-process on Darwin and Linux, so a
+/// re-entrant append (seal → boundary → append) must not unlock early, and two threads in one
+/// process need a recursive mutex as well. HTTP serializes tools/call; this lock covers a
+/// concurrent stdio MCP writing the same chain.
+private final class AuditAppendLock {
+    static let shared = AuditAppendLock()
+    private let gate = NSRecursiveLock()
+    private var depth = 0
+    private var fd: Int32 = -1
+
+    func withLock(_ path: String, _ body: () -> Void) {
+        gate.lock()
+        defer { gate.unlock() }
+        if depth == 0 {
+            fd = AuditFileLock.openLocked(path)
+            AuditFileLock.lock(fd)
+        }
+        depth += 1
+        defer {
+            depth -= 1
+            if depth == 0 {
+                AuditFileLock.unlock(fd)
+                AuditFileLock.close(fd)
+                fd = -1
+            }
+        }
+        body()
+    }
+}
+
+private enum AuditFileLock {
+    static func openLocked(_ path: String) -> Int32 {
+        path.withCString { cstr in
+            #if canImport(Darwin)
+            Darwin.open(cstr, Darwin.O_RDWR | Darwin.O_CREAT | Darwin.O_CLOEXEC, mode_t(0o600))
+            #elseif canImport(Glibc)
+            Glibc.open(cstr, Glibc.O_RDWR | Glibc.O_CREAT | Glibc.O_CLOEXEC, mode_t(0o600))
+            #else
+            -1
+            #endif
+        }
+    }
+
+    static func lock(_ fd: Int32) {
+        guard fd >= 0 else { return }
+        #if canImport(Darwin)
+        _ = Darwin.flock(fd, 2) // LOCK_EX
+        #elseif canImport(Glibc)
+        _ = Glibc.flock(fd, 2)
+        #endif
+    }
+
+    static func unlock(_ fd: Int32) {
+        guard fd >= 0 else { return }
+        #if canImport(Darwin)
+        _ = Darwin.flock(fd, 8) // LOCK_UN
+        #elseif canImport(Glibc)
+        _ = Glibc.flock(fd, 8)
+        #endif
+    }
+
+    static func close(_ fd: Int32) {
+        guard fd >= 0 else { return }
+        #if canImport(Darwin)
+        _ = Darwin.close(fd)
+        #elseif canImport(Glibc)
+        _ = Glibc.close(fd)
+        #endif
+    }
+}
 
 extension Integrity {
     // MARK: run inventory
@@ -41,6 +117,12 @@ extension Integrity {
     // MARK: append (MCP read audit)
 
     public func append(actor: String, tool: String, arguments: [String: Any], key: Data) {
+        AuditAppendLock.shared.withLock(auditLog.path) {
+            self.appendLocked(actor: actor, tool: tool, arguments: arguments, key: key)
+        }
+    }
+
+    private func appendLocked(actor: String, tool: String, arguments: [String: Any], key: Data) {
         ensureDirs()
         let existing = lines()
         var prev = String(repeating: "0", count: 64)

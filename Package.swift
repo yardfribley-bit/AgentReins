@@ -41,11 +41,20 @@ let package = Package(
             path: "Sources/AgentReinsAlertsBridge",
             swiftSettings: [ .swiftLanguageMode(.v5) ]
         ),
+        // libproc peer lookup for the loopback HTTP MCP. C so socket_fdinfo comes from the macOS SDK
+        // headers (a Swift replica of that struct would silently disagree with the kernel).
+        .target(
+            name: "AgentReinsPeerIdent",
+            path: "Sources/AgentReinsPeerIdent",
+            publicHeadersPath: "include",
+            linkerSettings: [.linkedLibrary("proc")]
+        ),
         .executableTarget(
             name: "AgentReinsMCP",
-            dependencies: ["AgentReinsCore"],
+            dependencies: ["AgentReinsCore", "AgentReinsPeerIdent"],
             path: "Sources/AgentReinsMCP",
-            swiftSettings: [ .swiftLanguageMode(.v5) ]
+            swiftSettings: [ .swiftLanguageMode(.v5) ],
+            linkerSettings: [.linkedLibrary("proc")]
         ),
         .executableTarget(
             name: "AgentReinsKeychainHelper",

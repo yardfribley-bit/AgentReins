@@ -1,0 +1,8 @@
+# ~/.codex/config.toml — loopback HTTP MCP (no per-client stdio command).
+# Requires the LaunchAgent from scripts/install_mcp_http.py (or the copy inside the .app).
+[mcp_servers.agentreins]
+url = "http://127.0.0.1:18977/mcp"
+# When the server was installed with --require-token, point this at the token value
+# (the file ~/Library/Application Support/AgentGuard/mcp-http.token is mode 0600; do not commit it):
+# bearer_token_env_var = "AGENTREINS_MCP_TOKEN"
+tool_timeout_sec = 30
