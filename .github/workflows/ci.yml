@@ -129,6 +129,9 @@ jobs:
       - name: Packaged MCP smoke
         # Redaction vectors run against the same AgentReinsCore sources in test_swift_parity.py
         # (redact-vectors); the shipped binary has no self-test switch.
+        # Do not write __pycache__ into the signed bundle before the zip is uploaded.
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
           python3 - <<'PY'
@@ -175,6 +178,8 @@ jobs:
           PY
 
       - name: Packaged HTTP MCP smoke
+        env:
+          PYTHONDONTWRITEBYTECODE: "1"
         run: |
           set -euo pipefail
           python3 tools/agentreins-mcp/test_http_transport.py AgentReins.app/Contents/MacOS/AgentReinsMCP
