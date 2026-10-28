@@ -102,10 +102,18 @@
   }
   return found.map(externalDetail).find(Boolean)||null;
  }
+ function loopbackPeer(value){
+  const text=String(value||'');
+  if(!text||!loopbackHost(text))return '';
+  const host=hostToken(text);
+  const port=text.match(/:(\d{2,5})/)||text.match(/\bport (\d{2,5})\b/);
+  return port&&host?host+':'+port[1]:host;
+ }
  function projectLocal(records){
   return list(records).filter(agentTransport).map(run=>{
    const tunnel=(run.connections||[]).find(c=>c.kind==='proxyTunnel');
    const connected=(run.connections||[]).find(c=>c.kind==='connected');
+   const attempt=(run.connections||[]).find(c=>c.kind==='attempt');
    const blocks=list(run.blocks);
    const tunnelHost=externalDetail(tunnel?.detail?.[0]);
    const connectedHost=externalDetail(connected?.detail?.[0]);
@@ -115,13 +123,25 @@
    // 显式访问本机回环仍保留（不再被当成「无外连」丢掉）；代理隧道里的 127.0.0.1 仍不当作站点。
    const askedLoopback=(!asked&&askedRaw&&loopbackHost(askedRaw))?hostToken(askedRaw):null;
    const connectedLoopback=(!connectedHost&&connected&&loopbackHost(connected.detail?.[0])&&!tunnelHost)?hostToken(connected.detail?.[0]):null;
+   const attemptPeer=loopbackPeer(attempt&&attempt.detail&&attempt.detail[0]);
+   const recordedPeer=loopbackPeer(run.transportPeer);
    const formula=list(run.formulas).find(Boolean);
-   const recordedReal=run.realDestination||run.destinationHost||null;
-   const target=recordedReal||tunnelHost||headerHost||connectedHost||asked||askedLoopback||connectedLoopback||(run.tool==='brew'&&formula?'Homebrew':null);
+   const recordedReal=run.realDestination&&!loopbackHost(run.realDestination)?run.realDestination:(run.destinationHost&&!loopbackHost(run.destinationHost)?run.destinationHost:null);
+   const failedExit=run.exitCode!=null&&run.exitCode!==''&&Number(run.exitCode)!==0;
+   const invocation=invocationArgs(run);
+   const argvURL=invocation.find(arg=>/^https?:\/\//i.test(String(arg)))||'';
+   let target=recordedReal||tunnelHost||headerHost||connectedHost||asked||askedLoopback||connectedLoopback||attemptPeer||(run.tool==='brew'&&formula?'Homebrew':null);
+   // A failed loopback / peer-only attempt is evidence. Name the URL or the peer; do not drop it
+   // because curl never reached "Connected" and the only address is 127.0.0.1.
+   if(failedExit&&(argvURL&&loopbackHost(argvURL)||attemptPeer||recordedPeer||askedLoopback)&&loopbackHost(target||argvURL||attemptPeer||recordedPeer||askedLoopback)){
+    target=(argvURL&&loopbackHost(argvURL)?argvURL:'')||attemptPeer||recordedPeer||target;
+   }
+   if(!target&&failedExit&&(attemptPeer||recordedPeer))target=attemptPeer||recordedPeer;
    // 127.0.0.1 is the local proxy or a local port, never the external site.
    const proxied=!!tunnelHost||(!!(connected&&loopbackHost(connected.detail?.[0]))&&!!headerHost)||!!run.transportPeer;
-   const transportPeer=run.transportPeer||(proxied&&connected&&loopbackHost(connected.detail?.[0])?hostToken(connected.detail[0]):null);
-   const destinationSource=run.destinationSource||(recordedReal?'proxy_observed':headerHost?'proxy_observed':asked?'argv_parsed':null);
+   const transportPeer=run.transportPeer||(proxied&&connected&&loopbackHost(connected.detail?.[0])?hostToken(connected.detail[0]):null)||(failedExit?attemptPeer||recordedPeer||null:null);
+   let destinationSource=run.destinationSource||(recordedReal?'proxy_observed':headerHost?'proxy_observed':asked?'argv_parsed':null);
+   if(!destinationSource&&failedExit&&loopbackHost(target)&&!recordedReal)destinationSource='transport_peer_only';
    const side=direction=>blocks.filter(b=>b.direction===direction);
    const hideLine=line=>/^(?:>|<)?\s*(authorization|cookie|set-cookie|proxy-authorization)\s*:/i.test(String(line).trim())||/connection established/i.test(String(line));
    const text=items=>items.map(b=>{
@@ -132,7 +152,6 @@
    const bytes=items=>items.filter(b=>b.kind==='data').reduce((n,b)=>n+(Number(b.observedBytes)||0),0);
    const sent=side('send'),received=side('receive');
    const names=list(run.outboundFiles).filter(Boolean);
-   const invocation=invocationArgs(run);
    const downloads=list(run.downloads).filter(item=>item&&typeof item==='object');
    // en_d595e9da: never promote sh/bash exec fileResult into downloads[] — that made
    // downloadCall/downloadPID point at the exec record instead of curl.
@@ -140,7 +159,8 @@
    const fallback=(!isExecTool&&run.fileResult&&typeof run.fileResult==='object')?[run.fileResult]:[];
    const downloadRecords=(downloads.length?downloads:fallback).filter(item=>item.path&&item.path!=='/dev/null');
    const downloaded=downloadRecords.map(item=>String(item.path).split(/[/\\]/).pop()).filter(name=>name&&name!=='null');
-   const request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
+   let request=[names.length?'外传文件名\n'+names.join('\n'):'',downloaded.length?'下载文件名\n'+downloaded.join('\n'):'',text(sent)].filter(Boolean).join('\n\n');
+   if(argvURL&&!request.includes(argvURL))request=[argvURL,request].filter(Boolean).join('\n');
    const statusLine=received.flatMap(block=>list(block.http).map(String)).filter(line=>/^HTTP\//.test(line)&&!/connection established/i.test(line)).pop();
    const statusMatch=statusLine&&statusLine.match(/\s(\d{3})\b/);
    // chmod/sh/bash/open 无外连主机，仍保留为本地执行证据（S03）
@@ -251,6 +271,61 @@
    visits.push(visit);
   }
   return visits;
+ }
+ function normalizeCmd(value){return String(value||'').replace(/\s+/g,' ').trim();}
+ function parentBlob(run){
+  const argv=run&&run.parentArgv;
+  if(Array.isArray(argv))return normalizeCmd(argv.join(' '));
+  return normalizeCmd(argv);
+ }
+ function argvURLs(run){return list(run&&run.args).map(String).filter(arg=>/^https?:\/\//i.test(arg));}
+ // Child curls under one agent shell. A parent exit code of 0 must not hide them.
+ function shellChildAttempts(task, card){
+  const command=normalizeCmd(shellText(card));
+  const title=String(card&&card.title||'');
+  const shell=card&&(card.kind==='command'||/^(bash|shell|exec_command|terminal|commandexecution|zsh|sh)$/i.test(title)||/terminal|shell|\bbash\b/i.test(title));
+  if(!shell||command.length<12)return [];
+  const agent=task&&task.agent;
+  const session=task&&task.session;
+  const shellPID=card.execution&&card.execution.processID;
+  const runs=rawLocalTransports().filter(run=>{
+   if(agent&&run.agent&&run.agent!==agent)return false;
+   const owner=run.session||run.codexThreadID;
+   if(session&&owner&&owner!==session)return false;
+   return true;
+  });
+  const strong=[],urlHits=[];
+  for(const run of runs){
+   const parent=parentBlob(run);
+   if((command.length>=24&&parent.includes(command))||(shellPID!=null&&shellPID!==''&&String(run.parentPID)===String(shellPID))){strong.push(run);continue;}
+   if(argvURLs(run).some(url=>command.includes(url)))urlHits.push(run);
+  }
+  const pids=new Set(strong.map(run=>run.parentPID).filter(pid=>pid!=null&&pid!==''));
+  // $i in a for-loop is not the expanded URL. Same parent shell as a literal hit still counts.
+  if(/[\n;]|&&|\bfor\b|\bwhile\b/.test(command))for(const run of urlHits)if(run.parentPID!=null&&run.parentPID!=='')pids.add(run.parentPID);
+  const linked=runs.filter(run=>strong.includes(run)||urlHits.includes(run)||(pids.size&&pids.has(run.parentPID)));
+  const byID=new Map();
+  for(const run of linked){
+   const id=String(run.call||run.runID||'');
+   if(!id||byID.has(id))continue;
+   byID.set(id,run);
+  }
+  return [...byID.values()].sort((a,b)=>String(a.startedAt||'').localeCompare(String(b.startedAt||'')));
+ }
+ function shellChildMarkup(task, card){
+  const rows=shellChildAttempts(task, card);
+  if(!rows.length)return '';
+  const failed=rows.filter(run=>run.exitCode!=null&&run.exitCode!==''&&Number(run.exitCode)!==0);
+  const items=rows.map(run=>{
+   const exit=run.exitCode!=null&&run.exitCode!==''?run.exitCode:'未提供';
+   const url=argvURLs(run)[0]||'';
+   const peer=run.transportPeer||loopbackPeer(list(run.connections).map(c=>c&&c.detail&&c.detail[0]).find(Boolean))||'对端未采到';
+   const dest=run.realDestination&&!loopbackHost(run.realDestination)?run.realDestination:(url&&!loopbackHost(url)?hostToken(url):'');
+   const id=run.call||run.runID||'';
+   const bad=run.exitCode!=null&&run.exitCode!==''&&Number(run.exitCode)!==0;
+   return '<li'+(bad?' class="is-fail"':'')+'>'+esc(run.tool||'命令')+' · 退出码 '+esc(exit)+' · '+(dest?esc(dest):'目的地未解析')+' · 对端 '+esc(peer)+(url?' · '+esc(url):'')+' · 执行编号 '+esc(id)+'</li>';
+  }).join('');
+  return '<section class="shell-children"><h3>同一次 shell 的子命令</h3><p>父命令退出码不能盖住这些尝试。'+esc(failed.length)+' 次未成功，共 '+esc(rows.length)+' 次已审计。</p><ul>'+items+'</ul></section>';
  }
  function delegatedTarget(object){
   if(!object||typeof object!=='object')return null;
@@ -1029,11 +1104,21 @@
   const s=String(value||'').trim().replace(/^[a-z][a-z0-9+.-]*:\/\//i,'').replace(/^[^@\s/]+@/,'');
   return hostToken(s).toLowerCase();
  }
+ const FAILED_LOOPBACK='本机回环 · 未成功';
+ function attemptFailed(r){
+  const exit=r.exitCode!=null&&r.exitCode!==''?Number(r.exitCode):null;
+  return exit!=null&&exit!==0;
+ }
  function recordDestination(r){
   const hop=accessHop(r);
   if(hop.kind==='remote-tool')return '远程访问工具';
   if(hop.kind==='model')return '模型服务';
-  return hostOfText(httpURL(r)||r.host||whereOf(r))||'目的地未采到';
+  const key=hostOfText(httpURL(r)||r.host||whereOf(r))||'目的地未采到';
+  const loop=loopbackHost(key)||/^127\./.test(key)||key==='::1';
+  const peerOnly=r.destinationSource==='transport_peer_only'&&!r.realDestination;
+  // Failed loopback / destination-null attempts stay on the destination page. Successful local services do not.
+  if(attemptFailed(r)&&(loop||peerOnly))return FAILED_LOOPBACK;
+  return key;
  }
  const UNJOINED='经代理（真实目的地未对上）';
  function ipLiteral(key){return scope(key)!=='unknown';}
@@ -1056,7 +1141,7 @@
   }
   const allow=allowFn();
   for(const g of groups.values()){
-   const special=g.key==='远程访问工具'||g.key==='模型服务'||g.key==='目的地未采到'||g.key===UNJOINED;
+   const special=g.key==='远程访问工具'||g.key==='模型服务'||g.key==='目的地未采到'||g.key===UNJOINED||g.key===FAILED_LOOPBACK;
    g.local=!special&&(loopbackHost(g.key)||scope(g.key)==='local');
    g.ipOnly=!special&&ipLiteral(g.key);
    g.allowed=!special&&!g.local&&!!(allow&&allow(g.key));
@@ -1069,8 +1154,12 @@
    g.suspicious=g.bypass||g.sensitive>0||(g.nonAllowed&&!g.ipOnly);
    g.verdict=g.local?'内网':g.suspicious?'可疑':g.nonAllowed?'待核（只有 IP）':g.allowed?'白名单':special?'说明':'未判定';
   }
-  // Loopback is not 外网 (local services); private addresses stay, marked 内网.
-  return [...groups.values()].filter(g=>!(loopbackHost(g.key)||/^127\./.test(g.key)||g.key==='::1')).sort((a,b)=>(b.suspicious-a.suspicious)||((b.last||0)-(a.last||0)));
+  // Loopback is not 外网 (local services). Agent-attributed failures aimed at loopback stay visible.
+  return [...groups.values()].filter(g=>{
+   const loop=loopbackHost(g.key)||/^127\./.test(g.key)||g.key==='::1';
+   if(!loop)return true;
+   return g.records.some(attemptFailed);
+  }).sort((a,b)=>(b.suspicious-a.suspicious)||((b.last||0)-(a.last||0)));
  }
  function evidenceSummary(g){
   const counts=new Map();
@@ -1247,5 +1336,5 @@
    +socketLedgerMarkup(agent,{collapsed:true});
  }
  // ESC-MUTATION-REGION-END
- window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,setSocketLedger,socketLedgerMarkup,socketLedgerData,socketCoverageSummary,destinationGroups,resultCell,associationCell,auditCell,mapMarkup,destinationDetailMarkup,localExchanges,rawLocalTransports,bypassedAudit,tlsFailed,tlsHandshakeFailed};
+ window.AgentReinsNetwork={rows,scope,render,redact,exchangeMarkup,journeys,taskExchangeMarkup,coverage,connectionMarkup,securityMarkup,accessHop,projectLocal,setLocalTransports,setCapturedBodies,setSocketLedger,socketLedgerMarkup,socketLedgerData,socketCoverageSummary,destinationGroups,resultCell,associationCell,auditCell,mapMarkup,destinationDetailMarkup,localExchanges,rawLocalTransports,shellChildAttempts,shellChildMarkup,bypassedAudit,tlsFailed,tlsHandshakeFailed};
 })();

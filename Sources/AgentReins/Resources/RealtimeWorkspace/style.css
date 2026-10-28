@@ -291,3 +291,9 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 #current-bar.plain-status .plain-evidence{color:var(--purple);font-weight:500;font-size:11px;flex:none;white-space:nowrap;padding:0;line-height:16px}
 #current-bar.plain-status.running{background:#f1f8f4;border-color:#c9e4d6}
 #current-bar.plain-status.running .plain{color:#1f5c45}
+.shell-children{margin:12px 0;padding:12px 14px;border:1px solid #e7d3c4;border-radius:10px;background:#fff8f3}
+.shell-children h3{margin:0 0 6px;font-size:14px}
+.shell-children p{margin:0;color:#6b5346;font-size:13px;line-height:1.5}
+.shell-children ul{margin:8px 0 0;padding-left:18px}
+.shell-children li{margin:4px 0;line-height:1.45;overflow-wrap:anywhere}
+.shell-children li.is-fail{color:#9a3412}
