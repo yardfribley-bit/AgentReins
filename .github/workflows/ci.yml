@@ -85,6 +85,17 @@ jobs:
         run: |
           python3 -m unittest discover -s tools/socket-sampler -p 'test_*.py' -v
 
+      # LaunchAgent runs the sampler with macOS /usr/bin/python3 (3.9.6). `X | Y` in a
+      # runtime alias is a TypeError there even with `from __future__ import annotations`.
+      # GitHub's `python3` on this image is newer, so the step above does not catch it.
+      - name: Socket sampler unit tests (system Python 3.9)
+        run: |
+          set -euo pipefail
+          py=/usr/bin/python3
+          "$py" -c 'import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 9) else 1)'
+          "$py" -c 'import sys; sys.path[:0] = ["tools/socket-sampler", "tools/agentreins-mcp"]; import proc_lookup, socket_sampler'
+          "$py" -m unittest discover -s tools/socket-sampler -p 'test_*.py' -v
+
       - name: Live socket sampling (macOS, direct connection, proxy env unset)
         run: |
           set -euo pipefail

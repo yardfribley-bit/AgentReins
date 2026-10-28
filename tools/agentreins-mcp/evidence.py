@@ -1372,6 +1372,7 @@ def _socket_sampling(cov: dict[str, Any]) -> dict[str, Any]:
         "estimatedMissRate": cov.get("estimatedMissRate"),
         "estimatedMissRateBasis": cov.get("estimatedMissRateBasis"),
         "referenceShortConnectionSeconds": cov.get("referenceShortConnectionSeconds"),
+        "intervalNote": cov.get("intervalNote"),
         "measurementConfidence": cov.get("measurementConfidence"),
         "configuredIntervalSeconds": cov.get("configuredIntervalSeconds"),
         "state": cov.get("state"),
@@ -1448,6 +1449,8 @@ def get_coverage() -> dict[str, Any]:
     }
     if KEY_WARM.state == "pending":
         result["keychainStatus"] = "pending"
+    if ledger_cov.get("intervalNote"):
+        result["intervalNote"] = ledger_cov.get("intervalNote")
     return result
 
 
@@ -1616,6 +1619,15 @@ class KeychainWarmup:
 
 
 KEY_WARM = KeychainWarmup()
+
+
+def keychain_status_label(state: str) -> str:
+    """Tool-facing status. ``ready`` means the helper returned a usable key."""
+    if state in ("pending", "cold"):
+        return "pending"
+    if state == "ready":
+        return "ok"
+    return "key_unavailable"
 
 
 def pending_integrity() -> dict[str, Any]:

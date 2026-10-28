@@ -178,6 +178,32 @@ class ListLatency(unittest.TestCase):
             except (OSError, ValueError):
                 pass
 
+    def test_list_agents_reports_keychain_status_when_the_key_is_ready(self) -> None:
+        from keychain_fake import FAKE
+        FAKE.items.clear()
+        evidence.KEY_WARM.reset()
+        evidence._KEYCHAIN_STATE["unresponsiveUntil"] = 0.0
+        evidence._KEYCHAIN_STATE.pop("statusCache", None)
+        patches = FAKE.patches(evidence)
+        for patch in patches:
+            patch.start()
+        try:
+            out = server.call_tool("list_agents", {"limit": 1})
+        finally:
+            for patch in patches:
+                patch.stop()
+            evidence.KEY_WARM.reset()
+        self.assertEqual(out.get("keychainStatus"), "ok")
+
+    def test_socket_sampling_surfaces_interval_note(self) -> None:
+        sampled = evidence._socket_sampling({
+            "intervalNote": "已安装的 LaunchAgent 仍传 --interval 2.0",
+            "state": "sampling",
+            "effectiveIntervalSeconds": 0.5,
+        })
+        self.assertEqual(sampled["intervalNote"], "已安装的 LaunchAgent 仍传 --interval 2.0")
+        self.assertEqual(sampled["effectiveIntervalSeconds"], 0.5)
+
 
 if __name__ == "__main__":
     unittest.main()

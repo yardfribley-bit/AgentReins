@@ -234,9 +234,8 @@ enum MCPDispatcher {
     }
 
     static func stamp(_ result: [String: Any], _ keyState: String) -> [String: Any] {
-        guard keyState == "pending" else { return result }
         var copy = result
-        copy["keychainStatus"] = "pending"
+        copy["keychainStatus"] = KeychainWarmup.reportedStatus(keyState)
         return copy
     }
 

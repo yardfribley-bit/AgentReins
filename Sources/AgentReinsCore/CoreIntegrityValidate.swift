@@ -238,7 +238,30 @@ extension Integrity {
         return false
     }
 
+    private static var evidenceFP = ""
+    private static var evidenceKey = ""
+    private static var evidenceMarker = ""
+    private static var evidenceCached: [String: Any]?
+
     public func validateEvidenceFiles(_ key: Data, _ marker: [String: Any]?) -> [String: Any] {
+        // Unchanged run directories: reuse the last HMAC pass. get_coverage appends one audit line
+        // and would otherwise re-read every transport.json.
+        let fp = transportDirectoryFingerprint()
+        let keyTag = String(crypto.shaHex(data: key).prefix(16))
+        let markerTag = str(marker?["establishedAt"]) ?? ""
+        if fp == Self.evidenceFP, keyTag == Self.evidenceKey, markerTag == Self.evidenceMarker,
+           let evidenceCached = Self.evidenceCached {
+            return evidenceCached
+        }
+        let result = validateEvidenceFilesUncached(key, marker)
+        Self.evidenceFP = fp
+        Self.evidenceKey = keyTag
+        Self.evidenceMarker = markerTag
+        Self.evidenceCached = result
+        return result
+    }
+
+    private func validateEvidenceFilesUncached(_ key: Data, _ marker: [String: Any]?) -> [String: Any] {
         var result: [String: Any] = ["ok": true, "checked": 0, "confidence": "Observed", "keyLimitation": Self.limitation]
         var tampered: [[String: Any]] = [], legacyItems: [[String: Any]] = []
         var missingMac: [String] = [], missingRuns: [String] = []
