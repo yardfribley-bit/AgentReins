@@ -20,3 +20,5 @@ WorkBuddy：粘贴配置后必须在客户端点「信任」才会真正启用 s
 | Claude Code | `claude-code.mcp.json` |
 | Cursor | `cursor.mcp.json` |
 | WorkBuddy | `workbuddy.mcp.json` |
+
+同一台 Mac 上的 HTTP 入口（`http://127.0.0.1:18977/mcp`，需先装 LaunchAgent）在 [`http/`](http/README.md)。stdio 配置保持可用。
