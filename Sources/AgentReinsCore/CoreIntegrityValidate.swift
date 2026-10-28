@@ -7,15 +7,16 @@ import Glibc
 
 /// Cross-process lock for the audit chain. `flock` is per-process on Darwin and Linux, so a
 /// re-entrant append (seal → boundary → append) must not unlock early, and two threads in one
-/// process need a recursive mutex as well. HTTP serializes tools/call; this lock covers a
+/// process need a recursive mutex as well. HTTP tool calls run concurrently; `append` and
+/// `lines()` share this lock so a reader never observes a half-written line. It also covers a
 /// concurrent stdio MCP writing the same chain.
-private final class AuditAppendLock {
+final class AuditAppendLock {
     static let shared = AuditAppendLock()
     private let gate = NSRecursiveLock()
     private var depth = 0
     private var fd: Int32 = -1
 
-    func withLock(_ path: String, _ body: () -> Void) {
+    func withLock<T>(_ path: String, _ body: () -> T) -> T {
         gate.lock()
         defer { gate.unlock() }
         if depth == 0 {
@@ -31,7 +32,7 @@ private final class AuditAppendLock {
                 fd = -1
             }
         }
-        body()
+        return body()
     }
 }
 
@@ -207,7 +208,7 @@ extension Integrity {
             }
         }
         if !isDir(transport) {
-            result["note"] = "无运输审计目录"
+            result["note"] = "无传输审计目录"
             if !known.isEmpty || signedEraActive() {
                 missingRuns = known.sorted()
                 result["confidence"] = "Unknown"

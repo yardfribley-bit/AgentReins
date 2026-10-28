@@ -97,7 +97,17 @@ public final class Integrity {
     // MARK: audit lines
 
     public func lines(_ log: URL? = nil) -> [String] {
-        guard let text = readText(log ?? auditLog) else { return [] }
+        let url = log ?? auditLog
+        // Same-process HTTP calls read this log while another call appends. Take the append lock
+        // for the live audit log only; re-entering from `appendLocked` is safe (recursive mutex).
+        if url.path == auditLog.path {
+            return AuditAppendLock.shared.withLock(url.path) { self.linesUnlocked(url) }
+        }
+        return linesUnlocked(url)
+    }
+
+    private func linesUnlocked(_ log: URL) -> [String] {
+        guard let text = readText(log) else { return [] }
         return text.components(separatedBy: CharacterSet.newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
     }

@@ -9,13 +9,18 @@ struct PeerIdentity {
     var path: String
     var exeBase: String
 
-    static func lookup(clientPort: UInt16, serverPort: UInt16) -> PeerIdentity? {
+    static func lookup(clientPort: UInt16, serverPort: UInt16, cancelled: () -> Bool = { false }) -> PeerIdentity? {
         // The accepted socket is sometimes invisible to libproc for a few milliseconds.
+        // Stop early when the client has already gone away so a dead connection cannot sit on a worker.
         for attempt in 0..<8 {
+            if cancelled() { return nil }
             if let peer = lookupOnce(clientPort: clientPort, serverPort: serverPort) {
                 return peer
             }
-            if attempt < 7 { Thread.sleep(forTimeInterval: 0.02) }
+            if attempt < 7 {
+                if cancelled() { return nil }
+                Thread.sleep(forTimeInterval: 0.02)
+            }
         }
         return nil
     }

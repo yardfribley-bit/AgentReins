@@ -169,6 +169,30 @@ class DestinationTests(Base):
         self.assertIsNone(f["destination"])  # the proxy hop is transportPeer, never "the destination"
         self.assertEqual((f["transportPeer"], f["destinationSource"], f["destinationEvidence"]),
                          ("127.0.0.1:18891", "transport_peer_only", "Unknown"))
+        self.assertIs(f["viaProxy"], True)
+
+    def test_mcp_server_peer_with_noproxy_is_not_via_proxy(self) -> None:
+        # WorkBuddy P2-9: transportPeer 127.0.0.1:18977 is the MCP server, and --noproxy / auditBypass
+        # already say the command did not use the audit proxy.
+        rec = {
+            "auditBypass": True,
+            "args": ["--noproxy", "*", "-fsSL", "https://example.com/"],
+            "connections": [{"kind": "connected", "detail": ["127.0.0.1 (127.0.0.1) port 18977"]}],
+        }
+        f = evidence.destination_fields(rec)
+        self.assertEqual(f["transportPeer"], "127.0.0.1:18977")
+        self.assertIs(f["viaProxy"], False)
+
+    def test_noproxy_flag_alone_clears_via_proxy(self) -> None:
+        rec = {
+            "args": ["--noproxy", "*"],
+            "connections": [{"kind": "connected", "detail": ["127.0.0.1 (127.0.0.1) port 18891"]}],
+        }
+        self.assertIs(evidence.destination_fields(rec)["viaProxy"], False)
+
+    def test_mcp_listen_port_is_not_a_proxy_even_without_noproxy(self) -> None:
+        rec = {"args": [], "connections": [{"kind": "connected", "detail": ["127.0.0.1 (127.0.0.1) port 18977"]}]}
+        self.assertIs(evidence.destination_fields(rec)["viaProxy"], False)
 
 
 if __name__ == "__main__":

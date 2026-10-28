@@ -197,7 +197,7 @@ function isActualExecution(cmd,tool){
  return false;
 }
 
-/** 真实运输审计里的 sh / bash / open —— 与任务卡片同等作为 S03 执行侧证据（不含 chmod）。 */
+/** 真实传输审计里的 sh / bash / open —— 与任务卡片同等作为 S03 执行侧证据（不含 chmod）。 */
 function transportExecCommands(){
  const net=window.AgentReinsNetwork;
  const locals=typeof net?.localExchanges==='function'?net.localExchanges():[];

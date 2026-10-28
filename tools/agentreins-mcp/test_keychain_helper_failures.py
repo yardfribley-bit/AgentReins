@@ -53,6 +53,7 @@ class KeychainFailureBase(unittest.TestCase):
         ]
         for p in self.patches:
             p.start()
+        evidence._KEYCHAIN_STATE.pop("statusCache", None)
 
     def tearDown(self) -> None:
         for p in self.patches:
@@ -83,6 +84,17 @@ class HelperFailureTests(KeychainFailureBase):
         self.assertLess(time.monotonic() - t1, 0.5)
         self.assertEqual(calls.read_text().count("x"), 1)
         self.assertFalse(evidence.HMAC_KEY_FILE.exists())
+
+    def test_error_status_stays_cached_after_the_short_backoff(self) -> None:
+        calls = self.tmp / "calls"
+        self.use_helper('echo x >> "%s"\nexit 4' % calls)
+        self.assertEqual(evidence._keychain_lookup(evidence.KEYCHAIN_ACCOUNT_HMAC)[0], "error")
+        evidence._KEYCHAIN_STATE["unresponsiveUntil"] = 0.0
+        self.assertEqual(evidence._keychain_lookup(evidence.KEYCHAIN_ACCOUNT_HMAC)[0], "error")
+        self.assertEqual(calls.read_text(encoding="utf-8").count("x"), 1)
+        v = evidence.validate_audit()
+        self.assertEqual(v["status"], "key_unavailable")
+        self.assertEqual(calls.read_text(encoding="utf-8").count("x"), 1)
 
     def test_needs_approval_exit_is_error_with_reason_and_no_key(self) -> None:
         self.use_helper('echo "get failed: OSStatus -25308" >&2\nexit 4')
