@@ -115,10 +115,79 @@ public final class Integrity {
         return linesUnlocked(url)
     }
 
+    static var lineCachePath = ""
+    static var lineCacheSize: UInt64 = 0
+    static var lineCacheMtime: TimeInterval = -1
+    private static var lineCache: [String] = []
+    /// True only when the latest `linesUnlocked` result extended a trusted prefix.
+    static var lineCacheAppended = false
+
     private func linesUnlocked(_ log: URL) -> [String] {
-        guard let text = readText(log) else { return [] }
+        let attrs = try? fm.attributesOfItem(atPath: log.path)
+        let size = (attrs?[.size] as? NSNumber)?.uint64Value ?? 0
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? -1
+        if log.path == Self.lineCachePath && size == Self.lineCacheSize && mtime == Self.lineCacheMtime {
+            return Self.lineCache
+        }
+        if log.path == Self.lineCachePath && size > Self.lineCacheSize,
+           let extra = Self.readAppendedLines(log, from: Self.lineCacheSize) {
+            Self.lineCache.append(contentsOf: extra)
+            Self.lineCacheSize = size
+            Self.lineCacheMtime = mtime
+            Self.lineCacheAppended = true
+            return Self.lineCache
+        }
+        guard let text = readText(log) else {
+            Self.lineCachePath = log.path
+            Self.lineCacheSize = size
+            Self.lineCacheMtime = mtime
+            Self.lineCache = []
+            Self.lineCacheAppended = false
+            return []
+        }
+        let parsed = text.components(separatedBy: CharacterSet.newlines)
+            .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+        Self.lineCachePath = log.path
+        Self.lineCacheSize = size
+        Self.lineCacheMtime = mtime
+        Self.lineCache = parsed
+        Self.lineCacheAppended = false
+        return parsed
+    }
+
+    /// New complete lines after `from`, or nil when the file was not a pure append (caller re-reads).
+    private static func readAppendedLines(_ log: URL, from: UInt64) -> [String]? {
+        guard let fh = try? FileHandle(forReadingFrom: log) else { return nil }
+        defer { try? fh.close() }
+        if from > 0 {
+            guard (try? fh.seek(toOffset: from - 1)) != nil, fh.offsetInFile == from - 1 else { return nil }
+            let prev = try? fh.read(upToCount: 1)
+            if prev?.first != 10 { return nil } // not a newline: the prefix was rewritten
+        } else if (try? fh.seek(toOffset: 0)) == nil {
+            return nil
+        }
+        guard fh.offsetInFile == (from == 0 ? 0 : from), let data = try? fh.readToEnd() else { return nil }
+        let text = String(decoding: data, as: UTF8.self)
         return text.components(separatedBy: CharacterSet.newlines)
             .filter { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+    }
+
+    /// One bulk listing of run-directory mtimes. A nested transport.json write updates its run directory.
+    public func transportDirectoryFingerprint() -> String {
+        guard let dirs = try? fm.contentsOfDirectory(
+            at: transport,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return "missing" }
+        var parts: [String] = []
+        parts.reserveCapacity(dirs.count)
+        for dir in dirs {
+            let mt = (try? dir.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate?
+                .timeIntervalSince1970) ?? 0
+            parts.append("\(dir.lastPathComponent):\(mt)")
+        }
+        parts.sort()
+        return parts.joined(separator: "|")
     }
 
     public func prefixSha(_ lines: [String], _ count: Int) -> String {

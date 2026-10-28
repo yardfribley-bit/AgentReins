@@ -23,6 +23,7 @@ if str(_ROOT) not in sys.path:
 from evidence import (
     KEY_WARM,
     KeychainUnavailable,
+    keychain_status_label,
     append_audit,
     get_coverage,
     get_execution,
@@ -140,9 +141,8 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     # unavailable: do not sign and do not wait. get_coverage reports key_unavailable from the cached helper error.
 
     def _stamp(result: dict[str, Any]) -> dict[str, Any]:
-        if key_state == "pending":
-            result = dict(result)
-            result["keychainStatus"] = "pending"
+        result = dict(result)
+        result["keychainStatus"] = keychain_status_label(key_state)
         return result
 
     if name == "list_agents":

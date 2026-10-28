@@ -389,6 +389,11 @@ enum ProxyJournal {
     private static let lock = NSLock()
     private static var sig: String?
     private static var flows: [[String: Any]] = []
+    private static var parsedPath = ""
+    private static var parsedSize: Int64 = 0
+    private static var byFlow: [String: [String: Any]] = [:]
+    /// Never pull more than this off the route journal. The on-device file is over 100MB.
+    private static let tailBytes: Int64 = 2 * 1024 * 1024
 
     static func url() -> URL {
         if let env = ProcessInfo.processInfo.environment["AGENTREINS_WORKBUDDY_ROUTE_JSONL"], !env.isEmpty {
@@ -410,17 +415,19 @@ enum ProxyJournal {
             lock.unlock()
             return copy
         }
+        let previousSize = parsedPath == path.path ? parsedSize : 0
+        let previous = parsedPath == path.path ? byFlow : [:]
         lock.unlock()
-        guard size > 0, let handle = try? FileHandle(forReadingFrom: path) else { return [] }
-        defer { try? handle.close() }
-        let tail = 2 * 1024 * 1024
-        if size > tail { try? handle.seek(toOffset: UInt64(size - Int64(tail))) }
-        var data = handle.readDataToEndOfFile()
-        if size > tail, let nl = data.firstIndex(of: 10) {
-            data = Data(data.suffix(from: data.index(after: nl)))
+        let appending = previousSize > 0 && size > previousSize && size - previousSize <= tailBytes
+        let start = appending ? previousSize : max(0, size - tailBytes)
+        guard size > 0, let data = Self.readBounded(path, start: start, maxBytes: Int(tailBytes) + 65_536) else {
+            return []
         }
-        let text = String(decoding: data, as: UTF8.self)
-        var by: [String: [String: Any]] = [:]
+        var text = String(decoding: data, as: UTF8.self)
+        if start > 0 && !appending, let nl = text.firstIndex(of: "\n") {
+            text = String(text[text.index(after: nl)...])
+        }
+        var by = appending ? previous : [:]
         for line in text.split(whereSeparator: \.isNewline) {
             guard let rec = JSON.object(String(line)), let flow = str(rec["flowID"]), !flow.isEmpty else { continue }
             let pid = intValue(rec["clientPid"])
@@ -455,9 +462,25 @@ enum ProxyJournal {
         let rows = Array(by.values.sorted { (str($0["observedAt"]) ?? "") > (str($1["observedAt"]) ?? "") }.prefix(limit))
         lock.lock()
         sig = key
+        parsedPath = path.path
+        parsedSize = size
+        var kept: [String: [String: Any]] = [:]
+        for row in rows {
+            if let id = str(row["flowID"]) { kept[id] = row }
+        }
+        byFlow = kept
         flows = rows
         lock.unlock()
         return rows
+    }
+
+    /// Bytes from `start`, at most `maxBytes`. A failed seek returns nil instead of the front of a 100MB file.
+    private static func readBounded(_ path: URL, start: Int64, maxBytes: Int) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: path) else { return nil }
+        defer { try? handle.close() }
+        do { try handle.seek(toOffset: UInt64(start)) } catch { return nil }
+        guard handle.offsetInFile == UInt64(start) else { return nil }
+        return try? handle.read(upToCount: maxBytes)
     }
 }
 
@@ -523,21 +546,53 @@ enum SocketLedger {
         return defaultURL
     }
 
+    private static let loadLock = NSLock()
+    private static var loadKeySig: String?
+    private static var loadCached: [String: Any]?
+
     static func load(_ integrity: Integrity, agent: String?, since: String?, until: String? = nil, limit: Int = 200) -> [String: Any] {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let macAttrs = try? FileManager.default.attributesOfItem(atPath: url.path + ".mac")
+        let macSize = (macAttrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let macMtime = (macAttrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let sig = "\(url.path)|\(size)|\(mtime)|\(macSize)|\(macMtime)|\(agent ?? "")|\(since ?? "")|\(until ?? "")|\(limit)|\(KeychainWarmup.shared.state)"
+        loadLock.lock()
+        if loadKeySig == sig, let loadCached {
+            loadLock.unlock()
+            return loadCached
+        }
+        loadLock.unlock()
         let seal = SocketLedgerCore.sealPath(ledger: url, defaultLedger: defaultURL, integrityDir: Paths.integrityDir)
         // Pending warmup: do not launch the helper on the tool thread (a cold Keychain is a 15s hang).
         let key: Data? = KeychainWarmup.shared.state == "pending" ? nil : (try? integrity.loadKey(create: false))
-        return SocketLedgerCore.load(ledger: url, seal: seal, key: key, crypto: Ctx.crypto, agent: agent, since: since,
-                                     until: until, limit: limit)
+        let value = SocketLedgerCore.load(ledger: url, seal: seal, key: key, crypto: Ctx.crypto, agent: agent, since: since,
+                                          until: until, limit: limit)
+        loadLock.lock()
+        loadKeySig = sig
+        loadCached = value
+        loadLock.unlock()
+        return value
     }
 
     static func blindSpot(_ cov: [String: Any]) -> [String: Any] {
         guard str(cov["state"]) == "sampling" else {
-            return ["topic": "未走代理流量", "confidence": "Unknown", "status": nn(cov["state"]),
-                    "note": "socket-sampler 当前没有在采样（\(str(cov["state"]) ?? "?")）；不估算比例"]
+            let status = str(cov["state"]) ?? "?"
+            if status == "failing" {
+                return ["topic": "未走代理流量", "confidence": "Unknown", "status": "failing",
+                        "note": "采样进程还在（pid \(str(cov["samplerPid"]) ?? "?")），但成功采样已经过期，最近失败：\(str(cov["lastFailure"]) ?? "?")。这不是进程已退出。不估算漏采比例。隔离的 socket-ledger.json.tampered-* 只保留备查，不自动改写或删除。"]
+            }
+            if status == "tampered" {
+                return ["topic": "未走代理流量", "confidence": "Unknown", "status": "tampered",
+                        "note": "台账签名对不上，内容按篡改处理。采样进程是否还在要看 samplerPid，不能据此说采样器已停止。隔离文件只保留备查，不自动改写或删除。不估算漏采比例。"]
+            }
+            return ["topic": "未走代理流量", "confidence": "Unknown", "status": status,
+                    "note": "socket-sampler 当前没有在成功采样（\(status)）；不估算比例"]
         }
         func v(_ k: String) -> String { str(cov[k]) ?? "None" }
         let reference = str(cov["referenceShortConnectionSeconds"]) ?? "1.5"
+        let intervalNote = str(cov["intervalNote"]).map { " " + $0 } ?? ""
         return [
             "topic": "未走代理流量",
             "confidence": str(cov["measurementConfidence"]) == "Observed" ? "Observed" : "Unknown",
@@ -545,7 +600,8 @@ enum SocketLedger {
             "note": "按进程采样 TCP/UDP 连接：有效间隔 p50 \(v("effectiveIntervalSeconds"))s / p95 \(v("effectiveIntervalSecondsP95"))s"
                 + "（成功采样间隔，不是配置的 \(v("configuredIntervalSeconds"))s），短于 \(v("missesShorterThanSeconds"))s 的连接可能漏掉，"
                 + "按 \(reference) 秒连接估算漏采率 \(v("estimatedMissRate"))"
-                + "（最近一次 \(v("lastSampleAt"))；失败 \(v("failures")) 次）；系统解析器发出的 DNS 不可见",
+                + "（最近一次 \(v("lastSampleAt"))；失败 \(v("failures")) 次）；系统解析器发出的 DNS 不可见。"
+                + intervalNote,
         ]
     }
 
@@ -557,6 +613,7 @@ enum SocketLedger {
             "estimatedMissRate": nn(cov["estimatedMissRate"]),
             "estimatedMissRateBasis": nn(cov["estimatedMissRateBasis"]),
             "referenceShortConnectionSeconds": nn(cov["referenceShortConnectionSeconds"]),
+            "intervalNote": nn(cov["intervalNote"]),
             "measurementConfidence": nn(cov["measurementConfidence"]),
             "configuredIntervalSeconds": nn(cov["configuredIntervalSeconds"]),
             "state": nn(cov["state"]),
@@ -600,6 +657,18 @@ enum Coverage {
             "confidence": "Unknown",
         ]
         if let status = str(validation["keychainStatus"]) { result["keychainStatus"] = status }
+        if let note = str(ledger["intervalNote"]) { result["intervalNote"] = note }
+        result["integrityStatusGuide"] = "key_unavailable：读不到完整性密钥，不能下篡改结论。"
+            + "current_tampered：密钥可读，迁移后的记录有校验失败（currentTampered 是失败条数，不是「密钥又丢了」）。"
+            + "已隔离的 socket-ledger.json.tampered-* 只保留备查，不自动改写或删除。"
+        let events = (ledger["integrity"] as? [String: Any])?["events"] as? [[String: Any]] ?? []
+        let kept = events.compactMap { str($0["quarantinedAs"]) }
+        if !kept.isEmpty {
+            result["ledgerIsolation"] = [
+                "kept": kept,
+                "note": "签名对不上的台账已改名留在原地备查，没有删除，也没有在其上继续签名。",
+            ] as [String: Any]
+        }
         return result
     }
 
@@ -718,6 +787,7 @@ final class KeychainWarmup {
     private let queue = DispatchQueue(label: "com.agentreins.mcp.keychain-warm")
     private var started = false
     private var finished = false
+    /// cold | pending | found | missing | error | no_helper | unavailable
     private(set) var state = "cold"
 
     func start() {
@@ -734,10 +804,19 @@ final class KeychainWarmup {
             self.lock.lock()
             self.finished = true
             switch status {
-            case "found", "missing": self.state = "ready"
+            case "found", "missing", "error", "no_helper": self.state = status
             default: self.state = "unavailable"
             }
             self.lock.unlock()
+        }
+    }
+
+    /// Tool responses: ok (key readable), pending (helper still running), or key_unavailable.
+    static func reportedStatus(_ state: String) -> String {
+        switch state {
+        case "found": return "ok"
+        case "pending", "cold": return "pending"
+        default: return "key_unavailable"
         }
     }
 
@@ -878,13 +957,12 @@ enum Ctx {
         let (status, data) = integrity.keychain.lookup(Integrity.accountHmac)
         let keyTag = data.map { String(crypto.shaHex(data: $0).prefix(16)) } ?? status
         var parts = ["key=\(keyTag)"]
-        for url in [integrity.auditLog, integrity.auditSeal, integrity.sealMirror] {
+        for url in [integrity.auditLog, integrity.auditSeal, integrity.sealMirror,
+                    integrity.runInventory, integrity.runInventoryMac] {
             parts.append(statToken(url))
         }
-        for url in integrity.evidenceFiles() {
-            parts.append(statToken(url))
-            parts.append(statToken(integrity.macFile(url)))
-        }
+        // Run-directory mtimes, one bulk listing. Not a stat-and-read of every transport.json.
+        parts.append("dirs=" + integrity.transportDirectoryFingerprint())
         return parts.joined(separator: "|")
     }
 

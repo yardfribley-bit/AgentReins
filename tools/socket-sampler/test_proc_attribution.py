@@ -7,6 +7,7 @@ with no guessed pid.
 """
 from __future__ import annotations
 
+import ast
 import importlib.util
 import os
 import pathlib
@@ -149,6 +150,64 @@ class ScopedSampler(unittest.TestCase):
         self.assertEqual(ss.resolve_interval(0.5), (0.5, None))
         self.assertEqual(ss.resolve_interval(1.5), (1.5, None))
         self.assertEqual(ss.resolve_interval(3.0)[0], 3.0)
+
+    def test_sampler_sources_have_no_runtime_union_aliases(self) -> None:
+        """Python 3.9 evaluates `X | Y` in assignments. Annotations are postponed; aliases are not."""
+        import ast
+        repo = HERE.parents[1]
+        roots = [
+            HERE,
+            repo / "tools" / "agentreins-mcp" / "evidence.py",
+            repo / "scripts" / "install_socket_sampler.py",
+            repo / "Resources" / "agentguard-memory-scan.py",
+        ]
+        files = []
+        for root in roots:
+            if root.is_dir():
+                files.extend(root.glob("*.py"))
+            elif root.is_file():
+                files.append(root)
+        for path in files:
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            bad = _runtime_union_lines(tree)
+            self.assertEqual(bad, [], "%s has runtime X | Y at %s" % (path.name, bad))
+
+
+def _runtime_union_lines(tree: ast.AST) -> list[int]:
+    """Line numbers of `X | Y` that execute at runtime (not annotations)."""
+    bad: list[int] = []
+
+    def is_typeish(node: ast.AST) -> bool:
+        if isinstance(node, ast.Constant) and node.value is None:
+            return True
+        if isinstance(node, ast.Name):
+            return True
+        if isinstance(node, (ast.Subscript, ast.Tuple)):
+            return True
+        if isinstance(node, ast.BinOp) and isinstance(node.op, ast.BitOr):
+            return is_typeish(node.left) or is_typeish(node.right)
+        return False
+
+    class Visitor(ast.NodeVisitor):
+        def visit_FunctionDef(self, node: ast.FunctionDef) -> None:
+            for stmt in node.body:
+                self.visit(stmt)
+            for deco in node.decorator_list:
+                self.visit(deco)
+
+        visit_AsyncFunctionDef = visit_FunctionDef
+
+        def visit_AnnAssign(self, node: ast.AnnAssign) -> None:
+            if node.value is not None:
+                self.visit(node.value)
+
+        def visit_BinOp(self, node: ast.BinOp) -> None:
+            if isinstance(node.op, ast.BitOr) and (is_typeish(node.left) or is_typeish(node.right)):
+                bad.append(node.lineno)
+            self.generic_visit(node)
+
+    Visitor().visit(tree)
+    return bad
 
 
 if __name__ == "__main__":

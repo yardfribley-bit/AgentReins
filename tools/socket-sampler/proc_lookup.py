@@ -24,7 +24,7 @@ import re
 import socket
 import subprocess
 import sys
-from typing import Any, Callable, Iterable
+from typing import Any, Iterable
 
 LOST_STATE = "via proxy · attribution lost"
 ATTRIBUTED_STATE = "via proxy · attributed"
@@ -54,9 +54,6 @@ TCP_STATE = {
     "0A": "LISTEN",
     "0B": "CLOSING",
 }
-
-LsofRunner = Callable[[list[int], float], tuple[list[dict[str, Any]], str | None]]
-
 
 class ProcUnavailable(OSError):
     """Fast backend cannot run; the caller may fall back to scoped lsof."""
