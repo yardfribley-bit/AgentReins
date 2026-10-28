@@ -36,6 +36,117 @@ function taskStatus(t){return t?.lifecycleStatus||'observed';}
 function read(t){return !!t?.readAt||shown.readTaskIDs.includes(t?.id);}
 function state(t){return taskStatus(t)==='completed'&&read(t)?'已完成已读':statuses[taskStatus(t)]||'状态待确认';}
 function current(t){return t?.currentStep||'已收到活动，任务阶段待确认';}
+// One vernacular sentence for the task-process strip. Technical fields stay in 全部证据.
+function plainStatus(task){
+ const cards=Array.isArray(task?.cards)?task.cards:[];
+ const agent=String(task?.agent||'').trim()||'Agent';
+ const life=({running:'running',stopped:'stopped',completed:'completed',failed:'failed',cancelled:'cancelled',awaiting_confirmation:'awaiting_confirmation'})[task?.lifecycleStatus]||'unknown';
+ const goal=task?.completionEvidence==='native_goal_success'||task?.completionEvidence==='verified_delivery';
+ const goalText=goal?'目标已确认':'目标尚未确认';
+ const calls=cards.filter(c=>c&&c.call&&String(c.id||'').startsWith('call:'));
+ const liveCalls=calls.filter(c=>['running','waiting','pending'].includes(c.phase));
+ const toolCard=life==='running'&&liveCalls.length?liveCalls[liveCalls.length-1]:calls[calls.length-1]||null;
+ function cleanHost(raw){
+  let host=String(raw||'').trim().replace(/^\[|\]$/g,'').replace(/:\d+$/,'').replace(/\.$/,'').toLowerCase();
+  if(!host||host==='目标未知'||host==='unknown')return '';
+  if(/^\d{1,3}(\.\d{1,3}){3}$/.test(host)||(host.includes(':')&&/^[0-9a-f:.]+$/i.test(host)))return '';
+  if(/^(localhost|127\.|0\.|10\.|192\.168\.|169\.254\.|172\.(1[6-9]|2\d|3[01])\.|fe80:|fc[0-9a-f]|fd[0-9a-f])/.test(host))return '';
+  if(!/^[a-z0-9.-]+$/.test(host)||!host.includes('.')||host.includes('..'))return '';
+  if(/response|completed|socket_endpoint_only/i.test(host))return '';
+  return host;
+ }
+ function hostOf(card){
+  const resource=card?.resource||{},intent=resource.evidenceType==='tool_intent',candidates=[];
+  if(!intent){
+   if(resource.domain)candidates.push(resource.domain);
+   if(resource.url){try{candidates.push(new URL(resource.url).hostname);}catch{}}
+   if(resource.observedRemoteHost)candidates.push(resource.observedRemoteHost);
+   const titled=String(card?.title||'').match(/连接\s*·\s*([^\s·,，;；]+)/);
+   if(titled)candidates.push(titled[1]);
+  }
+  if(card?.call&&String(card.id||'').startsWith('call:')){
+   const command=String(card.execution?.command||'');
+   const url=/https?:\/\/([^/\s]+)/gi,scp=/\bgit@([^:\s]+):/gi,ssh=/\bssh:\/\/(?:[^@\s]+@)?([^/\s]+)/gi;
+   let match;while((match=url.exec(command)))candidates.push(match[1]);
+   while((match=scp.exec(command)))candidates.push(match[1]);
+   while((match=ssh.exec(command)))candidates.push(match[1]);
+  }
+  for(const raw of candidates){const host=cleanHost(raw);if(host)return host;}
+  return '';
+ }
+ let host='';
+ for(const card of cards){const found=hostOf(card);if(found)host=found;}
+ function gitSubcommand(command){
+  const tokens=String(command||'').split(/\s+/).filter(Boolean);
+  for(let i=0;i<tokens.length;i++){
+   const bare=tokens[i].replace(/^['"`]+|['"`]+$/g,'');
+   if(!/(?:^|\/)git(?:\.exe)?$/i.test(bare))continue;
+   let j=i+1;
+   while(j<tokens.length){
+    const token=tokens[j].replace(/^['"`]+|['"`]+$/g,'');
+    if(!token){j++;continue;}
+    if(token==='-C'||token==='-c'||token==='--git-dir'||token==='--work-tree'||token==='--namespace'){j+=2;continue;}
+    if(token.startsWith('-')){j++;continue;}
+    return token.toLowerCase();
+   }
+   return '';
+  }
+  return null;
+ }
+ function toolFact(card){
+  if(!card)return null;
+  const command=String(card.execution?.command||'').replace(/\s+/g,' ').trim();
+  const title=String(card.title||'').trim();
+  const git=gitSubcommand(command);
+  const gitActions={pull:'拉代码',fetch:'拉代码',clone:'拉代码',push:'推代码',commit:'提交改动',status:'查看状态',diff:'查看改动',log:'查看历史',checkout:'切换分支',switch:'切换分支',add:'暂存改动','ls-remote':'查询远端',merge:'合并',rebase:'变基',branch:'查看分支'};
+  if(git!=null||/^git$/i.test(title))return {name:'git',action:gitActions[git]||''};
+  if(/\bcurl(?:\.exe)?\b/i.test(command)||/^curl$/i.test(title))return {name:'curl',action:'请求'};
+  const shell=/^(bash|shell|exec_command|terminal|commandexecution|zsh|sh)$/i.test(title)||(card.kind==='command'&&/^(bash|shell|zsh|sh)$/i.test(title));
+  if(shell)return {name:'bash',action:'执行命令'};
+  if(/^(read|read_file|cat)$/i.test(title))return {name:title,action:'读文件'};
+  if(/^(write|write_file|edit|strreplace|apply_patch|patch)$/i.test(title))return {name:title,action:'改文件'};
+  if(/^(webfetch|websearch|browse|fetch)$/i.test(title))return {name:title,action:/search/i.test(title)?'搜索网页':'打开网页'};
+  if(/^present_files$/i.test(title))return {name:'交付',action:''};
+  if(card.kind==='mcp'||/mcp/i.test(title))return {name:/mcp/i.test(title)&&title.length<=24?title:'MCP',action:'调用服务'};
+  if(card.kind==='plan')return {name:title&&title.length<=16?title:'计划',action:'安排步骤'};
+  if(!title||title.length>24||/连接\s*·/.test(title)||/[0-9a-f]{8}-[0-9a-f]{4}-/i.test(title)||/\b(response|completed|socket_endpoint_only)\b/i.test(title))return {name:'工具',action:''};
+  return {name:title,action:''};
+ }
+ const fact=toolFact(toolCard);
+ const toolName=fact?.name||'';
+ const toolAction=fact?.action||'';
+ const toolPhrase=toolName?toolName+(toolAction?' '+toolAction:''):'';
+ let sentence;
+ if(life==='running'){
+  if(toolPhrase&&host)sentence=`${agent} 正在用 ${toolPhrase}，访问了 ${host}`;
+  else if(toolPhrase)sentence=`${agent} 正在用 ${toolPhrase}`;
+  else if(host)sentence=`${agent} 正在访问 ${host}`;
+  else sentence=`${agent} 正在运行 · 本轮尚未采到工具或外网`;
+ }else if(life==='stopped'){
+  sentence=host?`${agent} 已停止 · 上次外联 ${host} · ${goalText}`:`${agent} 已停止 · 未见外网记录 · ${goalText}`;
+ }else if(life==='completed'){
+  sentence=host?`${agent} 已结束 · 上次外联 ${host} · ${goalText}`:`${agent} 已结束 · ${goalText}`;
+ }else if(life==='failed'){
+  sentence=host?`${agent} 已失败 · 上次外联 ${host} · 目标尚未确认`:`${agent} 已失败 · 请查看证据`;
+ }else if(life==='cancelled'){
+  sentence=`${agent} 已取消 · 请查看证据`;
+ }else if(life==='awaiting_confirmation'){
+  sentence=`${agent} 正在等你确认`;
+ }else sentence=`${agent} 状态未确认 · 请查看证据`;
+ const labels={running:['进行中','run','进行中'],stopped:['已停止','stop','已停止'],completed:['已完成','stop','已完成'],failed:['失败','stop','失败'],cancelled:['已取消','unk','已取消'],awaiting_confirmation:['等我确认','stop','等我确认'],unknown:['未确认','unk','未确认']};
+ const [pill,pillClass,statusChip]=labels[life]||labels.unknown;
+ return {running:life==='running',sentence,pill,pillClass,statusChip,host,toolChip:toolCard?toolName||'工具':'未采到原生调用'};
+}
+function renderCurrentBar(t){
+ const bar=$('current-bar');if(!bar)return;
+ if(!t){bar.className='';bar.innerHTML='';return;}
+ const status=plainStatus(t);
+ bar.className='plain-status'+(status.running?' running':'');
+ const chips=[`<span class="chip-s"><b>状态</b>${esc(status.statusChip)}</span>`];
+ if(status.host)chips.push(`<span class="chip-s"><b>外网</b>${esc(status.host)}</span>`);
+ chips.push(`<span class="chip-s"><b>工具</b>${esc(status.toolChip)}</span>`);
+ bar.innerHTML=`<div class="row"><span class="st ${esc(status.pillClass)}">${esc(status.pill)}</span><span class="plain" title="${esc(status.sentence)}">${esc(status.sentence)}</span></div><div class="meta"><div class="chips">${chips.join('')}</div><button type="button" class="plain-evidence" data-timeline="all">查看全部证据</button></div>`;
+}
 function cls(t){return ({running:'',awaiting_confirmation:'orange',completed:'green',stopped:'orange',failed:'red',cancelled:'',observed:'orange'})[taskStatus(t)]||'';}
 function taskContexts(t=task()){return shown.contexts.filter(c=>c.agent===t?.agent&&c.session===t?.session&&c.turn===t?.turn);}
 function taskArtifacts(t=task()){return shown.artifacts.filter(a=>a.taskID===t?.id);}
@@ -102,7 +213,7 @@ function renderGraph(animate=false){
  if(!t){
   // Honest empty state (D3): no task identity yet, so no graph — not even a placeholder bubble.
   runtimeProjection=null;const host=$('graph');if(host){host.style.aspectRatio='';host.innerHTML='<div class="graph-empty"><h3>还没有带任务身份的记录</h3><p>这里只画采到的真实过程；没有数据时不画示意图。无归属的观察保留在采集现场。</p></div>';}
-  if($('graph-nav'))$('graph-nav').innerHTML='';$('runtime-controls').innerHTML='';$('runtime-note').textContent='';$('current-bar').innerHTML='';return;
+  if($('graph-nav'))$('graph-nav').innerHTML='';$('runtime-controls').innerHTML='';$('runtime-note').textContent='';renderCurrentBar(null);return;
  }
  const args={task:t,contexts:taskContexts(),processes:shown.processes,artifacts:taskArtifacts(),exchangeID:runtimeExchangeID,callID:runtimeCallID,overview:window.AgentReinsFlow.isOverview(),networkObservations:shown.collected.filter(r=>r.kind==='network'&&!r.hasTaskIdentity&&r.agent===t?.agent)};const g=graphMode==='spider'?window.AgentReinsRuntimeGraph.buildRelations(args):window.AgentReinsRuntimeGraph.buildArchitecture(args);runtimeProjection=g;
  for(const o of g.objects)object(o.key,o.type,o.data);
@@ -112,7 +223,7 @@ function renderGraph(animate=false){
  document.querySelectorAll('[data-graph-mode]').forEach(b=>b.setAttribute('aria-pressed',String(b.dataset.graphMode===graphMode)));
  window.AgentReinsFlow.render({scope:t?.id||'observation',nodes:layout.nodes,edges:layout.edges,selectedKey:selection,currentKey:g.currentKey,paused,onSelect:choose,width:layout.width,height:layout.height,animate});
  $('runtime-note').innerHTML=`${g.exchange?`当前展示第 ${g.choices.indexOf(g.exchange)+1} 次${g.exchange.structured?'实际模型请求':'本地输入片段'}${chosen?`，工具 ${esc(chosen.title)}${inChosenCycle?'':'（未归属于所选请求）'}`:''}。`:g.calls.length?'模型请求未采到；原生工具调用仍可查看。':'等待模型请求或原生工具调用。'}${g.relationships?` 蜘蛛图展开 ${g.shownCallCount} 次具体调用${g.hiddenCallCount?`，其余 ${g.hiddenCallCount} 次可点开集合或时间线`:''}。`:''}${g.unlinked.length?` ${g.unlinked.length} 个调用未与模型响应配对。`:''}${chosen&&['returned','failed'].includes(chosen.phase)&&!g.next?' 这次返回是否进入下一次请求，尚未取得配对证据。':''}`;
- $('current-bar').innerHTML=`<span>${esc(t?current(t):'等待带任务身份的新记录')}</span><small>${esc(t?.statusBasis||'系统观察持续保留，尚不代表任务执行。')}</small>`;
+ renderCurrentBar(t);
 }
 function reportedWebFailure(c){return c?.title==='WebFetch'&&/^Error:\s*(?:Error:\s*)?(?:Error during web fetch|Request timed out)/i.test(c.output||'');}
 function renderTimeline(){
@@ -293,12 +404,12 @@ function render(animate=false){
  const warning=[shown.persistenceError&&'证据保存异常：'+shown.persistenceError,shown.truncated&&'先前展示发生过容量截断；早期任务可能缺少证据，不能据此确认完整性。'].filter(Boolean).join(' · ');$('workspace-warning').hidden=!warning&&!shown.continuityNotice;$('workspace-warning').textContent=[warning,shown.continuityNotice].filter(Boolean).join(' · ');
  $('footer-state').textContent=`${shown.publishedAt?'更新 '+time(shown.publishedAt)+' · ':''}${paused?'画面固定，采集继续':'真实采集数据'} · 当前任务 ${primaryTasks().length} 个`;
  if(view==='alerts'||view==='rules'||view==='coverage')renderRisk();
- else if(view==='process'){if($('collection-detail'))$('collection-detail').innerHTML='';const vacant=!task();if($('empty-guide'))$('empty-guide').hidden=!vacant;if($('graph-screen'))$('graph-screen').hidden=vacant;if(!vacant){renderStages();renderGraph(animate);renderTimeline();renderDetail();}else{$('stages').innerHTML='';$('detail').innerHTML='';}}
+ else if(view==='process'){if($('collection-detail'))$('collection-detail').innerHTML='';const vacant=!task();if($('empty-guide'))$('empty-guide').hidden=!vacant;if($('graph-screen'))$('graph-screen').hidden=vacant;if(!vacant){renderStages();renderGraph(animate);renderTimeline();renderDetail();}else{$('stages').innerHTML='';$('detail').innerHTML='';renderCurrentBar(null);}}
  else if(view==='collection'){$('detail').innerHTML='';renderCollection();if(snapshot)renderCollectionDetail();}
  else if(view==='network')renderNetwork();
  else if(view==='results')renderBoard();
  if(view!=='alerts'&&view!=='rules'&&view!=='coverage'&&window.AgentReinsRisk){const n=window.AgentReinsRisk.buildAlerts(shown).filter(a=>a.status==='todo'||a.status==='ask').length;const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}}
- if(view==='process'&&task()?.detailsLoaded===false){$('current-bar').textContent='正在读取该任务的完整执行证据…';$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
+ if(view==='process'&&task()?.detailsLoaded===false){const bar=$('current-bar');if(bar){bar.className='plain-status';bar.innerHTML='<div class="row"><span class="plain">正在读取该任务的完整执行证据…</span></div>';}$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
 }
 function renderNetwork(){if(networkTask&&shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);const focused=document.activeElement?.id==='network-search',position=focused?document.activeElement.selectionStart:null;window.AgentReinsNetwork.render($('network-view'),shown,{agent:networkAgent,query:networkQuery,taskOnly:networkTask,selected:networkSelected,focusTask:taskID,mode:networkMode,destination:networkDestination,suspicious:networkSuspicious,alerts:riskState.alerts||window.AgentReinsRisk?._lastAlerts||[]});if(focused){$('network-search').focus();$('network-search').setSelectionRange(position,position);}}
 window.agentreinsRenderNetwork=()=>{if(view==='network')renderNetwork();};
