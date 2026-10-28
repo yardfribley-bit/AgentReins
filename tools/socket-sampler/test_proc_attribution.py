@@ -111,7 +111,17 @@ class ScopedSampler(unittest.TestCase):
                 elapsed = time.perf_counter() - started
             self.assertLess(elapsed, 1.0, out)
             self.assertIsNone(out["failure"], out)
-            self.assertIn("procfs", sampler.collect_method)
+            # Fast path only: agent-tree scoped. Linux names procfs; macOS names libproc
+            # plus lsof limited to those pids. Neither is the legacy whole-machine lsof -i.
+            method = sampler.collect_method
+            self.assertIn("scoped to agent trees", method)
+            self.assertNotIn("legacy whole-machine", method)
+            if os.path.exists("/proc/net/tcp"):
+                self.assertIn("procfs sockets of the agent process tree only", method)
+            else:
+                self.assertIn("libproc process tree", method)
+                self.assertIn("lsof scoped to those pids", method)
+                self.assertIn("not lsof -i for the whole machine", method)
             rows = [r for r in out["sockets"] if r.get("pid") == os.getpid() and r.get("remotePort") == server.getsockname()[1]]
             self.assertTrue(rows, out["sockets"])
         finally:
@@ -130,6 +140,15 @@ class ScopedSampler(unittest.TestCase):
         self.assertGreater(cov["estimatedMissRate"], 0.5)
         self.assertLess(cov["estimatedMissRate"], 1.0)
         self.assertIn("1.5", cov["estimatedMissRateBasis"])
+
+    def test_legacy_plist_interval_is_applied_as_the_fast_default(self) -> None:
+        applied, note = ss.resolve_interval(2.0)
+        self.assertEqual(applied, ss.DEFAULT_INTERVAL)
+        self.assertEqual(ss.DEFAULT_INTERVAL, 0.5)
+        self.assertIn("2.0", note or "")
+        self.assertEqual(ss.resolve_interval(0.5), (0.5, None))
+        self.assertEqual(ss.resolve_interval(1.5), (1.5, None))
+        self.assertEqual(ss.resolve_interval(3.0)[0], 3.0)
 
 
 if __name__ == "__main__":

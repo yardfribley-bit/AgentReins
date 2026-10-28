@@ -60,6 +60,29 @@ from typing import Any, Iterable
 SCHEMA = 1
 SAMPLER_VERSION = "socket-sampler/2"  # measured coverage + signed ledger; collector is agent-tree scoped
 REFERENCE_SHORT_SECONDS = 1.5
+# Cadence now that a round is scoped to the agent tree. 0.5s keeps the gap between
+# successful samples at or under 1s when a round itself is a few hundred milliseconds.
+DEFAULT_INTERVAL = 0.5
+# install_socket_sampler.py wrote this exact flag into every LaunchAgent before the
+# scoped collector. The plist is not rewritten by launching the app, so the sampler
+# treats that historical value as the old default and runs at DEFAULT_INTERVAL.
+LEGACY_PLIST_INTERVAL = 2.0
+
+
+def resolve_interval(requested: float) -> tuple[float, str | None]:
+    """Return (interval to sleep toward, note or None).
+
+    ``2.0`` is the value baked into existing ``com.agentreins.socket-sampler`` plists.
+    Any other number, including values above or below 2, is kept.
+    """
+    if float(requested) == LEGACY_PLIST_INTERVAL:
+        return DEFAULT_INTERVAL, (
+            "已安装的 LaunchAgent 仍传 --interval 2.0（安装器旧默认值）。采样器把它当成过期配置，"
+            "按 %.1f 秒采样，这样不改 plist 也会落到不超过 1 秒的有效间隔。"
+            "要固定别的间隔，传不是 2.0 的 --interval，或重新运行 install_socket_sampler.py。"
+            % DEFAULT_INTERVAL
+        )
+    return float(requested), None
 HERE = pathlib.Path(__file__).resolve().parent
 SUPPORT = pathlib.Path.home() / "Library/Application Support/AgentGuard"
 DEFAULT_LEDGER_HOME = SUPPORT / "socket-ledger.json"
@@ -1112,6 +1135,7 @@ class Sampler:
         self.dns_budget = dns_budget
         self.backend = backend
         self.collect_method = ""
+        self.interval_note: str | None = None
         self.round_budget = round_budget if round_budget else max(4.0, 3 * (interval or 2.0))
         self.procs = ProcessTable()
         self.ledger: dict[str, Any] | None = None
@@ -1346,6 +1370,8 @@ class Sampler:
                 "failures": int(stats.get("failures", 0)),
                 "confidence": "Observed" if ok and cov["measurementConfidence"] == "Observed" else "Unknown",
             })
+            if self.interval_note:
+                cov["intervalNote"] = self.interval_note
             ledger["coverage"] = cov
             try:
                 self._save(ledger)
@@ -1380,16 +1406,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ledger", type=pathlib.Path, default=DEFAULT_LEDGER)
     ap.add_argument("--root-pid", action="append", default=[], help="PID[:Agent] to monitor with its descendants")
     ap.add_argument("--no-discover", action="store_true", help="only monitor --root-pid trees")
-    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--interval", type=float, default=DEFAULT_INTERVAL,
+                    help="target seconds between round starts (2.0 is the old plist default and is applied as %.1f)"
+                    % DEFAULT_INTERVAL)
     ap.add_argument("--duration", type=float, default=0, help="watch for N seconds (0 = forever)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--no-dns", action="store_true", help="skip reverse/forward DNS lookups")
     ap.add_argument("--json", action="store_true", help="print each sample's touched rows as JSON")
     args = ap.parse_args(argv)
     roots = parse_roots(args.root_pid)
+    interval, interval_note = resolve_interval(args.interval)
     key, integrity_dir, key_reason = load_integrity_key()
-    sampler = Sampler(args.ledger, roots, not args.no_discover, args.interval, not args.no_dns,
+    sampler = Sampler(args.ledger, roots, not args.no_discover, interval, not args.no_dns,
                       key=key, key_reason=key_reason, seal_path=default_seal_path(args.ledger, integrity_dir))
+    sampler.interval_note = interval_note
     stop = {"flag": False}
 
     def on_signal(signum, _frame):  # launchd sends SIGTERM on bootout / stop

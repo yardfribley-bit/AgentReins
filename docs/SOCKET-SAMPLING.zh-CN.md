@@ -54,7 +54,7 @@
 ## 接线
 - MCP `list_network`（Python 与打包的 Swift 版同时改）：原 `network` 不变，新增 `sockets`（字段白名单 + 脱敏）、`socketSummary`（其中 `notViaProxyPublic` = 未走代理的外网连接数）、`socketCoverage`；台账不存在时明确 `not_running / Unknown`。`get_coverage` 的"未走代理流量"盲区随采样状态如实改变。
 - 外网访问页：`loadTransportAudit` 载荷新增 `sockets`（`SocketLedgerArchive.swift`，只读、字段白名单），"全部外网访问"下方新增"按进程采样的全部连接 · 不论是否走代理"表，逐列转义。
-- 运行：`python3 scripts/install_socket_sampler.py` 安装用户级 LaunchAgent（默认每 2 秒，旧版 3 秒）；安装包内带 `Resources/socket-sampler/`。
+- 运行：`python3 scripts/install_socket_sampler.py` 安装用户级 LaunchAgent（默认每 0.5 秒；2026-10 之前的安装器把 `--interval 2.0` 写进 plist，再早是 3 秒）。安装包内带 `Resources/socket-sampler/`。再跑一次安装器会改写 plist 并重新 bootstrap。只重启 App 不会改这个 plist。已经写着 `--interval 2.0` 的 plist，在采样器进程换成新脚本之后，会被当成过期默认值，按 0.5 秒跑（台账 `coverage.intervalNote` 会写明）。传不是 2.0 的 `--interval` 则保持原值。
 - `list_network` 的每条连接、`get_execution` 都给出同一组字段 `realDestination / destinationSource / transportPeer`。Python 用 `evidence.destination_fields`，Swift 用 `Destination.fields`，规则一样，由 `test_swift_parity.py` 对照检查。
 - 打包：`package_app.sh` 最后一步检查安装包。下面任何一项缺失、为空、不是 universal（arm64 + x86_64），或者采样器不是 `socket-sampler/2`，都直接报错退出，不出包：
   - `AgentReinsMCP`
@@ -75,8 +75,8 @@
 - CI（macOS runner）现场：`live_direct_check.py` 清空代理变量，起 bash→python 孙进程直连外网（TCP 443 + 已连接 UDP 53），并起一个无关进程做对照；断言台账里 PID/PPID、`viaProxy=false`、`ESTABLISHED`、≥2 次采样、无关进程不出现；覆盖率断言用实测字段（`missesShorterThanSeconds` 必须等于实测的 `successGapSecondsP95`，失败数和失败日志对得上），并打印 `LIVE_COVERAGE`；顺带报告短命的 `git ls-remote` 是否被 0.2 秒采样抓到（不作为失败）。`mcp_list_network_live.py` 用**安装包里**的采样器 + 打包的 Swift MCP 端到端验证 `list_network.sockets`：采样器像 LaunchAgent 一样持续运行（0.5 秒），等到至少 3 轮（最多 60 秒）才查询 MCP，然后断言 `sampling`；失败时打印采样器日志、台账的 `samples` 和 `failureLog`、签名状态，以及 MCP 调用耗时。CI 用一个专用的、不会自动上锁的钥匙串（`scripts/ci_keychain.sh`），并在测打包版之前把它重建，让打包版 helper 自己创建密钥。
 
 ## 已知局限
-- 采样不是拦截：短连接可能漏。漏多短看 `missesShorterThanSeconds`，实际隔多久看 `effectiveIntervalSeconds`，对 1.5 秒连接的估计漏采率看 `estimatedMissRate`。这三个数 `get_coverage` 每次都从台账里带出来。默认配置间隔仍是 2 秒；采样器只扫 agent 进程树，目标是常态 Mac 上有效间隔 ≤ 1 秒。
-- 走审计代理（127.0.0.1:18891）的请求，在连接还活着时由 mitm 插件用内核套接字反查客户端 PID、父进程链和 agent，写进路由日志和正文存档。查不到就写 `via proxy · attribution lost`，不猜测，也不采用客户端自己带的 pid 头。`list_network.proxyFlows` 列出这些记录。
+- 采样不是拦截：短连接可能漏。漏多短看 `missesShorterThanSeconds`，实际隔多久看 `effectiveIntervalSeconds`，对 1.5 秒连接的估计漏采率看 `estimatedMissRate`。这三个数 `get_coverage` 每次都从台账里带出来。新安装的配置间隔是 0.5 秒；采样器只扫 agent 进程树，目标是常态 Mac 上有效间隔 ≤ 1 秒。已有 plist 里的 `--interval 2.0` 在新采样器进程里按 0.5 秒执行。
+- 走审计代理（127.0.0.1:18891）的请求，在连接还活着时由 mitm 插件用内核套接字反查客户端 PID、父进程链和 agent，写进路由日志和正文存档。查不到就写 `via proxy · attribution lost`，不猜测，也不采用客户端自己带的 pid 头。`list_network.proxyFlows` 列出这些记录。App 每次启动用 `Bundle` 里的 `workbuddy_network_capture.py` 新起一个 mitmdump（`--scripts` 指向该文件）；退出再打开 App 会停掉旧进程并加载新插件。更新 App 之前已经在跑的 mitmdump 要等这次重启才会换脚本。插件旁边的 `proc_lookup.py`（`Resources/proc_lookup.py` 或 `Resources/socket-sampler/proc_lookup.py`）随安装包一起换。
 - Read / Edit / Write / Glob 这类不派生子进程、也不打开套接字的进程内工具，系统级采样和代理都看不到。`get_coverage.blindSpots` 里有这一条。没看到不等于没发生。Network Extension 不在这一步里。
 - DNS 查询由系统 mDNSResponder 发出，不属于 agent 进程，看不到；反向 DNS 往往只得到 CDN/云厂商名字（标 Inferred）。
 - 直连 HTTPS 只能看到 IP 和端口，看不到 SNI/正文。
