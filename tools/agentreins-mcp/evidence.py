@@ -1113,17 +1113,31 @@ def _ledger_key() -> bytes | None:
 
 
 def socket_freshness(samples: dict[str, Any], coverage: dict[str, Any], now: float | None = None) -> dict[str, Any]:
-    """'sampling' only while samples keep arriving; otherwise 'stopped' with how long ago."""
+    """'sampling' only while successful samples keep arriving.
+
+    A live sampler whose rounds are failing (process still writing failureLog) is 'failing',
+    not 'stopped'. Stopped means no recent success and no recent failure from that process.
+    """
     now = time.time() if now is None else now
     last = _iso_ts(samples.get("lastAt"))
     cadence = [coverage.get(k) for k in ("successGapSecondsP95", "configuredIntervalSeconds", "intervalSeconds")]
     base = max([float(c) for c in cadence if isinstance(c, (int, float))] or [3.0])
     limit = max(10.0, 3 * base)
+    pid = samples.get("samplerPid")
+    last_fail = _iso_ts(samples.get("lastFailureAt"))
+    alive = bool(pid) and last_fail is not None and (now - last_fail) <= limit
     if last is None:
-        return {"state": "stopped", "staleSeconds": None, "staleAfterSeconds": limit}
+        state = "failing" if alive else "stopped"
+        return {"state": state, "staleSeconds": None, "staleAfterSeconds": limit, "samplerPid": pid}
     age = now - last
-    return {"state": "sampling" if age <= limit else "stopped", "staleSeconds": round(age, 1),
-            "staleAfterSeconds": round(limit, 1)}
+    if age <= limit:
+        state = "sampling"
+    elif alive:
+        state = "failing"
+    else:
+        state = "stopped"
+    return {"state": state, "staleSeconds": round(age, 1), "staleAfterSeconds": round(limit, 1),
+            "samplerPid": pid}
 
 
 def load_socket_ledger(
@@ -1380,9 +1394,19 @@ def _socket_sampling(cov: dict[str, Any]) -> dict[str, Any]:
 
 
 def _socket_blind_spot_from(cov: dict[str, Any]) -> dict[str, Any]:
-    if cov.get("state") != "sampling":
-        return {"topic": "未走代理流量", "confidence": "Unknown", "status": cov.get("state"),
-                "note": "socket-sampler 当前没有在采样（%s）；不估算比例" % cov.get("state")}
+    state = cov.get("state")
+    if state == "failing":
+        return {"topic": "未走代理流量", "confidence": "Unknown", "status": "failing",
+                "note": "采样进程还在（pid %s），但成功采样已经过期，最近失败：%s。"
+                        "这不是进程已退出。不估算漏采比例。台账若已隔离（socket-ledger.json.tampered-*）只保留备查，不自动改写或删除。"
+                        % (cov.get("samplerPid"), cov.get("lastFailure"))}
+    if state == "tampered":
+        return {"topic": "未走代理流量", "confidence": "Unknown", "status": "tampered",
+                "note": "台账签名对不上，内容按篡改处理。采样进程是否还在要看 samplerPid，不能据此说采样器已停止。"
+                        "隔离文件只保留备查，不自动改写或删除。不估算漏采比例。"}
+    if state != "sampling":
+        return {"topic": "未走代理流量", "confidence": "Unknown", "status": state,
+                "note": "socket-sampler 当前没有在成功采样（%s）；不估算比例" % state}
     return {
         "topic": "未走代理流量",
         "confidence": "Observed" if cov.get("measurementConfidence") == "Observed" else "Unknown",
@@ -1451,6 +1475,20 @@ def get_coverage() -> dict[str, Any]:
         result["keychainStatus"] = "pending"
     if ledger_cov.get("intervalNote"):
         result["intervalNote"] = ledger_cov.get("intervalNote")
+    result["integrityStatusGuide"] = (
+        "key_unavailable：读不到完整性密钥，不能下篡改结论。"
+        "current_tampered：密钥可读，迁移后的记录有校验失败（currentTampered 是失败条数，不是「密钥又丢了」）。"
+        "已隔离的 socket-ledger.json.tampered-* 只保留备查，不自动改写或删除。"
+    )
+    isolated = []
+    for event in ((ledger_cov.get("integrity") or {}).get("events") or []):
+        if isinstance(event, dict) and event.get("quarantinedAs"):
+            isolated.append(event.get("quarantinedAs"))
+    if isolated:
+        result["ledgerIsolation"] = {
+            "kept": isolated,
+            "note": "签名对不上的台账已改名留在原地备查，没有删除，也没有在其上继续签名。",
+        }
     return result
 
 
@@ -1905,12 +1943,46 @@ def _legacy_manifest_path() -> pathlib.Path:
     return INTEGRITY_DIR / "legacy-evidence-manifest.json"
 
 
+_AUDIT_LINES: dict[str, Any] = {"sig": None, "lines": [], "bytes": 0}
+
+
 def _audit_lines(log: pathlib.Path | None = None) -> list[str]:
+    """Full audit log, cached by stat. A pure append reads only the new bytes."""
     log = log or AUDIT_LOG
     try:
-        return [ln for ln in log.read_text(encoding="utf-8").splitlines() if ln.strip()]
+        st = log.stat()
     except OSError:
         return []
+    sig = (str(log), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+    cached = _AUDIT_LINES
+    if cached.get("sig") == sig:
+        return list(cached.get("lines") or [])
+    prev = cached.get("sig")
+    lines: list[str]
+    try:
+        with log.open("rb") as fh:
+            if (isinstance(prev, tuple) and prev[:3] == sig[:3] and isinstance(prev[4], int)
+                    and 0 < prev[4] < st.st_size):
+                fh.seek(prev[4] - 1)
+                if fh.read(1) != b"\n":
+                    fh.seek(0)
+                    blob = fh.read()
+                    _AUDIT_LINES["bytes"] = int(_AUDIT_LINES.get("bytes") or 0) + len(blob)
+                    lines = [ln for ln in blob.decode("utf-8", "replace").splitlines() if ln.strip()]
+                else:
+                    blob = fh.read()
+                    _AUDIT_LINES["bytes"] = int(_AUDIT_LINES.get("bytes") or 0) + len(blob)
+                    extra = [ln for ln in blob.decode("utf-8", "replace").splitlines() if ln.strip()]
+                    lines = list(cached.get("lines") or []) + extra
+            else:
+                blob = fh.read()
+                _AUDIT_LINES["bytes"] = int(_AUDIT_LINES.get("bytes") or 0) + len(blob)
+                lines = [ln for ln in blob.decode("utf-8", "replace").splitlines() if ln.strip()]
+    except OSError:
+        return list(cached.get("lines") or [])
+    _AUDIT_LINES["sig"] = sig
+    _AUDIT_LINES["lines"] = lines
+    return lines
 
 
 def _prefix_sha(lines: list[str], count: int) -> str:
@@ -2792,6 +2864,52 @@ def recent_audit(limit: int = 30) -> list[dict[str, Any]]:
     return out
 
 
+_AUDIT_TAIL: dict[str, Any] = {"sig": None, "entries": [], "bytes": 0}
+
+
+def _audit_tail_entries(path: pathlib.Path, need: int, since: str | None) -> list[dict[str, Any]]:
+    """Newest audit objects. Unchanged file: no read. Growth: only the new bytes, never the whole log."""
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    sig = (str(path), st.st_mtime_ns, st.st_size, since or "")
+    if _AUDIT_TAIL.get("sig") == sig:
+        _AUDIT_TAIL["bytes"] = 0
+        return list(_AUDIT_TAIL.get("entries") or [])
+    prev = _AUDIT_TAIL.get("sig")
+    prev_size = prev[2] if isinstance(prev, tuple) and prev[0] == sig[0] and prev[3] == sig[3] else 0
+    prev_entries = list(_AUDIT_TAIL.get("entries") or []) if prev_size else []
+    cap = 2 * 1024 * 1024 if not since else 8 * 1024 * 1024
+    budget = min(cap, max(65_536, (need + 8) * 1024))
+    appending = bool(prev_size) and st.st_size > int(prev_size) and st.st_size - int(prev_size) <= budget
+    start = int(prev_size) if appending else max(0, st.st_size - budget)
+    try:
+        with path.open("rb") as fh:
+            fh.seek(start)
+            blob = fh.read(budget + 65_536)
+    except OSError:
+        return prev_entries
+    _AUDIT_TAIL["bytes"] = len(blob)
+    if start > 0 and not appending:
+        nl = blob.find(b"\n")
+        if nl != -1:
+            blob = blob[nl + 1:]
+    parsed = prev_entries if appending else []
+    for line in blob.splitlines():
+        if not line.strip():
+            continue
+        try:
+            parsed.append(json.loads(line))
+        except json.JSONDecodeError:
+            continue
+    if len(parsed) > 4000:
+        parsed = parsed[-4000:]
+    _AUDIT_TAIL["sig"] = sig
+    _AUDIT_TAIL["entries"] = parsed
+    return parsed
+
+
 def list_mcp_audit(
     limit: int | None = 30,
     offset: int | None = None,
@@ -2801,22 +2919,23 @@ def list_mcp_audit(
 ) -> dict[str, Any]:
     page_offset, page_limit = _parse_page(limit, offset, cursor, 30)
     since_ts, until_ts = _iso_ts(since), _iso_ts(until)
-    entries = []
-    if AUDIT_LOG.exists():
-        for line in AUDIT_LOG.read_text(encoding="utf-8").splitlines():
-            try:
-                entry = json.loads(line)
-            except json.JSONDecodeError:
-                continue
-            if _in_time_range(entry.get("at"), since_ts, until_ts):
-                entries.append(entry)
-    # Newest page first; each page stays chronological, matching the old suffix(limit).
     window_limit = page_limit if page_limit is not None else 30
-    total = len(entries)
-    end = max(0, total - page_offset)
+    entries = _audit_tail_entries(AUDIT_LOG, page_offset + window_limit, since) if AUDIT_LOG.exists() else []
+    entries = [row for row in entries if _in_time_range(row.get("at"), since_ts, until_ts)]
+    # Newest page first; each page stays chronological, matching the old suffix(limit).
+    shown = len(entries)
+    end = max(0, shown - page_offset)
     start = max(0, end - window_limit)
     page = entries[start:end]
-    truncated = start > 0
+    total = shown
+    if since is None and until is None and AUDIT_SEAL.is_file():
+        try:
+            seal_count = int(json.loads(AUDIT_SEAL.read_text(encoding="utf-8")).get("count") or 0)
+        except (OSError, ValueError, TypeError):
+            seal_count = 0
+        if seal_count > total:
+            total = seal_count
+    truncated = start > 0 or (page_offset + len(page) < total)
     return {
         "entries": page,
         "validation": validate_audit(),

@@ -105,12 +105,19 @@ public enum SocketLedgerCore {
     public static func freshness(_ samples: [String: Any], _ coverage: [String: Any], now: Double) -> [String: Any] {
         let cadence = ["successGapSecondsP95", "configuredIntervalSeconds", "intervalSeconds"].compactMap { number(coverage[$0]) }
         let limit = max(10.0, 3 * (cadence.max() ?? 3.0))
+        let pid = samples["samplerPid"]
+        let lastFail = Clock.parse(samples["lastFailureAt"])
+        let alive = pid != nil && !(pid is NSNull) && lastFail != nil && (now - (lastFail ?? 0)) <= limit
         guard let last = Clock.parse(samples["lastAt"]) else {
-            return ["state": "stopped", "staleSeconds": NSNull(), "staleAfterSeconds": limit]
+            return ["state": alive ? "failing" : "stopped", "staleSeconds": NSNull(),
+                    "staleAfterSeconds": limit, "samplerPid": nn(pid)]
         }
         let age = now - last
-        return ["state": age <= limit ? "sampling" : "stopped", "staleSeconds": round1(age),
-                "staleAfterSeconds": round1(limit)]
+        let state: String
+        if age <= limit { state = "sampling" }
+        else if alive { state = "failing" }
+        else { state = "stopped" }
+        return ["state": state, "staleSeconds": round1(age), "staleAfterSeconds": round1(limit), "samplerPid": nn(pid)]
     }
 
     /// Ledger + sidecar + seal under a shared flock, only if the sampler's lock file already exists

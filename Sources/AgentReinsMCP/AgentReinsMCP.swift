@@ -578,8 +578,17 @@ enum SocketLedger {
 
     static func blindSpot(_ cov: [String: Any]) -> [String: Any] {
         guard str(cov["state"]) == "sampling" else {
-            return ["topic": "未走代理流量", "confidence": "Unknown", "status": nn(cov["state"]),
-                    "note": "socket-sampler 当前没有在采样（\(str(cov["state"]) ?? "?")）；不估算比例"]
+            let status = str(cov["state"]) ?? "?"
+            if status == "failing" {
+                return ["topic": "未走代理流量", "confidence": "Unknown", "status": "failing",
+                        "note": "采样进程还在（pid \(str(cov["samplerPid"]) ?? "?")），但成功采样已经过期，最近失败：\(str(cov["lastFailure"]) ?? "?")。这不是进程已退出。不估算漏采比例。隔离的 socket-ledger.json.tampered-* 只保留备查，不自动改写或删除。"]
+            }
+            if status == "tampered" {
+                return ["topic": "未走代理流量", "confidence": "Unknown", "status": "tampered",
+                        "note": "台账签名对不上，内容按篡改处理。采样进程是否还在要看 samplerPid，不能据此说采样器已停止。隔离文件只保留备查，不自动改写或删除。不估算漏采比例。"]
+            }
+            return ["topic": "未走代理流量", "confidence": "Unknown", "status": status,
+                    "note": "socket-sampler 当前没有在成功采样（\(status)）；不估算比例"]
         }
         func v(_ k: String) -> String { str(cov[k]) ?? "None" }
         let reference = str(cov["referenceShortConnectionSeconds"]) ?? "1.5"
@@ -649,6 +658,17 @@ enum Coverage {
         ]
         if let status = str(validation["keychainStatus"]) { result["keychainStatus"] = status }
         if let note = str(ledger["intervalNote"]) { result["intervalNote"] = note }
+        result["integrityStatusGuide"] = "key_unavailable：读不到完整性密钥，不能下篡改结论。"
+            + "current_tampered：密钥可读，迁移后的记录有校验失败（currentTampered 是失败条数，不是「密钥又丢了」）。"
+            + "已隔离的 socket-ledger.json.tampered-* 只保留备查，不自动改写或删除。"
+        let events = (ledger["integrity"] as? [String: Any])?["events"] as? [[String: Any]] ?? []
+        let kept = events.compactMap { str($0["quarantinedAs"]) }
+        if !kept.isEmpty {
+            result["ledgerIsolation"] = [
+                "kept": kept,
+                "note": "签名对不上的台账已改名留在原地备查，没有删除，也没有在其上继续签名。",
+            ] as [String: Any]
+        }
         return result
     }
 

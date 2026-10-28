@@ -1,5 +1,23 @@
 import Foundation
 
+/// HMAC walk over the audit log. A pure append rechecks only the new lines; a rewrite of the prefix
+/// (first line or the line at the previous head no longer matches) scans the whole log again.
+private enum AuditHmacCache {
+    static var path = ""
+    static var size: UInt64 = 0
+    static var mtime: TimeInterval = -1
+    static var checked = 0
+    static var nextIndex = 0
+    static var head = String(repeating: "0", count: 64)
+    static var prev = String(repeating: "0", count: 64)
+    static var seenSigned = false
+    static var tampered: [[String: Any]] = []
+    static var gaps: [[String: Any]] = []
+    static var legacy: [[String: Any]] = []
+    static var firstLine = ""
+    static var headLine = ""
+}
+
 extension Integrity {
     /// evidence.py validate_audit: keyed HMAC chain split into current (decides ok) and legacy (Unknown).
     /// Never re-signs anything on read.
@@ -72,11 +90,20 @@ extension Integrity {
             result["confidence"] = "Unknown"
         }
         let lines = self.lines()
+        let unchanged = AuditHmacCache.path == auditLog.path && AuditHmacCache.size == Integrity.lineCacheSize
+            && AuditHmacCache.mtime == Integrity.lineCacheMtime && AuditHmacCache.nextIndex == lines.count
+        let prefixUntouched = AuditHmacCache.nextIndex > 0 && lines.count >= AuditHmacCache.nextIndex
+            && lines[0] == AuditHmacCache.firstLine
+            && lines[AuditHmacCache.nextIndex - 1] == AuditHmacCache.headLine
+        let resume = !unchanged && Integrity.lineCacheAppended && prefixUntouched
+            && lines.count >= AuditHmacCache.nextIndex && AuditHmacCache.path == auditLog.path
         var boundary = intValue(marker?["auditBoundaryIndex"]) ?? 0
         if let marker {
             if lines.count < boundary {
                 tampered.append(["reason": "audit_truncated_below_boundary", "boundary": boundary])
                 boundary = lines.count
+            } else if resume && boundary <= AuditHmacCache.nextIndex {
+                // Prefix was spot-checked above; do not rebuild it on every appended line.
             } else if prefixSha(lines, boundary) != str(marker["auditPrefixSha256"]) {
                 tampered.append(["reason": "legacy_audit_prefix_modified", "boundary": boundary])
                 boundary = 0  // pinned legacy bytes changed: nothing before the boundary can be excused any more
@@ -86,7 +113,21 @@ extension Integrity {
         var seenSigned = false
         var head = prev
         var checked = 0
-        for (idx, line) in lines.enumerated() {
+        var start = 0
+        if unchanged || resume {
+            tampered.append(contentsOf: AuditHmacCache.tampered)
+            gaps.append(contentsOf: AuditHmacCache.gaps)
+            legacyAudit.append(contentsOf: AuditHmacCache.legacy)
+            prev = AuditHmacCache.head
+            head = AuditHmacCache.head
+            checked = AuditHmacCache.checked
+            seenSigned = AuditHmacCache.seenSigned
+            start = unchanged ? lines.count : AuditHmacCache.nextIndex
+        }
+        let loopStartTampered = tampered.count
+        let loopStartGaps = gaps.count
+        let loopStartLegacy = legacyAudit.count
+        for (idx, line) in lines.enumerated() where idx >= start {
             let legacyZone = idx < boundary
             guard let entry = JSON.object(line) else {
                 if legacyZone {
@@ -130,6 +171,28 @@ extension Integrity {
             if let h = str(entry["hash"]), !h.isEmpty { prev = h }
             head = prev
         }
+        let freshTampered = Array(tampered.dropFirst(loopStartTampered))
+        let freshGaps = Array(gaps.dropFirst(loopStartGaps))
+        let freshLegacy = Array(legacyAudit.dropFirst(loopStartLegacy))
+        if resume {
+            AuditHmacCache.tampered += freshTampered
+            AuditHmacCache.gaps += freshGaps
+            AuditHmacCache.legacy += freshLegacy
+        } else if !unchanged {
+            AuditHmacCache.tampered = freshTampered
+            AuditHmacCache.gaps = freshGaps
+            AuditHmacCache.legacy = freshLegacy
+        }
+        AuditHmacCache.path = auditLog.path
+        AuditHmacCache.size = Integrity.lineCacheSize
+        AuditHmacCache.mtime = Integrity.lineCacheMtime
+        AuditHmacCache.checked = checked
+        AuditHmacCache.nextIndex = lines.count
+        AuditHmacCache.head = head
+        AuditHmacCache.prev = prev
+        AuditHmacCache.seenSigned = seenSigned
+        AuditHmacCache.firstLine = lines.first ?? ""
+        AuditHmacCache.headLine = lines.isEmpty ? "" : lines[lines.count - 1]
         result["entriesChecked"] = checked
         let sealRequired = seenSigned || checked > 0 || exists(sealMirror) || signedEraActive()
         let activeSeal: URL? = exists(auditSeal) ? auditSeal : (exists(sealMirror) ? sealMirror : nil)

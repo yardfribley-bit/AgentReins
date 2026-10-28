@@ -154,7 +154,20 @@ class ScopedSampler(unittest.TestCase):
     def test_sampler_sources_have_no_runtime_union_aliases(self) -> None:
         """Python 3.9 evaluates `X | Y` in assignments. Annotations are postponed; aliases are not."""
         import ast
-        for path in HERE.glob("*.py"):
+        repo = HERE.parents[1]
+        roots = [
+            HERE,
+            repo / "tools" / "agentreins-mcp" / "evidence.py",
+            repo / "scripts" / "install_socket_sampler.py",
+            repo / "Resources" / "agentguard-memory-scan.py",
+        ]
+        files = []
+        for root in roots:
+            if root.is_dir():
+                files.extend(root.glob("*.py"))
+            elif root.is_file():
+                files.append(root)
+        for path in files:
             tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
             bad = _runtime_union_lines(tree)
             self.assertEqual(bad, [], "%s has runtime X | Y at %s" % (path.name, bad))

@@ -176,7 +176,9 @@ enum MCPDispatcher {
         // that a Keychain prompt hang (15s) is reported as pending instead of blocking the read.
         let keyState = KeychainWarmup.shared.resolve(grace: 0.25)
         Ctx.appendAudit(actor: actor, tool: name, arguments: args, sync: auditSync && keyState != "pending")
-        if name == "list_mcp_audit" { Ctx.flushAudit() }
+        // A pending Keychain must not sit inside flush (the helper wait is up to 20s) and then
+        // blow the 25s HTTP timeout. The page is the log as it already is.
+        if name == "list_mcp_audit" && keyState != "pending" { Ctx.flushAudit() }
         let loaded = Transport.loadReporting()
         let records = loaded.records
         let page: (offset: Int, limit: Int?)
@@ -210,24 +212,20 @@ enum MCPDispatcher {
             }
             return Coverage.get(integrity, validation: Ctx.cachedValidation(integrity))
         case "list_mcp_audit":
-            let entries = integrity.lines().compactMap { JSON.object($0) }
-            let sinceTs = Clock.parse(args["since"])
-            let untilTs = Clock.parse(args["until"])
-            let filtered = entries.filter { entry in
-                guard let ts = Clock.parse(entry["at"]) else { return true }
-                if let sinceTs, ts < sinceTs { return false }
-                if let untilTs, ts > untilTs { return false }
-                return true
-            }
-            // Newest page first, each page still chronological (same order as the previous suffix(limit)).
-            let window = pageRecent(filtered, offset: page.offset, limit: page.limit ?? 30)
-            return [
-                "entries": window.items,
-                "validation": Ctx.cachedValidation(integrity),
+            let limit = page.limit ?? 30
+            let paged = AuditPage.page(log: Paths.auditLog, seal: Paths.auditSeal,
+                                       offset: page.offset, limit: limit,
+                                       since: str(args["since"]), until: str(args["until"]))
+            let validation: [String: Any] = keyState == "pending"
+                ? Coverage.pendingIntegrity()
+                : Ctx.cachedValidation(integrity)
+            return stamp([
+                "entries": paged.items,
+                "validation": validation,
                 "confidence": "Observed",
-                "total": window.total, "offset": window.offset, "limit": window.limit,
-                "truncated": window.truncated, "nextCursor": window.nextCursor,
-            ]
+                "total": paged.total, "offset": page.offset, "limit": limit,
+                "truncated": paged.truncated, "nextCursor": paged.nextCursor,
+            ], keyState)
         default:
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: name])
         }
@@ -253,7 +251,8 @@ enum MCPDispatcher {
         }
     }
 
-    /// Page backward through a chronological list: offset 0 is the newest `limit` rows, still oldest-first.
+    /// Newest `limit` audit rows, still oldest-first inside the page. Reads the tail of the jsonl,
+    /// not the whole file. `total` prefers the seal count when the tail is only the recent end.
     static func pageRecent(_ items: [[String: Any]], offset: Int, limit: Int) -> ListPage.Window {
         let total = items.count
         let end = max(0, total - offset)
@@ -263,5 +262,97 @@ enum MCPDispatcher {
         return ListPage.Window(items: page, total: total, offset: offset, limit: limit,
                               truncated: truncated,
                               nextCursor: truncated ? ListPage.encodeCursor(offset + limit) : NSNull())
+    }
+}
+
+/// Recent MCP audit rows from the tail of mcp-supervisor-audit.jsonl. A warm call with an unchanged
+/// file does not touch the disk. Growth reads only the new bytes, capped so a 100MB log cannot
+/// be pulled into one tools/call.
+enum AuditPage {
+    struct Result {
+        var items: [[String: Any]]
+        var total: Int
+        var truncated: Bool
+        var nextCursor: Any
+    }
+
+    private static let lock = NSLock()
+    private static var sig: String?
+    private static var entries: [[String: Any]] = []
+    private static var parsedPath = ""
+    private static var parsedSize: Int64 = 0
+    private static let tailCap: Int64 = 2 * 1024 * 1024
+
+    static func page(log: URL, seal: URL, offset: Int, limit: Int, since: String?, until: String?) -> Result {
+        let loaded = load(log, need: offset + limit + 8, since: since)
+        let sinceTs = Clock.parse(since)
+        let untilTs = Clock.parse(until)
+        let filtered = loaded.filter { entry in
+            guard let ts = Clock.parse(entry["at"]) else { return true }
+            if let sinceTs, ts < sinceTs { return false }
+            if let untilTs, ts > untilTs { return false }
+            return true
+        }
+        let window = MCPDispatcher.pageRecent(filtered, offset: offset, limit: limit)
+        var total = window.total
+        var truncated = window.truncated
+        if since == nil && until == nil, let sealCount = sealEntryCount(seal), sealCount > total {
+            total = sealCount
+            truncated = offset + window.items.count < sealCount
+        }
+        let next: Any = truncated ? ListPage.encodeCursor(offset + limit) : NSNull()
+        return Result(items: window.items, total: total, truncated: truncated, nextCursor: next)
+    }
+
+    private static func load(_ log: URL, need: Int, since: String?) -> [[String: Any]] {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: log.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "\(log.path)|\(size)|\(mtime)|\(since ?? "")"
+        lock.lock()
+        if sig == key {
+            let copy = entries
+            lock.unlock()
+            return copy
+        }
+        let previousSize = parsedPath == log.path ? parsedSize : 0
+        let previous = parsedPath == log.path ? entries : []
+        lock.unlock()
+        guard size > 0 else { return [] }
+        let want = Int64(max(need, 30)) * 1024
+        let cap: Int64 = since == nil ? tailCap : min(8 * 1024 * 1024, tailCap * 4)
+        let budget = min(cap, max(Int64(65_536), want))
+        let appending = since == nil && previousSize > 0 && size > previousSize && size - previousSize <= budget
+        let start = appending ? previousSize : max(0, size - budget)
+        guard let data = readBounded(log, start: start, maxBytes: Int(budget) + 65_536) else { return previous }
+        var text = String(decoding: data, as: UTF8.self)
+        if start > 0 && !appending, let nl = text.firstIndex(of: "\n") {
+            text = String(text[text.index(after: nl)...])
+        }
+        var parsed = appending ? previous : []
+        for line in text.split(whereSeparator: \.isNewline) {
+            if let obj = JSON.object(String(line)) { parsed.append(obj) }
+        }
+        if parsed.count > 4000 { parsed = Array(parsed.suffix(4000)) }
+        lock.lock()
+        sig = key
+        parsedPath = log.path
+        parsedSize = size
+        entries = parsed
+        lock.unlock()
+        return parsed
+    }
+
+    private static func sealEntryCount(_ seal: URL) -> Int? {
+        guard let obj = JSON.objectAt(seal) else { return nil }
+        return intValue(obj["count"])
+    }
+
+    private static func readBounded(_ path: URL, start: Int64, maxBytes: Int) -> Data? {
+        guard let handle = try? FileHandle(forReadingFrom: path) else { return nil }
+        defer { try? handle.close() }
+        do { try handle.seek(toOffset: UInt64(max(0, start))) } catch { return nil }
+        guard handle.offsetInFile == UInt64(max(0, start)) else { return nil }
+        return try? handle.read(upToCount: maxBytes)
     }
 }

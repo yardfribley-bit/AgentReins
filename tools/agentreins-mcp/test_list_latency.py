@@ -204,6 +204,27 @@ class ListLatency(unittest.TestCase):
         self.assertEqual(sampled["intervalNote"], "已安装的 LaunchAgent 仍传 --interval 2.0")
         self.assertEqual(sampled["effectiveIntervalSeconds"], 0.5)
 
+    def test_warm_list_mcp_audit_reads_the_tail_not_the_whole_log(self) -> None:
+        line = (json.dumps({"at": "2026-10-28T00:00:00Z", "tool": "list_agents", "hash": "ab" * 32}) + "\n").encode()
+        blob = line * 2000
+        with evidence.AUDIT_LOG.open("wb") as fh:
+            for _ in range(8):
+                fh.write(blob)
+        last = (json.dumps({"at": "2026-10-28T01:02:03Z", "tool": "get_coverage", "hash": "cd" * 32}) + "\n").encode()
+        with evidence.AUDIT_LOG.open("ab") as fh:
+            fh.write(last)
+        self.assertGreater(evidence.AUDIT_LOG.stat().st_size, 2_000_000)
+        evidence.list_mcp_audit(limit=5)  # prime
+        evidence._AUDIT_TAIL["bytes"] = 0
+        evidence._AUDIT_LINES["bytes"] = 0
+        started = time.perf_counter()
+        out = evidence.list_mcp_audit(limit=5)
+        elapsed = time.perf_counter() - started
+        self.assertLess(elapsed, 0.5, "warm list_mcp_audit %.3fs" % elapsed)
+        self.assertEqual(evidence._AUDIT_TAIL["bytes"], 0)
+        self.assertEqual(evidence._AUDIT_LINES["bytes"], 0)
+        self.assertEqual(out["entries"][-1]["tool"], "get_coverage")
+
 
 if __name__ == "__main__":
     unittest.main()

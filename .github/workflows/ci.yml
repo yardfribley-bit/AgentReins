@@ -93,7 +93,8 @@ jobs:
           set -euo pipefail
           py=/usr/bin/python3
           "$py" -c 'import sys; print(sys.version); raise SystemExit(0 if sys.version_info[:2] == (3, 9) else 1)'
-          "$py" -c 'import sys; sys.path[:0] = ["tools/socket-sampler", "tools/agentreins-mcp"]; import proc_lookup, socket_sampler'
+          # py_compile is not enough: a runtime `X | Y` alias is valid syntax and TypeErrors on 3.9.
+          "$py" tools/socket-sampler/py39_import_check.py
           "$py" -m unittest discover -s tools/socket-sampler -p 'test_*.py' -v
 
       - name: Live socket sampling (macOS, direct connection, proxy env unset)

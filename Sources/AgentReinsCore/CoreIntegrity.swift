@@ -115,9 +115,9 @@ public final class Integrity {
         return linesUnlocked(url)
     }
 
-    private static var lineCachePath = ""
-    private static var lineCacheSize: UInt64 = 0
-    private static var lineCacheMtime: TimeInterval = -1
+    static var lineCachePath = ""
+    static var lineCacheSize: UInt64 = 0
+    static var lineCacheMtime: TimeInterval = -1
     private static var lineCache: [String] = []
     /// True only when the latest `linesUnlocked` result extended a trusted prefix.
     static var lineCacheAppended = false

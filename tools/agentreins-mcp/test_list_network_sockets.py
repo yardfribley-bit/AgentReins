@@ -72,6 +72,24 @@ class ListNetworkSockets(unittest.TestCase):
         self.assertEqual(out["socketCoverage"]["state"], "stopped")
         self.assertGreater(out["socketCoverage"]["staleSeconds"], 60)
 
+    def test_live_pid_with_failing_rounds_is_not_called_stopped(self):
+        now = dt.datetime.now(dt.timezone.utc)
+        old = (now - dt.timedelta(minutes=5)).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        recent = now.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        self.path.write_text(json.dumps({
+            "schema": 1, "connections": [],
+            "samples": {"count": 9, "lastAt": old, "lastFailureAt": recent, "samplerPid": 2804,
+                        "lastFailure": "round/error: TypeError"},
+            "coverage": {"configuredIntervalSeconds": 2},
+        }))
+        out = evidence.list_network(records=[])
+        cov = out["socketCoverage"]
+        self.assertEqual(cov["state"], "failing")
+        note = evidence._socket_blind_spot_from(cov)["note"]
+        self.assertNotIn("没有在采样", note)
+        self.assertIn("还在", note)
+        self.assertIn("2804", note)
+
     def test_v1_ledger_coverage_is_flagged_as_configured_not_measured(self):
         out = evidence.list_network(records=[])
         cov = out["socketCoverage"]
