@@ -36,11 +36,26 @@ SERVER_NAME = "agentreins-supervisor"
 SERVER_VERSION = "0.1.0"
 ACTOR = "Codex"
 
+_PAGE = {
+    "limit": {"type": "integer", "minimum": 1, "maximum": 500},
+    "offset": {"type": "integer", "minimum": 0},
+    "cursor": {"type": "string"},
+    "since": {"type": "string", "description": "ISO timestamp lower bound"},
+    "until": {"type": "string", "description": "ISO timestamp upper bound"},
+}
+
+
+def _opt_int(value: Any) -> int | None:
+    if value is None:
+        return None
+    return int(value)
+
+
 TOOLS = [
     {
         "name": "list_agents",
-        "description": "List observed agents (Cursor/Codex/WorkBuddy), sessions and execution ids. Read-only.",
-        "inputSchema": {"type": "object", "properties": {}, "additionalProperties": False},
+        "description": "List observed agents (Cursor/Codex/WorkBuddy). Read-only. sessions and executionIds are capped; sessionCount and executionCount are the full totals.",
+        "inputSchema": {"type": "object", "properties": dict(_PAGE), "additionalProperties": False},
     },
     {
         "name": "list_alerts",
@@ -48,8 +63,8 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
+                **_PAGE,
                 "agent": {"type": "string", "description": "Agent name filter, or all"},
-                "since": {"type": "string", "description": "ISO timestamp lower bound"},
                 "rule": {"type": "string", "description": "Rule id filter, e.g. S02"},
             },
             "additionalProperties": False,
@@ -70,10 +85,7 @@ TOOLS = [
         "description": "Outbound network: transport-audit commands plus per-process sampled TCP/UDP sockets (proxied or not), with realDestination/transportPeer. Read-only, redacted.",
         "inputSchema": {
             "type": "object",
-            "properties": {
-                "agent": {"type": "string"},
-                "since": {"type": "string"},
-            },
+            "properties": {**_PAGE, "agent": {"type": "string"}},
             "additionalProperties": False,
         },
     },
@@ -85,11 +97,7 @@ TOOLS = [
     {
         "name": "list_mcp_audit",
         "description": "Recent supervisor MCP read audit entries (hash-chained append-only log).",
-        "inputSchema": {
-            "type": "object",
-            "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}},
-            "additionalProperties": False,
-        },
+        "inputSchema": {"type": "object", "properties": dict(_PAGE), "additionalProperties": False},
     },
 ]
 
@@ -125,12 +133,20 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         # read is still answered; validate_audit / get_coverage report status key_unavailable.
         pass
     if name == "list_agents":
-        return list_agents()
+        return list_agents(
+            since=arguments.get("since"), until=arguments.get("until"),
+            limit=_opt_int(arguments.get("limit")), offset=_opt_int(arguments.get("offset")),
+            cursor=arguments.get("cursor"),
+        )
     if name == "list_alerts":
         return list_alerts(
             agent=arguments.get("agent"),
             since=arguments.get("since"),
+            until=arguments.get("until"),
             rule=arguments.get("rule"),
+            limit=_opt_int(arguments.get("limit")),
+            offset=_opt_int(arguments.get("offset")),
+            cursor=arguments.get("cursor"),
         )
     if name == "get_execution":
         eid = arguments.get("execution_id")
@@ -138,12 +154,21 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("execution_id required")
         return get_execution(str(eid))
     if name == "list_network":
-        return list_network(agent=arguments.get("agent"), since=arguments.get("since"))
+        return list_network(
+            agent=arguments.get("agent"), since=arguments.get("since"), until=arguments.get("until"),
+            limit=_opt_int(arguments.get("limit")), offset=_opt_int(arguments.get("offset")),
+            cursor=arguments.get("cursor"),
+        )
     if name == "get_coverage":
         return get_coverage()
     if name == "list_mcp_audit":
-        limit = int(arguments.get("limit") or 30)
-        return list_mcp_audit(limit=limit)
+        return list_mcp_audit(
+            limit=_opt_int(arguments.get("limit")) if arguments.get("limit") is not None else 30,
+            offset=_opt_int(arguments.get("offset")),
+            cursor=arguments.get("cursor"),
+            since=arguments.get("since"),
+            until=arguments.get("until"),
+        )
     raise ValueError(name)
 
 
@@ -191,6 +216,7 @@ def handle(message: dict[str, Any]) -> None:
                 msg_id,
                 {
                     "content": [{"type": "text", "text": f"error: {exc}"}],
+                    "structuredContent": {"error": str(exc)},
                     "isError": True,
                 },
             )

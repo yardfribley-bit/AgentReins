@@ -5,6 +5,7 @@ RealtimeWorkspace JS used by the packaged app. No new collectors.
 """
 from __future__ import annotations
 
+import base64
 import hashlib
 import hmac
 import json
@@ -305,10 +306,99 @@ def is_allowed_host(host: str | None) -> bool:
     return any(host.endswith("." + a) for a in DEFAULT_ALLOW)
 
 
-def list_agents(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
+_EXECUTION_ID_CAP = 40
+_SESSION_CAP = 40
+_PAGE_MAX = 500
+
+
+def _encode_cursor(offset: int) -> str:
+    return base64.urlsafe_b64encode(str(offset).encode()).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> int | None:
+    try:
+        pad = "=" * (-len(cursor) % 4)
+        n = int(base64.urlsafe_b64decode((cursor + pad).encode()).decode())
+    except (ValueError, TypeError):
+        return None
+    return n if n >= 0 else None
+
+
+def _parse_page(limit: int | None, offset: int | None, cursor: str | None,
+                default_limit: int | None, max_limit: int = _PAGE_MAX) -> tuple[int, int | None]:
+    if cursor:
+        decoded = _decode_cursor(str(cursor))
+        if decoded is None:
+            raise ValueError("invalid cursor")
+        offset = decoded
+    else:
+        offset = int(offset or 0)
+    if offset < 0:
+        raise ValueError("invalid offset")
+    if limit is None:
+        return offset, default_limit
+    limit = int(limit)
+    if limit < 1:
+        limit = 1
+    if limit > max_limit:
+        limit = max_limit
+    return offset, limit
+
+
+def _page_window(items: list, offset: int, limit: int | None, known_total: int | None = None) -> dict[str, Any]:
+    source_total = max(known_total if known_total is not None else len(items), len(items))
+    start = min(max(0, offset), len(items))
+    if limit is None:
+        page = items[start:]
+        effective = len(page)
+    else:
+        page = items[start:start + limit]
+        effective = limit
+    consumed = offset + len(page)
+    truncated = consumed < source_total
+    return {
+        "items": page,
+        "total": source_total,
+        "offset": offset,
+        "limit": effective,
+        "truncated": truncated,
+        "nextCursor": _encode_cursor(consumed) if truncated else None,
+    }
+
+
+def _page_meta(window: dict[str, Any]) -> dict[str, Any]:
+    return {k: window[k] for k in ("total", "offset", "limit", "truncated", "nextCursor")}
+
+
+def _in_time_range(value: Any, since_ts: float | None, until_ts: float | None) -> bool:
+    """A bound drops a row only when its timestamp parses and falls outside, same as list_alerts."""
+    if since_ts is None and until_ts is None:
+        return True
+    ts = _iso_ts(value)
+    if ts is None:
+        return True
+    if since_ts is not None and ts < since_ts:
+        return False
+    if until_ts is not None and ts > until_ts:
+        return False
+    return True
+
+
+def list_agents(
+    records: list[dict[str, Any]] | None = None,
+    since: str | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    cursor: str | None = None,
+    transport_truncated: bool = False,
+) -> dict[str, Any]:
     records = records if records is not None else load_transport_records()
+    since_ts, until_ts = _iso_ts(since), _iso_ts(until)
     by_agent: dict[str, dict[str, Any]] = {}
     for row in records:
+        if not _in_time_range(row.get("startedAt"), since_ts, until_ts):
+            continue
         agent = str(row.get("agent") or "Unknown")
         bucket = by_agent.setdefault(
             agent,
@@ -326,23 +416,35 @@ def list_agents(records: list[dict[str, Any]] | None = None) -> dict[str, Any]:
             bucket["executionIds"].append(str(row["call"]))
         if row.get("tool"):
             bucket["tools"].add(str(row["tool"]))
+    page_offset, page_limit = _parse_page(limit, offset, cursor, None)
+    session_limit = min(_SESSION_CAP, page_limit if page_limit is not None else _SESSION_CAP)
     agents = []
     for agent, bucket in sorted(by_agent.items()):
+        sessions = sorted(bucket["sessions"])
+        ids = bucket["executionIds"]
         agents.append(
             {
                 "agent": agent,
                 "isCursor": agent == "Cursor",
-                "sessions": sorted(bucket["sessions"]),
-                "executionIds": bucket["executionIds"][:40],
+                "sessions": sessions[:session_limit],
+                "sessionCount": len(sessions),
+                "sessionsTruncated": len(sessions) > session_limit,
+                "executionIds": ids[:_EXECUTION_ID_CAP],
+                "executionCount": len(ids),
+                "executionIdsTruncated": len(ids) > _EXECUTION_ID_CAP,
                 "tools": sorted(bucket["tools"]),
-                "confidence": "Observed" if bucket["executionIds"] else "Unknown",
+                "confidence": "Observed" if ids else "Unknown",
             }
         )
-    return {
-        "agents": agents,
+    window = _page_window(agents, page_offset, page_limit)
+    result = {
+        "agents": window["items"],
         "confidence": "Observed" if agents else "Unknown",
-        "note": "仅来自 agent-path 运输审计；未走包装入口的进程不会出现。",
+        "note": "仅来自 agent-path 传输审计；未走包装入口的进程不会出现。",
+        "transportTruncated": transport_truncated,
     }
+    result.update(_page_meta(window))
+    return result
 
 
 def _bridge_payload(records: list[dict[str, Any]]) -> dict[str, Any]:
@@ -577,15 +679,16 @@ def list_alerts(
     since: str | None = None,
     rule: str | None = None,
     records: list[dict[str, Any]] | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    cursor: str | None = None,
+    transport_truncated: bool = False,
 ) -> dict[str, Any]:
     records = records if records is not None else load_transport_records()
     alerts, engine_meta = build_alerts_via_bridge(records)
-    since_ts = None
-    if since:
-        try:
-            since_ts = time.mktime(time.strptime(since[:19], "%Y-%m-%dT%H:%M:%S"))
-        except ValueError:
-            since_ts = None
+    since_ts = _iso_ts(since)
+    until_ts = _iso_ts(until)
     by_call: dict[str, dict[str, Any]] = {}
     for r in records:
         for k in (r.get("call"), r.get("runID")):
@@ -618,20 +721,19 @@ def list_alerts(
             continue
         if rule and rule != "all" and str(item.get("rule")) != rule:
             continue
-        if since_ts and item.get("timestamp"):
-            try:
-                ts = time.mktime(time.strptime(str(item["timestamp"])[:19], "%Y-%m-%dT%H:%M:%S"))
-                if ts < since_ts:
-                    continue
-            except ValueError:
-                pass
+        if not _in_time_range(item.get("timestamp"), since_ts, until_ts):
+            continue
         out.append(redact_obj(item))
+    page_offset, page_limit = _parse_page(limit, offset, cursor, None)
+    window = _page_window(out, page_offset, page_limit)
     result = {
-        "alerts": out,
+        "alerts": window["items"],
         "confidence": "Observed" if out else "Unknown",
-        "note": "告警由本机运输审计 + 与 App 相同的 risk-alerts.js 推导；无数据即为空，不放样本。",
+        "note": "告警由本机传输审计 + 与 App 相同的 risk-alerts.js 推导；无数据即为空，不放样本。",
         "engine": engine_meta.get("engine"),
+        "transportTruncated": transport_truncated,
     }
+    result.update(_page_meta(window))
     if engine_meta.get("warning"):
         result["warning"] = engine_meta["warning"]
     return result
@@ -651,7 +753,7 @@ def get_execution(execution_id: str, records: list[dict[str, Any]] | None = None
         return {
             "executionId": execution_id,
             "confidence": "Unknown",
-            "note": "未找到该执行编号的运输审计记录。",
+            "note": "未找到该执行编号的传输审计记录。",
         }
     downloads = []
     for d in hit.get("downloads") or []:
@@ -793,6 +895,39 @@ def _real_destination(record: dict[str, Any]) -> tuple[str | None, str | None, s
     return real, peer, source
 
 
+# Loopback HTTP MCP listens here by default. A transport peer on this port is the supervisor
+# itself, not the audit proxy (mitmdump, 18891/18893 or an explicit --proxy hop).
+MCP_HTTP_PORT = 18977
+
+
+def _peer_port(peer: str | None) -> int | None:
+    if not peer or ":" not in peer:
+        return None
+    try:
+        return int(peer.rsplit(":", 1)[-1])
+    except ValueError:
+        return None
+
+
+def _argv_opts_out_of_proxy(args: Any) -> bool:
+    for arg in args or []:
+        text = str(arg).strip().lower()
+        if text in ("--noproxy", "--no-proxy") or text.startswith("--noproxy=") or text.startswith("--no-proxy="):
+            return True
+    return False
+
+
+def _via_proxy(record: dict[str, Any], peer: str | None, source: str | None) -> bool | None:
+    """False when the command bypassed the audit proxy or the only peer is the MCP server."""
+    if not source:
+        return None
+    if record.get("auditBypass") is True or _argv_opts_out_of_proxy(record.get("args")):
+        return False
+    if _peer_port(peer) == MCP_HTTP_PORT:
+        return False
+    return bool(peer)
+
+
 def destination_fields(record: dict[str, Any]) -> dict[str, Any]:
     """One definition for get_execution and list_network (Python and Swift MCP mirror this)."""
     real, peer, source = _real_destination(record)
@@ -806,7 +941,7 @@ def destination_fields(record: dict[str, Any]) -> dict[str, Any]:
         "transportPeer": peer,
         "destinationSource": source,
         "destinationEvidence": DESTINATION_EVIDENCE.get(source or "", "Unknown"),
-        "viaProxy": bool(peer) if source else None,
+        "viaProxy": _via_proxy(record, peer, source),
     }
 
 
@@ -947,6 +1082,7 @@ def load_socket_ledger(
     since: str | None = None,
     path: pathlib.Path | None = None,
     limit: int = 200,
+    until: str | None = None,
 ) -> dict[str, Any]:
     """Read-only view of tools/socket-sampler output (proxy-independent sockets)."""
     path = path or SOCKET_LEDGER
@@ -974,6 +1110,7 @@ def load_socket_ledger(
             },
         }
     since_ts = _iso_ts(since)
+    until_ts = _iso_ts(until)
     tampered = integrity["state"] == "tampered"
     rows = []
     for row in data.get("connections") or []:
@@ -982,6 +1119,8 @@ def load_socket_ledger(
         if agent and agent != "all" and str(row.get("agent")) != agent:
             continue
         if since_ts is not None and (_iso_ts(row.get("lastSeen")) or 0) < since_ts:
+            continue
+        if until_ts is not None and (_iso_ts(row.get("lastSeen")) or 0) > until_ts:
             continue
         out = {k: row.get(k) for k in SOCKET_FIELDS if k in row}
         if tampered:
@@ -1021,11 +1160,21 @@ def list_network(
     agent: str | None = None,
     since: str | None = None,
     records: list[dict[str, Any]] | None = None,
+    until: str | None = None,
+    limit: int | None = None,
+    offset: int | None = None,
+    cursor: str | None = None,
+    transport_truncated: bool = False,
 ) -> dict[str, Any]:
     records = records if records is not None else load_transport_records()
+    until_ts = _iso_ts(until)
+    since_ts = _iso_ts(since) if until_ts is not None else None
     rows = []
     for r in records:
         if agent and agent != "all" and str(r.get("agent")) != agent:
+            continue
+        # `since` alone stays socket-only (historical). Command rows gain a bound when `until` is set.
+        if until_ts is not None and not _in_time_range(r.get("startedAt"), since_ts, until_ts):
             continue
         dest = destination_fields(r)
         host = dest["destination"]
@@ -1045,19 +1194,26 @@ def list_network(
                 "confidence": "Observed" if host else "Unknown",
             }
         )
-    sockets = load_socket_ledger(agent=agent, since=since)
-    direct = [r for r in sockets["connections"] if r.get("viaProxy") is False and r.get("scope") == "public"]
-    return {
-        "network": redact_obj(rows),
-        "sockets": sockets["connections"],
+    page_offset, page_limit = _parse_page(limit, offset, cursor, None)
+    fetch = min(5000, max(200, page_offset + (page_limit if page_limit is not None else 200)))
+    sockets = load_socket_ledger(agent=agent, since=since, limit=fetch, until=until)
+    connections = sockets["connections"]
+    direct = [r for r in connections if r.get("viaProxy") is False and r.get("scope") == "public"]
+    network_window = _page_window(rows, page_offset, page_limit)
+    socket_window = _page_window(connections, page_offset, page_limit, known_total=sockets.get("total"))
+    result = {
+        "network": redact_obj(network_window["items"]),
+        "sockets": socket_window["items"],
         "socketSummary": {
             "total": sockets.get("total", 0),
             "notViaProxyPublic": len(direct),
-            "viaProxy": sum(1 for r in sockets["connections"] if r.get("viaProxy")),
+            "viaProxy": sum(1 for r in connections if r.get("viaProxy")),
             "ledgerIntegrity": (sockets["coverage"].get("integrity") or {}).get("state"),
         },
         "socketCoverage": sockets["coverage"],
-        "confidence": "Observed" if rows or sockets["connections"] else "Unknown",
+        "socketsPage": _page_meta(socket_window),
+        "confidence": "Observed" if rows or connections else "Unknown",
+        "transportTruncated": transport_truncated,
         "note": (
             "network = 经审计入口的命令（transport-audit）。每条的 realDestination / destinationSource / transportPeer"
             "与 get_execution 同源：proxy_observed=本次 trace 里看到经代理连到该主机（Observed）；"
@@ -1070,6 +1226,8 @@ def list_network(
             "采样会漏掉短于实测间隔（socketCoverage.missesShorterThanSeconds）的连接。"
         ),
     }
+    result.update(_page_meta(network_window))
+    return result
 
 
 def _socket_blind_spot() -> dict[str, Any]:
@@ -1173,6 +1331,9 @@ KEYCHAIN_HELPER_TIMEOUT = 15.0
 # After a helper timeout, answer "error" without calling it again for this long (per process), so a
 # Keychain that blocks costs one timeout, not one per account per MCP call.
 KEYCHAIN_UNRESPONSIVE_BACKOFF = 60.0
+# Process-wide result cache. A blocked or unreadable key stays key_unavailable for five minutes
+# instead of launching the helper on every tools/call. `missing` is not cached.
+KEYCHAIN_STATUS_CACHE_TTL = 300.0
 _KEYCHAIN_STATE: dict[str, Any] = {"unresponsiveUntil": 0.0, "lastError": None}
 HELPER_EXIT_NOT_FOUND = 3
 HELPER_EXIT_NEEDS_APPROVAL = 4
@@ -1209,7 +1370,48 @@ def _helper_failure(proc: subprocess.CompletedProcess[bytes]) -> str:
     return "keychain helper exit %s%s" % (proc.returncode, (": " + detail[0][:120]) if detail else "")
 
 
+def _keychain_status_cache() -> dict[str, Any]:
+    cache = _KEYCHAIN_STATE.get("statusCache")
+    if not isinstance(cache, dict):
+        cache = {}
+        _KEYCHAIN_STATE["statusCache"] = cache
+    return cache
+
+
+def _invalidate_keychain_cache(account: str) -> None:
+    cache = _KEYCHAIN_STATE.get("statusCache")
+    if isinstance(cache, dict):
+        cache.pop(account, None)
+
+
 def _keychain_lookup(account: str) -> tuple[str, bytes | None]:
+    """('found', data) | ('missing', None) | ('error', None) | ('no_helper', None) | ('no_backend', None).
+
+    `found` and `error` are cached for KEYCHAIN_STATUS_CACHE_TTL so a tools/call does not launch
+    AgentReinsKeychainHelper again while the answer is still the one we just got.
+    """
+    if _keychain_backend() != "security":
+        return "no_backend", None
+    cache = _keychain_status_cache()
+    hit = cache.get(account)
+    now = time.monotonic()
+    if isinstance(hit, dict) and hit.get("status") in ("found", "error") and now < float(hit.get("until") or 0):
+        _KEYCHAIN_STATE["lastError"] = hit.get("error")
+        return hit["status"], hit.get("data")
+    status, data = _keychain_lookup_uncached(account)
+    if status in ("found", "error"):
+        cache[account] = {
+            "status": status,
+            "data": data,
+            "error": _KEYCHAIN_STATE.get("lastError"),
+            "until": now + KEYCHAIN_STATUS_CACHE_TTL,
+        }
+    else:
+        cache.pop(account, None)
+    return status, data
+
+
+def _keychain_lookup_uncached(account: str) -> tuple[str, bytes | None]:
     """('found', data) | ('missing', None) | ('error', None) | ('no_helper', None) | ('no_backend', None)."""
     if _keychain_backend() != "security":
         return "no_backend", None
@@ -1248,6 +1450,7 @@ def keychain_get(account: str) -> bytes | None:
 
 
 def keychain_set(account: str, value: bytes) -> bool:
+    _invalidate_keychain_cache(account)
     if _keychain_backend() == "security":
         # Never put the secret on argv; never use `security -A`.
         try:
@@ -1265,6 +1468,7 @@ def keychain_set(account: str, value: bytes) -> bool:
 
 
 def keychain_delete(account: str) -> bool:
+    _invalidate_keychain_cache(account)
     if _keychain_backend() == "security":
         try:
             proc = _run_keychain_helper(["delete", account])
@@ -1806,7 +2010,7 @@ def validate_evidence_files(root: pathlib.Path | None = None, key: bytes | None 
             result["confidence"] = "Unknown"
 
     if not base.is_dir():
-        result["note"] = "无运输审计目录"
+        result["note"] = "无传输审计目录"
         known = known_run_ids()
         if known or signed_era_active():
             result["ok"] = False
@@ -2200,9 +2404,38 @@ def recent_audit(limit: int = 30) -> list[dict[str, Any]]:
     return out
 
 
-def list_mcp_audit(limit: int = 30) -> dict[str, Any]:
+def list_mcp_audit(
+    limit: int | None = 30,
+    offset: int | None = None,
+    cursor: str | None = None,
+    since: str | None = None,
+    until: str | None = None,
+) -> dict[str, Any]:
+    page_offset, page_limit = _parse_page(limit, offset, cursor, 30)
+    since_ts, until_ts = _iso_ts(since), _iso_ts(until)
+    entries = []
+    if AUDIT_LOG.exists():
+        for line in AUDIT_LOG.read_text(encoding="utf-8").splitlines():
+            try:
+                entry = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if _in_time_range(entry.get("at"), since_ts, until_ts):
+                entries.append(entry)
+    # Newest page first; each page stays chronological, matching the old suffix(limit).
+    window_limit = page_limit if page_limit is not None else 30
+    total = len(entries)
+    end = max(0, total - page_offset)
+    start = max(0, end - window_limit)
+    page = entries[start:end]
+    truncated = start > 0
     return {
-        "entries": recent_audit(limit=limit),
+        "entries": page,
         "validation": validate_audit(),
         "confidence": "Observed",
+        "total": total,
+        "offset": page_offset,
+        "limit": window_limit,
+        "truncated": truncated,
+        "nextCursor": _encode_cursor(page_offset + window_limit) if truncated else None,
     }

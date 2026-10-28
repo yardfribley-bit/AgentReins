@@ -122,8 +122,35 @@ public enum Destination {
         return [
             "destination": nn(host), "realDestination": nn(real), "transportPeer": nn(peer),
             "destinationSource": nn(source), "destinationEvidence": evidence[source ?? ""] ?? "Unknown",
-            "viaProxy": source == nil ? NSNull() : (peer != nil) as Any,
+            "viaProxy": viaProxy(record, peer: peer, source: source),
         ]
+    }
+
+    /// Loopback HTTP MCP (default 18977) is not the audit proxy. A peer on that port, `auditBypass`,
+    /// or `--noproxy` / `--no-proxy` in argv means the command did not go through the audit proxy.
+    public static let mcpHTTPPort = 18977
+
+    public static func viaProxy(_ record: [String: Any], peer: String?, source: String?) -> Any {
+        guard source != nil else { return NSNull() }
+        if (record["auditBypass"] as? Bool) == true { return false }
+        if argvOptsOutOfProxy(record["args"] as? [Any] ?? []) { return false }
+        if peerPort(peer) == mcpHTTPPort { return false }
+        return peer != nil
+    }
+
+    static func argvOptsOutOfProxy(_ args: [Any]) -> Bool {
+        for arg in args {
+            let text = (str(arg) ?? "").trimmingCharacters(in: .whitespaces).lowercased()
+            if text == "--noproxy" || text == "--no-proxy" || text.hasPrefix("--noproxy=") || text.hasPrefix("--no-proxy=") {
+                return true
+            }
+        }
+        return false
+    }
+
+    static func peerPort(_ peer: String?) -> Int? {
+        guard let peer, let colon = peer.lastIndex(of: ":") else { return nil }
+        return Int(peer[peer.index(after: colon)...])
     }
 }
 

@@ -26,8 +26,11 @@ enum HTTPTransport {
             auth = "none"
         }
 
+        // Serial queue: accept, connection count, listener state, writes to a connection.
+        // Tool work runs on `work` so one slow call cannot block initialize on another connection.
         let queue = DispatchQueue(label: "com.agentreins.mcp-http")
-        let state = ServerState(port: port, auth: auth, token: token, queue: queue)
+        let work = DispatchQueue(label: "com.agentreins.mcp-http.work", attributes: .concurrent)
+        let state = ServerState(port: port, auth: auth, token: token, queue: queue, work: work)
         guard let nwPort = NWEndpoint.Port(rawValue: UInt16(port)) else {
             log("AgentReinsMCP: invalid port \(port)")
             exit(2)
@@ -106,15 +109,32 @@ private final class ServerState {
     let auth: String
     let token: String?
     let queue: DispatchQueue
+    let work: DispatchQueue
+    let requestTimeout: TimeInterval
     var active = 0
     var settled = false
-    let sessions = SessionTable()
+    let sessions: SessionTable
 
-    init(port: Int, auth: String, token: String?, queue: DispatchQueue) {
+    init(port: Int, auth: String, token: String?, queue: DispatchQueue, work: DispatchQueue) {
         self.port = port
         self.auth = auth
         self.token = token
         self.queue = queue
+        self.work = work
+        self.requestTimeout = Self.envDouble("AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS", 25)
+        self.sessions = SessionTable(
+            maxSessions: Self.envInt("AGENTREINS_MCP_MAX_SESSIONS", 64),
+            ttl: Self.envDouble("AGENTREINS_MCP_SESSION_TTL_SECONDS", 30 * 60))
+    }
+
+    static func envDouble(_ key: String, _ fallback: Double) -> Double {
+        guard let raw = ProcessInfo.processInfo.environment[key], let value = Double(raw), value > 0 else { return fallback }
+        return value
+    }
+
+    static func envInt(_ key: String, _ fallback: Int) -> Int {
+        guard let raw = ProcessInfo.processInfo.environment[key], let value = Int(raw), value > 0 else { return fallback }
+        return value
     }
 
     func onListener(_ state: NWListener.State, listener: NWListener) {
@@ -184,6 +204,7 @@ private final class ServerState {
                 }
                 self.serve(conn, box: box)
             case .failed, .cancelled:
+                box.markCancelled()
                 self.release(conn, box: box)
             default:
                 break
@@ -238,16 +259,22 @@ private final class ServerState {
         }
         let sendAndClose: (Data) -> Void = { bytes in
             idle?.cancel()
+            guard box.claimSend() else { return }
             conn.send(content: bytes, completion: .contentProcessed { _ in
                 conn.cancel()
             })
         }
         func pump() {
             conn.receive(minimumIncompleteLength: 1, maximumLength: 65_536) { data, _, isComplete, error in
+                if box.shouldStop() {
+                    conn.cancel()
+                    return
+                }
                 if let data, !data.isEmpty { buffer.append(data) }
                 switch HTTPCodec.pull(buffer, maxBody: HTTPTransport.maxBody, maxHeader: HTTPTransport.maxHeader) {
                 case .needMore:
                     if isComplete || error != nil {
+                        box.markCancelled()
                         conn.cancel()
                         return
                     }
@@ -259,15 +286,7 @@ private final class ServerState {
                                                   body: HTTPCodec.jsonBody(["error": errorName])))
                 case .ready(let message):
                     idle?.cancel()
-                    let peerPort = self.clientPort(conn)
-                    let peer = peerPort.flatMap { PeerIdentity.lookup(clientPort: $0, serverPort: UInt16(self.port)) }
-                    if peer == nil {
-                        let local = String(describing: conn.currentPath?.localEndpoint)
-                        let remote = String(describing: conn.currentPath?.remoteEndpoint)
-                        HTTPTransportLog.write("AgentReinsMCP: peer lookup failed clientPort=\(peerPort.map(String.init) ?? "?") local=\(local) remote=\(remote)")
-                    }
-                    let response = self.route(message, peer: peer)
-                    sendAndClose(response)
+                    self.dispatch(conn, box: box, message: message)
                 }
             }
         }
@@ -275,7 +294,81 @@ private final class ServerState {
         pump()
     }
 
-    func route(_ message: HTTPMessage, peer: PeerIdentity?) -> Data {
+    /// Body is in hand. Further work (peer lookup, tool call) runs off the accept queue.
+    /// A second receive watches for the client going away so the worker can stop.
+    func dispatch(_ conn: NWConnection, box: ConnectionBox, message: HTTPMessage) {
+        box.requestId = Self.requestId(message.body)
+        box.sessionHeader = message.headers["mcp-session-id"]
+        let peerPort = clientPort(conn)
+        let local = String(describing: conn.currentPath?.localEndpoint)
+        let remote = String(describing: conn.currentPath?.remoteEndpoint)
+        armDisconnectWatch(conn, box: box)
+        let timeout = DispatchWorkItem { [weak box] in
+            guard let box, box.claimSend() else { return }
+            box.markTimedOut()
+            let body = HTTPCodec.jsonBody(MCPDispatcher.rpcError(box.requestId, -32000, "request timed out"))
+            var headers = [
+                "Content-Type": "application/json; charset=utf-8",
+                "Cache-Control": "no-store",
+            ]
+            if let sid = box.sessionHeader, !sid.isEmpty { headers["Mcp-Session-Id"] = sid }
+            let bytes = HTTPCodec.encode(status: 200, reason: "OK", headers: headers, body: body)
+            conn.send(content: bytes, completion: .contentProcessed { _ in
+                conn.cancel()
+            })
+        }
+        box.timeout = timeout
+        queue.asyncAfter(deadline: .now() + requestTimeout, execute: timeout)
+        let port = self.port
+        work.async { [weak self] in
+            guard let self else { return }
+            let abandon = {
+                self.queue.async {
+                    box.timeout?.cancel()
+                    HTTPTransportLog.write("AgentReinsMCP: request abandoned")
+                    conn.cancel()
+                }
+            }
+            if box.wasCancelled() { abandon(); return }
+            if box.shouldStop() { return }
+            let peer = peerPort.flatMap {
+                PeerIdentity.lookup(clientPort: $0, serverPort: UInt16(port), cancelled: { box.shouldStop() })
+            }
+            if box.wasCancelled() { abandon(); return }
+            if box.shouldStop() { return }
+            if peer == nil {
+                HTTPTransportLog.write("AgentReinsMCP: peer lookup failed clientPort=\(peerPort.map(String.init) ?? "?") local=\(local) remote=\(remote)")
+            }
+            let response = self.route(message, peer: peer, isCancelled: { box.shouldStop() })
+            self.queue.async {
+                box.timeout?.cancel()
+                if box.wasCancelled() { abandon(); return }
+                if box.shouldStop() { return }
+                guard box.claimSend() else { return }
+                conn.send(content: response, completion: .contentProcessed { _ in
+                    conn.cancel()
+                })
+            }
+        }
+    }
+
+    func armDisconnectWatch(_ conn: NWConnection, box: ConnectionBox) {
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 1024) { _, _, isComplete, error in
+            if isComplete || error != nil {
+                box.markCancelled()
+                return
+            }
+            if !box.shouldStop() { self.armDisconnectWatch(conn, box: box) }
+        }
+    }
+
+    static func requestId(_ body: Data) -> Any {
+        guard let obj = try? JSONSerialization.jsonObject(with: body, options: [.fragmentsAllowed]) as? [String: Any],
+              obj.keys.contains("id") else { return NSNull() }
+        return obj["id"] ?? NSNull()
+    }
+
+    func route(_ message: HTTPMessage, peer: PeerIdentity?, isCancelled: @escaping () -> Bool = { false }) -> Data {
         let jsonHeaders = [
             "Content-Type": "application/json; charset=utf-8",
             "Cache-Control": "no-store",
@@ -322,7 +415,7 @@ private final class ServerState {
                 return json(400, "Bad Request", ["error": "session_required"])
             }
             guard sessions.remove(sid) else {
-                return json(404, "Not Found", ["error": "session_not_found"])
+                return json(404, "Not Found", MCPDispatcher.rpcError(NSNull(), -32001, "session not found"))
             }
             return empty(204, "No Content")
         }
@@ -371,12 +464,14 @@ private final class ServerState {
                 return json(400, "Bad Request", ["error": "session_required"])
             }
             guard let existing = sessions.get(sid) else {
-                return json(404, "Not Found", ["error": "session_not_found"])
+                return json(404, "Not Found", MCPDispatcher.rpcError(obj["id"] ?? NSNull(), -32001, "session not found"))
             }
             session = existing
         }
 
-        let reply = MCPDispatcher.handle(obj, session: session, auditActor: session.auditActor(peer: peer))
+        if isCancelled() { return Data() }
+        let reply = MCPDispatcher.handle(obj, session: session, auditActor: session.auditActor(peer: peer),
+                                         auditSync: false, isCancelled: isCancelled)
         var extra = [
             "Mcp-Session-Id": session.id,
             "MCP-Protocol-Version": session.protocolVersion,
@@ -460,24 +555,108 @@ private final class ServerState {
 }
 
 private final class ConnectionBox {
+    let lock = NSLock()
     var started = false
     var released = false
+    var requestId: Any = NSNull()
+    var sessionHeader: String?
+    var timeout: DispatchWorkItem?
+    private var cancelled = false
+    private var timedOut = false
+    private var finished = false
+
+    func markCancelled() {
+        lock.lock(); cancelled = true; lock.unlock()
+        timeout?.cancel()
+    }
+
+    func markTimedOut() {
+        lock.lock(); timedOut = true; lock.unlock()
+    }
+
+    func wasCancelled() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled
+    }
+
+    func shouldStop() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        return cancelled || timedOut || finished
+    }
+
+    /// First caller sends the response. A timeout, a disconnect, or a finished call loses.
+    func claimSend() -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        if finished || cancelled || timedOut { return false }
+        finished = true
+        return true
+    }
 }
 
+/// Idle sessions expire. When the table is full, the least recently used session is evicted
+/// so a client that initializes and never DELETEs cannot pin the process at 503.
 private final class SessionTable {
-    var sessions: [String: MCPSession] = [:]
+    struct Entry {
+        var session: MCPSession
+        var lastUsed: Date
+    }
+
+    let maxSessions: Int
+    let ttl: TimeInterval
+    let now: () -> Date
+    private let lock = NSLock()
+    private var sessions: [String: Entry] = [:]
+    private var order: [String] = []
+
+    init(maxSessions: Int = 64, ttl: TimeInterval = 30 * 60, now: @escaping () -> Date = { Date() }) {
+        self.maxSessions = max(1, maxSessions)
+        self.ttl = ttl
+        self.now = now
+    }
 
     func create() -> MCPSession? {
-        if sessions.count >= 64 { return nil }
+        lock.lock(); defer { lock.unlock() }
+        evictExpiredLocked(now())
+        if sessions.count >= maxSessions, let oldest = order.first {
+            sessions.removeValue(forKey: oldest)
+            order.removeFirst()
+        }
+        if sessions.count >= maxSessions { return nil }
         let session = MCPSession(id: UUID().uuidString.lowercased(), transport: "http")
-        sessions[session.id] = session
+        sessions[session.id] = Entry(session: session, lastUsed: now())
+        order.append(session.id)
         return session
     }
 
-    func get(_ id: String) -> MCPSession? { sessions[id] }
+    func get(_ id: String) -> MCPSession? {
+        lock.lock(); defer { lock.unlock() }
+        let moment = now()
+        evictExpiredLocked(moment)
+        guard var entry = sessions[id] else { return nil }
+        entry.lastUsed = moment
+        sessions[id] = entry
+        if let index = order.firstIndex(of: id) { order.remove(at: index) }
+        order.append(id)
+        return entry.session
+    }
 
     @discardableResult
-    func remove(_ id: String) -> Bool { sessions.removeValue(forKey: id) != nil }
+    func remove(_ id: String) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        evictExpiredLocked(now())
+        return removeLocked(id)
+    }
+
+    private func evictExpiredLocked(_ moment: Date) {
+        let stale = sessions.compactMap { moment.timeIntervalSince($0.value.lastUsed) > ttl ? $0.key : nil }
+        for id in stale { removeLocked(id) }
+    }
+
+    private func removeLocked(_ id: String) -> Bool {
+        let removed = sessions.removeValue(forKey: id) != nil
+        if let index = order.firstIndex(of: id) { order.remove(at: index) }
+        return removed
+    }
 }
 
 private enum HTTPTransportLog {

@@ -35,29 +35,45 @@ enum MCPDispatcher {
     static let fallbackProtocol = "2024-11-05"
     static let supportedProtocols: Set<String> = ["2025-06-18", "2025-03-26", "2024-11-05"]
 
+    static let pageProperties: [String: Any] = [
+        "limit": ["type": "integer", "minimum": 1, "maximum": ListPage.maxLimit] as [String: Any],
+        "offset": ["type": "integer", "minimum": 0] as [String: Any],
+        "cursor": ["type": "string"],
+        "since": ["type": "string"],
+        "until": ["type": "string"],
+    ]
+
+    static func schemaProps(_ extra: [String: Any] = [:]) -> [String: Any] {
+        var props = pageProperties
+        for (key, value) in extra { props[key] = value }
+        return props
+    }
+
     static let tools: [[String: Any]] = [
-        ["name": "list_agents", "description": "List observed agents. Read-only.",
-         "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
+        ["name": "list_agents", "description": "List observed agents. Read-only. sessions and executionIds are capped; sessionCount and executionCount are the full totals.",
+         "inputSchema": ["type": "object", "properties": schemaProps(), "additionalProperties": false]],
         ["name": "list_alerts", "description": "List risk alerts. Read-only.",
-         "inputSchema": ["type": "object", "properties": [
-            "agent": ["type": "string"], "since": ["type": "string"], "rule": ["type": "string"]
-         ], "additionalProperties": false]],
+         "inputSchema": ["type": "object", "properties": schemaProps([
+            "agent": ["type": "string"] as [String: Any],
+            "rule": ["type": "string"] as [String: Any],
+         ]), "additionalProperties": false]],
         ["name": "get_execution", "description": "Get one execution; secrets redacted.",
          "inputSchema": ["type": "object", "properties": ["execution_id": ["type": "string"]],
                          "required": ["execution_id"], "additionalProperties": false]],
         ["name": "list_network", "description": "Outbound network: transport-audit commands plus per-process sampled TCP/UDP sockets (proxied or not). Read-only, redacted.",
-         "inputSchema": ["type": "object", "properties": [
-            "agent": ["type": "string"], "since": ["type": "string"]
-         ], "additionalProperties": false]],
+         "inputSchema": ["type": "object", "properties": schemaProps([
+            "agent": ["type": "string"] as [String: Any],
+         ]), "additionalProperties": false]],
         ["name": "get_coverage", "description": "Rule coverage and integrity.",
          "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
         ["name": "list_mcp_audit", "description": "HMAC-chained MCP read audit.",
-         "inputSchema": ["type": "object", "properties": ["limit": ["type": "integer"]],
-                         "additionalProperties": false]],
+         "inputSchema": ["type": "object", "properties": schemaProps(), "additionalProperties": false]],
     ]
 
     /// Returns a JSON-RPC response object, or nil when `message` is a notification (no `id`).
-    static func handle(_ msg: [String: Any], session: MCPSession, auditActor: String) -> [String: Any]? {
+    /// `auditSync` is true for stdio (the next line may read the log). HTTP queues the write.
+    static func handle(_ msg: [String: Any], session: MCPSession, auditActor: String,
+                       auditSync: Bool = true, isCancelled: @escaping () -> Bool = { false }) -> [String: Any]? {
         let method = msg["method"] as? String
         let hasId = msg.keys.contains("id")
         let id = msg["id"]
@@ -111,7 +127,8 @@ enum MCPDispatcher {
             let name = params["name"] as? String ?? ""
             let args = params["arguments"] as? [String: Any] ?? [:]
             do {
-                let result = try callTool(name, args, actor: auditActor)
+                let result = try callTool(name, args, actor: auditActor, auditSync: auditSync, isCancelled: isCancelled)
+                if isCancelled() { return nil }
                 return [
                     "jsonrpc": "2.0", "id": id ?? NSNull(),
                     "result": [
@@ -121,10 +138,12 @@ enum MCPDispatcher {
                     ] as [String: Any],
                 ]
             } catch {
+                let message = error.localizedDescription
                 return [
                     "jsonrpc": "2.0", "id": id ?? NSNull(),
                     "result": [
-                        "content": [["type": "text", "text": "error: \(error.localizedDescription)"]],
+                        "content": [["type": "text", "text": "error: \(message)"]],
+                        "structuredContent": ["error": message],
                         "isError": true,
                     ] as [String: Any],
                 ]
@@ -137,7 +156,8 @@ enum MCPDispatcher {
         ["jsonrpc": "2.0", "id": id ?? NSNull(), "error": ["code": code, "message": message]]
     }
 
-    static func callTool(_ name: String, _ args: [String: Any], actor: String) throws -> [String: Any] {
+    static func callTool(_ name: String, _ args: [String: Any], actor: String, auditSync: Bool = true,
+                         isCancelled: @escaping () -> Bool = { false }) throws -> [String: Any] {
         let banned = ["write", "delete", "update", "set_", "save", "dismiss", "accept", "whitelist", "mute"]
         let lower = name.lowercased()
         if banned.contains(where: { lower.contains($0) }) {
@@ -147,29 +167,89 @@ enum MCPDispatcher {
         guard allowed.contains(name) else {
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown tool: \(name)"])
         }
+        applyToolDelay(isCancelled)
+        if isCancelled() {
+            throw NSError(domain: "AgentReinsMCP", code: 5, userInfo: [NSLocalizedDescriptionKey: "request cancelled"])
+        }
         let integrity = Ctx.integrity()
-        Ctx.appendAudit(integrity, actor: actor, tool: name, arguments: args)
-        let records = Transport.load()
+        Ctx.appendAudit(actor: actor, tool: name, arguments: args, sync: auditSync)
+        if name == "list_mcp_audit" { Ctx.flushAudit() }
+        let loaded = Transport.loadReporting()
+        let records = loaded.records
+        let page: (offset: Int, limit: Int?)
+        if name.hasPrefix("list_") {
+            page = try ListPage.parse(args: args, defaultLimit: name == "list_mcp_audit" ? 30 : nil)
+        } else {
+            page = (offset: 0, limit: nil)
+        }
         switch name {
         case "list_agents":
-            return Agents.list(records)
+            return Agents.list(records, since: str(args["since"]), until: str(args["until"]),
+                               limit: page.limit, offset: page.offset, transportTruncated: loaded.truncated)
         case "list_alerts":
-            return Alerts.list(records, agent: args["agent"] as? String, rule: args["rule"] as? String,
-                               since: args["since"] as? String)
+            var result = Alerts.list(records, agent: str(args["agent"]), rule: str(args["rule"]),
+                                     since: str(args["since"]), until: str(args["until"]),
+                                     limit: page.limit, offset: page.offset)
+            result["transportTruncated"] = loaded.truncated
+            return result
         case "get_execution":
-            guard let eid = args["execution_id"] as? String else {
+            guard let eid = str(args["execution_id"]) else {
                 throw NSError(domain: "AgentReinsMCP", code: 3, userInfo: [NSLocalizedDescriptionKey: "execution_id required"])
             }
-            return Execution.get(eid, records)
+            return Execution.get(eid, records, transportTruncated: loaded.truncated)
         case "list_network":
-            return NetworkTool.list(records, agent: args["agent"] as? String, since: args["since"] as? String, integrity: integrity)
+            return NetworkTool.list(records, agent: str(args["agent"]), since: str(args["since"]), until: str(args["until"]),
+                                    integrity: integrity, limit: page.limit, offset: page.offset,
+                                    transportTruncated: loaded.truncated)
         case "get_coverage":
-            return Coverage.get(integrity)
+            return Coverage.get(integrity, validation: Ctx.cachedValidation(integrity))
         case "list_mcp_audit":
-            let limit = (args["limit"] as? Int) ?? (args["limit"] as? NSNumber)?.intValue ?? 30
-            return ["entries": Ctx.recent(integrity, limit: limit), "validation": integrity.validate(), "confidence": "Observed"]
+            let entries = integrity.lines().compactMap { JSON.object($0) }
+            let sinceTs = Clock.parse(args["since"])
+            let untilTs = Clock.parse(args["until"])
+            let filtered = entries.filter { entry in
+                guard let ts = Clock.parse(entry["at"]) else { return true }
+                if let sinceTs, ts < sinceTs { return false }
+                if let untilTs, ts > untilTs { return false }
+                return true
+            }
+            // Newest page first, each page still chronological (same order as the previous suffix(limit)).
+            let window = pageRecent(filtered, offset: page.offset, limit: page.limit ?? 30)
+            return [
+                "entries": window.items,
+                "validation": Ctx.cachedValidation(integrity),
+                "confidence": "Observed",
+                "total": window.total, "offset": window.offset, "limit": window.limit,
+                "truncated": window.truncated, "nextCursor": window.nextCursor,
+            ]
         default:
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: name])
         }
+    }
+
+    /// Test hook: `AGENTREINS_MCP_TOOL_DELAY_MS` sleeps in short slices so a timeout or a disconnect can stop it.
+    /// Unset in production. Not a client-config switch.
+    static func applyToolDelay(_ isCancelled: () -> Bool) {
+        let ms = intValue(ProcessInfo.processInfo.environment["AGENTREINS_MCP_TOOL_DELAY_MS"]) ?? 0
+        guard ms > 0 else { return }
+        var left = ms
+        while left > 0 {
+            if isCancelled() { return }
+            let slice = min(20, left)
+            Thread.sleep(forTimeInterval: Double(slice) / 1000)
+            left -= slice
+        }
+    }
+
+    /// Page backward through a chronological list: offset 0 is the newest `limit` rows, still oldest-first.
+    static func pageRecent(_ items: [[String: Any]], offset: Int, limit: Int) -> ListPage.Window {
+        let total = items.count
+        let end = max(0, total - offset)
+        let start = max(0, end - limit)
+        let page = Array(items[start..<end])
+        let truncated = start > 0
+        return ListPage.Window(items: page, total: total, offset: offset, limit: limit,
+                              truncated: truncated,
+                              nextCursor: truncated ? ListPage.encodeCursor(offset + limit) : NSNull())
     }
 }

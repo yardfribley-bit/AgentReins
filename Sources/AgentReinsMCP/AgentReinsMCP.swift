@@ -112,20 +112,31 @@ enum Paths {
 // MARK: - Transport (user dir only; never /private/tmp)
 
 enum Transport {
-    static func load(limit: Int = 80) -> [[String: Any]] {
+    struct Load {
+        var records: [[String: Any]]
+        /// True when more than `limit` transport directories exist; only the newest `limit` are returned.
+        var truncated: Bool
+    }
+
+    static func load(limit: Int = 80) -> [[String: Any]] { loadReporting(limit: limit).records }
+
+    static func loadReporting(limit: Int = 80) -> Load {
         Paths.ensureSupport()
         let root = Paths.transport.resolvingSymlinksInPath()
         let path = root.path
-        if path.hasPrefix("/private/tmp") || path.hasPrefix("/tmp/") { return [] }
-        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else { return [] }
-        let files = dirs.map { $0.appendingPathComponent("transport.json") }
+        if path.hasPrefix("/private/tmp") || path.hasPrefix("/tmp/") { return Load(records: [], truncated: false) }
+        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+            return Load(records: [], truncated: false)
+        }
+        let sorted = dirs.map { $0.appendingPathComponent("transport.json") }
             .filter { FileManager.default.fileExists(atPath: $0.path) }
             .sorted {
                 let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
                 return a > b
             }
-            .prefix(limit)
+        let truncated = sorted.count > limit
+        let files = sorted.prefix(limit)
         var rows: [[String: Any]] = []
         for file in files {
             guard let data = try? Data(contentsOf: file),
@@ -148,7 +159,7 @@ enum Transport {
             row["evidencePath"] = file.path
             rows.append(row)
         }
-        return rows
+        return Load(records: rows, truncated: truncated)
     }
 }
 
@@ -156,13 +167,15 @@ enum Transport {
 
 enum Alerts {
     /// evidence.py list_alerts: rule normalised ('INB'), INB alerts carry the finding with a redacted context.
-    static func list(_ records: [[String: Any]], agent: String?, rule: String?, since: String?) -> [String: Any] {
+    static func list(_ records: [[String: Any]], agent: String?, rule: String?, since: String?, until: String? = nil,
+                     limit: Int? = nil, offset: Int = 0) -> [String: Any] {
         let (alerts, engine, warning) = build(records)
         var byCall: [String: [String: Any]] = [:]
         for r in records {
             for k in [str(r["call"]), str(r["runID"])].compactMap({ $0 }) where byCall[k] == nil { byCall[k] = r }
         }
         let sinceTs = Clock.parse(since)
+        let untilTs = Clock.parse(until)
         var out: [[String: Any]] = []
         for alert in alerts {
             var finding: Any = nn(alert["finding"])
@@ -182,14 +195,17 @@ enum Alerts {
             if let agent, agent != "all", str(item["agent"]) != agent { continue }
             if let rule, rule != "all", str(item["rule"]) != rule { continue }
             if let sinceTs, let ts = Clock.parse(item["timestamp"]), ts < sinceTs { continue }
+            if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
             out.append(item)
         }
+        let page = ListPage.slice(out, offset: offset, limit: limit)
         var result: [String: Any] = [
-            "alerts": Redact.any(out),
+            "alerts": Redact.any(page.items),
             "confidence": out.isEmpty ? "Unknown" : "Observed",
             "engine": engine,
-            "note": "告警由本机运输审计 + 与 App 相同的 risk-alerts.js（JavaScriptCore）推导；无数据即为空，不放样本。",
+            "note": "告警由本机传输审计 + 与 App 相同的 risk-alerts.js（JavaScriptCore）推导；无数据即为空，不放样本。",
         ]
+        for (k, v) in ListPage.meta(page) { result[k] = v }
         if let warning { result["warning"] = warning }
         return result
     }
@@ -259,9 +275,18 @@ enum Alerts {
 }
 
 enum Agents {
-    static func list(_ records: [[String: Any]]) -> [String: Any] {
+    static let executionIdCap = 40
+    static let sessionCap = 40
+
+    static func list(_ records: [[String: Any]], since: String? = nil, until: String? = nil,
+                     limit: Int? = nil, offset: Int = 0, transportTruncated: Bool = false) -> [String: Any] {
+        let sinceTs = Clock.parse(since)
+        let untilTs = Clock.parse(until)
         var by: [String: [String: Any]] = [:]
         for r in records {
+            // Same rule as list_alerts: a bound drops a row only when its timestamp parses out of range.
+            if let sinceTs, let ts = Clock.parse(r["startedAt"]), ts < sinceTs { continue }
+            if let untilTs, let ts = Clock.parse(r["startedAt"]), ts > untilTs { continue }
             let agent = (r["agent"] as? String) ?? "Unknown"
             var bucket = by[agent] ?? ["agent": agent, "sessions": Set<String>(), "executionIds": [String](), "tools": Set<String>()]
             if let s = r["session"] as? String { var set = bucket["sessions"] as! Set<String>; set.insert(s); bucket["sessions"] = set }
@@ -269,27 +294,43 @@ enum Agents {
             if let t = r["tool"] as? String { var set = bucket["tools"] as! Set<String>; set.insert(t); bucket["tools"] = set }
             by[agent] = bucket
         }
+        let sessionLimit = min(Self.sessionCap, limit ?? Self.sessionCap)
         let agents = by.keys.sorted().map { agent -> [String: Any] in
             let b = by[agent]!
+            let sessions = Array(b["sessions"] as! Set<String>).sorted()
+            let ids = b["executionIds"] as! [String]
             return [
                 "agent": agent,
                 "isCursor": agent == "Cursor",
-                "sessions": Array(b["sessions"] as! Set<String>).sorted(),
-                "executionIds": Array((b["executionIds"] as! [String]).prefix(40)),
+                "sessions": Array(sessions.prefix(sessionLimit)),
+                "sessionCount": sessions.count,
+                "sessionsTruncated": sessions.count > sessionLimit,
+                "executionIds": Array(ids.prefix(Self.executionIdCap)),
+                "executionCount": ids.count,
+                "executionIdsTruncated": ids.count > Self.executionIdCap,
                 "tools": Array(b["tools"] as! Set<String>).sorted(),
-                "confidence": (b["executionIds"] as! [String]).isEmpty ? "Unknown" : "Observed",
+                "confidence": ids.isEmpty ? "Unknown" : "Observed",
             ]
         }
-        return ["agents": agents, "confidence": agents.isEmpty ? "Unknown" : "Observed",
-                "note": "仅来自用户目录运输审计；不读 /private/tmp。"]
+        let page = ListPage.slice(agents, offset: offset, limit: limit)
+        var result: [String: Any] = [
+            "agents": page.items,
+            "confidence": agents.isEmpty ? "Unknown" : "Observed",
+            "note": "仅来自用户目录传输审计；不读 /private/tmp。",
+            "transportTruncated": transportTruncated,
+        ]
+        for (k, v) in ListPage.meta(page) { result[k] = v }
+        return result
     }
 }
 
 enum Execution {
     /// evidence.py get_execution: findings (INB with redacted context) and the same destination fields as list_network.
-    static func get(_ id: String, _ records: [[String: Any]]) -> [String: Any] {
+    static func get(_ id: String, _ records: [[String: Any]], transportTruncated: Bool = false) -> [String: Any] {
         guard let hit = records.first(where: { str($0["call"]) == id || str($0["runID"]) == id }) else {
-            return ["executionId": id, "confidence": "Unknown", "note": "未找到该执行编号的运输审计记录。"]
+            var note = "未找到该执行编号的传输审计记录。"
+            if transportTruncated { note += "传输目录超过读取上限，只读了最近修改的记录。" }
+            return ["executionId": id, "confidence": "Unknown", "note": note]
         }
         let downloads = ((hit["downloads"] as? [[String: Any]]) ?? []).map { d -> [String: Any] in
             ["path": nn(d["path"]), "sha256": nn(d["sha256"]), "bytes": nn(d["bytes"]), "state": nn(d["state"]),
@@ -317,9 +358,18 @@ enum Execution {
 
 /// Renamed from `Network` so `import Network` (NWListener) does not clash with this tool.
 enum NetworkTool {
-    static func list(_ records: [[String: Any]], agent: String?, since: String?, integrity: Integrity) -> [String: Any] {
+    static func list(_ records: [[String: Any]], agent: String?, since: String?, until: String? = nil,
+                     integrity: Integrity, limit: Int? = nil, offset: Int = 0,
+                     transportTruncated: Bool = false) -> [String: Any] {
+        let sinceTs = Clock.parse(since)
+        let untilTs = Clock.parse(until)
         let rows = records.compactMap { r -> [String: Any]? in
             if let agent, agent != "all", str(r["agent"]) != agent { return nil }
+            // `since` alone stays socket-only. Command rows are bounded once `until` is set.
+            if let untilTs {
+                if let sinceTs, let ts = Clock.parse(r["startedAt"]), ts < sinceTs { return nil }
+                if let ts = Clock.parse(r["startedAt"]), ts > untilTs { return nil }
+            }
             var row: [String: Any] = [
                 "executionId": nn(r["call"] ?? r["runID"]), "agent": nn(r["agent"]), "tool": nn(r["tool"]),
                 "auditBypass": (r["auditBypass"] as? Bool) == true, "startedAt": nn(r["startedAt"]),
@@ -330,23 +380,30 @@ enum NetworkTool {
             row["confidence"] = isNull(dest["destination"]) ? "Unknown" : "Observed"
             return row
         }
-        let sockets = SocketLedger.load(integrity, agent: agent, since: since)
+        let fetch = ListPage.socketFetchLimit(offset: offset, limit: limit)
+        let sockets = SocketLedger.load(integrity, agent: agent, since: since, until: until, limit: fetch)
         let connections = sockets["connections"] as? [[String: Any]] ?? []
         let coverage = sockets["coverage"] as? [String: Any] ?? [:]
         let direct = connections.filter { ($0["viaProxy"] as? Bool) == false && str($0["scope"]) == "public" }.count
         let proxied = connections.filter { ($0["viaProxy"] as? Bool) == true }.count
-        return [
-            "network": Redact.any(rows),
-            "sockets": connections,
+        let networkPage = ListPage.slice(rows, offset: offset, limit: limit)
+        let socketPage = ListPage.slice(connections, offset: offset, limit: limit, knownTotal: intValue(sockets["total"]))
+        var result: [String: Any] = [
+            "network": Redact.any(networkPage.items),
+            "sockets": socketPage.items,
             "socketSummary": ["total": sockets["total"] ?? 0, "notViaProxyPublic": direct, "viaProxy": proxied,
                               "ledgerIntegrity": nn((coverage["integrity"] as? [String: Any])?["state"])] as [String: Any],
             "socketCoverage": coverage,
+            "socketsPage": ListPage.meta(socketPage),
             "confidence": rows.isEmpty && connections.isEmpty ? "Unknown" : "Observed",
+            "transportTruncated": transportTruncated,
             "note": "network = 经审计入口的命令；realDestination/destinationSource/transportPeer 与 get_execution 同源："
                 + "proxy_observed / connection_observed = trace 里看到（Observed），argv_parsed = 只从命令参数推出（Inferred），"
                 + "transport_peer_only = 只知道本机代理口（Unknown）。sockets = 按进程采样的 TCP/UDP 连接，与是否走代理无关；"
                 + "会漏掉短于实测间隔（socketCoverage.missesShorterThanSeconds）的连接。",
         ]
+        for (k, v) in ListPage.meta(networkPage) { result[k] = v }
+        return result
     }
 }
 
@@ -360,11 +417,11 @@ enum SocketLedger {
         return defaultURL
     }
 
-    static func load(_ integrity: Integrity, agent: String?, since: String?, limit: Int = 200) -> [String: Any] {
+    static func load(_ integrity: Integrity, agent: String?, since: String?, until: String? = nil, limit: Int = 200) -> [String: Any] {
         let seal = SocketLedgerCore.sealPath(ledger: url, defaultLedger: defaultURL, integrityDir: Paths.integrityDir)
         let key = try? integrity.loadKey(create: false)
         return SocketLedgerCore.load(ledger: url, seal: seal, key: key, crypto: Ctx.crypto, agent: agent, since: since,
-                                     limit: limit)
+                                     until: until, limit: limit)
     }
 
     static func blindSpot(_ cov: [String: Any]) -> [String: Any] {
@@ -385,8 +442,8 @@ enum SocketLedger {
 }
 
 enum Coverage {
-    static func get(_ integrity: Integrity) -> [String: Any] {
-        let validation = integrity.validate()
+    static func get(_ integrity: Integrity, validation: [String: Any]? = nil) -> [String: Any] {
+        let validation = validation ?? integrity.validate()
         let ledger = SocketLedger.load(integrity, agent: nil, since: nil, limit: 0)["coverage"] as? [String: Any] ?? [:]
         return [
             "rules": [
@@ -413,6 +470,156 @@ enum Coverage {
     }
 }
 
+// MARK: - List paging (limit / offset / cursor). Omitted limit keeps the previous full result.
+
+enum ListPage {
+    struct Window {
+        var items: [[String: Any]]
+        var total: Int
+        var offset: Int
+        var limit: Int
+        var truncated: Bool
+        var nextCursor: Any
+    }
+
+    static let maxLimit = 500
+
+    /// (`offset`, `limit`). `limit == nil` means "no extra cap" (historical full list, aside from each tool's own cap).
+    static func parse(args: [String: Any], defaultLimit: Int?) throws -> (offset: Int, limit: Int?) {
+        let offset: Int
+        if let cursor = str(args["cursor"]), !cursor.isEmpty {
+            guard let decoded = decodeCursor(cursor) else {
+                throw NSError(domain: "AgentReinsMCP", code: 4, userInfo: [NSLocalizedDescriptionKey: "invalid cursor"])
+            }
+            offset = decoded
+        } else {
+            let raw = intValue(args["offset"]) ?? 0
+            if raw < 0 {
+                throw NSError(domain: "AgentReinsMCP", code: 4, userInfo: [NSLocalizedDescriptionKey: "invalid offset"])
+            }
+            offset = raw
+        }
+        if args["limit"] == nil || args["limit"] is NSNull {
+            return (offset, defaultLimit)
+        }
+        guard var limit = intValue(args["limit"]) else {
+            throw NSError(domain: "AgentReinsMCP", code: 4, userInfo: [NSLocalizedDescriptionKey: "invalid limit"])
+        }
+        if limit < 1 { limit = 1 }
+        if limit > maxLimit { limit = maxLimit }
+        return (offset, limit)
+    }
+
+    static func slice(_ items: [[String: Any]], offset: Int, limit: Int?, knownTotal: Int? = nil) -> Window {
+        let sourceTotal = max(knownTotal ?? items.count, items.count)
+        let start = min(max(0, offset), items.count)
+        let page: [[String: Any]]
+        let effective: Int
+        if let limit {
+            page = Array(items.dropFirst(start).prefix(limit))
+            effective = limit
+        } else {
+            page = Array(items.dropFirst(start))
+            effective = page.count
+        }
+        let consumed = offset + page.count
+        let truncated = consumed < sourceTotal
+        return Window(items: page, total: sourceTotal, offset: offset, limit: effective,
+                      truncated: truncated, nextCursor: truncated ? encodeCursor(consumed) : NSNull())
+    }
+
+    static func meta(_ window: Window) -> [String: Any] {
+        ["total": window.total, "offset": window.offset, "limit": window.limit,
+         "truncated": window.truncated, "nextCursor": window.nextCursor]
+    }
+
+    /// Socket ledger historically returned at most 200 rows. Fetch enough for this page without
+    /// dropping that default when the caller did not ask for a page.
+    static func socketFetchLimit(offset: Int, limit: Int?) -> Int {
+        let need = offset + (limit ?? 200)
+        return min(5000, max(200, need))
+    }
+
+    static func encodeCursor(_ offset: Int) -> String {
+        Data(String(offset).utf8).base64EncodedString()
+            .replacingOccurrences(of: "+", with: "-")
+            .replacingOccurrences(of: "/", with: "_")
+            .replacingOccurrences(of: "=", with: "")
+    }
+
+    static func decodeCursor(_ cursor: String) -> Int? {
+        var text = cursor.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/")
+        let pad = (4 - (text.count % 4)) % 4
+        if pad > 0 { text += String(repeating: "=", count: pad) }
+        guard let data = Data(base64Encoded: text), let raw = String(data: data, encoding: .utf8),
+              let n = Int(raw), n >= 0 else { return nil }
+        return n
+    }
+}
+
+// MARK: - Process-wide Keychain cache and async audit writes
+
+/// One helper launch per account per TTL, shared by every tools/call in this process.
+/// `missing` is not cached: a key may be created on the next call. Failures (timeout, needs approval,
+/// helper error) stay cached so a blocked Keychain costs one 15s wait, not one per tool call.
+final class ProcessKeychainCache: KeychainStore {
+    let inner: KeychainStore
+    let foundTTL: TimeInterval
+    let unavailableTTL: TimeInterval
+    let now: () -> Date
+    private let lock = NSLock()
+    private struct Hit { var status: String; var data: Data?; var at: Date; var error: String? }
+    private var cache: [String: Hit] = [:]
+    private var storedError: String?
+
+    init(_ inner: KeychainStore, foundTTL: TimeInterval = 300, unavailableTTL: TimeInterval = 300,
+         now: @escaping () -> Date = { Date() }) {
+        self.inner = inner
+        self.foundTTL = foundTTL
+        self.unavailableTTL = unavailableTTL
+        self.now = now
+    }
+
+    func lookup(_ account: String) -> (String, Data?) {
+        lock.lock()
+        defer { lock.unlock() }
+        let moment = now()
+        if let hit = cache[account], hit.status != "missing" {
+            let ttl = hit.status == "found" ? foundTTL : unavailableTTL
+            if moment.timeIntervalSince(hit.at) < ttl {
+                storedError = hit.error
+                return (hit.status, hit.data)
+            }
+        }
+        let value = inner.lookup(account)
+        let error = inner.lastError
+        storedError = error
+        if value.0 == "missing" {
+            cache[account] = nil
+        } else {
+            cache[account] = Hit(status: value.0, data: value.1, at: moment, error: error)
+        }
+        return value
+    }
+
+    func set(_ account: String, _ value: Data) -> Bool {
+        let ok = inner.set(account, value)
+        lock.lock()
+        cache[account] = nil
+        storedError = inner.lastError
+        lock.unlock()
+        return ok
+    }
+
+    var backend: String { inner.backend }
+    var helperPath: String? { inner.helperPath }
+    var lastError: String? {
+        lock.lock()
+        defer { lock.unlock() }
+        return storedError ?? inner.lastError
+    }
+}
+
 // MARK: - Per-call integrity context (CryptoKit + packaged Keychain helper)
 
 enum Ctx {
@@ -426,17 +633,62 @@ enum Ctx {
             return Data(bytes)
         })
 
+    static let keychain = ProcessKeychainCache(HelperKeychain(helper: HelperKeychain.packaged()))
+    private static let auditQueue = DispatchQueue(label: "com.agentreins.mcp.audit")
+    private static let validationQueue = DispatchQueue(label: "com.agentreins.mcp.validation")
+    private static var validationCache: (token: String, value: [String: Any])?
+
     static func integrity() -> Integrity {
         Paths.ensureSupport()
         return Integrity(auditDir: Paths.support, integrityDir: Paths.integrityDir, transport: Paths.transport,
-                         keychain: CachedKeychain(HelperKeychain(helper: HelperKeychain.packaged())), crypto: crypto)
+                         keychain: keychain, crypto: crypto)
     }
 
     /// Without the Keychain key nothing is signed (never a throwaway file key); the read itself is still answered
     /// and get_coverage reports status key_unavailable.
-    static func appendAudit(_ integrity: Integrity, actor: String, tool: String, arguments: [String: Any]) {
-        guard let key = try? integrity.loadKey() else { return }
-        integrity.append(actor: actor, tool: tool, arguments: arguments, key: key)
+    /// HTTP passes `sync: false` so the helper launch and the log write do not sit on the tool-call path.
+    static func appendAudit(actor: String, tool: String, arguments: [String: Any], sync: Bool) {
+        let argsCopy = arguments
+        let work = {
+            let integrity = integrity()
+            guard let key = try? integrity.loadKey() else { return }
+            integrity.append(actor: actor, tool: tool, arguments: argsCopy, key: key)
+        }
+        if sync { auditQueue.sync(execute: work) } else { auditQueue.async(execute: work) }
+    }
+
+    static func flushAudit() { auditQueue.sync { } }
+
+    /// Reuses the last `validate()` while the audit log, seals, evidence files and key fingerprint are unchanged.
+    static func cachedValidation(_ integrity: Integrity) -> [String: Any] {
+        validationQueue.sync {
+            let token = validationToken(integrity)
+            if let validationCache, validationCache.token == token { return validationCache.value }
+            let value = integrity.validate()
+            if validationToken(integrity) == token { validationCache = (token, value) }
+            return value
+        }
+    }
+
+    private static func validationToken(_ integrity: Integrity) -> String {
+        let (status, data) = integrity.keychain.lookup(Integrity.accountHmac)
+        let keyTag = data.map { String(crypto.shaHex(data: $0).prefix(16)) } ?? status
+        var parts = ["key=\(keyTag)"]
+        for url in [integrity.auditLog, integrity.auditSeal, integrity.sealMirror] {
+            parts.append(statToken(url))
+        }
+        for url in integrity.evidenceFiles() {
+            parts.append(statToken(url))
+            parts.append(statToken(integrity.macFile(url)))
+        }
+        return parts.joined(separator: "|")
+    }
+
+    private static func statToken(_ url: URL) -> String {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(url.lastPathComponent):\(size):\(mtime)"
     }
 
     static func recent(_ integrity: Integrity, limit: Int) -> [[String: Any]] {

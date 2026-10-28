@@ -130,7 +130,7 @@ public enum SocketLedgerCore {
     }
 
     public static func load(ledger: URL, seal: URL, key: Data?, crypto: CryptoBox, agent: String?, since: String?,
-                     limit: Int = 200, now: Double = Date().timeIntervalSince1970) -> [String: Any] {
+                     until: String? = nil, limit: Int = 200, now: Double = Date().timeIntervalSince1970) -> [String: Any] {
         let (raw, side, sealObj) = readLocked(ledger, seal: seal)
         let integrity = verify(raw, side, sealObj, key, crypto)
         let tampered = str(integrity["state"]) == "tampered"
@@ -144,10 +144,12 @@ public enum SocketLedgerCore {
             ] as [String: Any]]
         }
         let sinceTs = Clock.parse(since)
+        let untilTs = Clock.parse(until)
         var rows: [[String: Any]] = []
         for case let row as [String: Any] in (root["connections"] as? [Any] ?? []) {
             if let agent, agent != "all", str(row["agent"]) != agent { continue }
             if let sinceTs, (Clock.parse(row["lastSeen"]) ?? 0) < sinceTs { continue }
+            if let untilTs, (Clock.parse(row["lastSeen"]) ?? 0) > untilTs { continue }
             var out: [String: Any] = [:]
             for k in fields { if let v = row[k] { out[k] = v } }
             if tampered {

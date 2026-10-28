@@ -218,8 +218,14 @@ class HTTPTransportTests(unittest.TestCase):
             client.initialize()
             status, _, raw = client.post({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
             self.assertEqual(status, 200, raw)
-            names = {t["name"] for t in json.loads(raw)["result"]["tools"]}
+            listed = json.loads(raw)["result"]["tools"]
+            names = {t["name"] for t in listed}
             self.assertEqual(names, TOOLS)
+            by_name = {t["name"]: t for t in listed}
+            for tool in ("list_agents", "list_alerts", "list_network", "list_mcp_audit"):
+                props = by_name[tool]["inputSchema"]["properties"]
+                for key in ("limit", "offset", "cursor", "since", "until"):
+                    self.assertIn(key, props, tool)
 
             cov = client.call("get_coverage", {})["result"]
             self.assertFalse(cov["isError"], cov)
@@ -231,6 +237,17 @@ class HTTPTransportTests(unittest.TestCase):
             self.assertFalse(net["isError"], net)
             self.assertIn("network", net["structuredContent"])
             self.assertIn("sockets", net["structuredContent"])
+            agents = client.call("list_agents", {"limit": 1})["result"]["structuredContent"]
+            self.assertIn("total", agents)
+            self.assertIn("truncated", agents)
+            self.assertIn("nextCursor", agents)
+            self.assertIn("传输审计", agents.get("note", ""))
+            self.assertNotIn("运输审计", json.dumps(agents, ensure_ascii=False))
+            for agent in agents.get("agents") or []:
+                self.assertIn("sessionCount", agent)
+                self.assertIn("executionCount", agent)
+                self.assertLessEqual(len(agent.get("executionIds") or []), 40)
+                self.assertLessEqual(len(agent.get("sessions") or []), 40)
         finally:
             server.stop()
 
@@ -398,6 +415,183 @@ class HTTPTransportTests(unittest.TestCase):
                 self.assertNotIn("pid=%s exe=" % server_pid, actor, actor)
                 self.assertNotIn("exe=AgentReinsMCP", actor, actor)
                 self.assertIn(" exe=", actor)
+        finally:
+            server.stop()
+
+    def test_slow_call_does_not_block_initialize_on_another_connection(self) -> None:
+        port = free_port()
+        server = Running(self.bin, port, extra_env={
+            "AGENTREINS_MCP_TOOL_DELAY_MS": "2000",
+            "AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS": "8",
+        })
+        try:
+            self.wait_health(server)
+            first = Client(port, name="slow")
+            first.initialize()
+            timings: dict[str, float] = {}
+
+            def slow() -> None:
+                started = time.perf_counter()
+                status, _, raw = first.post({
+                    "jsonrpc": "2.0", "id": 11, "method": "tools/call",
+                    "params": {"name": "list_agents", "arguments": {}},
+                }, timeout=10)
+                timings["slow"] = time.perf_counter() - started
+                timings["slow_status"] = status
+                if status != 200:
+                    timings["slow_body"] = raw[:300]
+
+            worker = threading.Thread(target=slow)
+            worker.start()
+            time.sleep(0.4)
+            other = Client(port, name="other")
+            started = time.perf_counter()
+            other.initialize()
+            timings["init"] = time.perf_counter() - started
+            worker.join(timeout=12)
+            self.assertFalse(worker.is_alive(), "slow call did not finish")
+            print("CONCURRENCY slow_s=%.3f other_initialize_s=%.3f" % (timings["slow"], timings["init"]))
+            self.assertEqual(timings["slow_status"], 200, timings.get("slow_body"))
+            self.assertGreaterEqual(timings["slow"], 1.8, timings)
+            self.assertLess(timings["init"], 1.0, timings)
+            self.assertLess(timings["init"], timings["slow"] / 2, timings)
+        finally:
+            server.stop()
+
+    def test_session_lru_eviction_and_idle_expiry(self) -> None:
+        port = free_port()
+        server = Running(self.bin, port, extra_env={
+            "AGENTREINS_MCP_MAX_SESSIONS": "3",
+            "AGENTREINS_MCP_SESSION_TTL_SECONDS": "60",
+        })
+        try:
+            self.wait_health(server)
+            clients = [Client(port, name="s%d" % i) for i in range(3)]
+            for client in clients:
+                client.initialize()
+            newest = Client(port, name="s3")
+            newest.initialize()
+            status, _, raw = clients[0].post({"jsonrpc": "2.0", "id": 9, "method": "ping", "params": {}})
+            self.assertEqual(status, 404, raw)
+            body = json.loads(raw)
+            self.assertEqual(body["jsonrpc"], "2.0")
+            self.assertEqual(body["id"], 9)
+            self.assertEqual(body["error"]["code"], -32001)
+            self.assertIn("session not found", body["error"]["message"])
+            status, _, raw = clients[1].post({"jsonrpc": "2.0", "id": 4, "method": "ping", "params": {}})
+            self.assertEqual(status, 200, raw)
+            self.assertIn("result", json.loads(raw))
+            status, _, raw = newest.post({"jsonrpc": "2.0", "id": 5, "method": "ping", "params": {}})
+            self.assertEqual(status, 200, raw)
+        finally:
+            server.stop()
+
+        port = free_port()
+        server = Running(self.bin, port, extra_env={"AGENTREINS_MCP_SESSION_TTL_SECONDS": "1"})
+        try:
+            self.wait_health(server)
+            client = Client(port, name="idle")
+            client.initialize()
+            time.sleep(1.3)
+            status, _, raw = client.post({"jsonrpc": "2.0", "id": 6, "method": "ping", "params": {}})
+            self.assertEqual(status, 404, raw)
+            body = json.loads(raw)
+            self.assertEqual(body["jsonrpc"], "2.0")
+            self.assertEqual(body["id"], 6)
+            self.assertEqual(body["error"]["code"], -32001)
+            Client(port, name="fresh").initialize()
+        finally:
+            server.stop()
+
+    def test_request_timeout_and_disconnect_cleanup(self) -> None:
+        port = free_port()
+        server = Running(self.bin, port, extra_env={
+            "AGENTREINS_MCP_TOOL_DELAY_MS": "3000",
+            "AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS": "0.4",
+        })
+        try:
+            self.wait_health(server)
+            client = Client(port, name="timeout")
+            client.initialize()
+            started = time.perf_counter()
+            status, _, raw = client.post({
+                "jsonrpc": "2.0", "id": 21, "method": "tools/call",
+                "params": {"name": "list_agents", "arguments": {}},
+            }, timeout=5)
+            elapsed = time.perf_counter() - started
+            print("TIMEOUT elapsed_s=%.3f status=%s" % (elapsed, status))
+            self.assertLess(elapsed, 2.0, raw[:300])
+            body = json.loads(raw)
+            self.assertEqual(status, 200, raw)
+            self.assertEqual(body["id"], 21)
+            self.assertEqual(body["error"]["code"], -32000)
+            started = time.perf_counter()
+            Client(port, name="after-timeout").initialize()
+            self.assertLess(time.perf_counter() - started, 1.0)
+        finally:
+            server.stop()
+
+        port = free_port()
+        server = Running(self.bin, port, extra_env={
+            "AGENTREINS_MCP_TOOL_DELAY_MS": "5000",
+            "AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS": "30",
+        })
+        try:
+            self.wait_health(server)
+            before = server.log()
+            held = Client(port, name="disconnect")
+            held.initialize()
+            payload = json.dumps({
+                "jsonrpc": "2.0", "id": 22, "method": "tools/call",
+                "params": {"name": "list_agents", "arguments": {}},
+            }).encode()
+            head = (
+                "POST /mcp HTTP/1.1\r\nHost: 127.0.0.1:%d\r\nContent-Type: application/json\r\n"
+                "Content-Length: %d\r\nMcp-Session-Id: %s\r\nConnection: close\r\n\r\n"
+                % (port, len(payload), held.session)
+            ).encode()
+            sock = socket.create_connection(("127.0.0.1", port), timeout=2)
+            try:
+                sock.sendall(head + payload)
+            finally:
+                sock.close()
+            deadline = time.time() + 2
+            while time.time() < deadline and "request abandoned" not in server.log()[len(before):]:
+                time.sleep(0.05)
+            suffix = server.log()[len(before):]
+            self.assertIn("request abandoned", suffix, suffix[-800:])
+            self.assertNotIn("peer lookup failed", suffix, suffix[-800:])
+            started = time.perf_counter()
+            Client(port, name="after-disconnect").initialize()
+            self.assertLess(time.perf_counter() - started, 1.0)
+        finally:
+            server.stop()
+
+    def test_unknown_session_is_404_with_jsonrpc_error(self) -> None:
+        port = free_port()
+        server = Running(self.bin, port)
+        try:
+            self.wait_health(server)
+            client = Client(port, name="missing-session")
+            client.initialize()
+            status, _, raw = client.post(
+                {"jsonrpc": "2.0", "id": 42, "method": "ping", "params": {}},
+                extra={"Mcp-Session-Id": "not-a-session"},
+            )
+            self.assertEqual(status, 404, raw)
+            body = json.loads(raw)
+            self.assertEqual(body["jsonrpc"], "2.0")
+            self.assertEqual(body["id"], 42)
+            self.assertEqual(body["error"]["code"], -32001)
+            self.assertNotIn("session_not_found", raw.decode())
+            status, _, raw = http_exchange(port, "DELETE", "/mcp", headers={
+                "Host": "127.0.0.1:%d" % port,
+                "Mcp-Session-Id": "also-missing",
+            })
+            self.assertEqual(status, 404, raw)
+            body = json.loads(raw)
+            self.assertEqual(body["error"]["code"], -32001)
+            self.assertIsNone(body["id"])
         finally:
             server.stop()
 

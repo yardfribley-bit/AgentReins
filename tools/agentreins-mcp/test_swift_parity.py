@@ -374,6 +374,11 @@ class RecordParity(Base):
                                "args": ["git@git.example.org:repo.git"]}
         recs["loopback"] = {"connections": [{"kind": "connected", "detail": ["127.0.0.1 (127.0.0.1) port 18891"]}],
                             "args": []}
+        recs["mcp_self"] = {
+            "auditBypass": True,
+            "args": ["--noproxy", "*", "https://example.com/"],
+            "connections": [{"kind": "connected", "detail": ["127.0.0.1 (127.0.0.1) port 18977"]}],
+        }
         run = self.tmp / "inb"
         (run / "bodies").mkdir(parents=True)
         (run / "bodies" / "7.bin").write_text(inbfx.RESPONSE, encoding="utf-8")
