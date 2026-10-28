@@ -5,6 +5,62 @@ import Darwin
 import Glibc
 #endif
 
+/// Line count and last HMAC hash of the audit jsonl. Warm appends do not re-read the file.
+enum AuditLogTip {
+    private static let lock = NSLock()
+    private static var path = ""
+    private static var size: UInt64 = 0
+    private static var mtime: TimeInterval = -1
+    private static var count = 0
+    private static var lastHash = String(repeating: "0", count: 64)
+
+    static func tip(_ url: URL) -> (Int, String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: url.path),
+              let attrs = try? fm.attributesOfItem(atPath: url.path) else {
+            path = ""
+            count = 0
+            size = 0
+            mtime = -1
+            lastHash = String(repeating: "0", count: 64)
+            return (0, lastHash)
+        }
+        let sz = (attrs[.size] as? NSNumber)?.uint64Value ?? 0
+        let mt = (attrs[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        if path == url.path && size == sz && mtime == mt {
+            return (count, lastHash)
+        }
+        let data = (try? Data(contentsOf: url)) ?? Data()
+        let text = String(decoding: data, as: UTF8.self)
+        let lines = text.split(whereSeparator: \.isNewline).map(String.init).filter {
+            !$0.trimmingCharacters(in: .whitespaces).isEmpty
+        }
+        count = lines.count
+        if let last = lines.last, let hash = str(JSON.object(last)?["hash"]), !hash.isEmpty {
+            lastHash = hash
+        } else if lines.isEmpty {
+            lastHash = String(repeating: "0", count: 64)
+        }
+        path = url.path
+        size = sz
+        mtime = mt
+        return (count, lastHash)
+    }
+
+    static func noteAppend(_ url: URL, hash: String) {
+        lock.lock()
+        defer { lock.unlock() }
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        path = url.path
+        size = (attrs?[.size] as? NSNumber)?.uint64Value ?? size
+        mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? mtime
+        count += 1
+        lastHash = hash
+    }
+}
+
 /// Cross-process lock for the audit chain. `flock` is per-process on Darwin and Linux, so a
 /// re-entrant append (seal → boundary → append) must not unlock early, and two threads in one
 /// process need a recursive mutex as well. HTTP tool calls run concurrently; `append` and
@@ -100,8 +156,15 @@ extension Integrity {
     /// The seal anchors the inventory hash only while the inventory still verifies; otherwise the previously
     /// sealed anchor is kept, so an edit is never re-sealed by the next MCP read.
     public func inventoryAnchor(_ key: Data) -> String? {
+        let sig = Self.statSig(runInventory) + "|" + Self.statSig(runInventoryMac)
+        if let cached = Self.inventorySha, Self.inventorySig == sig { return cached }
         guard let inv = read(runInventory) else { return nil }
-        if !exists(runInventoryMac) || (validateRunInventory(key)["ok"] as? Bool) == true { return crypto.shaHex(data: inv) }
+        if !exists(runInventoryMac) || (validateRunInventory(key)["ok"] as? Bool) == true {
+            let sha = crypto.shaHex(data: inv)
+            Self.inventorySig = sig
+            Self.inventorySha = sha
+            return sha
+        }
         for s in [auditSeal, sealMirror] {
             if let prev = str(JSON.objectAt(s)?["inventorySha256"]), !prev.isEmpty { return prev }
         }
@@ -118,9 +181,8 @@ extension Integrity {
 
     private func appendLocked(actor: String, tool: String, arguments: [String: Any], key: Data) {
         ensureDirs()
-        let existing = lines()
-        var prev = String(repeating: "0", count: 64)
-        if let last = existing.last, let h = str(JSON.object(last)?["hash"]), !h.isEmpty { prev = h }
+        let (count, prevHash) = AuditLogTip.tip(auditLog)
+        var prev = prevHash.isEmpty ? String(repeating: "0", count: 64) : prevHash
         var entry: [String: Any] = [
             "at": Clock.iso(now()), "actor": actor, "tool": tool,
             "argsDigest": String(crypto.shaHex(JSON.string(arguments)).prefix(24)), "prevHash": prev,
@@ -136,7 +198,8 @@ extension Integrity {
             writePrivate(auditLog, line)
         }
         try? fm.setAttributes([.posixPermissions: 0o600], ofItemAtPath: auditLog.path)
-        writeSeal(head: str(entry["hash"]) ?? prev, count: existing.count + 1, key: key)
+        AuditLogTip.noteAppend(auditLog, hash: str(entry["hash"]) ?? prev)
+        writeSeal(head: str(entry["hash"]) ?? prev, count: count + 1, key: key)
     }
 
     /// Primary seal + mirror outside the audit dir (B9/B10), same body as Python _write_seal.

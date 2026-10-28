@@ -11,7 +11,7 @@ public enum SocketLedgerCore {
         "localAddress", "remoteAddress", "remoteIP", "remotePort", "state", "firstSeen", "lastSeen",
         "sampleCount", "scope", "viaProxy", "transportPeer", "realDestination", "realDestinationPort",
         "destinationSource", "destinationEvidence", "destinationBasis", "forwardConfirmed", "transportCall",
-        "proxy", "evidence"]
+        "proxy", "evidence", "proxyAttribution"]
     public static let sideFields = ["schema", "seq", "prevHash", "fileSha256", "at"]
 
     public static func sibling(_ u: URL, _ suffix: String) -> URL {

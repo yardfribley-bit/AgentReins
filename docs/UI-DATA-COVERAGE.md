@@ -25,7 +25,9 @@ The UI consumes the complete live process inventory, not only risk or short-live
 ## Known boundaries
 
 - Process inventory is a live snapshot. A process that exits between samples can be missed.
-- Network sockets are sampled and short connections can be missed; proxy destinations are exact only when a client-port join is available.
+- Network sockets are sampled and short connections can be missed. `get_coverage.socketSampling` reports the measured effective interval and an estimated miss rate for a 1.5s connection; that rate is an estimate, not a counted total.
+- In-process tools such as Read, Edit, Write and Glob do not spawn a subprocess or open a socket. They are outside system-level visibility. Absence in the socket ledger or the proxy journal is not evidence they did not run.
+- Proxy requests are attributed from the kernel socket while the client connection is open. If that lookup fails the record says `via proxy · attribution lost` and does not guess a process. A client-supplied pid header is not accepted.
 - Prompts, responses, reasoning and tool results depend on what each native adapter exposes. Transport metadata alone cannot reconstruct encrypted model content.
 - Cursor Composer evidence can provide stable session/turn/tool-call linkage, prompt-token categories, user prompts, visible model responses, tool arguments/results, and before/after file contents. The actual model name remains unknown when Cursor records only `default`.
 - Recorded reasoning means provider-emitted reasoning data; hidden model chain-of-thought is not available as raw evidence.

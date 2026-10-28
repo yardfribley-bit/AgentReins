@@ -1,14 +1,20 @@
 #!/usr/bin/env python3
 """Install / remove the per-user LaunchAgent that runs tools/socket-sampler.
 
-The sampler only reads `ps` and `lsof` for agent process trees (Codex, Cursor,
-WorkBuddy, Claude) and writes ~/Library/Application Support/AgentGuard/socket-ledger.json.
+The sampler reads agent process trees (Codex, Cursor, WorkBuddy, Claude) with
+libproc or procfs and, on macOS, lsof scoped to those pids. It does not run
+lsof -i for the whole machine. It writes ~/Library/Application Support/AgentGuard/socket-ledger.json.
 It changes nothing about agents, proxies or sockets.
 
-  python3 scripts/install_socket_sampler.py            # install + load
-  python3 scripts/install_socket_sampler.py --interval 2
+  python3 scripts/install_socket_sampler.py            # install + load (0.5s)
+  python3 scripts/install_socket_sampler.py --interval 0.5
   python3 scripts/install_socket_sampler.py --uninstall
   python3 scripts/install_socket_sampler.py --print    # show the plist only
+
+Re-running this installer rewrites ~/Library/LaunchAgents/com.agentreins.socket-sampler.plist
+and bootstraps the agent again. Launching AgentReins.app does not rewrite that plist.
+Plists this script used to write with --interval 2.0 stay on disk until reinstall; the
+sampler applies 2.0 as 0.5 once the updated socket_sampler.py is the process launchd runs.
 """
 from __future__ import annotations
 
@@ -46,7 +52,9 @@ def plist(interval: float) -> dict:
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--interval", type=float, default=0.5,
+                    help="seconds between samples written into the LaunchAgent (default 0.5; "
+                         "older installs hardcoded 2.0)")
     ap.add_argument("--uninstall", action="store_true")
     ap.add_argument("--print", action="store_true")
     args = ap.parse_args()

@@ -79,6 +79,7 @@ class Base(unittest.TestCase):
 
     def sampler(self, **kw) -> ss.Sampler:
         kw.setdefault("interval", 2.0)
+        kw.setdefault("backend", "legacy")  # replay fixture ps/lsof; the default collector is procfs/libproc
         return ss.Sampler(self.ledger, roots=None, discover=True, resolve=False, route_paths=[],
                           v2ray_log=self.tmp / "none.log", transport_root=self.tmp / "transport", **kw)
 

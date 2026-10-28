@@ -58,7 +58,31 @@ import time
 from typing import Any, Iterable
 
 SCHEMA = 1
-SAMPLER_VERSION = "socket-sampler/2"
+SAMPLER_VERSION = "socket-sampler/2"  # measured coverage + signed ledger; collector is agent-tree scoped
+REFERENCE_SHORT_SECONDS = 1.5
+# Cadence now that a round is scoped to the agent tree. 0.5s keeps the gap between
+# successful samples at or under 1s when a round itself is a few hundred milliseconds.
+DEFAULT_INTERVAL = 0.5
+# install_socket_sampler.py wrote this exact flag into every LaunchAgent before the
+# scoped collector. The plist is not rewritten by launching the app, so the sampler
+# treats that historical value as the old default and runs at DEFAULT_INTERVAL.
+LEGACY_PLIST_INTERVAL = 2.0
+
+
+def resolve_interval(requested: float) -> tuple[float, str | None]:
+    """Return (interval to sleep toward, note or None).
+
+    ``2.0`` is the value baked into existing ``com.agentreins.socket-sampler`` plists.
+    Any other number, including values above or below 2, is kept.
+    """
+    if float(requested) == LEGACY_PLIST_INTERVAL:
+        return DEFAULT_INTERVAL, (
+            "已安装的 LaunchAgent 仍传 --interval 2.0（安装器旧默认值）。采样器把它当成过期配置，"
+            "按 %.1f 秒采样，这样不改 plist 也会落到不超过 1 秒的有效间隔。"
+            "要固定别的间隔，传不是 2.0 的 --interval，或重新运行 install_socket_sampler.py。"
+            % DEFAULT_INTERVAL
+        )
+    return float(requested), None
 HERE = pathlib.Path(__file__).resolve().parent
 SUPPORT = pathlib.Path.home() / "Library/Application Support/AgentGuard"
 DEFAULT_LEDGER_HOME = SUPPORT / "socket-ledger.json"
@@ -78,8 +102,10 @@ LSOF = "/usr/sbin/lsof" if os.path.exists("/usr/sbin/lsof") else "lsof"
 PS = "/bin/ps" if os.path.exists("/bin/ps") else "ps"
 
 LIMITATION = (
-    "按进程定时采样（lsof），不是逐包拦截：两次采样之间开始又结束的短连接会漏掉；"
+    "按进程定时采样（只扫 agent 进程树，优先 libproc/procfs；套接字不对全机跑 lsof -i），不是逐包拦截："
+    "两次成功采样之间开始又结束的短连接会漏掉；"
     "经系统解析器（mDNSResponder）发出的 DNS 查询不属于 agent 进程，这里看不到；不读取任何正文。"
+    "Read/Edit/Write/Glob 这类不派生子进程、也不打开套接字的进程内工具，系统级采样和代理都看不到。"
 )
 
 
@@ -423,6 +449,26 @@ def parse_lsof(text: str) -> list[dict[str, Any]]:
     return out
 
 
+def run_lsof_scoped(pids: Iterable[int], timeout: float = 3.0) -> tuple[list[dict[str, Any]], str | None]:
+    """``lsof -a -p <agent tree> -i``. Not a whole-machine ``lsof -i``."""
+    pids = sorted({int(p) for p in pids if isinstance(p, int) and p > 0})
+    if not pids:
+        return [], None
+    # lsof -p lists are bounded so one huge tree cannot turn into an argv bomb.
+    chunks = [pids[index:index + 200] for index in range(0, len(pids), 200)]
+    records: list[dict[str, Any]] = []
+    partial = None
+    for chunk in chunks:
+        proc = run_tool([LSOF, "-nP", "-w", "-a", "-p", ",".join(map(str, chunk)), "-i", "-F", "pcRftPTn"],
+                        timeout, "lsof")
+        if proc.returncode not in (0, 1):
+            raise SampleError("lsof", "error", "lsof exit %s" % proc.returncode)
+        if proc.returncode == 1 and proc.stdout.strip() and proc.stderr.strip():
+            partial = "lsof exit 1 with errors; some processes may be missing from this sample"
+        records.extend(parse_lsof(proc.stdout))
+    return records, partial
+
+
 def run_lsof_all(timeout: float = 8.0) -> tuple[list[dict[str, Any]], str | None]:
     """One ``lsof -i`` call for every Internet socket visible to this user.
 
@@ -514,8 +560,12 @@ def _parse_audit_routes(path: pathlib.Path, max_bytes: int) -> list[dict[str, An
             ts = parse_iso(rec.get("observedAt"))
             if cp is None or ts is None or ip_scope(ch) != "loopback":
                 continue
+            owner = rec.get("clientPid")
             routes.append({"clientPort": cp, "host": host.strip("[]"), "port": rec.get("remotePort"),
-                           "ts": ts, "proxy": "AgentReins audit proxy"})
+                           "ts": ts, "proxy": "AgentReins audit proxy",
+                           "clientPid": int(owner) if isinstance(owner, int) else None,
+                           "clientAgent": rec.get("clientAgent"),
+                           "attributionState": rec.get("attributionState")})
     return routes
 
 
@@ -551,8 +601,18 @@ def match_route(row: dict[str, Any], routes: list[dict[str, Any]]) -> dict[str, 
     port = row.get("localPort")
     first = parse_iso(row.get("firstSeen")) or 0
     last = parse_iso(row.get("lastSeen")) or first
-    hits = [r for r in routes if r["clientPort"] == port
-            and first - ROUTE_JOIN_SECONDS <= r["ts"] <= last + ROUTE_JOIN_SECONDS]
+    hits = []
+    for route in routes:
+        if route["clientPort"] != port:
+            continue
+        if not (first - ROUTE_JOIN_SECONDS <= route["ts"] <= last + ROUTE_JOIN_SECONDS):
+            continue
+        # A pid recorded on the proxy at request time must be this socket's pid.
+        # A reused client port owned by someone else is not a join, and is not a guess.
+        owner = route.get("clientPid")
+        if owner is not None and row.get("pid") is not None and int(owner) != int(row["pid"]):
+            continue
+        hits.append(route)
     if not hits:
         return None
     hosts = {(r["host"], r.get("port")) for r in hits}
@@ -759,11 +819,18 @@ def resolve_destinations(rows: list[dict[str, Any]], routes: list[dict[str, Any]
         row["viaProxy"] = via_proxy
         row["transportPeer"] = row.get("remoteAddress")
         if route:
+            basis = "exact loopback client port + time join with proxy route log"
+            if route.get("clientPid") is not None:
+                basis += "; proxy attributed this socket to pid %s at request time" % route["clientPid"]
             row.update(realDestination=route["host"], realDestinationPort=route.get("port"),
                        destinationSource="proxy_observed", destinationEvidence="Correlated",
                        proxy={"name": route["proxy"], "listener": row.get("remoteAddress"),
                               "clientPort": row.get("localPort"), "routeObservedAt": utc_iso(route["ts"])},
-                       destinationBasis="exact loopback client port + time join with proxy route log")
+                       destinationBasis=basis)
+            if route.get("attributionState"):
+                row["proxyAttribution"] = route["attributionState"]
+            if route.get("clientAgent") and route.get("clientPid") == row.get("pid"):
+                row["agent"] = route["clientAgent"]
             continue
         if via_proxy:
             if row.get("destinationSource") != "proxy_observed":
@@ -1005,18 +1072,35 @@ def measured_coverage(samples: dict[str, Any], interval: float | None) -> dict[s
     durations = [r[1] for r in rounds]
     r2 = lambda v: None if v is None else round(v, 2)  # noqa: E731
     p95 = _percentile(gaps, 95)
+    p50_gap = _percentile(gaps, 50)
     enough = len(gaps) >= 5
+    usable = [g for g in gaps if g > 0]
+    if usable:
+        miss = round(sum(max(0.0, 1.0 - REFERENCE_SHORT_SECONDS / g) for g in usable) / len(usable), 4)
+    else:
+        miss = None
     return {
         "configuredIntervalSeconds": interval,
         "intervalSeconds": r2(_percentile(periods, 50)),
         "observedCycleSecondsP50": r2(_percentile(periods, 50)),
         "observedCycleSecondsP95": r2(_percentile(periods, 95)),
+        "successGapSecondsP50": r2(p50_gap),
         "successGapSecondsP95": r2(p95),
+        # Effective interval is the measured gap between successful samples, not the configured 2s.
+        "effectiveIntervalSeconds": r2(p50_gap),
+        "effectiveIntervalSecondsP95": r2(p95),
         "maxFirstDetectionDelaySeconds": r2(max(gaps) if gaps else None),
         "roundDurationSecondsP50": r2(_percentile(durations, 50)),
         "roundDurationSecondsP95": r2(_percentile(durations, 95)),
         # Connections shorter than this may be missed (p95 of measured gaps between successful rounds).
         "missesShorterThanSeconds": r2(p95),
+        "referenceShortConnectionSeconds": REFERENCE_SHORT_SECONDS,
+        "estimatedMissRate": miss,
+        "estimatedMissRateBasis": (
+            "对持续 %.1f 秒的连接，按各次成功采样间隔估计漏采概率 max(0, 1 - %.1f/间隔) 的平均值；"
+            "间隔是实测成功轮次，不是配置值。短于 missesShorterThanSeconds（成功间隔 p95）的连接可能整段落在两次成功采样之间。"
+            % (REFERENCE_SHORT_SECONDS, REFERENCE_SHORT_SECONDS)
+        ),
         "windowRounds": len(rounds),
         "windowFailedRounds": sum(1 for r in rounds if not r[2]),
         "windowFrom": utc_iso(rounds[0][0]) if rounds else None,
@@ -1038,7 +1122,8 @@ class Sampler:
                  transport_root: pathlib.Path = DEFAULT_TRANSPORT,
                  key: bytes | None = None, key_reason: str | None = None,
                  seal_path: pathlib.Path | None = None,
-                 dns_budget: float = 0.4, round_budget: float | None = None) -> None:
+                 dns_budget: float = 0.4, round_budget: float | None = None,
+                 backend: str = "auto") -> None:
         self.ledger_path = ledger_path
         self.lock_path = ledger_path.with_name(ledger_path.name + ".lock")
         self.side_path = sidecar_path(ledger_path)
@@ -1048,6 +1133,9 @@ class Sampler:
         self.transport = TransportIndex(transport_root)
         self.key, self.key_reason = key, key_reason
         self.dns_budget = dns_budget
+        self.backend = backend
+        self.collect_method = ""
+        self.interval_note: str | None = None
         self.round_budget = round_budget if round_budget else max(4.0, 3 * (interval or 2.0))
         self.procs = ProcessTable()
         self.ledger: dict[str, Any] | None = None
@@ -1160,6 +1248,74 @@ class Sampler:
         except Exception:
             pass
 
+    def _collect_legacy(self, budget: float, t0: float) -> tuple[dict[int, dict[str, Any]], dict[int, str], list[dict[str, Any]], str | None]:
+        """Whole-machine ps + one ``lsof -i``. Kept for fixture replay; not the default."""
+        procs = self.procs.snapshot(timeout=min(5.0, budget * 0.5))
+        owners = agent_tree(procs, self.roots, self.discover)
+        left = budget - (time.monotonic() - t0)
+        if left <= 0.2:
+            raise SampleError("ps", "timeout", "process snapshot used the whole round budget")
+        sockets, partial = run_lsof_all(timeout=min(8.0, left))
+        late = attribute_sockets(sockets, procs, owners)
+        if late:
+            self.procs.add_late(late, procs, timeout=1.5)
+        self.collect_method = (
+            "legacy whole-machine ps + one lsof -i filtered to agent trees; not the default collector"
+        )
+        return procs, owners, sockets, partial
+
+    def _collect(self, budget: float, t0: float) -> tuple[dict[int, dict[str, Any]], dict[int, str], list[dict[str, Any]], str | None]:
+        if self.backend == "legacy":
+            return self._collect_legacy(budget, t0)
+        here = pathlib.Path(__file__).resolve().parent
+        if str(here) not in sys.path:
+            sys.path.insert(0, str(here))
+        import proc_lookup
+        try:
+            procs = proc_lookup.snapshot_processes(timeout=min(2.0, budget * 0.4))
+        except proc_lookup.ProcUnavailable:
+            return self._collect_legacy(budget, t0)
+        # macOS libproc snapshots have no argv. Fetch argv[0..1] once per new interpreter
+        # so `node …/codex` is still recognised. Linux cmdline is already on the snapshot.
+        if not os.path.exists("/proc"):
+            interpreters = {"node", "python", "python3", "ruby", "bash", "zsh", "sh"}
+            need = []
+            for pid, proc in procs.items():
+                cached = self.procs.cache.get(pid) or {}
+                if cached.get("path") == proc.get("path") and "argvHead" in cached:
+                    proc["argvHead"] = cached.get("argvHead") or []
+                    continue
+                if (proc.get("name") or "").lower() in interpreters:
+                    need.append(pid)
+            if need:
+                try:
+                    detail = self.procs._detail(need[:200], timeout=min(1.5, max(0.4, budget * 0.3)))
+                except SampleError:
+                    detail = {}
+                for pid, info in detail.items():
+                    if pid in procs:
+                        procs[pid]["argvHead"] = info.get("argvHead") or []
+                        self.procs.cache[pid] = {"path": procs[pid].get("path"), "startAt": procs[pid].get("startAt"),
+                                                 "argvHead": procs[pid]["argvHead"]}
+        owners = agent_tree(procs, self.roots, self.discover)
+        left = budget - (time.monotonic() - t0)
+        if left <= 0.15:
+            raise SampleError("ps", "timeout", "process snapshot used the whole round budget")
+        partial = None
+        if os.path.exists("/proc/net/tcp"):
+            sockets = proc_lookup.procfs_sockets(owners, procs)
+            basis = "procfs sockets of the agent process tree only"
+        else:
+            sockets, partial = run_lsof_scoped(owners, timeout=min(3.0, left))
+            late = attribute_sockets(sockets, procs, owners)
+            if late:
+                self.procs.add_late(late, procs, timeout=0.8)
+            basis = "libproc process tree + lsof scoped to those pids (not lsof -i for the whole machine)"
+        self.collect_method = (
+            "per-process socket sampling scoped to agent trees (%s); independent of proxy settings" % basis
+        )
+        return procs, owners, sockets, partial
+
     # -- one round
     def sample(self) -> dict[str, Any]:
         with open(self.lock_path, "a") as lock:
@@ -1174,15 +1330,7 @@ class Sampler:
             deferred = 0
             try:
                 budget = self.round_budget
-                procs = self.procs.snapshot(timeout=min(5.0, budget * 0.5))
-                owners = agent_tree(procs, self.roots, self.discover)
-                left = budget - (time.monotonic() - t0)
-                if left <= 0.2:
-                    raise SampleError("ps", "timeout", "process snapshot used the whole round budget")
-                sockets, partial = run_lsof_all(timeout=min(8.0, left))
-                late = attribute_sockets(sockets, procs, owners)
-                if late:
-                    self.procs.add_late(late, procs, timeout=1.5)
+                procs, owners, sockets, partial = self._collect(budget, t0)
                 touched = merge_sample(ledger, sockets, procs, owners, observed_at)
                 routes = load_audit_proxy_routes(self.route_paths) + load_v2ray_routes(self.v2ray_log)
                 resolver = Resolver(ledger.setdefault("dnsCache", {}), enabled=self.resolve, budget=self.dns_budget)
@@ -1214,13 +1362,16 @@ class Sampler:
             ledger["sampler"] = SAMPLER_VERSION
             cov = measured_coverage(stats, self.interval)
             cov.update({
-                "method": "per-process socket sampling: ps -axo pid,ppid,comm each round (lstart/args cached per "
-                          "new pid) + one lsof -i (TCP+UDP) for all sockets filtered to agent trees; "
-                          "independent of proxy settings",
+                "method": self.collect_method or (
+                    "per-process socket sampling scoped to agent process trees "
+                    "(libproc/procfs; scoped lsof only if the fast backend is unavailable)"
+                ),
                 "limitation": LIMITATION,
                 "failures": int(stats.get("failures", 0)),
                 "confidence": "Observed" if ok and cov["measurementConfidence"] == "Observed" else "Unknown",
             })
+            if self.interval_note:
+                cov["intervalNote"] = self.interval_note
             ledger["coverage"] = cov
             try:
                 self._save(ledger)
@@ -1255,16 +1406,20 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--ledger", type=pathlib.Path, default=DEFAULT_LEDGER)
     ap.add_argument("--root-pid", action="append", default=[], help="PID[:Agent] to monitor with its descendants")
     ap.add_argument("--no-discover", action="store_true", help="only monitor --root-pid trees")
-    ap.add_argument("--interval", type=float, default=2.0)
+    ap.add_argument("--interval", type=float, default=DEFAULT_INTERVAL,
+                    help="target seconds between round starts (2.0 is the old plist default and is applied as %.1f)"
+                    % DEFAULT_INTERVAL)
     ap.add_argument("--duration", type=float, default=0, help="watch for N seconds (0 = forever)")
     ap.add_argument("--once", action="store_true")
     ap.add_argument("--no-dns", action="store_true", help="skip reverse/forward DNS lookups")
     ap.add_argument("--json", action="store_true", help="print each sample's touched rows as JSON")
     args = ap.parse_args(argv)
     roots = parse_roots(args.root_pid)
+    interval, interval_note = resolve_interval(args.interval)
     key, integrity_dir, key_reason = load_integrity_key()
-    sampler = Sampler(args.ledger, roots, not args.no_discover, args.interval, not args.no_dns,
+    sampler = Sampler(args.ledger, roots, not args.no_discover, interval, not args.no_dns,
                       key=key, key_reason=key_reason, seal_path=default_seal_path(args.ledger, integrity_dir))
+    sampler.interval_note = interval_note
     stop = {"flag": False}
 
     def on_signal(signum, _frame):  # launchd sends SIGTERM on bootout / stop

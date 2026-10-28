@@ -209,7 +209,8 @@ jobs:
           print("MCP_INTEGRITY_WARNING", cov["evidenceIntegrity"].get("warning"))
           assert summary["sameUidCanForge"] is True, summary
           # Fresh runner: either the Keychain key works and everything verifies, or the key is honestly unavailable.
-          assert summary["status"] in ("ok", "key_unavailable"), cov["evidenceIntegrity"]
+          # pending: the Keychain helper has not answered yet. The read must not block on the 15s hang.
+          assert summary["status"] in ("ok", "key_unavailable", "pending"), cov["evidenceIntegrity"]
           print("MCP_SMOKE_OK", names)
           proc.terminate()
           PY

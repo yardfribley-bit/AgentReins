@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from evidence import (
+    KEY_WARM,
     KeychainUnavailable,
     append_audit,
     get_coverage,
@@ -126,20 +127,32 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
     lowered = name.lower()
     if any(b in lowered for b in banned):
         raise PermissionError("write tools are not available")
-    try:
-        append_audit(ACTOR, name, arguments or {})
-    except KeychainUnavailable:
-        # Same as the Swift MCP: without the Keychain key nothing is signed (never a throwaway key) and the
-        # read is still answered; validate_audit / get_coverage report status key_unavailable.
-        pass
+    # The helper is warmed in the background. A cold Keychain must not add its 15s timeout to this call.
+    key_state = KEY_WARM.wait()
+    if key_state == "ready":
+        try:
+            append_audit(ACTOR, name, arguments or {})
+        except KeychainUnavailable:
+            # Without the Keychain key nothing is signed (never a throwaway key) and the read is still answered.
+            pass
+    elif key_state == "pending":
+        KEY_WARM.enqueue(ACTOR, name, arguments or {})
+    # unavailable: do not sign and do not wait. get_coverage reports key_unavailable from the cached helper error.
+
+    def _stamp(result: dict[str, Any]) -> dict[str, Any]:
+        if key_state == "pending":
+            result = dict(result)
+            result["keychainStatus"] = "pending"
+        return result
+
     if name == "list_agents":
-        return list_agents(
+        return _stamp(list_agents(
             since=arguments.get("since"), until=arguments.get("until"),
             limit=_opt_int(arguments.get("limit")), offset=_opt_int(arguments.get("offset")),
             cursor=arguments.get("cursor"),
-        )
+        ))
     if name == "list_alerts":
-        return list_alerts(
+        return _stamp(list_alerts(
             agent=arguments.get("agent"),
             since=arguments.get("since"),
             until=arguments.get("until"),
@@ -147,28 +160,28 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
             limit=_opt_int(arguments.get("limit")),
             offset=_opt_int(arguments.get("offset")),
             cursor=arguments.get("cursor"),
-        )
+        ))
     if name == "get_execution":
         eid = arguments.get("execution_id")
         if not eid:
             raise ValueError("execution_id required")
-        return get_execution(str(eid))
+        return _stamp(get_execution(str(eid)))
     if name == "list_network":
-        return list_network(
+        return _stamp(list_network(
             agent=arguments.get("agent"), since=arguments.get("since"), until=arguments.get("until"),
             limit=_opt_int(arguments.get("limit")), offset=_opt_int(arguments.get("offset")),
             cursor=arguments.get("cursor"),
-        )
+        ))
     if name == "get_coverage":
-        return get_coverage()
+        return _stamp(get_coverage())
     if name == "list_mcp_audit":
-        return list_mcp_audit(
+        return _stamp(list_mcp_audit(
             limit=_opt_int(arguments.get("limit")) if arguments.get("limit") is not None else 30,
             offset=_opt_int(arguments.get("offset")),
             cursor=arguments.get("cursor"),
             since=arguments.get("since"),
             until=arguments.get("until"),
-        )
+        ))
     raise ValueError(name)
 
 
