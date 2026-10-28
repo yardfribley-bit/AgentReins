@@ -23,7 +23,7 @@
   area.querySelector('[data-close]').onclick=()=>{area.hidden=true;window.agentreinsCommandsOpen=false;const active=document.querySelector('nav [data-view].active span');const name=document.getElementById('view-name');if(name&&active)name.textContent=active.textContent;};
   area.querySelectorAll('[data-run]').forEach(b=>b.onclick=()=>{selected=Number(b.dataset.run);render();});
  }
- function publish(records){runs=list(records).filter(r=>r.captureMode==='agent-path');window.AgentReinsNetwork?.setLocalTransports(runs);window.agentreinsRenderNetwork?.();window.agentreinsRenderRisk?.();}
+ function publish(records){runs=list(records).filter(r=>r.captureMode==='agent-path');window.AgentReinsNetwork?.setLocalTransports(runs);window.agentreinsRenderNetwork?.();window.agentreinsRenderRisk?.();window.agentreinsRenderProcess?.();}
  const list=v=>Array.isArray(v)?v:[];
  window.agentreinsTransportReceive=payload=>{
   const commands=Array.isArray(payload)?payload:list(payload&&payload.commands);
