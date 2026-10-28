@@ -1,8 +1,9 @@
 #!/usr/bin/env python3
 """Install / remove the per-user LaunchAgent that runs tools/socket-sampler.
 
-The sampler only reads `ps` and `lsof` for agent process trees (Codex, Cursor,
-WorkBuddy, Claude) and writes ~/Library/Application Support/AgentGuard/socket-ledger.json.
+The sampler reads agent process trees (Codex, Cursor, WorkBuddy, Claude) with
+libproc or procfs and, on macOS, lsof scoped to those pids. It does not run
+lsof -i for the whole machine. It writes ~/Library/Application Support/AgentGuard/socket-ledger.json.
 It changes nothing about agents, proxies or sockets.
 
   python3 scripts/install_socket_sampler.py            # install + load

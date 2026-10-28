@@ -172,7 +172,10 @@ enum MCPDispatcher {
             throw NSError(domain: "AgentReinsMCP", code: 5, userInfo: [NSLocalizedDescriptionKey: "request cancelled"])
         }
         let integrity = Ctx.integrity()
-        Ctx.appendAudit(actor: actor, tool: name, arguments: args, sync: auditSync)
+        // 0.25s is enough for a healthy helper that was started at process launch, and short enough
+        // that a Keychain prompt hang (15s) is reported as pending instead of blocking the read.
+        let keyState = KeychainWarmup.shared.resolve(grace: 0.25)
+        Ctx.appendAudit(actor: actor, tool: name, arguments: args, sync: auditSync && keyState != "pending")
         if name == "list_mcp_audit" { Ctx.flushAudit() }
         let loaded = Transport.loadReporting()
         let records = loaded.records
@@ -184,8 +187,8 @@ enum MCPDispatcher {
         }
         switch name {
         case "list_agents":
-            return Agents.list(records, since: str(args["since"]), until: str(args["until"]),
-                               limit: page.limit, offset: page.offset, transportTruncated: loaded.truncated)
+            return stamp(Agents.list(records, since: str(args["since"]), until: str(args["until"]),
+                                     limit: page.limit, offset: page.offset, transportTruncated: loaded.truncated), keyState)
         case "list_alerts":
             var result = Alerts.list(records, agent: str(args["agent"]), rule: str(args["rule"]),
                                      since: str(args["since"]), until: str(args["until"]),
@@ -202,6 +205,9 @@ enum MCPDispatcher {
                                     integrity: integrity, limit: page.limit, offset: page.offset,
                                     transportTruncated: loaded.truncated)
         case "get_coverage":
+            if keyState == "pending" {
+                return Coverage.get(integrity, validation: Coverage.pendingIntegrity())
+            }
             return Coverage.get(integrity, validation: Ctx.cachedValidation(integrity))
         case "list_mcp_audit":
             let entries = integrity.lines().compactMap { JSON.object($0) }
@@ -225,6 +231,13 @@ enum MCPDispatcher {
         default:
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: name])
         }
+    }
+
+    static func stamp(_ result: [String: Any], _ keyState: String) -> [String: Any] {
+        guard keyState == "pending" else { return result }
+        var copy = result
+        copy["keychainStatus"] = "pending"
+        return copy
     }
 
     /// Test hook: `AGENTREINS_MCP_TOOL_DELAY_MS` sleeps in short slices so a timeout or a disconnect can stop it.

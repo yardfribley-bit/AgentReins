@@ -46,6 +46,8 @@ enum AgentReinsMCP {
             }
             index += 1
         }
+        // Overlap the Keychain helper with process startup. Tool calls do not wait out a 15s hang.
+        KeychainWarmup.shared.start()
         if http {
             if envPortInvalid && !portFromArg { failArgs("invalid AGENTREINS_MCP_PORT") }
             guard (1...65535).contains(port) else { failArgs("port must be 1...65535") }
@@ -120,7 +122,32 @@ enum Transport {
 
     static func load(limit: Int = 80) -> [[String: Any]] { loadReporting(limit: limit).records }
 
+    /// Names + root mtime. A warm list_agents returns this without re-reading transport.json files.
+    private static let cacheLock = NSLock()
+    private static var cacheKey: String?
+    private static var cacheLoad: Load?
+
     static func loadReporting(limit: Int = 80) -> Load {
+        let root = Paths.transport.resolvingSymlinksInPath()
+        let names = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).filter { !$0.hasPrefix(".") }
+        let mtime = ((try? FileManager.default.attributesOfItem(atPath: root.path))?[.modificationDate] as? Date)?
+            .timeIntervalSince1970 ?? 0
+        let key = "\(root.path)|\(names.count)|\(mtime)|\(limit)"
+        cacheLock.lock()
+        if cacheKey == key, let cacheLoad {
+            cacheLock.unlock()
+            return cacheLoad
+        }
+        cacheLock.unlock()
+        let fresh = loadReportingUncached(limit: limit)
+        cacheLock.lock()
+        cacheKey = key
+        cacheLoad = fresh
+        cacheLock.unlock()
+        return fresh
+    }
+
+    static func loadReportingUncached(limit: Int = 80) -> Load {
         Paths.ensureSupport()
         let root = Paths.transport.resolvingSymlinksInPath()
         let path = root.path
@@ -356,6 +383,84 @@ enum Execution {
     }
 }
 
+/// Tail of the audit-proxy route journal. The body archive is never read here.
+enum ProxyJournal {
+    static let lost = "via proxy · attribution lost"
+    private static let lock = NSLock()
+    private static var sig: String?
+    private static var flows: [[String: Any]] = []
+
+    static func url() -> URL {
+        if let env = ProcessInfo.processInfo.environment["AGENTREINS_WORKBUDDY_ROUTE_JSONL"], !env.isEmpty {
+            return URL(fileURLWithPath: env)
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Application Support/AgentReins/workbuddy-network-routes.jsonl")
+    }
+
+    static func recent(limit: Int = 200) -> [[String: Any]] {
+        let path = url()
+        let attrs = try? FileManager.default.attributesOfItem(atPath: path.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        let key = "\(path.path)|\(size)|\(mtime)"
+        lock.lock()
+        if sig == key {
+            let copy = flows
+            lock.unlock()
+            return copy
+        }
+        lock.unlock()
+        guard size > 0, let handle = try? FileHandle(forReadingFrom: path) else { return [] }
+        defer { try? handle.close() }
+        let tail = 2 * 1024 * 1024
+        if size > tail { try? handle.seek(toOffset: UInt64(size - Int64(tail))) }
+        var data = handle.readDataToEndOfFile()
+        if size > tail, let nl = data.firstIndex(of: 10) {
+            data = Data(data.suffix(from: data.index(after: nl)))
+        }
+        let text = String(decoding: data, as: UTF8.self)
+        var by: [String: [String: Any]] = [:]
+        for line in text.split(whereSeparator: \.isNewline) {
+            guard let rec = JSON.object(String(line)), let flow = str(rec["flowID"]), !flow.isEmpty else { continue }
+            let pid = intValue(rec["clientPid"])
+            let state = str(rec["attributionState"]) ?? (pid == nil ? lost : nil)
+            let lostRow = state == lost || pid == nil
+            by[flow] = [
+                "flowID": flow,
+                "observedAt": nn(rec["observedAt"]),
+                "agent": lostRow ? NSNull() : nn(rec["clientAgent"]),
+                "pid": lostRow ? NSNull() : nn(rec["clientPid"]),
+                "ppid": lostRow ? NSNull() : nn(rec["clientPpid"]),
+                "processName": lostRow ? NSNull() : nn(rec["clientProcess"]),
+                "processPath": lostRow ? NSNull() : nn(rec["clientPath"]),
+                "processStartAt": lostRow ? NSNull() : nn(rec["clientStartAt"]),
+                "parentChain": lostRow ? [Any]() : (rec["parentChain"] as? [Any] ?? []),
+                "attributionState": nn(state),
+                "attributionBasis": lostRow ? NSNull() : nn(rec["attributionBasis"]),
+                "host": nn(rec["host"]),
+                "path": nn(rec["path"]),
+                "method": nn(rec["method"]),
+                "clientAddress": nn(rec["clientAddress"]),
+                "remoteHost": nn(rec["remoteHost"]),
+                "remotePort": nn(rec["remotePort"]),
+                "viaProxy": true,
+                "realDestination": nn(rec["host"]),
+                "destinationSource": lostRow ? "proxy_unattributed" : "proxy_attributed",
+                "destinationEvidence": lostRow ? "Unknown" : "Observed",
+                "captureStage": nn(rec["captureStage"]),
+                "confidence": lostRow ? "Unknown" : "Observed",
+            ]
+        }
+        let rows = Array(by.values.sorted { (str($0["observedAt"]) ?? "") > (str($1["observedAt"]) ?? "") }.prefix(limit))
+        lock.lock()
+        sig = key
+        flows = rows
+        lock.unlock()
+        return rows
+    }
+}
+
 /// Renamed from `Network` so `import Network` (NWListener) does not clash with this tool.
 enum NetworkTool {
     static func list(_ records: [[String: Any]], agent: String?, since: String?, until: String? = nil,
@@ -395,6 +500,7 @@ enum NetworkTool {
                               "ledgerIntegrity": nn((coverage["integrity"] as? [String: Any])?["state"])] as [String: Any],
             "socketCoverage": coverage,
             "socketsPage": ListPage.meta(socketPage),
+            "proxyFlows": ProxyJournal.recent(),
             "confidence": rows.isEmpty && connections.isEmpty ? "Unknown" : "Observed",
             "transportTruncated": transportTruncated,
             "note": "network = 经审计入口的命令；realDestination/destinationSource/transportPeer 与 get_execution 同源："
@@ -419,7 +525,8 @@ enum SocketLedger {
 
     static func load(_ integrity: Integrity, agent: String?, since: String?, until: String? = nil, limit: Int = 200) -> [String: Any] {
         let seal = SocketLedgerCore.sealPath(ledger: url, defaultLedger: defaultURL, integrityDir: Paths.integrityDir)
-        let key = try? integrity.loadKey(create: false)
+        // Pending warmup: do not launch the helper on the tool thread (a cold Keychain is a 15s hang).
+        let key: Data? = KeychainWarmup.shared.state == "pending" ? nil : (try? integrity.loadKey(create: false))
         return SocketLedgerCore.load(ledger: url, seal: seal, key: key, crypto: Ctx.crypto, agent: agent, since: since,
                                      until: until, limit: limit)
     }
@@ -430,22 +537,45 @@ enum SocketLedger {
                     "note": "socket-sampler 当前没有在采样（\(str(cov["state"]) ?? "?")）；不估算比例"]
         }
         func v(_ k: String) -> String { str(cov[k]) ?? "None" }
+        let reference = str(cov["referenceShortConnectionSeconds"]) ?? "1.5"
         return [
             "topic": "未走代理流量",
             "confidence": str(cov["measurementConfidence"]) == "Observed" ? "Observed" : "Unknown",
             "status": "sampled",
-            "note": "按进程采样 TCP/UDP 连接：实测周期 p50 \(v("observedCycleSecondsP50"))s / p95 \(v("observedCycleSecondsP95"))s，"
-                + "最长首次发现延迟 \(v("maxFirstDetectionDelaySeconds"))s，短于 \(v("missesShorterThanSeconds"))s 的连接可能漏掉"
+            "note": "按进程采样 TCP/UDP 连接：有效间隔 p50 \(v("effectiveIntervalSeconds"))s / p95 \(v("effectiveIntervalSecondsP95"))s"
+                + "（成功采样间隔，不是配置的 \(v("configuredIntervalSeconds"))s），短于 \(v("missesShorterThanSeconds"))s 的连接可能漏掉，"
+                + "按 \(reference) 秒连接估算漏采率 \(v("estimatedMissRate"))"
                 + "（最近一次 \(v("lastSampleAt"))；失败 \(v("failures")) 次）；系统解析器发出的 DNS 不可见",
         ]
     }
+
+    static func sampling(_ cov: [String: Any]) -> [String: Any] {
+        [
+            "effectiveIntervalSeconds": nn(cov["effectiveIntervalSeconds"]),
+            "effectiveIntervalSecondsP95": nn(cov["effectiveIntervalSecondsP95"]),
+            "missesShorterThanSeconds": nn(cov["missesShorterThanSeconds"]),
+            "estimatedMissRate": nn(cov["estimatedMissRate"]),
+            "estimatedMissRateBasis": nn(cov["estimatedMissRateBasis"]),
+            "referenceShortConnectionSeconds": nn(cov["referenceShortConnectionSeconds"]),
+            "measurementConfidence": nn(cov["measurementConfidence"]),
+            "configuredIntervalSeconds": nn(cov["configuredIntervalSeconds"]),
+            "state": nn(cov["state"]),
+        ]
+    }
 }
+
+let inProcessBlindSpot: [String: Any] = [
+    "topic": "进程内工具（Read/Edit/Write/Glob）",
+    "confidence": "Observed",
+    "status": "outside_system_visibility",
+    "note": "Read/Edit/Write/Glob 等不派生子进程、也不打开套接字的进程内工具，不在系统级采样和审计代理的可见范围内。这里没看到，不能当成没发生。Network Extension 不在本接口范围内。",
+]
 
 enum Coverage {
     static func get(_ integrity: Integrity, validation: [String: Any]? = nil) -> [String: Any] {
         let validation = validation ?? integrity.validate()
         let ledger = SocketLedger.load(integrity, agent: nil, since: nil, limit: 0)["coverage"] as? [String: Any] ?? [:]
-        return [
+        var result: [String: Any] = [
             "rules": [
                 ["id": "S01", "status": "blind", "confidence": "Unknown", "note": "无 Endpoint Security 级文件读证据"],
                 ["id": "S02", "status": "supported", "confidence": "Observed", "note": "content_audit credential-outbound"],
@@ -456,8 +586,10 @@ enum Coverage {
             ],
             "blindSpots": [
                 SocketLedger.blindSpot(ledger),
+                inProcessBlindSpot,
                 ["topic": "SSH 通道内正文", "confidence": "Unknown", "note": "只看到连到哪台主机"],
             ],
+            "socketSampling": SocketLedger.sampling(ledger),
             "evidenceIntegrity": validation,
             "integritySummary": Integrity.summary(validation),
             "socketLedgerIntegrity": nn(ledger["integrity"]),
@@ -466,6 +598,25 @@ enum Coverage {
             "runtime": "swift-mcp-no-system-node-python",
             "mcpEndpoint": EndpointDiscovery.snapshot(),
             "confidence": "Unknown",
+        ]
+        if let status = str(validation["keychainStatus"]) { result["keychainStatus"] = status }
+        return result
+    }
+
+    static func pendingIntegrity() -> [String: Any] {
+        [
+            "ok": false,
+            "status": "pending",
+            "statusText": "完整性密钥正在后台读取，这一次不阻塞等待钥匙串。",
+            "confidence": "Unknown",
+            "keychainStatus": "pending",
+            "entriesChecked": 0,
+            "tampered": [Any](),
+            "deletedOrGap": [Any](),
+            "currentTampered": ["count": 0, "reasons": [String: Any]()] as [String: Any],
+            "legacyUnverifiable": ["count": 0, "from": NSNull(), "to": NSNull()] as [String: Any],
+            "b6": ["sameUidCanForge": true, "reasons": ["钥匙串结果尚未返回，不把这次等待算成校验失败。"]] as [String: Any],
+            "note": "pending 不是 key_unavailable，也不是篡改。助手返回后下一次读取会给出真实状态。",
         ]
     }
 }
@@ -554,6 +705,57 @@ enum ListPage {
         guard let data = Data(base64Encoded: text), let raw = String(data: data, encoding: .utf8),
               let n = Int(raw), n >= 0 else { return nil }
         return n
+    }
+}
+
+// MARK: - Keychain warmup (do not block a tool call on the 15s helper timeout)
+
+/// Starts at process launch. `resolve` waits at most `grace` seconds; a helper that is still
+/// running is `pending` (not a tamper result, and not a reason to mint a new key).
+final class KeychainWarmup {
+    static let shared = KeychainWarmup()
+    private let lock = NSLock()
+    private let queue = DispatchQueue(label: "com.agentreins.mcp.keychain-warm")
+    private var started = false
+    private var finished = false
+    private(set) var state = "cold"
+
+    func start() {
+        lock.lock()
+        if started {
+            lock.unlock()
+            return
+        }
+        started = true
+        state = "pending"
+        lock.unlock()
+        queue.async {
+            let (status, _) = Ctx.keychain.lookup(Integrity.accountHmac)
+            self.lock.lock()
+            self.finished = true
+            switch status {
+            case "found", "missing": self.state = "ready"
+            default: self.state = "unavailable"
+            }
+            self.lock.unlock()
+        }
+    }
+
+    func resolve(grace: TimeInterval) -> String {
+        start()
+        let deadline = Date().addingTimeInterval(max(0, grace))
+        while Date() < deadline {
+            lock.lock()
+            let done = finished
+            let current = state
+            lock.unlock()
+            if done { return current }
+            Thread.sleep(forTimeInterval: 0.01)
+        }
+        lock.lock()
+        let current = state
+        lock.unlock()
+        return current
     }
 }
 
@@ -650,6 +852,8 @@ enum Ctx {
     static func appendAudit(actor: String, tool: String, arguments: [String: Any], sync: Bool) {
         let argsCopy = arguments
         let work = {
+            // The tool thread already returned when the helper was still pending. Wait here, not there.
+            _ = KeychainWarmup.shared.resolve(grace: 20)
             let integrity = integrity()
             guard let key = try? integrity.loadKey() else { return }
             integrity.append(actor: actor, tool: tool, arguments: argsCopy, key: key)

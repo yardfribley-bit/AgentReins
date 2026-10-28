@@ -18,7 +18,7 @@
 新增 `tools/socket-sampler/socket_sampler.py`（只用系统自带 `ps`、`lsof`，标准库实现，与 auto.py 同一采集层）：
 
 1. **进程树**：每轮只跑便宜的 `ps -axo pid=,ppid=,comm=`；进程启动时间和 argv[0..1] 只对**新出现的进程**用一次 `ps -ww -o pid=,lstart=,args= -p <新 PID>` 取来并缓存（旧版每轮对全机约 500 个进程算 `lstart`，在真实 Mac 上出现过 10 秒超时）。按可执行路径/argv[0..1] 的文件名识别 Codex / Cursor / WorkBuddy / Claude 根进程（项目路径里出现 "codex" 不算），再向下收全部子孙；也可用 `--root-pid PID:Agent` 指定根。进程参数只用于识别，**不落盘**。
-2. **连接**：每轮一次 `lsof -nP -w -i -F pcRftPTn`（本用户能看到的全部网络套接字），在 Python 里按 agent 进程树过滤；ps 快照之后才 fork 出来的子进程，靠 lsof 自带的 PPID 也能归到树上。TCP + UDP、IPv4 + IPv6；丢弃监听和未连接的 UDP。
+2. **连接**：只扫 agent 进程树，不再对全机跑 `lsof -i`。Linux 用 procfs（`/proc/net/tcp` + 这些 PID 的 fd）；macOS 用 libproc 列进程，套接字用 `lsof -a -p <进程树> -i`（只这些 PID）。libproc 的 `socket_fdinfo` 布局和当前内核一致时，代理侧归因直接走 libproc。TCP + UDP、IPv4 + IPv6；丢弃监听和未连接的 UDP。旧的「每轮一次全机 lsof」只留给夹具回放。
 3. **合并成台账** `~/Library/Application Support/AgentGuard/socket-ledger.json`（0600，原子替换，文件锁，最多 3000 条/7 天）：同一 `pid+进程启动时间+协议+本端+对端` 合并，记 `firstSeen/lastSeen`（UTC ISO8601）和 `sampleCount`。
 4. **真实目的地** `realDestination` + `destinationSource` + `destinationEvidence`：
    - 对端是本机代理端口：用代理路由日志（AgentReins 审计代理 `workbuddy-network-routes.jsonl`、V2rayU 日志）按 **本机客户端端口 + 时间窗 15 秒** 精确对上 → `proxy_observed`，Correlated；同端口在窗内对上多个主机 → 视为不确定；对不上 → `proxy_unjoined`，Unknown（**不再把 127.0.0.1 当目的地**）。`transportPeer` 始终保留实际对端（如 `127.0.0.1:18891`），`viaProxy=true`。
@@ -33,6 +33,8 @@
 - `configuredIntervalSeconds`：配置的间隔，只是愿望。
 - `observedCycleSecondsP50/P95`：相邻两轮实际相隔多久。
 - `successGapSecondsP95`、`missesShorterThanSeconds`：相邻两次**成功**采样相隔多久的 p95。比这更短的连接可能整条漏掉。失败的轮次会把这个间隔拉长，所以它比配置间隔更真实。
+- `effectiveIntervalSeconds` / `effectiveIntervalSecondsP95`：成功采样间隔的 p50 / p95，也就是实际生效的采样间隔。`get_coverage.socketSampling` 每读一次都带上这两个数，不是只在安装时量一次。
+- `estimatedMissRate`：按持续 `referenceShortConnectionSeconds`（1.5 秒，对应实测里 1–2 秒就结束的 python urllib）的连接，对每段成功间隔算 `max(0, 1 - 1.5/间隔)` 再取平均。这是估计，不是数过的漏采条数。
 - `maxFirstDetectionDelaySeconds`：窗口内最长的成功间隔。
 - `roundDurationSecondsP50/P95`：每轮本身花多久。
 - `windowRounds`、`windowFailedRounds`、`failures`：轮数与失败数。
@@ -73,7 +75,9 @@
 - CI（macOS runner）现场：`live_direct_check.py` 清空代理变量，起 bash→python 孙进程直连外网（TCP 443 + 已连接 UDP 53），并起一个无关进程做对照；断言台账里 PID/PPID、`viaProxy=false`、`ESTABLISHED`、≥2 次采样、无关进程不出现；覆盖率断言用实测字段（`missesShorterThanSeconds` 必须等于实测的 `successGapSecondsP95`，失败数和失败日志对得上），并打印 `LIVE_COVERAGE`；顺带报告短命的 `git ls-remote` 是否被 0.2 秒采样抓到（不作为失败）。`mcp_list_network_live.py` 用**安装包里**的采样器 + 打包的 Swift MCP 端到端验证 `list_network.sockets`：采样器像 LaunchAgent 一样持续运行（0.5 秒），等到至少 3 轮（最多 60 秒）才查询 MCP，然后断言 `sampling`；失败时打印采样器日志、台账的 `samples` 和 `failureLog`、签名状态，以及 MCP 调用耗时。CI 用一个专用的、不会自动上锁的钥匙串（`scripts/ci_keychain.sh`），并在测打包版之前把它重建，让打包版 helper 自己创建密钥。
 
 ## 已知局限
-- 采样不是拦截：短连接可能漏，漏多短的看 `missesShorterThanSeconds`（实测）；`lsof` 有开销，默认 2 秒。
+- 采样不是拦截：短连接可能漏。漏多短看 `missesShorterThanSeconds`，实际隔多久看 `effectiveIntervalSeconds`，对 1.5 秒连接的估计漏采率看 `estimatedMissRate`。这三个数 `get_coverage` 每次都从台账里带出来。默认配置间隔仍是 2 秒；采样器只扫 agent 进程树，目标是常态 Mac 上有效间隔 ≤ 1 秒。
+- 走审计代理（127.0.0.1:18891）的请求，在连接还活着时由 mitm 插件用内核套接字反查客户端 PID、父进程链和 agent，写进路由日志和正文存档。查不到就写 `via proxy · attribution lost`，不猜测，也不采用客户端自己带的 pid 头。`list_network.proxyFlows` 列出这些记录。
+- Read / Edit / Write / Glob 这类不派生子进程、也不打开套接字的进程内工具，系统级采样和代理都看不到。`get_coverage.blindSpots` 里有这一条。没看到不等于没发生。Network Extension 不在这一步里。
 - DNS 查询由系统 mDNSResponder 发出，不属于 agent 进程，看不到；反向 DNS 往往只得到 CDN/云厂商名字（标 Inferred）。
 - 直连 HTTPS 只能看到 IP 和端口，看不到 SNI/正文。
 - 进程识别靠可执行文件名/路径；以别名启动的 agent 需用 `--root-pid`。

@@ -125,6 +125,74 @@ def _take_transport_call(flow):
         del flow.request.headers[name]
     except KeyError:
         pass
+    # A client-supplied pid is not attribution. Drop it so it cannot be stored or trusted.
+    for header in ("X-AgentReins-Pid", "X-Process-Pid", "X-Agent-Pid"):
+        try:
+            del flow.request.headers[header]
+        except KeyError:
+            pass
+
+
+_proc_lookup = None
+
+def _load_proc_lookup():
+    global _proc_lookup
+    if _proc_lookup is not None:
+        return _proc_lookup
+    here = Path(__file__).resolve()
+    candidates = [
+        here.with_name("proc_lookup.py"),
+        here.parent / "socket-sampler" / "proc_lookup.py",
+        here.parents[3] / "tools" / "socket-sampler" / "proc_lookup.py" if len(here.parents) > 3 else None,
+    ]
+    for candidate in candidates:
+        if candidate is None or not candidate.is_file():
+            continue
+        spec = importlib.util.spec_from_file_location("agentreins_proc_lookup", candidate)
+        if spec is None or spec.loader is None:
+            continue
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        _proc_lookup = module
+        return module
+    raise ImportError("proc_lookup.py")
+
+
+def attribution_fields(peer, local, headers=None):
+    """Kernel owner of the still-open client socket. ``headers`` is ignored on purpose."""
+    del headers  # a pid header is spoofable and is not consulted
+    try:
+        module = _load_proc_lookup()
+    except Exception as exc:
+        return {
+            "attributionState": "via proxy · attribution lost",
+            "attribution": "lost",
+            "clientPid": None,
+            "clientPpid": None,
+            "clientAgent": None,
+            "clientProcess": None,
+            "clientPath": None,
+            "clientStartAt": None,
+            "parentChain": [],
+            "attributionBasis": None,
+            "attributionDetail": "proc_lookup unavailable: %s" % exc.__class__.__name__,
+        }
+    if not peer or len(peer) < 2 or not local or len(local) < 2:
+        return module.lost_attribution("client or proxy socket address missing")
+    try:
+        return module.attribute_client(int(peer[1]), int(local[1]))
+    except Exception as exc:
+        return module.lost_attribution("attribution failed: %s" % exc.__class__.__name__)
+
+
+def _flow_attribution(flow):
+    cached = flow.metadata.get("agentreins_attribution")
+    if isinstance(cached, dict):
+        return cached
+    fields = attribution_fields(getattr(flow.client_conn, "peername", None),
+                                getattr(flow.client_conn, "sockname", None))
+    flow.metadata["agentreins_attribution"] = fields
+    return fields
 
 
 def request(flow):
@@ -188,6 +256,7 @@ def _safe_headers(headers):
 
 def _capture(flow, stage):
     server_address = flow.server_conn.ip_address
+    who = _flow_attribution(flow)
     _append_jsonl(ROUTE_OUTPUT, {
         "flowID": flow.id,
         "captureStage": stage,
@@ -201,6 +270,16 @@ def _capture(flow, stage):
         "clientAddress": _endpoint(flow.client_conn.peername),
         "remoteHost": server_address[0] if server_address else None,
         "remotePort": server_address[1] if server_address else None,
+        # Request-time kernel attribution. Lost is explicit; nothing here is inferred from a neighbour.
+        "attributionState": who.get("attributionState"),
+        "clientPid": who.get("clientPid"),
+        "clientPpid": who.get("clientPpid"),
+        "clientAgent": who.get("clientAgent"),
+        "clientProcess": who.get("clientProcess"),
+        "clientPath": who.get("clientPath"),
+        "clientStartAt": who.get("clientStartAt"),
+        "parentChain": who.get("parentChain") or [],
+        "attributionBasis": who.get("attributionBasis"),
     })
 
     website_parent = _website_scope(flow, stage)
@@ -249,6 +328,15 @@ def _capture(flow, stage):
         "clientAddress": _endpoint(flow.client_conn.peername),
         "remoteHost": server_address[0] if server_address else None,
         "remotePort": server_address[1] if server_address else None,
+        "attributionState": who.get("attributionState"),
+        "clientPid": who.get("clientPid"),
+        "clientPpid": who.get("clientPpid"),
+        "clientAgent": who.get("clientAgent"),
+        "clientProcess": who.get("clientProcess"),
+        "clientPath": who.get("clientPath"),
+        "clientStartAt": who.get("clientStartAt"),
+        "parentChain": who.get("parentChain") or [],
+        "attributionBasis": who.get("attributionBasis"),
     }
     _append_jsonl(OUTPUT, record)
 

@@ -95,8 +95,11 @@ cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
 # Proxy-independent per-process socket sampler (lsof/ps only) + LaunchAgent installer.
 mkdir -p "$APP_BUNDLE/Contents/Resources/socket-sampler"
 cp "$PROJECT_DIR/tools/socket-sampler/socket_sampler.py" \
+   "$PROJECT_DIR/tools/socket-sampler/proc_lookup.py" \
    "$PROJECT_DIR/scripts/install_socket_sampler.py" \
    "$APP_BUNDLE/Contents/Resources/socket-sampler/"
+cp "$PROJECT_DIR/tools/socket-sampler/proc_lookup.py" \
+   "$APP_BUNDLE/Contents/Resources/proc_lookup.py"
 # Loopback HTTP MCP LaunchAgent installer (same binary as stdio; --http).
 cp "$PROJECT_DIR/scripts/install_mcp_http.py" \
    "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
@@ -167,6 +170,8 @@ for exe in "$APP_NAME" AgentReinsNativeHost AgentReinsAlertsBridge AgentReinsMCP
 done
 for res in \
   socket-sampler/socket_sampler.py \
+  socket-sampler/proc_lookup.py \
+  proc_lookup.py \
   socket-sampler/install_socket_sampler.py \
   agentreins-mcp/evidence.py \
   agentreins-mcp/server.py \

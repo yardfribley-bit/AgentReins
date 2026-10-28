@@ -21,6 +21,15 @@ public final class Integrity {
     public let crypto: CryptoBox
     public let now: () -> Date
     public let fm = FileManager.default
+    static var inventorySig: String?
+    static var inventorySha: String?
+
+    static func statSig(_ url: URL) -> String {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        let size = (attrs?[.size] as? NSNumber)?.int64Value ?? -1
+        let mtime = (attrs?[.modificationDate] as? Date)?.timeIntervalSince1970 ?? 0
+        return "\(size):\(mtime)"
+    }
 
     public init(auditDir: URL, integrityDir: URL, transport: URL, keychain: KeychainStore, crypto: CryptoBox,
          now: @escaping () -> Date = { Date() }) {

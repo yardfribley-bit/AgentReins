@@ -14,6 +14,7 @@ import pathlib
 import re
 import subprocess
 import sys
+import threading
 import time
 from typing import Any
 
@@ -205,62 +206,103 @@ def inb_finding_for(record: dict[str, Any] | None) -> dict[str, Any] | None:
     return None
 
 
+# In-process index of transport runs. Warm list_agents does not re-read every transport.json.
+# Invalidated when the set of run directory names or the transport root mtime changes.
+_TRANSPORT_INDEX: dict[str, Any] = {
+    "root": None,
+    "rootMtime": None,
+    "names": None,
+    "rows": {},  # run name -> (dir_mtime_ns, row or None)
+    "parsedFiles": 0,
+    "lastTruncated": False,
+}
+
+
+def _parse_transport_file(path: pathlib.Path) -> dict[str, Any] | None:
+    try:
+        text = path.read_text(encoding="utf-8")
+        item = json.loads(text)
+    except (OSError, json.JSONDecodeError):
+        return None
+    _TRANSPORT_INDEX["parsedFiles"] = int(_TRANSPORT_INDEX.get("parsedFiles") or 0) + 1
+    inv = item.get("invocation") if isinstance(item.get("invocation"), dict) else {}
+    if inv.get("captureMode") != "agent-path":
+        return None
+    run_id = path.parent.name
+    row = {
+        "runID": run_id,
+        "captureMode": "agent-path",
+        "agent": inv.get("agent"),
+        "tool": inv.get("tool"),
+        "args": inv.get("args") or [],
+        "task": inv.get("task"),
+        "call": inv.get("call") or run_id,
+        "startedAt": inv.get("startedAt"),
+        "pid": inv.get("pid"),
+        "parentPID": inv.get("parentPID"),
+        "launcherPID": inv.get("launcherPID"),
+        "exitCode": inv.get("exitCode"),
+        "gap": inv.get("gap"),
+        "auditBypass": inv.get("auditBypass"),
+        "session": inv.get("session") or inv.get("codexThreadID"),
+        "codexThreadID": inv.get("codexThreadID"),
+        "provenance": inv.get("provenance") or "live",
+        "testCapture": inv.get("testCapture") is True,
+        "connections": item.get("connections") or [],
+        "blocks": item.get("blocks") or [],
+        "downloads": item.get("downloads") or [],
+        "outboundFiles": item.get("outboundFiles") or [],
+        "securityAudit": item.get("securityAudit"),
+        "fileResult": item.get("fileResult"),
+        "gitOperation": item.get("gitOperation"),
+        "evidencePath": str(path),
+        "evidenceSha256": sha256_hex(text[:200_000]),
+        "confidence": "Observed",
+    }
+    if is_test_capture(row):
+        return None
+    return row
+
+
 def _load_transport_dir(root: pathlib.Path, limit: int) -> list[dict[str, Any]]:
     if not root.is_dir():
+        _TRANSPORT_INDEX["lastTruncated"] = False
         return []
     try:
-        root.chmod(0o700)
+        if (root.stat().st_mode & 0o777) != 0o700:
+            root.chmod(0o700)
     except OSError:
         pass
-    files = sorted(
-        root.glob("*/transport.json"),
-        key=lambda p: p.stat().st_mtime,
-        reverse=True,
-    )[:limit]
-    rows: list[dict[str, Any]] = []
-    for path in files:
-        try:
-            item = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
-            continue
-        inv = item.get("invocation") if isinstance(item.get("invocation"), dict) else {}
-        if inv.get("captureMode") != "agent-path":
-            continue
-        run_id = path.parent.name
-        row = {
-            "runID": run_id,
-            "captureMode": "agent-path",
-            "agent": inv.get("agent"),
-            "tool": inv.get("tool"),
-            "args": inv.get("args") or [],
-            "task": inv.get("task"),
-            "call": inv.get("call") or run_id,
-            "startedAt": inv.get("startedAt"),
-            "pid": inv.get("pid"),
-            "parentPID": inv.get("parentPID"),
-            "launcherPID": inv.get("launcherPID"),
-            "exitCode": inv.get("exitCode"),
-            "gap": inv.get("gap"),
-            "auditBypass": inv.get("auditBypass"),
-            "session": inv.get("session") or inv.get("codexThreadID"),
-            "codexThreadID": inv.get("codexThreadID"),
-            "provenance": inv.get("provenance") or "live",
-            "testCapture": inv.get("testCapture") is True,
-            "connections": item.get("connections") or [],
-            "blocks": item.get("blocks") or [],
-            "downloads": item.get("downloads") or [],
-            "outboundFiles": item.get("outboundFiles") or [],
-            "securityAudit": item.get("securityAudit"),
-            "fileResult": item.get("fileResult"),
-            "gitOperation": item.get("gitOperation"),
-            "evidencePath": str(path),
-            "evidenceSha256": sha256_hex(path.read_bytes().decode("utf-8", "replace")[:200_000]),
-            "confidence": "Observed",
-        }
-        if is_test_capture(row):
-            continue
-        rows.append(row)
-    return rows
+    try:
+        names = {entry.name for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(".")}
+        root_mtime = root.stat().st_mtime_ns
+    except OSError:
+        _TRANSPORT_INDEX["lastTruncated"] = False
+        return []
+    index = _TRANSPORT_INDEX
+    same = index.get("root") == str(root) and index.get("names") == names and index.get("rootMtime") == root_mtime
+    cached: dict[str, Any] = index.get("rows") if same else {}
+    if not same:
+        # Only directories that appeared or disappeared need a stat. Unchanged names keep their row.
+        previous = index.get("rows") if index.get("root") == str(root) else {}
+        cached = {name: previous[name] for name in names if name in previous}
+        for name in names - set(cached):
+            path = root / name / "transport.json"
+            try:
+                mtime = path.stat().st_mtime_ns if path.is_file() else None
+            except OSError:
+                mtime = None
+            row = _parse_transport_file(path) if mtime is not None else None
+            cached[name] = (mtime, row)
+        index["root"] = str(root)
+        index["rootMtime"] = root_mtime
+        index["names"] = set(names)
+        index["rows"] = cached
+    ranked = [item for item in cached.values() if item and item[1] is not None]
+    ranked.sort(key=lambda item: item[0] or 0, reverse=True)
+    rows = [item[1] for item in ranked]
+    index["lastTruncated"] = len(rows) > limit
+    return rows[:limit]
 
 
 def load_transport_records(root: pathlib.Path | None = None, limit: int = 80) -> list[dict[str, Any]]:
@@ -393,7 +435,9 @@ def list_agents(
     cursor: str | None = None,
     transport_truncated: bool = False,
 ) -> dict[str, Any]:
-    records = records if records is not None else load_transport_records()
+    if records is None:
+        records = load_transport_records()
+        transport_truncated = bool(_TRANSPORT_INDEX.get("lastTruncated"))
     since_ts, until_ts = _iso_ts(since), _iso_ts(until)
     by_agent: dict[str, dict[str, Any]] = {}
     for row in records:
@@ -685,7 +729,9 @@ def list_alerts(
     cursor: str | None = None,
     transport_truncated: bool = False,
 ) -> dict[str, Any]:
-    records = records if records is not None else load_transport_records()
+    if records is None:
+        records = load_transport_records()
+        transport_truncated = bool(_TRANSPORT_INDEX.get("lastTruncated"))
     alerts, engine_meta = build_alerts_via_bridge(records)
     since_ts = _iso_ts(since)
     until_ts = _iso_ts(until)
@@ -953,7 +999,7 @@ SOCKET_FIELDS = (
     "localAddress", "remoteAddress", "remoteIP", "remotePort", "state", "firstSeen", "lastSeen",
     "sampleCount", "scope", "viaProxy", "transportPeer", "realDestination", "realDestinationPort",
     "destinationSource", "destinationEvidence", "destinationBasis", "forwardConfirmed", "transportCall",
-    "proxy", "evidence",
+    "proxy", "evidence", "proxyAttribution",
 )
 
 
@@ -1057,6 +1103,9 @@ def verify_socket_ledger(data: bytes | None, side: Any, seal: Any, key: bytes | 
 
 
 def _ledger_key() -> bytes | None:
+    # A tool call that already decided the helper is still pending must not start a second 15s wait.
+    if KEY_WARM.state == "pending":
+        return None
     try:
         return load_or_create_hmac_key(create=False)
     except OSError:
@@ -1156,6 +1205,88 @@ def load_socket_ledger(
     return {"connections": redact_obj(rows[:limit]), "total": len(rows), "coverage": coverage}
 
 
+ROUTE_JOURNAL = pathlib.Path(os.environ.get(
+    "AGENTREINS_WORKBUDDY_ROUTE_JSONL",
+    str(pathlib.Path.home() / "Library/Application Support/AgentReins/workbuddy-network-routes.jsonl"),
+))
+_ROUTE_TAIL = {"sig": None, "flows": [], "bytesRead": 0}
+_LOST_ATTRIBUTION = "via proxy · attribution lost"
+
+
+def load_proxy_flows(path: pathlib.Path | None = None, limit: int = 200, tail_bytes: int = 2 * 1024 * 1024) -> list[dict[str, Any]]:
+    """Recent proxy route records, read from the tail of the route journal (not the whole file).
+
+    A flow the proxy could not attribute is returned with attributionState
+    ``via proxy · attribution lost`` and a null pid. The host is the proxy's own observation.
+    """
+    path = path or ROUTE_JOURNAL
+    try:
+        st = path.stat()
+    except OSError:
+        return []
+    sig = (str(path), st.st_size, st.st_mtime_ns)
+    if _ROUTE_TAIL.get("sig") == sig:
+        _ROUTE_TAIL["bytesRead"] = 0
+        return list(_ROUTE_TAIL["flows"])
+    try:
+        with path.open("rb") as fh:
+            fh.seek(max(0, st.st_size - tail_bytes))
+            blob = fh.read()
+    except OSError:
+        return []
+    _ROUTE_TAIL["bytesRead"] = len(blob)
+    if st.st_size > tail_bytes:
+        newline = blob.find(b"\n")
+        if newline != -1:
+            blob = blob[newline + 1:]
+    by_flow: dict[str, dict[str, Any]] = {}
+    for line in blob.splitlines():
+        if not line.strip():
+            continue
+        try:
+            rec = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        flow_id = str(rec.get("flowID") or "")
+        if not flow_id:
+            continue
+        state = rec.get("attributionState")
+        pid = rec.get("clientPid") if isinstance(rec.get("clientPid"), int) else None
+        if state is None and pid is None:
+            # Journals written before request-time attribution have no owner. Say so; do not guess.
+            state = _LOST_ATTRIBUTION
+        lost = state == _LOST_ATTRIBUTION or pid is None
+        by_flow[flow_id] = {
+            "flowID": flow_id,
+            "observedAt": rec.get("observedAt"),
+            "agent": None if lost else rec.get("clientAgent"),
+            "pid": None if lost else pid,
+            "ppid": None if lost else rec.get("clientPpid"),
+            "processName": None if lost else rec.get("clientProcess"),
+            "processPath": None if lost else rec.get("clientPath"),
+            "processStartAt": None if lost else rec.get("clientStartAt"),
+            "parentChain": [] if lost else (rec.get("parentChain") or []),
+            "attributionState": state,
+            "attributionBasis": None if lost else rec.get("attributionBasis"),
+            "host": rec.get("host"),
+            "path": rec.get("path"),
+            "method": rec.get("method"),
+            "clientAddress": rec.get("clientAddress"),
+            "remoteHost": rec.get("remoteHost"),
+            "remotePort": rec.get("remotePort"),
+            "viaProxy": True,
+            "realDestination": rec.get("host"),
+            "destinationSource": "proxy_attributed" if not lost else "proxy_unattributed",
+            "destinationEvidence": "Observed" if not lost else "Unknown",
+            "captureStage": rec.get("captureStage"),
+            "confidence": "Observed" if not lost else "Unknown",
+        }
+    flows = sorted(by_flow.values(), key=lambda row: str(row.get("observedAt") or ""), reverse=True)[:limit]
+    _ROUTE_TAIL["sig"] = sig
+    _ROUTE_TAIL["flows"] = flows
+    return list(flows)
+
+
 def list_network(
     agent: str | None = None,
     since: str | None = None,
@@ -1166,7 +1297,9 @@ def list_network(
     cursor: str | None = None,
     transport_truncated: bool = False,
 ) -> dict[str, Any]:
-    records = records if records is not None else load_transport_records()
+    if records is None:
+        records = load_transport_records()
+        transport_truncated = bool(_TRANSPORT_INDEX.get("lastTruncated"))
     until_ts = _iso_ts(until)
     since_ts = _iso_ts(since) if until_ts is not None else None
     rows = []
@@ -1212,6 +1345,7 @@ def list_network(
         },
         "socketCoverage": sockets["coverage"],
         "socketsPage": _page_meta(socket_window),
+        "proxyFlows": redact_obj(load_proxy_flows()),
         "confidence": "Observed" if rows or connections else "Unknown",
         "transportTruncated": transport_truncated,
         "note": (
@@ -1230,8 +1364,21 @@ def list_network(
     return result
 
 
-def _socket_blind_spot() -> dict[str, Any]:
-    cov = load_socket_ledger(limit=0)["coverage"]
+def _socket_sampling(cov: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "effectiveIntervalSeconds": cov.get("effectiveIntervalSeconds"),
+        "effectiveIntervalSecondsP95": cov.get("effectiveIntervalSecondsP95"),
+        "missesShorterThanSeconds": cov.get("missesShorterThanSeconds"),
+        "estimatedMissRate": cov.get("estimatedMissRate"),
+        "estimatedMissRateBasis": cov.get("estimatedMissRateBasis"),
+        "referenceShortConnectionSeconds": cov.get("referenceShortConnectionSeconds"),
+        "measurementConfidence": cov.get("measurementConfidence"),
+        "configuredIntervalSeconds": cov.get("configuredIntervalSeconds"),
+        "state": cov.get("state"),
+    }
+
+
+def _socket_blind_spot_from(cov: dict[str, Any]) -> dict[str, Any]:
     if cov.get("state") != "sampling":
         return {"topic": "未走代理流量", "confidence": "Unknown", "status": cov.get("state"),
                 "note": "socket-sampler 当前没有在采样（%s）；不估算比例" % cov.get("state")}
@@ -1239,16 +1386,30 @@ def _socket_blind_spot() -> dict[str, Any]:
         "topic": "未走代理流量",
         "confidence": "Observed" if cov.get("measurementConfidence") == "Observed" else "Unknown",
         "status": "sampled",
-        "note": "按进程采样 TCP/UDP 连接：实测周期 p50 %ss / p95 %ss，最长首次发现延迟 %ss，短于 %ss 的连接可能漏掉"
+        "note": "按进程采样 TCP/UDP 连接：有效间隔 p50 %ss / p95 %ss（成功采样间隔，不是配置的 %ss），"
+        "短于 %ss 的连接可能漏掉，按 %.1f 秒连接估算漏采率 %s"
         "（最近一次 %s；失败 %s 次）；系统解析器发出的 DNS 不可见"
-        % (cov.get("observedCycleSecondsP50"), cov.get("observedCycleSecondsP95"),
-           cov.get("maxFirstDetectionDelaySeconds"), cov.get("missesShorterThanSeconds"),
+        % (cov.get("effectiveIntervalSeconds"), cov.get("effectiveIntervalSecondsP95"),
+           cov.get("configuredIntervalSeconds"), cov.get("missesShorterThanSeconds"),
+           cov.get("referenceShortConnectionSeconds") or 1.5, cov.get("estimatedMissRate"),
            cov.get("lastSampleAt"), cov.get("failures")),
     }
 
 
+IN_PROCESS_BLIND_SPOT = {
+    "topic": "进程内工具（Read/Edit/Write/Glob）",
+    "confidence": "Observed",
+    "status": "outside_system_visibility",
+    "note": "Read/Edit/Write/Glob 等不派生子进程、也不打开套接字的进程内工具，不在系统级采样和审计代理的可见范围内。"
+            "这里没看到，不能当成没发生。Network Extension 不在本接口范围内。",
+}
+
+
 def get_coverage() -> dict[str, Any]:
-    integrity = validate_audit()
+    if KEY_WARM.state == "pending":
+        integrity = pending_integrity()
+    else:
+        integrity = validate_audit()
     proxy_up = False
     detail = "未探测"
     # Lightweight local listen check — does not open Network Extension.
@@ -1262,7 +1423,8 @@ def get_coverage() -> dict[str, Any]:
         detail = "127.0.0.1:18891 可连接" if proxy_up else "127.0.0.1:18891 未监听"
     except OSError:
         detail = "端口探测失败"
-    return {
+    ledger_cov = load_socket_ledger(limit=0)["coverage"]
+    result = {
         "proxy": {"listening": proxy_up, "detail": detail, "confidence": "Observed" if proxy_up else "Unknown"},
         "rules": [
             {"id": "S01", "status": "blind", "confidence": "Unknown", "note": "无 Endpoint Security 级文件读证据"},
@@ -1273,15 +1435,20 @@ def get_coverage() -> dict[str, Any]:
             {"id": "S07", "status": "supported", "confidence": "Observed", "note": "仅认后端 auditBypass=true"},
         ],
         "blindSpots": [
-            _socket_blind_spot(),
+            _socket_blind_spot_from(ledger_cov),
+            IN_PROCESS_BLIND_SPOT,
             {"topic": "SSH 通道内正文", "confidence": "Unknown", "note": "只看到连到哪台主机"},
         ],
+        "socketSampling": _socket_sampling(ledger_cov),
         "evidenceIntegrity": integrity,
         "integritySummary": integrity_summary(integrity),
-        "socketLedgerIntegrity": load_socket_ledger(limit=0)["coverage"].get("integrity"),
+        "socketLedgerIntegrity": ledger_cov.get("integrity"),
         "transportRoot": str(DEFAULT_TRANSPORT),
         "confidence": "Observed" if proxy_up else "Unknown",
     }
+    if KEY_WARM.state == "pending":
+        result["keychainStatus"] = "pending"
+    return result
 
 
 def ensure_audit_dir() -> None:
@@ -1360,6 +1527,113 @@ def _run_keychain_helper(args: list[str], stdin: bytes | None = None) -> subproc
 def keychain_last_error() -> str | None:
     """Why the last Keychain lookup failed (no secret material), for status texts."""
     return _KEYCHAIN_STATE["lastError"]
+
+
+# Tool calls wait at most this long for the background Keychain warmup. A helper that would
+# block for KEYCHAIN_HELPER_TIMEOUT (15s) is reported as pending instead of stalling the read.
+KEYCHAIN_TOOL_WAIT = 0.25
+
+
+class KeychainWarmup:
+    """Load the integrity key off the tool-call thread.
+
+    ``ready`` means the helper returned (key present or honestly unavailable). ``pending`` means
+    it has not returned yet; callers must not block and must not mint a replacement key.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self.state = "cold"  # cold | pending | ready | unavailable
+        self.error: str | None = None
+        self.queue: list[tuple[str, str, dict[str, Any]]] = []
+        self._generation = 0
+
+    def reset(self) -> None:
+        """Tests start from cold. An in-flight helper from an older generation cannot publish its result."""
+        with self._cv:
+            self._generation += 1
+            self.state = "cold"
+            self.error = None
+            self.queue.clear()
+            self._cv.notify_all()
+
+    def start(self) -> None:
+        with self._cv:
+            if self.state != "cold":
+                return
+            self.state = "pending"
+            generation = self._generation
+            thread = threading.Thread(target=self._run, args=(generation,), name="agentreins-keychain-warm", daemon=True)
+            thread.start()
+
+    def _run(self, generation: int) -> None:
+        state = "unavailable"
+        error = None
+        try:
+            load_or_create_hmac_key()
+            state = "ready"
+        except OSError as exc:
+            error = str(exc)
+            state = "unavailable"
+        with self._cv:
+            if generation != self._generation:
+                return
+            self.state = state
+            self.error = error
+            queued = list(self.queue)
+            self.queue.clear()
+            self._cv.notify_all()
+        if state == "ready":
+            for actor, tool, arguments in queued:
+                try:
+                    append_audit(actor, tool, arguments)
+                except OSError:
+                    pass
+
+    def wait(self, timeout: float | None = None) -> str:
+        self.start()
+        limit = KEYCHAIN_TOOL_WAIT if timeout is None else timeout
+        with self._cv:
+            if self.state == "pending":
+                self._cv.wait(timeout=max(0.0, limit))
+            return self.state
+
+    def enqueue(self, actor: str, tool: str, arguments: dict[str, Any]) -> None:
+        with self._cv:
+            if self.state == "pending" or self.state == "cold":
+                self.queue.append((actor, tool, arguments))
+                if self.state == "cold":
+                    self.state = "pending"
+                    generation = self._generation
+                    threading.Thread(target=self._run, args=(generation,), name="agentreins-keychain-warm", daemon=True).start()
+                return
+        if self.state == "ready":
+            try:
+                append_audit(actor, tool, arguments)
+            except OSError:
+                pass
+
+
+KEY_WARM = KeychainWarmup()
+
+
+def pending_integrity() -> dict[str, Any]:
+    """get_coverage payload when the helper has not answered yet. Not a tamper verdict."""
+    return {
+        "ok": False,
+        "status": "pending",
+        "statusText": "完整性密钥正在后台读取，这一次不阻塞等待钥匙串。",
+        "confidence": "Unknown",
+        "keychainStatus": "pending",
+        "entriesChecked": 0,
+        "tampered": [],
+        "deletedOrGap": [],
+        "currentTampered": {"count": 0, "reasons": {}},
+        "legacyUnverifiable": {"count": 0, "from": None, "to": None},
+        "b6": {"sameUidCanForge": True, "reasons": ["钥匙串结果尚未返回，不把这次等待算成校验失败。"]},
+        "note": "pending 不是 key_unavailable，也不是篡改。助手返回后下一次读取会给出真实状态。",
+    }
 
 
 def _helper_failure(proc: subprocess.CompletedProcess[bytes]) -> str:
@@ -1863,11 +2137,24 @@ def validate_run_inventory(key: bytes | None = None) -> dict[str, Any]:
     """Detect B8: deleting inventory rows without the external MAC."""
     result: dict[str, Any] = {"ok": True, "tampered": []}
     key = key or load_or_create_hmac_key()
+    sig = _file_sig(RUN_INVENTORY)
+    mac_sig = _file_sig(RUN_INVENTORY_MAC)
+    fp = sha256_bytes(key)[:16]
+    cached = _INV_CACHE.get("valid")
+    if cached is not None and _INV_CACHE.get("fp") == fp and _INV_CACHE.get("validSig") == (sig, mac_sig):
+        return {"ok": cached["ok"], "tampered": list(cached["tampered"])}
+
+    def _store(done: dict[str, Any]) -> dict[str, Any]:
+        _INV_CACHE["valid"] = {"ok": done["ok"], "tampered": list(done["tampered"])}
+        _INV_CACHE["fp"] = fp
+        _INV_CACHE["validSig"] = (sig, mac_sig)
+        return done
+
     if RUN_INVENTORY_MAC.is_file():
         if not RUN_INVENTORY.is_file():
             result["ok"] = False
             result["tampered"].append({"reason": "inventory_missing_after_signed"})
-            return result
+            return _store(result)
         expected = RUN_INVENTORY_MAC.read_text(encoding="utf-8").strip()
         actual = evidence_file_mac(RUN_INVENTORY, key)
         if not hmac.compare_digest(expected, actual):
@@ -1877,7 +2164,7 @@ def validate_run_inventory(key: bytes | None = None) -> dict[str, Any]:
         # Signed era but inventory MAC wiped with the inventory edits.
         result["ok"] = False
         result["tampered"].append({"reason": "inventory_mac_missing_after_signed_era"})
-    return result
+    return _store(result)
 
 
 def register_run_id(run_id: str, run_path: pathlib.Path | None = None) -> None:
@@ -2086,11 +2373,22 @@ def _write_seal(head_hash: str, count: int, key: bytes) -> None:
         pass
 
 
+def _inventory_sha(path: pathlib.Path) -> str:
+    sig = _file_sig(path)
+    if sig is not None and _INV_CACHE.get("sig") == sig and _INV_CACHE.get("sha"):
+        return str(_INV_CACHE["sha"])
+    digest = sha256_bytes(path.read_bytes())
+    _INV_CACHE["sig"] = sig
+    _INV_CACHE["sha"] = digest
+    _INV_CACHE["valid"] = None
+    return digest
+
+
 def _inventory_anchor(key: bytes) -> str | None:
     if not RUN_INVENTORY.is_file():
         return None
     if not RUN_INVENTORY_MAC.is_file() or validate_run_inventory(key).get("ok"):
-        return sha256_bytes(RUN_INVENTORY.read_bytes())
+        return _inventory_sha(RUN_INVENTORY)
     for seal in (AUDIT_SEAL, PROTECTED_SEAL_DIR / "mcp-supervisor-audit.seal"):
         try:
             prev = json.loads(seal.read_text(encoding="utf-8")).get("inventorySha256")
@@ -2101,6 +2399,85 @@ def _inventory_anchor(key: bytes) -> str | None:
     return None
 
 
+class AuditTip:
+    """Last hash and line count of the audit jsonl without re-parsing the whole file on every call.
+
+    The first sight of a file streams it once (only the last line is JSON-parsed). Later calls
+    read the bytes appended since that offset. The HMAC prev-hash and the seal count stay the
+    same values a full read would have produced.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.identity: tuple | None = None
+        self.count = 0
+        self.last_hash = "0" * 64
+        self.bytes_read = 0
+
+    def _stat_id(self, path: pathlib.Path):
+        st = path.stat()
+        return (str(path), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+
+    def tip(self, path: pathlib.Path) -> tuple[int, str]:
+        with self._lock:
+            if not path.is_file():
+                self.identity = None
+                self.count = 0
+                self.last_hash = "0" * 64
+                return 0, self.last_hash
+            ident = self._stat_id(path)
+            if ident == self.identity:
+                return self.count, self.last_hash
+            # Stat miss: count the file. Do not add to a previous file's count (that inflated the seal).
+            count = 0
+            last = b""
+            try:
+                with path.open("rb") as fh:
+                    for line in fh:
+                        self.bytes_read += len(line)
+                        if line.strip():
+                            count += 1
+                            last = line
+            except OSError:
+                return self.count, self.last_hash
+            self.count = count
+            if last:
+                try:
+                    parsed = json.loads(last.decode("utf-8")).get("hash")
+                    if parsed:
+                        self.last_hash = parsed
+                except (UnicodeDecodeError, json.JSONDecodeError):
+                    pass
+            else:
+                self.last_hash = "0" * 64
+            self.identity = ident
+            return self.count, self.last_hash
+
+    def remember(self, path: pathlib.Path, count: int, new_hash: str) -> None:
+        """The line just appended is `count` lines long and ends with `new_hash`. Absolute, not additive."""
+        with self._lock:
+            try:
+                self.identity = self._stat_id(path)
+            except OSError:
+                self.identity = None
+                return
+            self.count = count
+            self.last_hash = new_hash
+
+
+AUDIT_TIP = AuditTip()
+
+_INV_CACHE: dict[str, Any] = {"sig": None, "sha": None, "valid": None, "fp": None}
+
+
+def _file_sig(path: pathlib.Path):
+    try:
+        st = path.stat()
+    except OSError:
+        return None
+    return (str(path), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+
+
 def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
     """Append one audit line. Readers must NEVER re-sign evidence trees (B3 wash prevention)."""
     ensure_audit_dir()
@@ -2109,10 +2486,8 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
     count = 0
     if AUDIT_LOG.exists():
         try:
-            lines = [ln for ln in AUDIT_LOG.read_text(encoding="utf-8").splitlines() if ln.strip()]
-            count = len(lines)
-            if lines:
-                prev = json.loads(lines[-1]).get("hash") or prev
+            count, prev = AUDIT_TIP.tip(AUDIT_LOG)
+            prev = prev or ("0" * 64)
         except (OSError, json.JSONDecodeError, IndexError):
             prev = "0" * 64
     args_digest = sha256_hex(canonical_json(arguments))[:24]
@@ -2131,6 +2506,7 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
         os.chmod(AUDIT_LOG, 0o600)
     except OSError:
         pass
+    AUDIT_TIP.remember(AUDIT_LOG, count + 1, entry["hash"])
     _write_seal(entry["hash"], count + 1, key)
     # Intentionally do NOT call sign_evidence_tree() here — collection signs; read only verifies.
     return entry
