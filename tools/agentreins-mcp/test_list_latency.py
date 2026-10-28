@@ -55,6 +55,8 @@ class ListLatency(unittest.TestCase):
             "root": None, "rootMtime": None, "names": None, "rows": {}, "parsedFiles": 0, "lastTruncated": False,
         })
         evidence._ROUTE_TAIL.update({"sig": None, "flows": [], "bytesRead": 0})
+        evidence._AUDIT_TAIL.update({"sig": None, "entries": [], "bytes": 0})
+        evidence._AUDIT_LINES.update({"sig": None, "lines": [], "bytes": 0})
         evidence.AUDIT_TIP.identity = None
         evidence.AUDIT_TIP.bytes_read = 0
         evidence.KEY_WARM.reset()
@@ -205,6 +207,11 @@ class ListLatency(unittest.TestCase):
         self.assertEqual(sampled["effectiveIntervalSeconds"], 0.5)
 
     def test_warm_list_mcp_audit_reads_the_tail_not_the_whole_log(self) -> None:
+        # macOS CI has a Keychain, so the prime call's validate_audit appends one
+        # integrity-boundary line after the tail cache is filled (~354 bytes).
+        # That line has to land in the cache at write time; the next call reads nothing.
+        from keychain_fake import FAKE
+        FAKE.items.clear()
         line = (json.dumps({"at": "2026-10-28T00:00:00Z", "tool": "list_agents", "hash": "ab" * 32}) + "\n").encode()
         blob = line * 2000
         with evidence.AUDIT_LOG.open("wb") as fh:
@@ -213,17 +220,29 @@ class ListLatency(unittest.TestCase):
         last = (json.dumps({"at": "2026-10-28T01:02:03Z", "tool": "get_coverage", "hash": "cd" * 32}) + "\n").encode()
         with evidence.AUDIT_LOG.open("ab") as fh:
             fh.write(last)
-        self.assertGreater(evidence.AUDIT_LOG.stat().st_size, 2_000_000)
-        evidence.list_mcp_audit(limit=5)  # prime
-        evidence._AUDIT_TAIL["bytes"] = 0
-        evidence._AUDIT_LINES["bytes"] = 0
-        started = time.perf_counter()
-        out = evidence.list_mcp_audit(limit=5)
-        elapsed = time.perf_counter() - started
+        size_before = evidence.AUDIT_LOG.stat().st_size
+        self.assertGreater(size_before, 2_000_000)
+        patches = FAKE.patches(evidence)
+        for patch in patches:
+            patch.start()
+        try:
+            evidence.list_mcp_audit(limit=5)  # prime; validation appends the boundary line
+            self.assertGreater(evidence.AUDIT_LOG.stat().st_size, size_before)
+            evidence._AUDIT_TAIL["bytes"] = 0
+            evidence._AUDIT_LINES["bytes"] = 0
+            started = time.perf_counter()
+            out = evidence.list_mcp_audit(limit=5)
+            elapsed = time.perf_counter() - started
+        finally:
+            for patch in patches:
+                patch.stop()
+            FAKE.items.clear()
         self.assertLess(elapsed, 0.5, "warm list_mcp_audit %.3fs" % elapsed)
         self.assertEqual(evidence._AUDIT_TAIL["bytes"], 0)
         self.assertEqual(evidence._AUDIT_LINES["bytes"], 0)
-        self.assertEqual(out["entries"][-1]["tool"], "get_coverage")
+        tools = [row.get("tool") for row in out["entries"]]
+        self.assertIn("get_coverage", tools)
+        self.assertEqual(tools[-1], "integrity-boundary")
 
 
 if __name__ == "__main__":

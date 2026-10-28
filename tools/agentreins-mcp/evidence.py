@@ -2584,16 +2584,52 @@ def append_audit(actor: str, tool: str, arguments: dict[str, Any]) -> dict[str, 
     }
     entry["mac"] = entry_hmac(entry, key)
     entry["hash"] = sha256_hex(canonical_json(entry) + prev)
+    line = canonical_json(entry)
     with AUDIT_LOG.open("a", encoding="utf-8") as fh:
-        fh.write(canonical_json(entry) + "\n")
+        fh.write(line + "\n")
     try:
         os.chmod(AUDIT_LOG, 0o600)
     except OSError:
         pass
     AUDIT_TIP.remember(AUDIT_LOG, count + 1, entry["hash"])
     _write_seal(entry["hash"], count + 1, key)
+    # The line is already in memory. Fold it into the read caches so the next list_mcp_audit
+    # does not re-read it (validation may append an integrity-boundary line after the tail was cached).
+    _cache_appended_audit_line(entry, line)
     # Intentionally do NOT call sign_evidence_tree() here — collection signs; read only verifies.
     return entry
+
+
+def _cache_appended_audit_line(entry: dict[str, Any], line: str) -> None:
+    """Extend the audit tail/line caches by the line just written. A size mismatch drops the cache."""
+    try:
+        st = AUDIT_LOG.stat()
+    except OSError:
+        _AUDIT_TAIL["sig"] = None
+        _AUDIT_LINES["sig"] = None
+        return
+    added = len((line + "\n").encode("utf-8"))
+    prev = _AUDIT_TAIL.get("sig")
+    if isinstance(prev, tuple) and len(prev) >= 4 and prev[0] == str(AUDIT_LOG) and isinstance(prev[2], int):
+        if st.st_size == prev[2] + added:
+            entries = list(_AUDIT_TAIL.get("entries") or [])
+            entries.append(entry)
+            if len(entries) > 4000:
+                entries = entries[-4000:]
+            _AUDIT_TAIL["entries"] = entries
+            _AUDIT_TAIL["sig"] = (str(AUDIT_LOG), st.st_mtime_ns, st.st_size, prev[3])
+        else:
+            _AUDIT_TAIL["sig"] = None
+    prev_lines = _AUDIT_LINES.get("sig")
+    if (isinstance(prev_lines, tuple) and len(prev_lines) >= 5 and prev_lines[0] == str(AUDIT_LOG)
+            and prev_lines[1] == st.st_dev and prev_lines[2] == st.st_ino and isinstance(prev_lines[4], int)):
+        if st.st_size == prev_lines[4] + added:
+            lines = list(_AUDIT_LINES.get("lines") or [])
+            lines.append(line)
+            _AUDIT_LINES["lines"] = lines
+            _AUDIT_LINES["sig"] = (str(AUDIT_LOG), st.st_dev, st.st_ino, st.st_mtime_ns, st.st_size)
+        else:
+            _AUDIT_LINES["sig"] = None
 
 
 def key_storage_facts() -> dict[str, Any]:
