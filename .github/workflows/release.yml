@@ -113,7 +113,7 @@ jobs:
           notes="$RUNNER_TEMP/release-notes.md"
           title="AgentReins $GITHUB_REF_NAME"
           if [[ "$SIGNED" != "true" ]]; then
-            title="$title（未签名）"
+            title="${title}（未签名）"
             cat > "$notes" <<'NOTES'
           > **未签名版本 / Unsigned build**
           >
