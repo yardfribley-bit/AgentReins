@@ -86,12 +86,30 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 pushMCPAudit(to: message.webView)
                 return
             }
+            if action == "deleteReviewDecision" {
+                guard let id = body["id"] as? String, !id.isEmpty, id.count <= 240 else { return }
+                _ = RealtimeReviewStore.remove(id: id)
+                pushReviewDecisions(to: message.webView, message: "已撤销这条决定")
+                return
+            }
+            if action == "exportEvidencePack" {
+                guard let json = body["json"] as? String, !json.isEmpty, json.utf8.count <= 2_000_000 else { return }
+                let name = String(((body["name"] as? String) ?? "task").prefix(80))
+                do {
+                    let file = try RealtimeReviewStore.writeExport(name: name, json: json)
+                    pushHostResult(to: message.webView, result: ["action": "evidenceExported", "path": file.path, "message": "证据包已写入 " + file.path])
+                } catch {
+                    pushHostResult(to: message.webView, result: ["action": "evidenceExported", "message": "证据包没有写下来"])
+                }
+                return
+            }
             if action == "saveReviewDecision" {
-                // Style-only ack — acceptance / disposition / evidence-pack export removed.
-                guard let id = body["id"] as? String, !id.isEmpty, id.count <= 200,
-                      let state = body["state"] as? String,
-                      ["acked", "acknowledged", "known"].contains(state) else { return }
+                guard let id = body["id"] as? String, !id.isEmpty, id.count <= 240,
+                      let state = body["state"] as? String else { return }
                 let note = (body["note"] as? String).map { String($0.prefix(2000)) }
+                let subject = (body["subject"] as? String).map { String($0.prefix(300)) }
+                let rule = (body["rule"] as? String).map { String($0.prefix(32)) }
+                guard let normalized = RealtimeReviewStore.normalize(state: state, note: note, subject: subject) else { return }
                 let evidenceText = String((body["evidenceText"] as? String ?? "").prefix(200_000))
                 let evidenceHash = evidenceText.isEmpty
                     ? (body["evidenceHash"] as? String).map { String($0.prefix(128)) }
@@ -100,11 +118,15 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 let decidedAt = (body["decidedAt"] as? String).flatMap { $0.isEmpty ? nil : $0 }
                     ?? ISO8601DateFormatter().string(from: Date())
                 let decision = RealtimeReviewStore.Decision(
-                    id: id, state: "acked", note: note, decidedAt: decidedAt,
-                    evidenceHash: evidenceHash, evidenceCount: evidenceCount
+                    id: id, state: normalized.state, note: note, decidedAt: decidedAt,
+                    evidenceHash: evidenceHash, evidenceCount: evidenceCount,
+                    subject: subject, rule: rule, effect: normalized.effect
                 )
                 _ = RealtimeReviewStore.save(decision)
-                pushReviewDecisions(to: message.webView, message: "已标记已知悉（仅样式）")
+                let messageText = normalized.effect == "gateway-demo"
+                    ? "已记下演示处置（未调用模型网关，未改 Network Extension）"
+                    : "已写入本机 Review"
+                pushReviewDecisions(to: message.webView, message: messageText)
                 return
             }
             guard let latest else { return }
@@ -238,6 +260,15 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
         func webView(_ webView: WKWebView, decidePolicyFor action: WKNavigationAction, decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
             decisionHandler(action.request.url?.isFileURL == true ? .allow : .cancel)
         }
+        private func pushHostResult(to webView: WKWebView?, result: [String: Any]) {
+            Task { @MainActor in
+                _ = try? await webView?.callAsyncJavaScript(
+                    "window.agentreinsHostResult && window.agentreinsHostResult(result)",
+                    arguments: ["result": result],
+                    in: nil, contentWorld: .page
+                )
+            }
+        }
         private func pushReviewDecisions(to webView: WKWebView?, message: String? = nil) {
             _ = RealtimeReviewStore.clearSeedAndTestDecisions()
             let decisions = RealtimeReviewStore.load().map { item -> [String: Any] in
@@ -249,6 +280,9 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 if let note = item.note { row["note"] = note }
                 if let hash = item.evidenceHash { row["evidenceHash"] = hash }
                 if let count = item.evidenceCount { row["evidenceCount"] = count }
+                if let subject = item.subject { row["subject"] = subject }
+                if let rule = item.rule { row["rule"] = rule }
+                if let effect = item.effect { row["effect"] = effect }
                 return row
             }
             var result: [String: Any] = ["action": "reviewDecisions", "decisions": decisions]

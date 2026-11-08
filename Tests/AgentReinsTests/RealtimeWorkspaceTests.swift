@@ -278,9 +278,11 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let taskCount = try await browser.evaluateJavaScript("document.querySelectorAll('#tasks [data-task]').length") as? Int
         XCTAssertGreaterThan(taskCount ?? 0, 0)
         let navOrder = try await browser.evaluateJavaScript("Array.from(document.querySelectorAll('nav [data-view]')).map(el=>el.getAttribute('data-view')).join(',')") as? String
-        XCTAssertEqual(navOrder, "alerts,network,process,rules,coverage")
+        XCTAssertEqual(navOrder, "alerts,inbox,network,files,reason,process,rules,coverage,supervise,about")
         let hasInboxLabel = try await browser.evaluateJavaScript("document.body.textContent.includes('待我处理')") as? Bool
-        XCTAssertEqual(hasInboxLabel, false)
+        XCTAssertEqual(hasInboxLabel, true)
+        let homeStillAlerts = try await browser.evaluateJavaScript("document.querySelector('nav [data-view=alerts]').classList.contains('active')") as? Bool
+        XCTAssertEqual(homeStillAlerts, true)
         _ = try await browser.evaluateJavaScript("document.querySelector('#tasks [data-task]').click()")
         for _ in 0..<50 {
             try await Task.sleep(for: .milliseconds(100))

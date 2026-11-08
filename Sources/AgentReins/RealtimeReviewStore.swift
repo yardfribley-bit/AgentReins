@@ -1,8 +1,8 @@
 import CryptoKit
 import Foundation
 
-/// Durable style-only acknowledgements for realtime risk alerts ("已知悉").
-/// Kept outside WKWebView's non-persistent websiteDataStore so acks survive relaunch.
+/// Durable local reviews: alert ack / confirm / allowlist, gateway demo marks, and task acceptance.
+/// Kept outside WKWebView's non-persistent websiteDataStore so they survive relaunch.
 /// Storage path is injectable so XCTest never writes into Application Support.
 enum RealtimeReviewStore {
     struct Decision: Codable, Equatable {
@@ -12,6 +12,35 @@ enum RealtimeReviewStore {
         var decidedAt: String
         var evidenceHash: String?
         var evidenceCount: Int?
+        var subject: String? = nil
+        var rule: String? = nil
+        var effect: String? = nil
+    }
+
+    /// Returns the state to store, or nil when the action is not a known review.
+    static func normalize(state: String, note: String?, subject: String?) -> (state: String, effect: String)? {
+        switch state {
+        case "acked", "acknowledged", "known":
+            return ("acked", "persisted")
+        case "confirmed":
+            return ("confirmed", "persisted")
+        case "released", "blocked", "escalated":
+            return (state, "persisted")
+        case "gateway_allow":
+            return ("released", "persisted")
+        case "gateway_block":
+            return ("blocked", "persisted")
+        case "allowlisted":
+            guard let subject, !subject.isEmpty, subject.count <= 300 else { return nil }
+            return ("allowlisted", "persisted")
+        case "accept", "needs_evidence":
+            return (state, "persisted")
+        case "return":
+            guard let note, !note.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return ("return", "persisted")
+        default:
+            return nil
+        }
     }
 
     private static let fileName = "realtime-review-decisions-v1.json"
@@ -59,6 +88,16 @@ enum RealtimeReviewStore {
         return ordered
     }
 
+    @discardableResult
+    static func remove(id: String) -> [Decision] {
+        let kept = load().filter { $0.id != id }
+        if let data = try? JSONEncoder().encode(kept) {
+            try? data.write(to: url, options: [.atomic])
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+        }
+        return kept
+    }
+
     /// Drop seed / fixture acknowledgements from the production store.
     @discardableResult
     static func clearSeedAndTestDecisions() -> [Decision] {
@@ -80,5 +119,17 @@ enum RealtimeReviewStore {
     static func evidenceHash(for text: String) -> String {
         let digest = SHA256.hash(data: Data(text.utf8))
         return digest.map { String(format: "%02x", $0) }.joined()
+    }
+
+    /// Writes one evidence pack under the review directory. Tests inject that directory.
+    static func writeExport(name: String, json: String) throws -> URL {
+        let root = url.deletingLastPathComponent().appendingPathComponent("exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let cleaned = String(name.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0 == "-" }.prefix(40))
+        let stem = cleaned.isEmpty ? "task" : cleaned
+        let file = root.appendingPathComponent("\(stem)-\(UUID().uuidString.prefix(8)).json")
+        try Data(json.utf8).write(to: file, options: [.atomic])
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        return file
     }
 }

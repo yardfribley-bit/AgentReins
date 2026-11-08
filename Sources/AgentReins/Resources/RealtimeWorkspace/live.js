@@ -8,7 +8,9 @@ const statuses={running:'进行中',awaiting_confirmation:'等我确认',complet
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
-const riskState={filter:{sev:'all',rule:'all',agent:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
+const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
+const consoleState={fileId:null,reasonId:null,inboxId:null,fileMode:'list',returnNote:'',returnInvalid:false};
+const CONSOLE_VIEWS=['alerts','rules','coverage','inbox','files','reason','supervise','about'];
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
 let objects=new Map(),runtimeExchangeID=null,runtimeCallID=null,runtimeTaskID=null,timelineMode='tools',runtimeProjection=null;
@@ -164,7 +166,7 @@ function badge(s,c=''){return `<span class="status-pill ${c}">${esc(s)}</span>`;
 function evidence(o){const d=o.data||{},t=o.task;return `<details class="technical"><summary>来源与关联依据</summary><p>${esc([d.source&&'来源：'+d.source,d.basis||d.responseBasis,t?.session&&'会话：'+t.session,t?.turn&&'轮次：'+t.turn,d.call&&'调用：'+d.call,array(d.eventIDs).length&&'证据：'+d.eventIDs.join(', '),d.id&&'记录：'+d.id].filter(Boolean).join('\n')||'该对象没有可确认的原生关联信息。')}</p></details>`;}
 function recordButton(c){return `<button class="event-item" data-select="card:${esc(c.id)}"><b>${esc(c.title)}</b><small>${esc(c.tag)} · ${esc(time(c.timestamp))}</small><small>${esc(c.summary)}</small></button>`;}
 function toast(s){$('toast').textContent=s;$('toast').hidden=false;clearTimeout(toastTimer);toastTimer=setTimeout(()=>$('toast').hidden=true,3200);}
-function bridge(action,fields){const handler=window.webkit?.messageHandlers?.agentreins;if(!handler){toast('此操作需要 AgentReins 原生应用；当前浏览器未连接原生通道。');return false;}handler.postMessage({action,...fields});return true;}
+function bridge(action,fields,opts){const handler=window.webkit?.messageHandlers?.agentreins;if(!handler){if(!opts||!opts.silent)toast('此操作需要 AgentReins 原生应用；当前浏览器未连接原生通道。');return false;}handler.postMessage({action,...fields});return true;}
 function selectTask(id,openKey=null){pendingOpenKey=openKey;taskID=id;following=false;selection=null;snapshot=null;contextBlockID=null;detailTab='output';view='process';render();if(openKey&&objects.has(openKey)){pendingOpenKey=null;choose(openKey);}}
 function revision(o){return JSON.stringify([o?.type,o?.data]);}
 function object(key,type,data,t=task()){const o={key,type,data,task:t};objects.set(key,o);return o;}
@@ -201,7 +203,7 @@ function renderTasks(){
 function stopExcerpt(t){const paragraphs=String(t?.nativeEndMessage||'').split(/\n\s*\n/).map(s=>s.trim()).filter(s=>s&&!/^#{1,6}\s/.test(s));return paragraphs.length?cut(paragraphs[0].replace(/\*\*/g,''),140):'执行已结束，尚无目标验证记录。点击核对最后答复与执行详情。';}
 function renderHeading(){const t=task();
  if(view==='network'&&networkTask){const scoped=shown.tasks.find(x=>x.id===networkTask);$('heading').innerHTML=scoped?`<div class="heading-meta">这次任务的外网访问</div><div class="heading-row"><h1>${esc(taskLabel(scoped))}</h1><button class="task-jump" data-task="${esc(scoped.id)}">返回任务过程</button></div><p class="request">${esc(scoped.agent)} · 下面只列归到这次任务的外网访问。</p>`:`<h1>这次任务已不在列表里</h1><button class="task-jump" data-view="process">返回任务过程</button>`;return;}
- if(view!=='process'){const titles={alerts:['风险告警','这台 Mac 上的编码 agent 今天有没有做危险的事。'],network:['外网访问，追查目标和发起来源','查看 WorkBuddy、Codex、Cursor 的目标地址、位置、会话与实际证据。'],collection:['采集现场，确认数据从哪里来','应用进程、文件与网络观察独立保留；缺少任务身份的记录可以查找。'],rules:['规则','少而准的高危行为规则；默认只告警。'],coverage:['覆盖度 · 看不到什么','告警只来自看得到的部分；没有告警不等于安全。'],results:['任务结果看板','按任务归列，点击找到当前步骤、失败原因和实际交付物。']};const meta=titles[view]||titles.alerts;$('heading').innerHTML=`<div class="heading-meta">本机运行时安全 · WorkBuddy / Codex / Cursor</div><h1>${meta[0]}</h1><p class="request">${meta[1]}</p>`;return;}
+ if(view!=='process'){const titles={alerts:['风险告警','这台 Mac 上的编码 agent 今天有没有做危险的事。'],network:['外网访问，追查目标和发起来源','查看 WorkBuddy、Codex、Cursor 的目标地址、位置、会话与实际证据。'],collection:['采集现场，确认数据从哪里来','应用进程、文件与网络观察独立保留；缺少任务身份的记录可以查找。'],rules:['规则','少而准的高危行为规则；默认只告警。'],coverage:['覆盖度 · 看不到什么','告警只来自看得到的部分；没有告警不等于安全。'],results:['任务结果看板','按任务归列，点击找到当前步骤、失败原因和实际交付物。']};if(CONSOLE_VIEWS.includes(view))return;const meta=titles[view]||titles.alerts;$('heading').innerHTML=`<div class="heading-meta">本机运行时安全 · WorkBuddy / Codex / Cursor</div><h1>${meta[0]}</h1><p class="request">${meta[1]}</p>`;return;}
  const duration=t?Math.max(0,Math.round((new Date(t.lastActivity)-new Date(t.startedAt))/1000)):null;const durationText=duration==null?'':duration>=86400?Math.floor(duration/86400)+' 天 '+Math.floor(duration%86400/3600)+' 小时':duration>=3600?Math.floor(duration/3600)+' 小时 '+Math.floor(duration%3600/60)+' 分钟':String(Math.floor(duration/60)).padStart(2,'0')+':'+String(duration%60).padStart(2,'0');
  const requestLine=t?.originalRequest?(machineInput(t.originalRequest)?'<p class="request">这条记录是心跳或自动化标记，不是用户写下的需求。原始标记可以在「查看原始输入」里看。</p>':`<p class="request"><b>起始原话：</b>${esc(readableTask(t.originalRequest))}</p>`)+(t?.latestUserInput?.content&&t.latestUserInput.content!==t.originalRequest&&!machineInput(t.latestUserInput.content)?`<p class="request latest-input"><b>最新补充：</b>${esc(readableTask(t.latestUserInput.content))}</p>`:''):t?.subagentPath?`<p class="request">Agent 委派的子任务 · ${esc(t.subagentPath)}<br>工具与执行结果属于当前子任务，用户原始需求归属父会话。</p>`:array(t?.inputAttachments).length?'<p class="request">本次输入为附件，没有附带文字需求。点击原始输入查看路径。</p>':t?'<p class="request-missing">本轮用户原话尚未采到。后续活动保留，任务起点待补齐。</p>':'<p class="request">这里将从你的原话开始，展示模型往返、执行过程与结果。</p>';
  const headingLabel=t?taskLabel(t):'等待一个真实任务';
@@ -383,33 +385,48 @@ function requestRiskTransports(){
 function renderRisk(){
  const api=window.AgentReinsRisk;if(!api){$('alerts-view').innerHTML=empty('风险告警模块未加载。');return;}
  ensureReviewDecisions();
- if(view==='coverage')ensureMCPAudit();
- if(view==='alerts'||view==='rules'||view==='coverage')requestRiskTransports();
+ if(view==='coverage'||view==='supervise')ensureMCPAudit();
+ if(view==='alerts'||view==='rules'||view==='coverage'||view==='files')requestRiskTransports();
  if(view==='alerts')api.renderList($('alerts-view'),shown,riskState);
- else if(view==='rules')api.renderRules($('rules-view'),shown);
+ else if(view==='rules')api.renderRules($('rules-view'),shown,riskState);
  else if(view==='coverage')api.renderCoverage($('coverage-view'),shown,riskState);
- const n=(riskState.alerts||api.applyDecisions?.(api.buildAlerts(shown),riskState.decisions)||api.buildAlerts(shown)||[]).filter(a=>!a.acked).length;
+ const decided=api.applyDecisions?.(api.buildAlerts(shown),riskState.decisions)||riskState.alerts||[];
+ const n=decided.filter(a=>api.isOpen?api.isOpen(a):!a.acked).length;
  const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}
+ renderConsole();
 }
-window.agentreinsRenderRisk=()=>{if(view==='alerts'||view==='rules'||view==='coverage'){riskState.transportsRequested=true;renderRisk();}};
+function renderConsole(){
+ const api=window.AgentReinsConsole;if(!api)return;
+ if(view==='files')api.renderFiles($('files-view'),shown,consoleState);
+ else if(view==='reason')api.renderReason($('reason-view'),shown,consoleState);
+ else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions});
+ else if(view==='supervise')api.renderSupervise($('supervise-view'),shown,riskState);
+ else if(view==='about')api.renderAbout($('about-view'));
+ const inbox=api.inboxItems?.(shown,riskState.decisions)||[];
+ const left=inbox.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
+ const ib=$('inbox-badge');if(ib){ib.hidden=!left;ib.textContent=String(left);}
+}
+window.agentreinsRenderRisk=()=>{if(CONSOLE_VIEWS.includes(view)){riskState.transportsRequested=true;renderRisk();}};
 function render(animate=false){
  if(following)taskID=newest();if(task()?.detailsLoaded===false)requestTask(taskID);rebuildObjects();renderTasks();renderHeading();
  document.querySelectorAll('nav [data-view]').forEach(b=>b.classList.toggle('active',b.dataset.view===view));
- $('view-name').textContent=window.agentreinsCommandsOpen?'命令外联':{alerts:'风险告警',network:'外网访问',process:'任务过程',collection:'采集现场',rules:'规则',coverage:'覆盖度',results:'结果看板'}[view]||'风险告警';
+ $('view-name').textContent=window.agentreinsCommandsOpen?'命令外联':{alerts:'风险告警',inbox:'待我处理',files:'文件改动',reason:'推理对齐',network:'外网访问',process:'任务过程',collection:'采集现场',rules:'规则',coverage:'覆盖度',supervise:'监督接入',about:'关于',results:'结果看板'}[view]||'风险告警';
  $('alerts-view').hidden=view!=='alerts';$('rules-view').hidden=view!=='rules';$('coverage-view').hidden=view!=='coverage';
+ $('inbox-view').hidden=view!=='inbox';$('files-view').hidden=view!=='files';$('reason-view').hidden=view!=='reason';
+ $('supervise-view').hidden=view!=='supervise';$('about-view').hidden=view!=='about';
  $('network-view').hidden=view!=='network';
  $('process-view').hidden=view!=='process';$('collection-view').hidden=view!=='collection';$('result-screen').hidden=view!=='results';
- if($('heading'))$('heading').hidden=['alerts','rules','coverage'].includes(view);
+ if($('heading'))$('heading').hidden=CONSOLE_VIEWS.includes(view);
  $('live-label').textContent=collectorPhrase();$('pause').textContent=paused?'恢复画面':'暂停画面';
  $('follow-latest').textContent=following?'正在跟随最新任务':'跟随最新任务';
  const warning=[shown.persistenceError&&'证据保存异常：'+shown.persistenceError,shown.truncated&&'先前展示发生过容量截断；早期任务可能缺少证据，不能据此确认完整性。'].filter(Boolean).join(' · ');$('workspace-warning').hidden=!warning&&!shown.continuityNotice;$('workspace-warning').textContent=[warning,shown.continuityNotice].filter(Boolean).join(' · ');
  $('footer-state').textContent=`${shown.publishedAt?'更新 '+time(shown.publishedAt)+' · ':''}${paused?'画面固定，采集继续':'真实采集数据'} · 当前任务 ${primaryTasks().length} 个`;
- if(view==='alerts'||view==='rules'||view==='coverage')renderRisk();
+ if(CONSOLE_VIEWS.includes(view))renderRisk();
  else if(view==='process'){requestRiskTransports();if($('collection-detail'))$('collection-detail').innerHTML='';const vacant=!task();if($('empty-guide'))$('empty-guide').hidden=!vacant;if($('graph-screen'))$('graph-screen').hidden=vacant;if(!vacant){renderStages();renderGraph(animate);renderTimeline();renderDetail();}else{$('stages').innerHTML='';$('detail').innerHTML='';renderCurrentBar(null);}}
  else if(view==='collection'){$('detail').innerHTML='';renderCollection();if(snapshot)renderCollectionDetail();}
  else if(view==='network')renderNetwork();
  else if(view==='results')renderBoard();
- if(view!=='alerts'&&view!=='rules'&&view!=='coverage'&&window.AgentReinsRisk){const n=window.AgentReinsRisk.buildAlerts(shown).filter(a=>a.status==='todo'||a.status==='ask').length;const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}}
+ if(!CONSOLE_VIEWS.includes(view)&&window.AgentReinsRisk){const built=window.AgentReinsRisk.applyDecisions(window.AgentReinsRisk.buildAlerts(shown),riskState.decisions);const n=built.filter(a=>window.AgentReinsRisk.isOpen(a)).length;const badge=$('alert-badge');if(badge){badge.hidden=!n;badge.textContent=String(n);}renderConsole();}
  if(view==='process'&&task()?.detailsLoaded===false){const bar=$('current-bar');if(bar){bar.className='plain-status';bar.innerHTML='<div class="row"><span class="plain">正在读取该任务的完整执行证据…</span></div>';}$('detail').innerHTML=empty('正在读取任务详情，采集继续。');}
 }
 function renderNetwork(){if(networkTask&&shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);const focused=document.activeElement?.id==='network-search',position=focused?document.activeElement.selectionStart:null;window.AgentReinsNetwork.render($('network-view'),shown,{agent:networkAgent,query:networkQuery,taskOnly:networkTask,selected:networkSelected,focusTask:taskID,mode:networkMode,destination:networkDestination,suspicious:networkSuspicious,alerts:riskState.alerts||window.AgentReinsRisk?._lastAlerts||[]});if(focused){$('network-search').focus();$('network-search').setSelectionRange(position,position);}}
@@ -487,13 +504,14 @@ window.agentreinsReceive=receive;
 window.agentreinsHostResult=result=>{
  if(result?.action==='reviewDecisions'&&Array.isArray(result.decisions)){
   riskState.decisions=result.decisions;riskState.decisionsLoaded=true;
-  if(view==='alerts'||view==='rules'||view==='coverage')renderRisk();
+  if(CONSOLE_VIEWS.includes(view))renderRisk();
  }
+ if(result?.action==='evidenceExported'&&result.path){/* toast already shows the path */}
  if(result?.action==='mcpAudit'&&Array.isArray(result.entries)){
   riskState.mcpAudit=result.entries;
   riskState.mcpAuditPath=result.path||'';
   riskState.mcpAuditLoaded=true;
-  if(view==='coverage')renderRisk();
+  if(view==='coverage'||view==='supervise')renderRisk();
  }
  if(result?.action==='keychainAuthorize'){
   // Re-read the ledger and key state after the user answered the Keychain prompt.
@@ -514,7 +532,7 @@ document.addEventListener('click',e=>{
  else if(el.dataset.networkAgentPill){networkAgent=el.dataset.networkAgentPill;renderNetwork();}
  else if(el.dataset.action==='toggle-details'){const collapsed=document.body.classList.toggle('details-collapsed');$('toggle-details').textContent=collapsed?'显示详情':'收起详情';}
  else if(el.dataset.zoom){window.AgentReinsFlow.zoom(el.dataset.zoom);}
- else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;networkDestination=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage')riskState.transportsRequested=false;render();}
+ else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;networkDestination=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage'||view==='files')riskState.transportsRequested=false;if(view==='supervise'||view==='coverage')riskState.mcpAuditLoaded=false;render();}
  else if(el.dataset.graphMode){graphMode=el.dataset.graphMode;renderGraph();}
  else if(el.dataset.networkScope){networkTask=el.dataset.networkScope;taskID=networkTask;following=false;networkQuery='';networkSelected=null;view='network';if(shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);render();}
  else if(el.hasAttribute('data-network-all')){networkTask=null;renderNetwork();}
@@ -540,20 +558,70 @@ document.addEventListener('click',e=>{
  else if(el.id==='pause'){paused=!paused;if(!paused)shown=latest;render();}
  else if(el.dataset.riskAlert){riskState.selected=el.dataset.riskAlert;renderRisk();}
  else if(el.dataset.riskFilter){riskState.filter[el.dataset.riskFilter]=el.dataset.riskValue;riskState.selected=null;renderRisk();}
+ else if(el.dataset.riskJump){document.getElementById('risk-ev-'+el.dataset.riskJump)?.scrollIntoView?.({block:'nearest'});}
  else if(el.dataset.riskDecide){
-  // 仅「标记已知悉」：样式回执，不做验收处置、不导出证据包。
   const state=el.dataset.riskDecide;
-  if(!['acked','acknowledged','known'].includes(state))return;
+  const allowed=['acked','acknowledged','known','confirmed','allowlisted','released','blocked','escalated','gateway_allow','gateway_block'];
+  if(!allowed.includes(state))return;
   const api=window.AgentReinsRisk;const alert=(riskState.alerts||[]).find(a=>a.id===el.dataset.riskId)||api?.buildAlerts?.(shown)?.find(a=>a.id===el.dataset.riskId);
   if(!alert){toast('找不到这条告警');return;}
+  const subject=api?.subjectOf?.(alert)||'';
+  if(state==='allowlisted'&&!subject){toast('没有可加白的主机或路径，未写入');return;}
+  const stored=state==='acknowledged'||state==='known'?'acked':state==='gateway_allow'?'released':state==='gateway_block'?'blocked':state;
+  const note=(stored==='released'||stored==='blocked')?'已记录处置。未调用模型网关，未改 Network Extension。':'';
   const evidenceText=api?.evidenceTextFor?.(alert)||'';
-  bridge('saveReviewDecision',{id:alert.id,state:'acked',note:'',evidenceText,evidenceCount:evidenceText.length});
+  const row={id:alert.id,state:stored,note,subject,rule:alert.rule,decidedAt:new Date().toISOString(),effect:stored.startsWith('gateway_')?'gateway-demo':'persisted'};
+  riskState.decisions=[row,...riskState.decisions.filter(d=>d.id!==alert.id)];
   riskState.selected=alert.id;
+  const sent=bridge('saveReviewDecision',{id:alert.id,state:stored,note,subject,rule:alert.rule,evidenceText,evidenceCount:evidenceText.length},{silent:true});
+  if(!sent)toast('当前没有原生通道，这次处置只留在本页，重新打开不会还在');
+  renderRisk();
+ }
+ else if(el.dataset.fileMode){consoleState.fileMode=el.dataset.fileMode==='alerts'?'alerts':'list';renderConsole();}
+ else if(el.dataset.fileId){consoleState.fileId=el.dataset.fileId;consoleState.fileMode='list';renderConsole();}
+ else if(el.dataset.reasonId){consoleState.reasonId=el.dataset.reasonId;renderConsole();}
+ else if(el.dataset.inboxId){consoleState.inboxId=el.dataset.inboxId;consoleState.returnInvalid=false;renderConsole();}
+ else if(el.dataset.acceptDecide){
+  const state=el.dataset.acceptDecide;
+  if(!['accept','return','needs_evidence'].includes(state))return;
+  const note=(document.getElementById('accept-note')?.value||'').trim();
+  consoleState.returnNote=note;
+  if(state==='return'&&!note){consoleState.returnInvalid=true;toast('退回必须写原因');renderConsole();return;}
+  consoleState.returnInvalid=false;
+  const id='task:'+el.dataset.taskId;
+  const row={id,state,note,decidedAt:new Date().toISOString(),effect:'persisted'};
+  riskState.decisions=[row,...riskState.decisions.filter(d=>d.id!==id)];
+  consoleState.inboxId=el.dataset.taskId;
+  const sent=bridge('saveReviewDecision',{id,state,note,subject:'',rule:'',evidenceText:'',evidenceCount:0},{silent:true});
+  if(!sent)toast('当前没有原生通道，验收决定只留在本页');
+  renderConsole();
+ }
+ else if(el.dataset.acceptUndo){
+  const id=el.dataset.acceptUndo;
+  riskState.decisions=riskState.decisions.filter(d=>d.id!==id);
+  consoleState.returnInvalid=false;
+  const sent=bridge('deleteReviewDecision',{id},{silent:true});
+  if(!sent)toast('当前没有原生通道，撤销只留在本页');
+  renderConsole();
+ }
+ else if(el.dataset.exportTask){
+  const task=shown.tasks.find(t=>t.id===el.dataset.exportTask);
+  const pack=window.AgentReinsConsole?.evidencePack?.(task,riskState.decisions.find(d=>d.id==='task:'+el.dataset.exportTask));
+  if(!pack){toast('没有可导出的任务');return;}
+  const json=JSON.stringify(pack,null,2);
+  const sent=bridge('exportEvidencePack',{name:String(task.id||'task').slice(0,40),json},{silent:true});
+  if(!sent){
+   const blob=new Blob([json],{type:'application/json'});
+   const url=URL.createObjectURL(blob);
+   const a=document.createElement('a');a.href=url;a.download='agentreins-evidence.json';document.body.appendChild(a);a.click();a.remove();
+   setTimeout(()=>URL.revokeObjectURL(url),1000);
+   toast('已下载当前投影的证据包');
+  }
  }
  else if(el.dataset.networkRecordJump){networkSelected=el.dataset.networkRecordJump||null;view='network';render();}
 });
 document.addEventListener('input',e=>{if(e.target.id==='network-search'){const position=e.target.selectionStart;networkQuery=e.target.value;renderNetwork();const input=$('network-search');input.focus();input.setSelectionRange(position,position);}else if(e.target.id==='risk-search'){riskState.filter.q=e.target.value;renderRisk();}});
 document.addEventListener('change',e=>{if(e.target.id==='network-agent'){networkAgent=e.target.value;renderNetwork();return;}if(e.target.id==='runtime-exchange'){runtimeExchangeID=e.target.value||null;runtimeCallID=null;selection=null;snapshot=null;render();if(runtimeExchangeID&&objects.has('model'))choose('model');}else if(e.target.id==='runtime-call'){runtimeCallID=e.target.value||null;selection=null;snapshot=null;render();if(runtimeCallID)choose('card:'+runtimeCallID);}else if(e.target.id==='collection-filter'){collectionFilter=e.target.value;renderCollection();}});
 $('search').oninput=e=>{query=e.target.value;renderTasks();};$('agent-filter').onchange=e=>{agentFilter=e.target.value;if(following)taskID=newest();render();};
-const initialParams=new URLSearchParams(location.search),initialView=initialParams.get('view');if(['alerts','process','collection','results','network','rules','coverage'].includes(initialView))view=initialView;const initialTask=initialParams.get('task');if(view==='network'&&initialTask&&initialTask.length<=4096){networkTask=initialTask;taskID=initialTask;following=false;}render();
+const initialParams=new URLSearchParams(location.search),initialView=initialParams.get('view');if(['alerts','process','collection','results','network','rules','coverage','inbox','files','reason','supervise','about'].includes(initialView))view=initialView;const initialTask=initialParams.get('task');if(view==='network'&&initialTask&&initialTask.length<=4096){networkTask=initialTask;taskID=initialTask;following=false;}render();
 })();

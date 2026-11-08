@@ -150,11 +150,12 @@ const sock = (o) => Object.assign({ agent: 'Codex', pid: 10, ppid: 1, processNam
   assert.ok(!/加入白名单<\/button>|拦截<\/button>/.test(detail.innerHTML), 'no fake action buttons');
 }
 
-// --- shipped UI has no evidence-pack export and no esc hook ---
+// Evidence-pack export belongs only on the acceptance queue, not on alerts or the network page.
+const exportAllowed = new Set(['console-pages.js', 'live.js']);
 for (const f of fs.readdirSync(dir)) {
   const src = fs.readFileSync(path.join(dir, f), 'utf8');
   const code = src.split('\n').filter((line) => !/^\s*(\/\/|\/\*|\*)/.test(line)).join('\n');
-  assert.ok(!code.includes('导出证据包'), f + ' must not offer 导出证据包');
+  if (!exportAllowed.has(f)) assert.ok(!code.includes('导出证据包'), f + ' must not offer 导出证据包');
   assert.ok(!/set\s+esc\s*\(/.test(src), f + ' must not expose an esc setter');
 }
 // --- home list is rebuilt from data on every render (a stale state.alerts must not freeze it) ---

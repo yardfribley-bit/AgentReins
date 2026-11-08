@@ -161,6 +161,7 @@ function poisonAlert(a) {
     gapText: probe,
     severityLabel: probe,
     statusText: probe,
+    coverage: { key: 'gap', text: probe },
     confDisplay: { c: 'obs', t: probe },
     association: { name: probe, note: probe, kind: probe },
     evidence: {
@@ -172,7 +173,7 @@ function poisonAlert(a) {
       parentName: probe,
       parentArgv: probe,
     },
-    decision: { ...(a.decision || {}), state: 'acked', decidedAt: probe },
+    decision: { ...(a.decision || {}), state: 'acked', decidedAt: probe, note: probe },
     acked: true,
     record: a.record
       ? {
@@ -236,8 +237,8 @@ function probeCoverage() {
 
 function probeRules() {
   return [
-    { id: probe, name: probe, desc: probe, cond: probe, cant: probe },
-    { id: 'S07', name: probe, desc: probe, cond: probe, cant: probe },
+    { id: probe, name: probe, desc: probe, cond: probe, cant: probe, version: probe, fp: probe, disposition: probe, sources: probe },
+    { id: 'S07', name: probe, desc: probe, cond: probe, cant: probe, version: probe, fp: probe, disposition: probe, sources: probe },
   ];
 }
 
