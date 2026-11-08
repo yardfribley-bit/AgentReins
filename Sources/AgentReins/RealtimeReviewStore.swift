@@ -121,15 +121,26 @@ enum RealtimeReviewStore {
         return digest.map { String(format: "%02x", $0) }.joined()
     }
 
-    /// Writes one evidence pack under the review directory. Tests inject that directory.
+    /// Writes one evidence pack under Application Support/AgentGuard/exports
+    /// (or the directory injected by tests). Creates the folder if it is missing.
     static func writeExport(name: String, json: String) throws -> URL {
-        let root = url.deletingLastPathComponent().appendingPathComponent("exports", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let parent = url.deletingLastPathComponent()
+        let root = parent.appendingPathComponent("exports", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let cleaned = String(name.unicodeScalars.filter { CharacterSet.alphanumerics.contains($0) || $0 == "-" }.prefix(40))
         let stem = cleaned.isEmpty ? "task" : cleaned
         let file = root.appendingPathComponent("\(stem)-\(UUID().uuidString.prefix(8)).json")
-        try Data(json.utf8).write(to: file, options: [.atomic])
+        let data = Data(json.utf8)
+        do {
+            try data.write(to: file, options: [.atomic])
+        } catch {
+            try data.write(to: file)
+        }
         try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path)
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: file.path, isDirectory: &isDir), !isDir.boolValue else {
+            throw CocoaError(.fileWriteUnknown)
+        }
         return file
     }
 }

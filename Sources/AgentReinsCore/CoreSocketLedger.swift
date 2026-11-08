@@ -122,23 +122,52 @@ public enum SocketLedgerCore {
 
     /// Ledger + sidecar + seal under a shared flock, only if the sampler's lock file already exists
     /// (the read-only MCP never creates files there).
-    public static func readLocked(_ ledger: URL, seal: URL) -> (Data?, Any?, Any?) {
+    /// `lockWait == nil` blocks on the sampler lock (app and parity). A finite wait returns
+    /// `lockBusy` instead of sitting on the lock until the MCP client abandons the call.
+    public static func readLocked(_ ledger: URL, seal: URL, lockWait: TimeInterval? = nil) -> (Data?, Any?, Any?, Bool) {
         let lock = sibling(ledger, ".lock")
         var fd: Int32 = -1
+        var lockBusy = false
         if FileManager.default.fileExists(atPath: lock.path) {
             fd = open(lock.path, O_RDONLY)
-            if fd >= 0 { _ = flock(fd, LOCK_SH) }
+            if fd >= 0 {
+                if let lockWait {
+                    let deadline = Date().addingTimeInterval(max(0, lockWait))
+                    var locked = false
+                    while Date() < deadline {
+                        if flock(fd, LOCK_SH | LOCK_NB) == 0 { locked = true; break }
+                        Thread.sleep(forTimeInterval: 0.02)
+                    }
+                    if !locked {
+                        close(fd)
+                        fd = -1
+                        lockBusy = true
+                    }
+                } else {
+                    _ = flock(fd, LOCK_SH)
+                }
+            }
         }
         defer { if fd >= 0 { close(fd) } }
+        if lockBusy { return (nil, nil, nil, true) }
         let data = try? Data(contentsOf: ledger)
         let side = JSON.parse(try? Data(contentsOf: sibling(ledger, ".mac")))
         let sealObj = JSON.parse(try? Data(contentsOf: seal))
-        return (data, side, sealObj)
+        return (data, side, sealObj, false)
     }
 
     public static func load(ledger: URL, seal: URL, key: Data?, crypto: CryptoBox, agent: String?, since: String?,
-                     until: String? = nil, limit: Int = 200, now: Double = Date().timeIntervalSince1970) -> [String: Any] {
-        let (raw, side, sealObj) = readLocked(ledger, seal: seal)
+                     until: String? = nil, limit: Int = 200, now: Double = Date().timeIntervalSince1970,
+                     lockWait: TimeInterval? = nil) -> [String: Any] {
+        let (raw, side, sealObj, lockBusy) = readLocked(ledger, seal: seal, lockWait: lockWait)
+        if lockBusy {
+            return ["connections": [[String: Any]](), "total": 0, "coverage": [
+                "state": "unread",
+                "confidence": "Unknown",
+                "integrity": ["state": "unread", "ok": NSNull(), "confidence": "Unknown", "reason": "ledger lock busy"] as [String: Any],
+                "note": "socket-ledger.json 正被占用，这次没有一直等锁。证据没有被改写。",
+            ] as [String: Any]]
+        }
         let integrity = verify(raw, side, sealObj, key, crypto)
         let tampered = str(integrity["state"]) == "tampered"
         guard let root = JSON.parse(raw) as? [String: Any] else {

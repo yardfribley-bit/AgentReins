@@ -56,6 +56,10 @@ enum HTTPTransport {
         // No Bonjour / mDNS.
         listener.service = nil
 
+        let reaped = HTTPProcessGuard.reap(port: port)
+        if !reaped.isEmpty {
+            log("AgentReinsMCP: reaped \(reaped.count) orphan process(es) before listen: \(reaped.map(String.init).joined(separator: ","))")
+        }
         installSignals(queue: queue)
         listener.stateUpdateHandler = { listenerState in
             state.onListener(listenerState, listener: listener)
@@ -121,7 +125,7 @@ private final class ServerState {
         self.token = token
         self.queue = queue
         self.work = work
-        self.requestTimeout = Self.envDouble("AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS", 25)
+        self.requestTimeout = Self.envDouble("AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS", 12)
         self.sessions = SessionTable(
             maxSessions: Self.envInt("AGENTREINS_MCP_MAX_SESSIONS", 64),
             ttl: Self.envDouble("AGENTREINS_MCP_SESSION_TTL_SECONDS", 30 * 60))
@@ -306,7 +310,9 @@ private final class ServerState {
         let timeout = DispatchWorkItem { [weak box] in
             guard let box, box.claimSend() else { return }
             box.markTimedOut()
-            let body = HTTPCodec.jsonBody(MCPDispatcher.rpcError(box.requestId, -32000, "request timed out"))
+            let body = HTTPCodec.jsonBody(MCPDispatcher.rpcError(
+                box.requestId, -32000,
+                "request timed out; tool read was stopped so this call would not hang until the client abandoned it. Evidence was not modified."))
             var headers = [
                 "Content-Type": "application/json; charset=utf-8",
                 "Cache-Control": "no-store",
@@ -656,6 +662,74 @@ private final class SessionTable {
         let removed = sessions.removeValue(forKey: id) != nil
         if let index = order.firstIndex(of: id) { order.remove(at: index) }
         return removed
+    }
+}
+
+/// Stops leftover AgentReinsMCP processes before this one binds 127.0.0.1.
+/// Same-port `--http` processes that are not the listener, and stdio workers
+/// whose client has died (ppid 1), are signaled. A listener on this port is left
+/// alone so the existing port_in_use exit still applies. Other ports are left alone.
+private enum HTTPProcessGuard {
+    static func reap(port: Int) -> [Int32] {
+        let listing = ServerState.lsofListen(port)
+        let listeners = MCPHTTPOrphans.listenerPIDs(lsof: listing)
+        let procs = MCPHTTPOrphans.parsePS(psText())
+        let selfPid = ProcessInfo.processInfo.processIdentifier
+        let victims = MCPHTTPOrphans.orphanPIDs(procs, selfPid: selfPid, port: port, listenerPIDs: listeners)
+        let dry = ProcessInfo.processInfo.environment["AGENTREINS_MCP_REAP_DRY_RUN"] == "1"
+        var done: [Int32] = []
+        for pid in victims {
+            if dry {
+                HTTPTransportLog.write("AgentReinsMCP: orphan http pid=\(pid) not listening; dry-run")
+                done.append(pid)
+                continue
+            }
+            let command = psCommand(pid)
+            guard MCPHTTPOrphans.isAgentReinsMCP(command) else { continue }
+            let samePort = MCPHTTPOrphans.isHTTPServerCommand(command)
+                && MCPHTTPOrphans.commandTargetsPort(command, port: port)
+            let abandonedStdio = !MCPHTTPOrphans.isHTTPServerCommand(command)
+            guard samePort || abandonedStdio else { continue }
+            kill(pid, SIGTERM)
+            done.append(pid)
+            HTTPTransportLog.write("AgentReinsMCP: reaped orphan http pid=\(pid)")
+        }
+        if !dry && !done.isEmpty {
+            Thread.sleep(forTimeInterval: 0.3)
+            for pid in done where PeerIdentity.processAlive(pid) {
+                kill(pid, SIGKILL)
+            }
+        }
+        return done
+    }
+
+    private static func psText() -> String {
+        if let path = ProcessInfo.processInfo.environment["AGENTREINS_MCP_PS_FIXTURE"], !path.isEmpty,
+           let text = try? String(contentsOfFile: path, encoding: .utf8) {
+            return text
+        }
+        return run("/bin/ps", ["-ax", "-o", "pid=,ppid=,command="])
+    }
+
+    private static func psCommand(_ pid: Int32) -> String {
+        run("/bin/ps", ["-p", String(pid), "-o", "command="])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    private static func run(_ exe: String, _ args: [String]) -> String {
+        let proc = Process()
+        proc.executableURL = URL(fileURLWithPath: exe)
+        proc.arguments = args
+        let out = Pipe()
+        proc.standardOutput = out
+        proc.standardError = Pipe()
+        do {
+            try proc.run()
+            proc.waitUntilExit()
+            return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+        } catch {
+            return ""
+        }
     }
 }
 

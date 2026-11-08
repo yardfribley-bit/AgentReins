@@ -121,6 +121,34 @@ pages.renderInbox(inboxHolder, filePayload, { inboxId: 't1', decisions: returned
 assert.match(inboxHolder.innerHTML, /已退回/);
 assert.match(inboxHolder.innerHTML, /撤销决定/);
 assert.match(inboxHolder.innerHTML, /invalid/);
+assert.match(inboxHolder.innerHTML, /噪声/);
+assert.match(inboxHolder.innerHTML, /改一下配置/);
+
+const noisyPayload = {
+  tasks: [
+    filePayload.tasks[0],
+    { id: 'hb', agent: 'Codex', lifecycleStatus: 'stopped', title: '<heartbeat>ping', originalRequest: '<heartbeat>ping', startedAt: '2026-11-08T04:00:00Z', cards: [] },
+    { id: 'gap', agent: 'Codex', lifecycleStatus: 'completed', title: '当前轮次 · 用户需求未采集', startedAt: '2026-11-08T04:01:00Z', cards: [] },
+    { id: 'att', agent: 'Codex', lifecycleStatus: 'stopped', title: '用户附件输入 · 未附带文字', startedAt: '2026-11-08T04:02:00Z', cards: [] },
+  ],
+  collected: [], artifacts: [], health: [],
+};
+assert.equal(pages.inboxNoiseReason(noisyPayload.tasks[1]), 'heartbeat');
+assert.equal(pages.inboxNoiseReason(noisyPayload.tasks[2]), 'no-user-prompt');
+assert.equal(pages.inboxNoiseReason(noisyPayload.tasks[3]), null);
+const work = pages.inboxItems(noisyPayload, []).map(i => i.task.id).sort();
+assert.deepEqual(work, ['att', 't1']);
+const noise = pages.inboxItems(noisyPayload, [], { noise: true }).map(i => i.task.id).sort();
+assert.deepEqual(noise, ['gap', 'hb']);
+const noiseHolder = { innerHTML: '' };
+pages.renderInbox(noiseHolder, noisyPayload, { decisions: [], inboxBucket: 'work' });
+assert.match(noiseHolder.innerHTML, /改一下配置/);
+assert.match(noiseHolder.innerHTML, /用户附件输入/);
+assert.match(noiseHolder.innerHTML, /不进默认队列/);
+assert.doesNotMatch(noiseHolder.innerHTML, /data-inbox-id="gap"|data-inbox-id="hb"/);
+pages.renderInbox(noiseHolder, noisyPayload, { decisions: [], inboxBucket: 'noise' });
+assert.match(noiseHolder.innerHTML, /用户需求未采集/);
+assert.match(noiseHolder.innerHTML, /没有删除/);
 const fileAlertsHolder = { innerHTML: '' };
 pages.renderFiles(fileAlertsHolder, filePayload, { fileMode: 'alerts' });
 assert.match(fileAlertsHolder.innerHTML, /S08 敏感文件被改/);
@@ -138,6 +166,9 @@ assert.match(about.innerHTML, /关于 AgentReins/);
 assert.match(about.innerHTML, /agent 安全观测/);
 assert.match(about.innerHTML, /确认、加白、复查/);
 assert.match(about.innerHTML, /现在能做的/);
+assert.match(about.innerHTML, /14 天/);
+assert.match(about.innerHTML, /2GB/);
+assert.match(about.innerHTML, /不能无限追加/);
 assert.match(about.innerHTML, /本机处置记录/);
 assert.match(about.innerHTML, /连接仍按原路径进行/);
 assert.match(about.innerHTML, /<h3>下一步<\/h3>/);

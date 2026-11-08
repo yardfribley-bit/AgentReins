@@ -66,6 +66,7 @@ final class EventStore: ObservableObject {
     private var durableProcessingTask: Task<Void, Never>?
     private var durableAnalysisTask: Task<Void, Never>?
     private var taskSearchTask: Task<Void, Never>?
+    private var retentionTask: Task<Void, Never>?
 
     init(fileURL: URL = EventStore.defaultURL(), realtimeOnly: Bool = false) {
         self.fileURL = fileURL; self.realtimeOnly = realtimeOnly
@@ -86,6 +87,12 @@ final class EventStore: ObservableObject {
         load()
         refreshCollectorHealth(publish: false)
         if realtimeOnly { openedDatabase?.setAuditUploadEnabled(false) }
+        let runningTests = ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] != nil
+            || ProcessInfo.processInfo.environment["AGENTREINS_EVIDENCE_RETENTION"] == "0"
+        if let openedDatabase, !runningTests,
+           databaseURL.standardizedFileURL.path == EvidenceDatabase.defaultURL().standardizedFileURL.path {
+            startEvidenceRetention(database: openedDatabase)
+        }
         if !realtimeOnly, fileURL.standardizedFileURL == EventStore.defaultURL().standardizedFileURL {
             if let openedDatabase { auditUploader = AuditUploadClient(database: openedDatabase) }
             openedDatabase?.setAuditUploadEnabled(auditUploader != nil)
@@ -103,6 +110,19 @@ final class EventStore: ObservableObject {
         durableAnalysisTask?.cancel()
         historySummaryTask?.cancel()
         taskSearchTask?.cancel()
+        retentionTask?.cancel()
+    }
+
+    /// Background only. Each pass deletes a few indexed batches and returns, so a huge
+    /// evidence file cannot stall MCP reads or the UI. MCP does not open this database.
+    private func startEvidenceRetention(database: EvidenceDatabase) {
+        retentionTask = Task.detached(priority: .background) {
+            try? await Task.sleep(for: .seconds(20))
+            while !Task.isCancelled {
+                _ = try? database.prune()
+                try? await Task.sleep(for: .seconds(60))
+            }
+        }
     }
 
     private func startTaskSearchIndexing(database: EvidenceDatabase, index: TaskSearchIndex) {

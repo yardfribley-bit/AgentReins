@@ -60,6 +60,25 @@ struct CollectorHealthRecord: Equatable, Sendable {
     let detail: String?
 }
 
+struct EvidenceRetentionPolicy: Equatable, Sendable {
+    var maxAge: TimeInterval = EvidenceRetentionDefaults.maxAge
+    var maxBytes: Int64 = EvidenceRetentionDefaults.maxBytes
+    var batchRows: Int = EvidenceRetentionDefaults.batchRows
+    var maxBatches: Int = EvidenceRetentionDefaults.maxBatchesPerPass
+    static let `default` = EvidenceRetentionPolicy()
+}
+
+struct EvidencePruneResult: Equatable, Sendable {
+    var deletedRecords: Int
+    var deletedRaw: Int
+    var deletedEvents: Int
+    var batches: Int
+    var onDiskBytes: Int64
+    var overCap: Bool
+    var rawIndexSkipped: Bool
+    var note: String
+}
+
 /// Durable local evidence spine. WAL keeps ingestion transactional without
 /// blocking readers, and stable evidence keys make replay idempotent.
 final class EvidenceDatabase: @unchecked Sendable {
@@ -82,6 +101,7 @@ final class EvidenceDatabase: @unchecked Sendable {
     }
 
     private var handle: OpaquePointer?
+    private let fileURL: URL
     private var readConnection: EvidenceReadConnection?
     private let lock = NSRecursiveLock()
     private var auditUploadEnabled = false
@@ -89,6 +109,7 @@ final class EvidenceDatabase: @unchecked Sendable {
     private let decoder: JSONDecoder
 
     init(url: URL = EvidenceDatabase.defaultURL()) throws {
+        fileURL = url
         encoder = JSONEncoder()
         // Content hashes are persistent identities; dictionary key order must
         // not turn an identical record into a new evidence revision on replay.
@@ -1901,6 +1922,158 @@ final class EvidenceDatabase: @unchecked Sendable {
         guard let backup = sqlite3_backup_init(target, "main", handle, "main") else { throw failure("backup init") }
         defer { sqlite3_backup_finish(backup) }
         guard sqlite3_backup_step(backup, -1) == SQLITE_DONE else { throw failure("backup") }
+    }
+
+    /// One short pass. Deletes use the `observed_at` index and a row limit, so a 27GB file
+    /// is not scanned. The writer lock is held only for each small batch. MCP never opens
+    /// this database. The file on disk does not shrink until a later compact; new writes
+    /// reuse freed pages, so the file stops growing past the high-water mark.
+    func prune(policy: EvidenceRetentionPolicy = .default, now: Date = Date()) throws -> EvidencePruneResult {
+        lock.lock(); defer { lock.unlock() }
+        var deletedRecords = 0
+        var deletedRaw = 0
+        var deletedEvents = 0
+        var batches = 0
+        let onDisk = Self.fileBytes(fileURL)
+        let cutoff = now.addingTimeInterval(-policy.maxAge).timeIntervalSince1970
+        let rawIndexed = try indexExistsUnlocked("raw_evidence_time")
+        let eventsIndexed = try indexExistsUnlocked("agent_event_observed")
+        if !rawIndexed && onDisk < 512 * 1024 * 1024 {
+            try executeUnlocked("CREATE INDEX IF NOT EXISTS raw_evidence_time ON raw_evidence(observed_at)")
+        }
+        if !eventsIndexed && onDisk < 512 * 1024 * 1024 {
+            try executeUnlocked("CREATE INDEX IF NOT EXISTS agent_event_observed ON agent_event_stream(observed_at)")
+        }
+        let rawReady = try indexExistsUnlocked("raw_evidence_time")
+        let eventsReady = try indexExistsUnlocked("agent_event_observed")
+        while batches < policy.maxBatches {
+            let before = deletedRecords + deletedRaw + deletedEvents
+            let aged = try deleteEvidenceBatchUnlocked(before: cutoff, limit: policy.batchRows, ignoreAge: false)
+            deletedRecords += aged
+            let stillOver = Self.fileBytes(fileURL) > policy.maxBytes
+            if aged == 0 && stillOver {
+                deletedRecords += try deleteEvidenceBatchUnlocked(before: cutoff, limit: policy.batchRows, ignoreAge: true)
+            }
+            if rawReady {
+                deletedRaw += try deleteTimeBatchUnlocked(
+                    table: "raw_evidence", timeColumn: "observed_at", before: cutoff,
+                    limit: policy.batchRows, ignoreAge: aged == 0 && stillOver)
+            }
+            if eventsReady {
+                deletedEvents += try deleteTimeBatchUnlocked(
+                    table: "agent_event_stream", timeColumn: "observed_at", before: cutoff,
+                    limit: policy.batchRows, ignoreAge: false)
+            }
+            batches += 1
+            if deletedRecords + deletedRaw + deletedEvents == before { break }
+        }
+        _ = try? executeUnlocked("PRAGMA wal_checkpoint(PASSIVE)")
+        let bytesNow = Self.fileBytes(fileURL)
+        return EvidencePruneResult(
+            deletedRecords: deletedRecords,
+            deletedRaw: deletedRaw,
+            deletedEvents: deletedEvents,
+            batches: batches,
+            onDiskBytes: bytesNow,
+            overCap: bytesNow > policy.maxBytes,
+            rawIndexSkipped: !rawReady && onDisk >= 512 * 1024 * 1024,
+            note: bytesNow > policy.maxBytes
+                ? "已按时间和上限删除旧行。文件暂时不会缩小，新写入会复用空页，所以不会无限变大。自动压缩会把整库再写一遍，超过 512MB 时不做。"
+                : "证据库在 14 天和 2GB 上限内。"
+        )
+    }
+
+    private func indexExistsUnlocked(_ name: String) throws -> Bool {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT 1 FROM sqlite_master WHERE type='index' AND name=? LIMIT 1", -1, &statement, nil) == SQLITE_OK else {
+            throw failure("prepare index lookup")
+        }
+        defer { sqlite3_finalize(statement) }
+        bind(name, at: 1, to: statement)
+        return sqlite3_step(statement) == SQLITE_ROW
+    }
+
+    /// Indexed `ORDER BY observed_at LIMIT`. Child rows go first so the foreign key does not reject the parent delete.
+    private func deleteEvidenceBatchUnlocked(before cutoff: Double, limit: Int, ignoreAge: Bool) throws -> Int {
+        let capped = max(1, min(limit, 500))
+        try executeUnlocked("CREATE TEMP TABLE IF NOT EXISTS prune_keys(evidence_key TEXT PRIMARY KEY)")
+        try executeUnlocked("DELETE FROM prune_keys")
+        let insert = ignoreAge
+            ? "INSERT INTO prune_keys SELECT evidence_key FROM evidence_records ORDER BY observed_at ASC LIMIT \(capped)"
+            : "INSERT INTO prune_keys SELECT evidence_key FROM evidence_records WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped)"
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, insert, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare prune keys") }
+        defer { sqlite3_finalize(statement) }
+        if !ignoreAge { sqlite3_bind_double(statement, 1, cutoff) }
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("select prune keys") }
+        var count = 0
+        var probe: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM prune_keys", -1, &probe, nil) == SQLITE_OK else { throw failure("count prune keys") }
+        defer { sqlite3_finalize(probe) }
+        if sqlite3_step(probe) == SQLITE_ROW { count = Int(sqlite3_column_int(probe, 0)) }
+        if count == 0 { return 0 }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        do {
+            try executeUnlocked("DELETE FROM evidence_parse_order WHERE evidence_key IN (SELECT evidence_key FROM prune_keys)")
+            try executeUnlocked("DELETE FROM evidence_parse_jobs WHERE evidence_key IN (SELECT evidence_key FROM prune_keys)")
+            try executeUnlocked("DELETE FROM security_evidence_inputs WHERE evidence_key IN (SELECT evidence_key FROM prune_keys)")
+            try executeUnlocked("DELETE FROM evidence_records WHERE evidence_key IN (SELECT evidence_key FROM prune_keys)")
+            try executeUnlocked("COMMIT")
+        } catch {
+            try? executeUnlocked("ROLLBACK")
+            throw error
+        }
+        return count
+    }
+
+    private func deleteTimeBatchUnlocked(table: String, timeColumn: String, before cutoff: Double, limit: Int, ignoreAge: Bool) throws -> Int {
+        let capped = max(1, min(limit, 500))
+        // Table and column names are fixed by the callers above, never by input.
+        let sql = ignoreAge
+            ? "DELETE FROM \(table) WHERE rowid IN (SELECT rowid FROM \(table) ORDER BY \(timeColumn) ASC LIMIT \(capped))"
+            : "DELETE FROM \(table) WHERE rowid IN (SELECT rowid FROM \(table) WHERE \(timeColumn) < ? ORDER BY \(timeColumn) ASC LIMIT \(capped))"
+        // WITHOUT ROWID tables have no rowid. Delete by the primary key selected from the time index.
+        let keyed: String
+        switch table {
+        case "raw_evidence":
+            keyed = ignoreAge
+                ? "DELETE FROM raw_evidence WHERE evidence_key IN (SELECT evidence_key FROM raw_evidence ORDER BY observed_at ASC LIMIT \(capped))"
+                : "DELETE FROM raw_evidence WHERE evidence_key IN (SELECT evidence_key FROM raw_evidence WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped))"
+        case "agent_event_stream":
+            keyed = ignoreAge
+                ? "DELETE FROM agent_event_stream WHERE event_id IN (SELECT event_id FROM agent_event_stream ORDER BY observed_at ASC LIMIT \(capped))"
+                : "DELETE FROM agent_event_stream WHERE event_id IN (SELECT event_id FROM agent_event_stream WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped))"
+        default:
+            keyed = sql
+        }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, keyed, -1, &statement, nil) == SQLITE_OK else {
+            try? executeUnlocked("ROLLBACK")
+            throw failure("prepare \(table) prune")
+        }
+        defer { sqlite3_finalize(statement) }
+        if !ignoreAge { sqlite3_bind_double(statement, 1, cutoff) }
+        let step = sqlite3_step(statement)
+        if step != SQLITE_DONE {
+            try? executeUnlocked("ROLLBACK")
+            throw failure("prune \(table)")
+        }
+        let changes = Int(sqlite3_changes(handle))
+        try executeUnlocked("COMMIT")
+        return changes
+    }
+
+    static func fileBytes(_ url: URL) -> Int64 {
+        let fm = FileManager.default
+        var total: Int64 = 0
+        for suffix in ["", "-wal", "-shm"] {
+            let path = suffix.isEmpty ? url.path : url.path + suffix
+            let attrs = try? fm.attributesOfItem(atPath: path)
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            total += size
+        }
+        return total
     }
 
     func recent(limit: Int) throws -> [GuardEvent] {

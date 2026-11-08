@@ -57,6 +57,11 @@ public final class Integrity {
         var d: ObjCBool = false
         return fm.fileExists(atPath: u.path, isDirectory: &d) && d.boolValue
     }
+    public func byteSize(_ u: URL) -> Int64 {
+        let attrs = try? fm.attributesOfItem(atPath: u.path)
+        return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+
     public func read(_ u: URL) -> Data? { try? Data(contentsOf: u) }
     public func readText(_ u: URL) -> String? { read(u).map { String(decoding: $0, as: UTF8.self) } }
 
@@ -251,16 +256,33 @@ public final class Integrity {
     }
 
     public func evidenceFiles() -> [URL] {
+        evidenceFilesBounded(maxDirectories: nil, deadline: nil).files
+    }
+
+    /// `stopped` is true when the deadline or directory cap cut the walk short.
+    /// The uncapped path (`maxDirectories == nil`, `deadline == nil`) lists every run.
+    public func evidenceFilesBounded(maxDirectories: Int?, deadline: Date?) -> (files: [URL], stopped: Bool) {
         guard let dirs = try? fm.contentsOfDirectory(at: transport, includingPropertiesForKeys: nil,
-                                                       options: [.skipsHiddenFiles]) else { return [] }
+                                                       options: [.skipsHiddenFiles]) else { return ([], false) }
         var out: [URL] = []
-        for d in dirs.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }) {
+        var stopped = false
+        for (index, d) in dirs.sorted(by: { $0.lastPathComponent < $1.lastPathComponent }).enumerated() {
+            if let deadline, index % 40 == 0, Date() >= deadline {
+                stopped = true
+                break
+            }
+            if let maxDirectories, index >= maxDirectories {
+                stopped = true
+                break
+            }
             for name in ["manifest.json", "transport.json"] {
                 let u = d.appendingPathComponent(name)
+                let base = u.lastPathComponent
+                if base.contains("evidence.sqlite") { continue }
                 if exists(u) && !isDir(u) { out.append(u) }
             }
         }
-        return out
+        return (out, stopped)
     }
 
     public func macFile(_ u: URL) -> URL { u.deletingLastPathComponent().appendingPathComponent(u.lastPathComponent + ".mac") }

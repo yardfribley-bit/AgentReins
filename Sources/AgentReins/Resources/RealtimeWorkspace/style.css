@@ -237,6 +237,9 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 .health-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:8px 28px;padding:0;list-style:none}
 .health-steps li{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px}
 .health-steps b{display:block}.health-steps span{display:block;margin:4px 0;font-size:13px}.health-steps small{color:var(--muted);font-size:11px}
+.inbox-switch{display:flex;gap:8px;margin:0 28px 12px}
+.inbox-switch button{border:1px solid var(--line);border-radius:999px;padding:4px 10px;background:var(--surface);font-size:12px}
+.inbox-switch button.on{border-color:#cfc5f1;background:var(--soft)}
 .inbox-layout{display:grid;grid-template-columns:280px minmax(0,1fr);gap:12px;margin:0 28px}
 .inbox-item{display:block;width:100%;text-align:left;border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--surface)}
 .inbox-item.on{border-color:#cfc5f1;background:var(--soft)}

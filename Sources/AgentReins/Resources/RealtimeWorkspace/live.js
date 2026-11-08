@@ -9,7 +9,7 @@ const typeNames={user:'用户原话',context:'模型上下文',model:'模型往�
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
 const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
-const consoleState={fileId:null,reasonId:null,inboxId:null,fileMode:'list',returnNote:'',returnInvalid:false};
+const consoleState={fileId:null,reasonId:null,inboxId:null,inboxBucket:'work',fileMode:'list',returnNote:'',returnInvalid:false};
 const CONSOLE_VIEWS=['alerts','rules','coverage','inbox','files','reason','supervise','about'];
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
@@ -580,6 +580,7 @@ document.addEventListener('click',e=>{
  else if(el.dataset.fileMode){consoleState.fileMode=el.dataset.fileMode==='alerts'?'alerts':'list';renderConsole();}
  else if(el.dataset.fileId){consoleState.fileId=el.dataset.fileId;consoleState.fileMode='list';renderConsole();}
  else if(el.dataset.reasonId){consoleState.reasonId=el.dataset.reasonId;renderConsole();}
+ else if(el.dataset.inboxBucket){consoleState.inboxBucket=el.dataset.inboxBucket==='noise'?'noise':'work';consoleState.inboxId=null;consoleState.returnInvalid=false;renderConsole();}
  else if(el.dataset.inboxId){consoleState.inboxId=el.dataset.inboxId;consoleState.returnInvalid=false;renderConsole();}
  else if(el.dataset.acceptDecide){
   const state=el.dataset.acceptDecide;

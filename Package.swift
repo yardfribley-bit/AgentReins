@@ -63,7 +63,7 @@ let package = Package(
         ),
         .testTarget(
             name: "AgentReinsTests",
-            dependencies: ["AgentReins"],
+            dependencies: ["AgentReins", "AgentReinsCore"],
             path: "Tests/AgentReinsTests"
         )
     ]

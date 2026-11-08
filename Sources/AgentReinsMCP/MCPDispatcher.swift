@@ -156,6 +156,27 @@ enum MCPDispatcher {
         ["jsonrpc": "2.0", "id": id ?? NSNull(), "error": ["code": code, "message": message]]
     }
 
+    /// One tools/call body at a time. initialize and tools/list do not take this gate,
+    /// so a slow read cannot block session setup. Parallel calls wait until the budget, then fail.
+    private static let toolGate = DispatchSemaphore(value: 1)
+
+    struct ToolStopped: LocalizedError {
+        var errorDescription: String?
+    }
+
+    static func budgetSeconds() -> TimeInterval {
+        if let raw = ProcessInfo.processInfo.environment["AGENTREINS_MCP_TOOL_BUDGET_SECONDS"],
+           let value = Double(raw), value > 0 {
+            return value
+        }
+        // Under the 15–30s timeouts that abandon the HTTP connection with no body.
+        return 8
+    }
+
+    static func stopped(_ why: String) -> ToolStopped {
+        ToolStopped(errorDescription: "tool read stopped: \(why) Evidence was not modified.")
+    }
+
     static func callTool(_ name: String, _ args: [String: Any], actor: String, auditSync: Bool = true,
                          isCancelled: @escaping () -> Bool = { false }) throws -> [String: Any] {
         let banned = ["write", "delete", "update", "set_", "save", "dismiss", "accept", "whitelist", "mute"]
@@ -167,19 +188,40 @@ enum MCPDispatcher {
         guard allowed.contains(name) else {
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown tool: \(name)"])
         }
-        applyToolDelay(isCancelled)
+        let deadline = Date().addingTimeInterval(budgetSeconds())
         if isCancelled() {
             throw NSError(domain: "AgentReinsMCP", code: 5, userInfo: [NSLocalizedDescriptionKey: "request cancelled"])
+        }
+        // Only the waiter that acquired the gate may signal it. A timeout must not signal.
+        if toolGate.wait(timeout: .now() + max(0.01, deadline.timeIntervalSinceNow)) == .timedOut {
+            throw stopped("another read is still running, or this call's \(budgetSeconds())s budget ran out before it started")
+        }
+        defer { toolGate.signal() }
+        try applyToolDelay(isCancelled, deadline: deadline)
+        if isCancelled() {
+            throw NSError(domain: "AgentReinsMCP", code: 5, userInfo: [NSLocalizedDescriptionKey: "request cancelled"])
+        }
+        if Date() >= deadline {
+            throw stopped("exceeded \(budgetSeconds())s budget before the client would abandon the request")
         }
         let integrity = Ctx.integrity()
         // 0.25s is enough for a healthy helper that was started at process launch, and short enough
         // that a Keychain prompt hang (15s) is reported as pending instead of blocking the read.
-        let keyState = KeychainWarmup.shared.resolve(grace: 0.25)
+        let keyState = KeychainWarmup.shared.resolve(grace: min(0.25, max(0, deadline.timeIntervalSinceNow)))
         Ctx.appendAudit(actor: actor, tool: name, arguments: args, sync: auditSync && keyState != "pending")
         // A pending Keychain must not sit inside flush (the helper wait is up to 20s) and then
-        // blow the 25s HTTP timeout. The page is the log as it already is.
+        // blow the HTTP timeout. The page is the log as it already is.
         if name == "list_mcp_audit" && keyState != "pending" { Ctx.flushAudit() }
-        let loaded = Transport.loadReporting()
+        let needsRecords = name == "list_agents" || name == "list_alerts" || name == "get_execution" || name == "list_network"
+        let loaded: Transport.Load
+        if needsRecords {
+            loaded = Transport.loadReporting(deadline: deadline, isCancelled: isCancelled)
+            if loaded.stopped, loaded.records.isEmpty {
+                throw stopped(loaded.stopReason ?? "transport scan exceeded \(budgetSeconds())s budget")
+            }
+        } else {
+            loaded = Transport.Load(records: [], truncated: false)
+        }
         let records = loaded.records
         let page: (offset: Int, limit: Int?)
         if name.hasPrefix("list_") {
@@ -189,28 +231,33 @@ enum MCPDispatcher {
         }
         switch name {
         case "list_agents":
-            return stamp(Agents.list(records, since: str(args["since"]), until: str(args["until"]),
-                                     limit: page.limit, offset: page.offset, transportTruncated: loaded.truncated), keyState)
+            return deliver(Agents.list(records, since: str(args["since"]), until: str(args["until"]),
+                                       limit: page.limit, offset: page.offset, transportTruncated: loaded.truncated), loaded, keyState)
         case "list_alerts":
             var result = Alerts.list(records, agent: str(args["agent"]), rule: str(args["rule"]),
                                      since: str(args["since"]), until: str(args["until"]),
                                      limit: page.limit, offset: page.offset)
             result["transportTruncated"] = loaded.truncated
-            return result
+            return deliver(result, loaded, keyState)
         case "get_execution":
             guard let eid = str(args["execution_id"]) else {
                 throw NSError(domain: "AgentReinsMCP", code: 3, userInfo: [NSLocalizedDescriptionKey: "execution_id required"])
             }
-            return Execution.get(eid, records, transportTruncated: loaded.truncated)
+            return deliver(Execution.get(eid, records, transportTruncated: loaded.truncated), loaded, keyState)
         case "list_network":
-            return NetworkTool.list(records, agent: str(args["agent"]), since: str(args["since"]), until: str(args["until"]),
-                                    integrity: integrity, limit: page.limit, offset: page.offset,
-                                    transportTruncated: loaded.truncated)
+            return deliver(NetworkTool.list(records, agent: str(args["agent"]), since: str(args["since"]), until: str(args["until"]),
+                                            integrity: integrity, limit: page.limit, offset: page.offset,
+                                            transportTruncated: loaded.truncated), loaded, keyState)
         case "get_coverage":
             if keyState == "pending" {
-                return Coverage.get(integrity, validation: Coverage.pendingIntegrity())
+                return deliver(Coverage.get(integrity, validation: Coverage.pendingIntegrity()), loaded, keyState)
             }
-            return Coverage.get(integrity, validation: Ctx.cachedValidation(integrity))
+            let validation = Ctx.cachedValidation(integrity, deadline: deadline)
+            var coverage = Coverage.get(integrity, validation: validation)
+            if str(validation["status"]) == "read_budget_exceeded" {
+                coverage["readStopped"] = str(validation["statusText"]) ?? "read budget exceeded"
+            }
+            return deliver(coverage, loaded, keyState)
         case "list_mcp_audit":
             let limit = page.limit ?? 30
             let paged = AuditPage.page(log: Paths.auditLog, seal: Paths.auditSeal,
@@ -218,14 +265,14 @@ enum MCPDispatcher {
                                        since: str(args["since"]), until: str(args["until"]))
             let validation: [String: Any] = keyState == "pending"
                 ? Coverage.pendingIntegrity()
-                : Ctx.cachedValidation(integrity)
-            return stamp([
+                : Ctx.cachedValidation(integrity, deadline: deadline)
+            return deliver([
                 "entries": paged.items,
                 "validation": validation,
                 "confidence": "Observed",
                 "total": paged.total, "offset": page.offset, "limit": limit,
                 "truncated": paged.truncated, "nextCursor": paged.nextCursor,
-            ], keyState)
+            ], loaded, keyState)
         default:
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: name])
         }
@@ -237,14 +284,25 @@ enum MCPDispatcher {
         return copy
     }
 
+    static func deliver(_ result: [String: Any], _ loaded: Transport.Load, _ keyState: String) -> [String: Any] {
+        var copy = stamp(result, keyState)
+        if loaded.stopped, let reason = loaded.stopReason {
+            copy["readStopped"] = "tool read stopped: \(reason) Evidence was not modified."
+        }
+        return copy
+    }
+
     /// Test hook: `AGENTREINS_MCP_TOOL_DELAY_MS` sleeps in short slices so a timeout or a disconnect can stop it.
-    /// Unset in production. Not a client-config switch.
-    static func applyToolDelay(_ isCancelled: () -> Bool) {
+    /// Unset in production. Not a client-config switch. The budget throws before the sleep can outlive the client.
+    static func applyToolDelay(_ isCancelled: () -> Bool, deadline: Date) throws {
         let ms = intValue(ProcessInfo.processInfo.environment["AGENTREINS_MCP_TOOL_DELAY_MS"]) ?? 0
         guard ms > 0 else { return }
         var left = ms
         while left > 0 {
             if isCancelled() { return }
+            if Date() >= deadline {
+                throw stopped("exceeded \(budgetSeconds())s budget before the client would abandon the request")
+            }
             let slice = min(20, left)
             Thread.sleep(forTimeInterval: Double(slice) / 1000)
             left -= slice
