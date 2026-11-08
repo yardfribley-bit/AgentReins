@@ -25,7 +25,7 @@ final class EvidenceRetentionTests: XCTestCase {
             modelText: "我只读取，不联网", payloadBytes: 160))
         XCTAssertEqual(mismatch, .keep)
         let join = EvidenceValue.tier(EvidenceValueFields(
-            op: "exec", toolName: "Bash", command: "ls", path: "-", processId: 42, payloadBytes: 90))
+            op: "exec", command: "ls", path: "-", toolName: "Bash", processId: 42, payloadBytes: 90))
         XCTAssertEqual(join, .keep)
         let transcript = EvidenceValue.tier(EvidenceValueFields(
             op: "recovered_transcript", toolName: "codex.compacted_history",
@@ -87,7 +87,7 @@ final class EvidenceRetentionTests: XCTestCase {
         let join = GuardEvent(kind: "tool", ruleId: "fixture", path: "-", command: "ls",
                                agent: "codex", op: "exec", severity: "info",
                                ts: Date().addingTimeInterval(-5 * 24 * 60 * 60), action: "observed",
-                               toolName: "Bash", processId: 42, source: "retention")
+                               toolName: "Bash", source: "retention", processId: 42)
         try database.append([copy, join])
         let stored = try database.recent(limit: 10)
         let storedCopy = try XCTUnwrap(stored.first { $0.id == copy.id })
