@@ -2198,28 +2198,13 @@ final class EvidenceDatabase: @unchecked Sendable {
         return keys.count
     }
 
-    /// Full session text is not what we store. The agent file remains the place to read it on demand.
+    /// Session-file copies are not stored whole. The agent file remains the place to read them on demand.
+    /// Ordinary prompts stay intact so security analysis can still slice a long body.
     private func thinForStorage(_ event: GuardEvent) -> GuardEvent {
-        let modelText = [event.modelResponse, event.modelPrompt].compactMap { $0 }.joined(separator: "\n")
-        let commandBytes = event.command?.utf8.count ?? 0
-        let diffBytes = event.fileDiff?.utf8.count ?? 0
-        var fields = EvidenceValueFields()
-        fields.kind = event.kind
-        fields.op = event.op
-        fields.ruleId = event.ruleId
-        fields.action = event.action
-        fields.severity = event.severity
-        fields.source = event.source ?? ""
-        fields.userIntent = event.userIntent ?? ""
-        fields.command = event.command ?? ""
-        fields.path = event.path
-        fields.toolName = event.toolName ?? ""
-        fields.toolCallId = event.toolCallId ?? ""
-        fields.modelText = modelText
-        fields.processId = event.processId.map { Int($0) }
-        fields.payloadBytes = modelText.utf8.count + commandBytes + diffBytes
-        let tier = EvidenceValue.tier(fields)
-        let cap = tier == .keep ? EvidenceValue.keepFieldCap : EvidenceValue.excerptLimit
+        let op = event.op.lowercased()
+        let sessionCopy = op == "recovered_transcript" || op == "runtime_user_context" || op == "streaming" || op == "output"
+        guard sessionCopy else { return event }
+        let cap = EvidenceValue.excerptLimit
         let command = Self.clip(event.command, cap: cap)
         let userIntent = Self.clip(event.userIntent, cap: cap)
         let modelDecision = Self.clip(event.modelDecision, cap: cap)
