@@ -8,34 +8,48 @@ const time=v=>{const d=new Date(v);return isNaN(d)?'—':d.toLocaleTimeString('z
 const dayKey=v=>{const d=new Date(v);return isNaN(d)?'':d.toLocaleDateString('zh-CN');};
 
 const RULES=[
- {id:'S01',name:'凭证读取后外联',mode:'告警',severity:'critical',
+ {id:'S01',version:'1.1',name:'凭证读取后外联',mode:'告警',severity:'critical',
   desc:'agent 读取 ~/.ssh、~/.aws、.env、钥匙串导出文件后，同一执行编号下出现外联。',
   cond:'真实文件读取证据（resource.path）∧ 路径命中凭证清单 ∧ 同一执行编号 ∧ 目的地非白名单',
-  cant:'当前没有 Endpoint Security 级文件监控；仅会话描述文本或时间窗凑出来的关联不当证据，覆盖度页标为盲区。'},
- {id:'S02',name:'出站含密钥',mode:'告警',severity:'critical',
+  fp:'合法部署脚本和密钥轮换也会读这些路径。模型输出里出现路径、或只有描述文本，不触发。没有 resource.path 时这条不报。',
+  cant:'当前没有 Endpoint Security 级文件监控；仅会话描述文本或时间窗凑出来的关联不当证据，覆盖度页标为盲区。',
+  sources:'file + network',disposition:'仅告警'},
+ {id:'S02',version:'1.0',name:'出站含密钥',mode:'告警',severity:'critical',
   desc:'出站请求头或正文里出现 API Key、Token、私钥片段。命中即打码展示。',
   cond:'content_audit：credential-outbound / private-key-outbound',
-  cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。'},
- {id:'S03',name:'下载后执行',mode:'告警',severity:'critical',
+  fp:'文档或示例里的密钥格式可能命中。展示已打码，原始匹配不写入告警。',
+  cant:'HTTPS 未经代理解密、QUIC、证书固定的请求，正文看不到。',
+  sources:'network content_audit',disposition:'仅告警'},
+ {id:'S03',version:'1.2',name:'下载后执行',mode:'告警',severity:'critical',
   desc:'curl / wget 下载的文件在 5 分钟内被 sh、bash 或 open 真正执行（chmod +x 只改权限，不算执行）。',
-  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s；Correlated 仅直接父子血缘（pid+启动时间）或执行文件哈希一致；同父兄弟进程为 Inferred，除非父进程有 shell 证据（名+argv+启动时间）且同会话',
-  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 sh/bash。'},
- {id:'S04',name:'非白名单外联',mode:'告警',severity:'high',
+  cond:'下载路径与随后执行命令对得上 ∧ Δt ≤ 300s；Correlated 仅执行文件哈希一致；同父兄弟进程为 Inferred',
+  fp:'部分框架用 shell 包一层工具调用。chmod +x 不算执行。没有执行哈希时保持 Inferred，不写成已执行确认。',
+  cant:'不经命令包装的下载（如 agent 内置 fetch）只能看到网络，不知道落到哪个文件。绝对路径绕过 PATH 包装时看不到 sh/bash。',
+  sources:'network + process',disposition:'告警；网关拦截未接通'},
+ {id:'S04',version:'1.0',name:'非白名单外联',mode:'告警',severity:'high',
   desc:'git push / clone、brew tap、ssh、curl 访问白名单之外的远端或来源。',
   cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）；或按进程采样到 agent 未走代理的公网连接，其目的地（主机名或只有 IP）不在名单',
-  cant:'ssh 通道内传了什么看不到，只能看到连到了哪里。只有 IP、没有主机名的采样连接按 Medium 报，不臆测归属。'},
- {id:'S05',name:'大体积上传',mode:'告警',severity:'high',
+  fp:'DNS、包管理和模型供应商已在内置名单里，仍可能漏。名单不是组织授权范围。未配置授权范围时不启用「空配置=全拦」。只有 IP 的采样降为 Medium。',
+  cant:'ssh 通道内传了什么看不到，只能看到连到了哪里。只有 IP、没有主机名的采样连接按 Medium 报，不臆测归属。',
+  sources:'tool + network',disposition:'仅告警'},
+ {id:'S05',version:'1.0',name:'大体积上传',mode:'告警',severity:'high',
   desc:'单次向首次出现的域名上传超过 1 MB。',
   cond:'域名首次出现 ∧ 送出字节 > 1 MB',
-  cant:'分片成多次小请求的上传，目前只按单次计，可能漏报。'},
- {id:'S06',name:'安全设置被关闭',mode:'告警',severity:'high',
+  fp:'分片成多次小请求的上传，目前只按单次计，可能漏报。首次出现按本会话已见到的主机，不是全公司历史。',
+  cant:'分片成多次小请求的上传，目前只按单次计，可能漏报。',
+  sources:'network bytes',disposition:'仅告警'},
+ {id:'S06',version:'1.0',name:'安全设置被关闭',mode:'告警',severity:'high',enabled:false,
   desc:'Cursor 改为自动运行全部命令、Claude Code 关闭 sandbox、Codex 切到 full-access 等。',
   cond:'监看各 agent 配置文件的关键字段变更',
-  cant:'当前未接入配置文件监看；运行时临时放开（不写配置）也看不到。'},
- {id:'S07',name:'绕过审计代理',mode:'告警',severity:'high',
+  fp:'本版没有配置文件事件，命中数保持 0。不把缺少告警写成设置安全。',
+  cant:'当前未接入配置文件监看；运行时临时放开（不写配置）也看不到。',
+  sources:'未接入',disposition:'规则在册，检测未启用'},
+ {id:'S07',version:'1.0',name:'绕过审计代理',mode:'告警',severity:'high',
   desc:'命令显式 --noproxy / 自选代理，或 agent 进程直接连到公网，不经本机审计代理。',
   cond:'后端写入 auditBypass=true；或按进程采样（socket ledger）看到 agent 进程树的公网连接 viaProxy=false',
-  cant:'采样周期之间开始又结束的短连接会漏掉（覆盖率横幅写实测周期）；直连流量的正文看不到，只知道连到了哪里。'}
+  fp:'命令行里的 --noproxy 会在外网列表标成绕过，但不会单独生成 S07。S07 只认 auditBypass=true 或已采样的 viaProxy=false。',
+  cant:'采样周期之间开始又结束的短连接会漏掉（覆盖率横幅写实测周期）；直连流量的正文看不到，只知道连到了哪里。',
+  sources:'auditBypass + socket ledger',disposition:'仅告警'}
 ];
 
 const DEFAULT_ALLOW=new Set([
@@ -435,6 +449,7 @@ function buildAlerts(payload){
    title:`读取凭证相关路径后外联${host?' '+host:''}`,
    sub:`${cut(read.path,48)} → ${r.tool||'访问'} · 同一执行编号`,
    agent:r.agent||read.task?.agent||'未对上 Agent',session:r.session||read.task?.session||'',call:read.call,record:r,timestamp:r.timestamp||r.startedAt,status:'open',
+   evidence:{path:read.path,call:read.call,kind:'file-read'},
    why:'文件读取证据来自 resource.path，并与外联共用执行编号。描述文本或无路径证据不会触发 S01。'
   });
  }
@@ -513,60 +528,147 @@ function socketBlind(){
  if(c.state==='sampling')return {t:'未走代理的流量',s:'按进程采样 agent 进程树的 TCP/UDP 连接（不含正文）',v:c.p95Text+(c.misses!=null?'；短于 '+c.misses+' 秒的连接可能漏掉':'')+'；系统解析器发出的 DNS 看不到'};
  return {t:'未走代理的流量',s:'按进程连接采样'+(SOCKET_STATE[c.state]||c.state),v:'现在看不到，也不估算比例'};
 }
-/** 已知悉只影响显示样式，不改变告警本身、不做验收处置。 */
+function subjectOf(a){
+ const path=a?.evidence?.path||a?.evidence?.readPath||'';
+ if(path)return 'path:'+path;
+ const host=a?.destination||hostOf(a?.record||{});
+ if(host)return 'host:'+host;
+ return '';
+}
+/** Persisted review. Allowlist matches later alerts with the same rule + subject. Ack stays display-only. */
 function applyDecisions(alerts,decisions){
- const map=new Map(list(decisions).map(d=>[d.id,d]));
+ const rows=list(decisions);
+ const byId=new Map(rows.map(d=>[d.id,d]));
+ const allows=rows.filter(d=>d.state==='allowlisted'&&d.subject);
  return alerts.map(a=>{
-  const d=map.get(a.id);if(!d)return a;
+  const own=byId.get(a.id)||null;
+  const subject=a.subject||subjectOf(a);
+  let d=own;
+  if(!d&&subject){
+   const hit=allows.find(x=>x.subject===subject&&(!x.rule||x.rule===a.rule));
+   if(hit)d={...hit,inherited:true};
+  }
+  if(!d)return {...a,subject};
   const acked=d.state==='acked'||d.state==='acknowledged'||d.state==='known';
-  return {...a,acked,decision:d};
+  return {...a,acked,decision:d,subject,allowlisted:d.state==='allowlisted'};
  });
 }
-function statusLabel(a){
- if(a.acked)return '已知悉';
- return '未读';
+function dispositionOf(a){
+ const s=a?.decision?.state;
+ if(s==='allowlisted'||a?.allowlisted)return {key:'allow',text:'已加白'};
+ if(s==='blocked'||s==='gateway_block')return {key:'block',text:'已阻断'};
+ if(s==='released'||s==='gateway_allow')return {key:'release',text:'已放行'};
+ if(s==='escalated')return {key:'escalate',text:'转人工'};
+ if(s==='confirmed')return {key:'acked',text:'已确认'};
+ if(a?.acked||s==='acked'||s==='acknowledged'||s==='known')return {key:'acked',text:'已知悉'};
+ return {key:'open',text:'待处置'};
+}
+function isOpen(a){return dispositionOf(a).key==='open';}
+function statusLabel(a){return dispositionOf(a).text;}
+function modelCardsFor(payload,a){
+ const out=[];
+ if(!a?.call)return out;
+ for(const t of list(payload?.tasks)){
+  for(const c of list(t.cards)){
+   const kind=String(c.kind||c.detailType||'');
+   if(!/model|plan/.test(kind))continue;
+   const call=c.call||(String(c.id||'').startsWith('call:')?String(c.id).slice(5):null);
+   if(call&&String(call)===String(a.call))out.push(c);
+  }
+ }
+ return out;
+}
+/** Five layers. A missing layer is a gap, never a guessed event. */
+function relatedEvents(a,payload){
+ const r=a.record||{};
+ const ev=a.evidence||{};
+ const events=[];
+ const stamp=a.call?String(a.call)+' · ':'';
+ const host=a.destination||hostOf(r);
+ const args=list(r.args).map(String).join(' ');
+ if(ev.path){
+  const explicit=a.rule==='S01'&&!!a.call||ev.basis==='exec_hash';
+  events.push({layer:'file',title:'文件',summary:ev.path,relation:explicit?'explicit':'candidate',basis:stamp+(explicit?'路径来自 resource.path 或执行哈希':'路径对得上，关联不是显式')});
+ }else if(a.rule==='S01'||a.rule==='S03'||a.rule==='S06'){
+  events.push({layer:'file',title:'文件',summary:a.rule==='S06'?'配置文件监看未接入':'没有采到文件路径',relation:'gap',basis:stamp+'未覆盖'});
+ }
+ if(a.call||r.tool){
+  events.push({layer:'tool',title:r.tool||'工具调用',summary:a.call?('执行编号 '+a.call+(args?' · '+cut(args,80):'')):(r.tool||'只有工具名'),relation:a.call?'explicit':'candidate',basis:stamp+(a.call?'执行编号对得上':'没有执行编号')});
+ }else events.push({layer:'tool',title:'工具调用',summary:'没有工具调用记录',relation:'gap',basis:stamp+'未覆盖'});
+ if(r.pid||ev.parentPID||list(a.sockets).length){
+  const pid=r.pid||ev.parentPID||list(a.sockets)[0]?.pid;
+  const explicit=!!(a.call&&r.pid);
+  events.push({layer:'process',title:'进程',summary:'PID '+(pid||'未采到'),relation:explicit?'explicit':(list(a.sockets).length&&!r.pid?'candidate':'candidate'),basis:stamp+(explicit?'同一条记录上的执行编号和 PID':(list(a.sockets).length?'按进程采样，没有执行编号':'进程字段不完整'))});
+ }else events.push({layer:'process',title:'进程',summary:'没有进程事件',relation:'gap',basis:stamp+'未覆盖'});
+ if(host||list(a.sockets).length){
+  events.push({layer:'network',title:'网络',summary:host||'见采样目的地',relation:a.call&&host?'explicit':'candidate',basis:stamp+(a.call&&host?'执行编号与目的地在同一条记录':'目的地没有执行编号')});
+ }else events.push({layer:'network',title:'网络',summary:'没有出站记录',relation:'gap',basis:stamp+'未覆盖'});
+ const models=modelCardsFor(payload,a);
+ if(models.length){
+  const text=String(models[0].output||models[0].summary||models[0].input||'').trim();
+  events.push({layer:'model',title:'模型',summary:text?cut(text,140):'已采到同一执行编号的模型记录，正文为空',relation:'explicit',basis:stamp+'模型卡片与告警共用执行编号。模型提过不等于主机已执行。'});
+ }else events.push({layer:'model',title:'模型',summary:'没有与本告警同一执行编号的模型输出',relation:'gap',basis:stamp+'未覆盖。不把别的会话文本补进来。'});
+ return events;
+}
+function coverageOf(events){
+ const rows=list(events);
+ const seen=rows.filter(e=>e.relation!=='gap');
+ if(!seen.length)return {key:'miss',text:'未见'};
+ if(rows.some(e=>e.relation==='gap'))return {key:'gap',text:'部分缺口'};
+ return {key:'ok',text:'层可见'};
+}
+function relationLabel(kind){
+ if(kind==='explicit')return {name:'显式',note:'执行编号或同一条记录对得上'};
+ if(kind==='candidate')return {name:'候选',note:'按路径、时间或进程采样，不是显式因果'};
+ return {name:'缺口',note:'这一层没有采到'};
 }
 function renderStats(alerts,cov){
  const crit=alerts.filter(a=>a.severity==='critical').length;
  const high=alerts.filter(a=>a.severity==='high').length;
- const unread=alerts.filter(a=>!a.acked).length;
+ const unread=alerts.filter(isOpen).length;
  const chips=cov.chips.map(c=>`<span class="risk-chip ${c.level==='full'?'ok':c.level==='part'?'warn':'bad'}"><i></i>${esc(c.a)} ${esc(c.label)}</span>`).join('')
   +`<span class="risk-chip ${cov.proxyUp?'ok':'bad'}"><i></i>${cov.proxyUp?'代理在听':'代理未确认'}</span>`
   +`<span class="risk-chip ${socketCoverage().state==='sampling'?'ok':'bad'}"><i></i>${socketCoverage().state==='sampling'?'未走代理流量：按进程采样':'未走代理流量：看不到'}</span>`;
  return `<div class="risk-stats">
   <div class="risk-stat crit"><b>${crit}</b><span>今日 Critical</span></div>
   <div class="risk-stat high"><b>${high}</b><span>今日 High</span></div>
-  <div class="risk-stat ask"><b>${unread}</b><span>未读</span></div>
+  <div class="risk-stat ask"><b>${unread}</b><span>待处置</span></div>
   <div class="risk-cov"><div class="risk-cov-t"><span>覆盖度 · 告警只来自看得到的部分</span><button type="button" data-view="coverage">看不到什么 →</button></div><div class="risk-chips">${chips}</div></div>
  </div>`;
 }
 
 function renderFilters(alerts,filter){
- const f=filter||{sev:'all',rule:'all',agent:'all',q:''};
+ const f=filter||{sev:'all',rule:'all',agent:'all',disp:'all',q:''};
  const agents=[...new Set(alerts.map(a=>a.agent))];
  const rules=[...new Set(alerts.map(a=>a.rule))];
  const item=(k,v,label,n)=>`<button type="button" class="risk-f ${f[k]===v?'on':''}" data-risk-filter="${k}" data-risk-value="${esc(v)}">${esc(label)}<span>${n}</span></button>`;
+ const dispCount=key=>alerts.filter(a=>key==='all'||dispositionOf(a).key===key).length;
  return `<aside class="risk-filters">
   <h5>严重级别</h5>${item('sev','all','全部',alerts.length)}${item('sev','critical','Critical',alerts.filter(a=>a.severity==='critical').length)}${item('sev','high','High',alerts.filter(a=>a.severity==='high').length)}${item('sev','medium','Medium',alerts.filter(a=>a.severity==='medium').length)}
+  <h5>处置</h5>${item('disp','all','全部',dispCount('all'))}${item('disp','open','待处置',dispCount('open'))}${item('disp','allow','已加白',dispCount('allow'))}${item('disp','block','已阻断',dispCount('block'))}${item('disp','release','已放行',dispCount('release'))}
   <h5>命中规则</h5>${item('rule','all','全部',alerts.length)}${rules.map(r=>item('rule',r,r,alerts.filter(a=>a.rule===r).length)).join('')}
   <h5>Agent</h5>${item('agent','all','全部',alerts.length)}${agents.map(a=>item('agent',a,a,alerts.filter(x=>x.agent===a).length)).join('')}
   <label class="risk-search">搜索<input id="risk-search" value="${esc(f.q||'')}" placeholder="域名、规则、会话…"></label>
  </aside>`;
 }
 
-function rowHTML(a,selected){
+function rowHTML(a,selected,payload){
  const c=a.confDisplay||confOf(a.confidence);
  const assoc=a.association||associationOf(a);
  const sevText=a.severityLabel||sevLabel(a.severity);
- const statusText=a.statusText||statusLabel(a);
+ const disp=dispositionOf(a);
+ const statusText=a.statusText||disp.text;
  const whenText=a.timeText!=null?a.timeText:time(a.timestamp);
- return `<tr class="${selected===a.id?'sel':''}${a.acked?' acked':''}" data-risk-alert="${esc(a.id)}">
+ const cov=a.coverage||coverageOf(relatedEvents(a,payload));
+ const covKey=/^(ok|gap|miss)$/.test(cov.key)?cov.key:'gap';
+ const dispKey=/^(open|allow|block|release|escalate|acked)$/.test(disp.key)?disp.key:'open';
+ return `<tr class="${selected===a.id?'sel':''}${disp.key==='open'?'':' acked'}" data-risk-alert="${esc(a.id)}">
   <td><span class="risk-sev ${sevOf(a.severity)}">${esc(sevText)}</span></td>
   <td><button type="button" class="risk-link" data-risk-alert="${esc(a.id)}"><div class="t1">${esc(a.title)}</div><div class="t2">${esc(a.sub)}</div></button></td>
   <td class="ag"><b>${esc(a.agent)}</b><div class="t2 mono">${esc(cut(a.session,28))}</div><div class="t2 strength-${esc(assoc.kind)}">关联：${esc(assoc.name)}</div></td>
-  <td><span class="risk-rule">${esc(a.ruleLabel||a.rule)}</span></td>
+  <td><span class="risk-rule">${esc(a.ruleLabel||a.rule)}</span><div class="t2 cov-${covKey}">覆盖 ${esc(cov.text)}</div></td>
   <td><span class="risk-conf ${c.c}">${esc(c.t)}</span></td>
-  <td><span class="risk-st ${a.acked?'acked':'open'}">${esc(statusText)}</span></td>
+  <td><span class="risk-st ${dispKey}">${esc(statusText)}</span></td>
   <td class="mono">${esc(whenText)}</td>
  </tr>`;
 }
@@ -583,10 +685,10 @@ function renderAlerts(holder,payload,state,built){
  state.alerts=alerts;
  if(window.AgentReinsRisk)window.AgentReinsRisk._lastAlerts=alerts;
  const f=state.filter||{sev:'all',rule:'all',agent:'all',q:''};
- let shown=alerts.filter(a=>(f.sev==='all'||a.severity===f.sev)&&(f.rule==='all'||a.rule===f.rule)&&(f.agent==='all'||a.agent===f.agent));
+ let shown=alerts.filter(a=>(f.sev==='all'||a.severity===f.sev)&&(f.rule==='all'||a.rule===f.rule)&&(f.agent==='all'||a.agent===f.agent)&&(!f.disp||f.disp==='all'||dispositionOf(a).key===f.disp));
  if(f.q){const q=f.q.toLowerCase();shown=shown.filter(a=>[a.title,a.sub,a.agent,a.session,a.rule,hostOf(a.record||{})].join('\n').toLowerCase().includes(q));}
  const selected=state.selected&&shown.find(a=>a.id===state.selected)||null;
- const table=shown.length?`<div class="risk-table-wrap"><table class="risk-table"><thead><tr><th>级别</th><th>告警</th><th>Agent · 会话</th><th>规则</th><th>证据可信度</th><th>状态</th><th>时间</th></tr></thead><tbody>${shown.map(a=>rowHTML(a,selected?.id)).join('')}</tbody></table>
+ const table=shown.length?`<div class="risk-table-wrap"><table class="risk-table"><thead><tr><th>级别</th><th>告警</th><th>Agent · 会话</th><th>规则</th><th>证据可信度</th><th>状态</th><th>时间</th></tr></thead><tbody>${shown.map(a=>rowHTML(a,selected?.id,payload)).join('')}</tbody></table>
  <div class="risk-ft"><span>可信度：Observed / Correlated / Inferred / Unknown · 关联强度：按执行编号 / 候选 / 缺口</span><span>仅真实采集 · ${shown.length} 条</span></div></div>`
   :`<div class="risk-empty"><h2>今天还没有风险告警</h2><p>没有告警不等于安全。未走代理的流量、文件级读取和配置变更仍可能是盲区。</p><ol><li>看覆盖度，确认代理是否在听。</li><li>确认上方“按进程采样”在运行，未走代理的连接才看得到。</li></ol><button type="button" data-view="coverage">打开覆盖度</button><button type="button" data-view="network">打开外网访问</button></div>`;
  const detail=selected?renderDetail(selected,payload):'';
@@ -648,37 +750,59 @@ function renderDetail(a,payload){
  const evidenceBlock=a.evidence
   ?`<pre class="mono risk-evidence-json">${esc(JSON.stringify(a.evidence,null,2))}</pre>`
   :'';
- return `<article class="risk-detail${a.acked?' acked':''}">
-  <header><span class="risk-sev ${sevOf(a.severity)}">${esc(sevText)}</span><h2>${esc(a.title)}</h2>
-  <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.ruleLabel||a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.kind)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')}</p></header>
+ const events=relatedEvents(a,payload);
+ const cov=a.coverage||coverageOf(events);
+ const covText=a.coverage?.text||cov.text;
+ const chain=events.map(e=>{
+  const rel=relationLabel(e.relation);
+  const layer=['file','tool','process','network','model'].includes(e.layer)?e.layer:'gap';
+  const relKind=e.relation==='explicit'?'by-call':e.relation==='candidate'?'candidate':'gap';
+  return `<li id="risk-ev-${layer}" class="risk-ev${e.relation==='gap'?' gap':''}"><button type="button" data-risk-jump="${layer}"><span class="ly">${layer}</span><b>${esc(e.title)}</b></button><p>${esc(e.summary)}</p><span class="rel strength-${relKind}">Relation ${rel.name}</span><small>${rel.note} · ${esc(e.basis)}</small></li>`;
+ }).join('');
+ const disp=dispositionOf(a);
+ const statusText=a.statusText||disp.text;
+ const idAttr=esc(a.id);
+ const review=a.decision?`<p class="note">${esc(statusText)}${a.decision.inherited?' · 沿用同一规则和对象的加白':''} · ${esc(a.decision.decidedAt||'')} · ${esc(a.decision.note||'')} · 告警事实未改</p>`:'';
+ return `<article class="risk-detail${disp.key==='open'?'':' acked'}">
+  <header><span class="risk-sev ${sevOf(a.severity)}">${esc(sevText)}</span><span class="risk-st ${/^(open|allow|block|release|escalate|acked)$/.test(disp.key)?disp.key:'open'}">${esc(statusText)}</span><h2>${esc(a.title)}</h2>
+  <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.ruleLabel||a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.kind)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')} · 覆盖 ${esc(covText)}</p></header>
   <p class="risk-why">${esc(a.why||'')}</p>
   ${evidenceBlock}
   <div class="risk-actions">
-   ${a.acked?'':`<button type="button" class="quiet" data-risk-decide="acked" data-risk-id="${esc(a.id)}">标记已知悉</button>`}
+   <button type="button" class="primary" data-risk-decide="released" data-risk-id="${idAttr}">放行</button>
+   <button type="button" class="quiet" data-risk-decide="blocked" data-risk-id="${idAttr}">阻断</button>
+   <button type="button" class="quiet" data-risk-decide="allowlisted" data-risk-id="${idAttr}">加白</button>
+   <button type="button" class="quiet" data-risk-decide="escalated" data-risk-id="${idAttr}">转人工</button>
+   ${a.acked?'':`<button type="button" class="quiet" data-risk-decide="acked" data-risk-id="${idAttr}">标记已知悉</button>`}
    ${a.call&&a.rule!=='S07'?`<button type="button" class="quiet" data-network-record-jump="${esc(r?.id||'')}">在外网访问中打开</button>`:''}
    <button type="button" class="quiet" data-view="network">外网访问</button>
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
-  ${a.acked?`<p class="note">已知悉（仅样式）· ${esc(a.decision?.decidedAt||'')} · 告警本身未改</p>`:''}
+  <p class="risk-demo-note">放行、阻断、加白、转人工和已知悉都写入本机 Review，重新打开仍在。阻断和放行不会调用模型网关，也不会改 Network Extension，连接不会因此被拦住。</p>
+  ${review}
+  <h3>关联事件</h3>
+  <ol class="risk-chain">${chain}</ol>
   <h3>${list(a.sockets).length&&!r?'连接证据':a.rule==='S07'?'绕过证据':'送出 / 收回'}</h3>
   ${exchange||'<p class="empty">这条告警还没有可展示的交换正文。</p>'}
-  <div class="risk-gapbox"><b>证据缺口</b><br>${esc(gapText)}${a.call?'':'<br>· 还没有执行编号，工具调用归属未知。'}</div>
+  <div class="risk-gapbox"><b>证据缺口</b><br>${esc(gapText)}${a.call?'':'<br>· 还没有执行编号，工具调用归属未知。'}<br>· 覆盖 ${esc(cov.text)}：没有采到的层标成缺口，不用模型摘要代替主机事实。</div>
  </article>`;
 }
 
 function renderRules(holder,payload,state){
- const alerts=Array.isArray(state?.alerts)?state.alerts:buildAlerts(payload);
+ const alerts=applyDecisions(buildAlerts(payload),state?.decisions||[]);
  const rules=Array.isArray(state?.rules)?state.rules:RULES;
  const cards=rules.map(r=>{
   const hit=alerts.filter(a=>a.rule===r.id).length;
-  return `<div class="risk-rc"><div class="h"><span class="id">${esc(r.id)}</span><span class="nm">${esc(r.name)}</span><div class="seg"><span class="on">告警</span></div></div>
-   <div class="d">${esc(r.desc)}</div><div class="cond mono">${esc(r.cond)}</div>
-   <div class="m"><span><b>${hit}</b>今日命中</span><span><b>—</b>近 7 天</span></div>
-   <div class="cant"><b>看不到：</b>${esc(r.cant)}</div></div>`;
+  const off=r.enabled===false;
+  return `<div class="risk-rc"><div class="h"><span class="id">${esc(r.id)}</span><span class="ver">v${esc(r.version||'—')}</span><span class="nm">${esc(r.name)}</span><div class="seg"><span class="${off?'':'on'}">${off?'未启用':'告警'}</span></div></div>
+   <div class="d">${esc(r.desc||'')}</div><div class="cond mono">${esc(r.cond||'')}</div>
+   <div class="fp"><b>误报：</b>${esc(r.fp||'未单列。')}</div>
+   <div class="m"><span><b>${hit}</b>今日命中</span><span>${esc(r.disposition||'仅告警')}</span><span>${esc(r.sources||'')}</span></div>
+   <div class="cant"><b>看不到：</b>${esc(r.cant||'')}</div></div>`;
  }).join('');
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${RULES.length} 条</div><h1>规则</h1><p>少而准：命中时尽量拿出送出/收回或命令证据。默认只告警；验收流已撤掉。</p></div></div>
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${rules.length} 条</div><h1>规则</h1><p>每条有版本和误报说明。命中数只来自本机已经采到的证据。</p></div></div>
  <div class="risk-rules">${cards}</div>
- <p class="note" style="margin:16px 28px">S01 无真实文件读取证据时不报。S03 按路径/进程血缘/时间窗关联（执行编号可不同）。S06 本版未监看配置文件。S07 只认后端 auditBypass=true。</p>`;
+ <p class="note" style="margin:16px 28px">S01 没有 resource.path 不报。S03 没有执行哈希时保持 Inferred。S06 未启用。S08、S09、S10 没有检测器。WebLens 到规则的映射不在这版里。</p>`;
 }
 
 function renderCoverage(holder,payload,riskState){
@@ -690,8 +814,13 @@ function renderCoverage(holder,payload,riskState){
   ?audit.slice().reverse().map(e=>`<tr><td>${esc(e.at||'')}</td><td>${esc(e.actor||'')}</td><td><b>${esc(e.tool||'')}</b></td><td class="t2 mono">${esc(cut(e.argsDigest||'',16))}</td><td class="t2 mono">${esc(cut(e.hash||'',12))}</td></tr>`).join('')
   :`<tr><td colspan="5" class="t2">尚无 Codex/supervisor 只读调用记录。配置 tools/agentreins-mcp/server.py 后会出现哈希链审计。</td></tr>`;
  const auditPath=esc(cut(riskState?.mcpAuditPath||'~/Library/Application Support/AgentGuard/mcp-supervisor-audit.jsonl',120));
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">告警只来自看得到的部分</div><h1>覆盖度 · 看不到什么</h1><p>没有告警不等于安全。下面写清盲区。</p></div></div>
+ const healthRows=list(payload?.health);
+ const hookSeen=healthRows.some(h=>/hook|command|audit|agentreins/i.test(String(h.source||'')+' '+String(h.detail||'')));
+ const checklist=`<ol class="health-steps"><li><b>审计代理</b><span>${cov.proxyUp?'在听':'未确认'}</span><small>${esc(cut(cov.proxyDetail,160)||'没有代理健康记录，不写监听个数')}</small></li><li><b>命令入口</b><span>${hookSeen?'来源已上报':'未看到命令入口状态'}</span><small>没有安装条数时不写「已安装 N 个」。</small></li><li><b>Agent 来源</b><span>${esc(cov.chips.map(c=>c.a+' '+c.label).join(' · ')||'来源未提供')}</span><small>和顶栏用的是同一份 health。</small></li></ol>`;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">告警只来自看得到的部分</div><h1>覆盖度 · 看不到什么</h1><p>没有告警不等于安全。顶栏「采集进行中」和这里用同一份采集健康。</p></div></div>
+ ${checklist}
  ${socketBanner()}
+ <p class="note" style="margin:8px 28px">绕过审计：外网列表会标出 auditBypass，以及命令里的 --noproxy / 非本机代理。风险告警 S07 只在 auditBypass=true 或已采样 viaProxy=false 时出现，不单凭参数推断。</p>
  <div class="risk-stats cov-only">
   <div class="risk-stat"><b class="${cov.proxyUp?'ok':''}">${cov.proxyUp?'在听':'未确认'}</b><span>审计代理 18891</span></div>
   <div class="risk-stat"><b>S01</b><span>文件读 · 盲区（无 ES）</span></div>
@@ -729,7 +858,7 @@ function packFields(a){
 }
 window.AgentReinsRisk={
  RULES,buildAlerts,applyDecisions,renderList,renderAlerts,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,isProvenShellParent,
- isAllowedHost,socketAlerts,
+ isAllowedHost,socketAlerts,subjectOf,dispositionOf,isOpen,relatedEvents,coverageOf,
  _lastAlerts:[]
 };
 })();

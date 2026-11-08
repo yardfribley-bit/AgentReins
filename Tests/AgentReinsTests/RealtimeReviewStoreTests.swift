@@ -66,4 +66,34 @@ final class RealtimeReviewStoreTests: XCTestCase {
         }
         XCTAssertTrue(FileManager.default.fileExists(atPath: RealtimeReviewStore.url.path))
     }
+
+    func testConfirmAndAllowlistRoundTrip() throws {
+        XCTAssertEqual(RealtimeReviewStore.normalize(state: "confirmed", note: nil, subject: nil)?.state, "confirmed")
+        XCTAssertEqual(RealtimeReviewStore.normalize(state: "blocked", note: nil, subject: nil)?.state, "blocked")
+        XCTAssertEqual(RealtimeReviewStore.normalize(state: "gateway_block", note: nil, subject: nil)?.state, "blocked")
+        XCTAssertEqual(RealtimeReviewStore.normalize(state: "released", note: nil, subject: nil)?.effect, "persisted")
+        XCTAssertNil(RealtimeReviewStore.normalize(state: "allowlisted", note: nil, subject: nil))
+        XCTAssertNil(RealtimeReviewStore.normalize(state: "return", note: "  ", subject: nil))
+        XCTAssertEqual(RealtimeReviewStore.normalize(state: "return", note: "缺交付物", subject: nil)?.state, "return")
+
+        let allow = RealtimeReviewStore.Decision(
+            id: "S04:host", state: "allowlisted", note: nil, decidedAt: "2026-11-08T00:00:00Z",
+            evidenceHash: nil, evidenceCount: nil, subject: "host:uploads.example", rule: "S04", effect: "persisted"
+        )
+        _ = RealtimeReviewStore.save(allow)
+        let loaded = RealtimeReviewStore.load().first { $0.id == "S04:host" }
+        XCTAssertEqual(loaded?.subject, "host:uploads.example")
+        XCTAssertEqual(loaded?.rule, "S04")
+        XCTAssertEqual(loaded?.effect, "persisted")
+        XCTAssertTrue(RealtimeReviewStore.remove(id: "S04:host").allSatisfy { $0.id != "S04:host" })
+        XCTAssertNil(RealtimeReviewStore.load().first { $0.id == "S04:host" })
+    }
+
+    func testExportStaysInsideInjectedDirectory() throws {
+        let file = try RealtimeReviewStore.writeExport(name: "../evil task", json: "{\"schema\":\"agentreins.acceptance.v1\"}")
+        XCTAssertTrue(file.path.hasPrefix(tempDir.path))
+        XCTAssertFalse(file.lastPathComponent.contains("/"))
+        let text = try String(contentsOf: file, encoding: .utf8)
+        XCTAssertTrue(text.contains("agentreins.acceptance.v1"))
+    }
 }

@@ -278,9 +278,11 @@ final class RealtimeWorkspaceTests: XCTestCase {
         let taskCount = try await browser.evaluateJavaScript("document.querySelectorAll('#tasks [data-task]').length") as? Int
         XCTAssertGreaterThan(taskCount ?? 0, 0)
         let navOrder = try await browser.evaluateJavaScript("Array.from(document.querySelectorAll('nav [data-view]')).map(el=>el.getAttribute('data-view')).join(',')") as? String
-        XCTAssertEqual(navOrder, "alerts,network,process,rules,coverage")
+        XCTAssertEqual(navOrder, "alerts,inbox,network,files,reason,process,rules,coverage,supervise,about")
         let hasInboxLabel = try await browser.evaluateJavaScript("document.body.textContent.includes('待我处理')") as? Bool
-        XCTAssertEqual(hasInboxLabel, false)
+        XCTAssertEqual(hasInboxLabel, true)
+        let homeStillAlerts = try await browser.evaluateJavaScript("document.querySelector('nav [data-view=alerts]').classList.contains('active')") as? Bool
+        XCTAssertEqual(homeStillAlerts, true)
         _ = try await browser.evaluateJavaScript("document.querySelector('#tasks [data-task]').click()")
         for _ in 0..<50 {
             try await Task.sleep(for: .milliseconds(100))
@@ -310,8 +312,8 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertEqual(escHook, "undefined")
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=rules]')?.click()")
         try await Task.sleep(for: .milliseconds(200))
-        let rulesBody = try await browser.evaluateJavaScript("document.body.innerHTML") as? String
-        XCTAssertEqual(rulesBody?.contains("阻断"), false, "rule cards must not show 阻断")
+        let rulesHTML = try await browser.evaluateJavaScript("document.getElementById('rules-view')?.innerHTML || ''") as? String
+        XCTAssertEqual(rulesHTML?.contains("阻断"), false, "rule cards must not show 阻断")
         let graphVisible = try await browser.evaluateJavaScript("!document.getElementById('graph-screen').hidden") as? Bool
         XCTAssertEqual(graphVisible, true)
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool
