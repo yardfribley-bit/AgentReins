@@ -165,6 +165,23 @@ public struct ParsedToolCall: Codable, Equatable, Sendable {
     public var argumentsTruncated: Bool
     public var claimedPaths: [String]
     public var claimsEdit: Bool
+    public init(id: String, callId: String, sessionId: String, agent: String, sourcePath: String, sourceOffset: Int, timestamp: Date, pid: Int32?, reasoning: String, reasoningTruncated: Bool, toolName: String, arguments: String, argumentsTruncated: Bool, claimedPaths: [String], claimsEdit: Bool) {
+        self.id = id
+        self.callId = callId
+        self.sessionId = sessionId
+        self.agent = agent
+        self.sourcePath = sourcePath
+        self.sourceOffset = sourceOffset
+        self.timestamp = timestamp
+        self.pid = pid
+        self.reasoning = reasoning
+        self.reasoningTruncated = reasoningTruncated
+        self.toolName = toolName
+        self.arguments = arguments
+        self.argumentsTruncated = argumentsTruncated
+        self.claimedPaths = claimedPaths
+        self.claimsEdit = claimsEdit
+    }
 }
 
 public struct HostEffect: Codable, Equatable, Sendable {
@@ -213,6 +230,11 @@ public struct VerificationMismatch: Codable, Equatable, Sendable {
     public var kind: String
     public var label: String
     public var detail: String
+    public init(kind: String, label: String, detail: String) {
+        self.kind = kind
+        self.label = label
+        self.detail = detail
+    }
 }
 
 public struct VerificationEffect: Codable, Equatable, Sendable {
@@ -227,6 +249,19 @@ public struct VerificationEffect: Codable, Equatable, Sendable {
     public var timestamp: Date
     public var join: String
     public var credential: Bool
+    public init(id: String, kind: String, path: String? = nil, diff: String? = nil, before: String? = nil, after: String? = nil, command: String? = nil, remote: String? = nil, timestamp: Date, join: String, credential: Bool) {
+        self.id = id
+        self.kind = kind
+        self.path = path
+        self.diff = diff
+        self.before = before
+        self.after = after
+        self.command = command
+        self.remote = remote
+        self.timestamp = timestamp
+        self.join = join
+        self.credential = credential
+    }
 }
 
 public struct ToolCallCard: Codable, Equatable, Sendable {
@@ -245,6 +280,23 @@ public struct ToolCallCard: Codable, Equatable, Sendable {
     public var argumentsTruncated: Bool
     public var happened: [VerificationEffect]
     public var note: String
+    public init(id: String, callId: String, sessionId: String, agent: String, timestamp: Date, pid: Int32?, status: String, mismatches: [VerificationMismatch], said: String, saidTruncated: Bool, toolName: String, arguments: String, argumentsTruncated: Bool, happened: [VerificationEffect], note: String) {
+        self.id = id
+        self.callId = callId
+        self.sessionId = sessionId
+        self.agent = agent
+        self.timestamp = timestamp
+        self.pid = pid
+        self.status = status
+        self.mismatches = mismatches
+        self.said = said
+        self.saidTruncated = saidTruncated
+        self.toolName = toolName
+        self.arguments = arguments
+        self.argumentsTruncated = argumentsTruncated
+        self.happened = happened
+        self.note = note
+    }
 }
 
 public struct UnclaimedChange: Codable, Equatable, Sendable {

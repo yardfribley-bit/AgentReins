@@ -18,11 +18,11 @@ enum SessionVerificationFeed {
         var effects: [HostEffect] = []
         for task in tasks {
             for card in task.cards {
-                effects.append(contentsOf: effects(card: card, session: task.session))
+                effects.append(contentsOf: effectsForCard(card, session: task.session))
             }
         }
         for row in collected {
-            effects.append(contentsOf: effects(collected: row))
+            effects.append(contentsOf: effectsForCollected(row))
         }
         if effects.count > 2000 { effects = Array(effects.suffix(2000)) }
         return effects
@@ -35,7 +35,7 @@ enum SessionVerificationFeed {
         }
     }
 
-    private static func effects(card: RealtimeCard, session: String) -> [HostEffect] {
+    private static func effectsForCard(_ card: RealtimeCard, session: String) -> [HostEffect] {
         var effects: [HostEffect] = []
         let pid = card.pid ?? card.execution?.processID
         let resource = card.resource
@@ -66,7 +66,7 @@ enum SessionVerificationFeed {
         return effects
     }
 
-    private static func effects(collected row: RealtimeCollectedRecord) -> [HostEffect] {
+    private static func effectsForCollected(_ row: RealtimeCollectedRecord) -> [HostEffect] {
         let timestamp = row.timestamp ?? Date(timeIntervalSince1970: 0)
         guard row.timestamp != nil else { return [] }
         if row.kind == "file" {
@@ -120,8 +120,8 @@ final class SessionLogIndex {
         lock.lock(); defer { lock.unlock() }
         if !scanned {
             return SessionLogSnapshot(calls: [], completions: [:], sources: [
-                SessionLogSource(agent: "Claude Code", root: "~/.claude/projects", state: scanEnabled ? "pending" : "absent", filesRead: 0, filesSkipped: 0, malformedLines: 0, note: scanEnabled ? "正在读本机 Claude Code 日志。" : "这次没有去读 ~/.claude/projects。"),
-                SessionLogSource(agent: "Codex", root: "~/.codex/sessions", state: scanEnabled ? "pending" : "absent", filesRead: 0, filesSkipped: 0, malformedLines: 0, note: scanEnabled ? "正在读本机 Codex 日志。" : "这次没有去读 ~/.codex/sessions。"),
+                SessionLogSource(agent: "Claude Code", root: "~/.claude/projects", state: Self.scanEnabled ? "pending" : "absent", filesRead: 0, filesSkipped: 0, malformedLines: 0, note: Self.scanEnabled ? "正在读本机 Claude Code 日志。" : "这次没有去读 ~/.claude/projects。"),
+                SessionLogSource(agent: "Codex", root: "~/.codex/sessions", state: Self.scanEnabled ? "pending" : "absent", filesRead: 0, filesSkipped: 0, malformedLines: 0, note: Self.scanEnabled ? "正在读本机 Codex 日志。" : "这次没有去读 ~/.codex/sessions。"),
             ])
         }
         return snapshot
