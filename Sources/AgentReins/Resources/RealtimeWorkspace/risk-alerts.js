@@ -13,7 +13,7 @@ const RULES=[
   cond:'真实文件读取证据（resource.path）∧ 路径命中凭证清单 ∧ 同一执行编号 ∧ 目的地非白名单',
   fp:'合法部署脚本和密钥轮换也会读这些路径。模型输出里出现路径、或只有描述文本，不触发。没有 resource.path 时这条不报。',
   cant:'当前没有 Endpoint Security 级文件监控；仅会话描述文本或时间窗凑出来的关联不当证据，覆盖度页标为盲区。',
-  sources:'file + network',disposition:'仅告警'},
+  sources:'file + network',disposition:'进程内读取仍只告警；PATH 参数默认拒绝'},
  {id:'S02',version:'1.0',name:'出站含密钥',mode:'告警',severity:'critical',
   desc:'出站请求头或正文里出现 API Key、Token、私钥片段。命中即打码展示。',
   cond:'content_audit：credential-outbound / private-key-outbound',
@@ -31,7 +31,7 @@ const RULES=[
   cond:'目的主机 ∉ 默认可信名单（github.com、registry.npmjs.org 等）；或按进程采样到 agent 未走代理的公网连接，其目的地（主机名或只有 IP）不在名单',
   fp:'DNS、包管理和模型供应商已在内置名单里，仍可能漏。名单不是组织授权范围。未配置授权范围时不启用「空配置=全拦」。只有 IP 的采样降为 Medium。',
   cant:'ssh 通道内传了什么看不到，只能看到连到了哪里。只有 IP、没有主机名的采样连接按 Medium 报，不臆测归属。',
-  sources:'tool + network',disposition:'仅告警'},
+  sources:'tool + network',disposition:'审计代理与 PATH 入口默认拒绝未加白外联'},
  {id:'S05',version:'1.0',name:'大体积上传',mode:'告警',severity:'high',
   desc:'单次向首次出现的域名上传超过 1 MB。',
   cond:'域名首次出现 ∧ 送出字节 > 1 MB',
@@ -553,15 +553,31 @@ function applyDecisions(alerts,decisions){
   return {...a,acked,decision:d,subject,allowlisted:d.state==='allowlisted'};
  });
 }
+function enforcementFired(a){
+ const e=a&&a.enforcement;
+ if(!e||e.fired!==true)return false;
+ return e.mechanism==='audit-proxy'||e.mechanism==='transport-wrapper';
+}
 function dispositionOf(a){
  const s=a?.decision?.state;
  if(s==='allowlisted'||a?.allowlisted)return {key:'allow',text:'已加白'};
- if(s==='blocked'||s==='gateway_block')return {key:'block',text:'已阻断'};
+ // 已阻断 only after the proxy killed the flow or the PATH wrapper refused exec.
+ if(enforcementFired(a))return {key:'block',text:'已阻断'};
+ if(s==='blocked'||s==='gateway_block')return {key:'noted',text:'已记下，未拦截'};
  if(s==='released'||s==='gateway_allow')return {key:'release',text:'已放行'};
  if(s==='escalated')return {key:'escalate',text:'转人工'};
  if(s==='confirmed')return {key:'acked',text:'已确认'};
  if(a?.acked||s==='acked'||s==='acknowledged'||s==='known')return {key:'acked',text:'已知悉'};
  return {key:'open',text:'待处置'};
+}
+function applyEnforcement(alerts,receipts){
+ const rows=list(receipts).filter(r=>r&&r.enforced===true&&r.action==='deny'&&(r.mechanism==='audit-proxy'||r.mechanism==='transport-wrapper'));
+ return list(alerts).map(a=>{
+  const subject=a.subject||subjectOf(a);
+  const hit=rows.find(r=>r.subject&&r.subject===subject);
+  if(!hit)return {...a,subject};
+  return {...a,subject,enforcement:{fired:true,mechanism:hit.mechanism,at:hit.at||null}};
+ });
 }
 function isOpen(a){return dispositionOf(a).key==='open';}
 function statusLabel(a){return dispositionOf(a).text;}
@@ -661,7 +677,7 @@ function rowHTML(a,selected,payload){
  const whenText=a.timeText!=null?a.timeText:time(a.timestamp);
  const cov=a.coverage||coverageOf(relatedEvents(a,payload));
  const covKey=/^(ok|gap|miss)$/.test(cov.key)?cov.key:'gap';
- const dispKey=/^(open|allow|block|release|escalate|acked)$/.test(disp.key)?disp.key:'open';
+ const dispKey=/^(open|allow|block|release|escalate|acked|noted)$/.test(disp.key)?disp.key:'open';
  return `<tr class="${selected===a.id?'sel':''}${disp.key==='open'?'':' acked'}" data-risk-alert="${esc(a.id)}">
   <td><span class="risk-sev ${sevOf(a.severity)}">${esc(sevText)}</span></td>
   <td><button type="button" class="risk-link" data-risk-alert="${esc(a.id)}"><div class="t1">${esc(a.title)}</div><div class="t2">${esc(a.sub)}</div></button></td>
@@ -680,7 +696,7 @@ function renderList(holder,payload,state){
 }
 /** Pure render of a given alert list (renderList passes the freshly built one). */
 function renderAlerts(holder,payload,state,built){
- const alerts=applyDecisions(list(built),state.decisions||[]);
+ const alerts=applyEnforcement(applyDecisions(list(built),state.decisions||[]),state.receipts||state.hardGate?.receipts||[]);
  const cov=state.coverage||coverageModel(payload);
  state.alerts=alerts;
  if(window.AgentReinsRisk)window.AgentReinsRisk._lastAlerts=alerts;
@@ -762,9 +778,12 @@ function renderDetail(a,payload){
  const disp=dispositionOf(a);
  const statusText=a.statusText||disp.text;
  const idAttr=esc(a.id);
+ const gateNote=enforcementFired(a)
+  ?`已阻断。执行回执来自${a.enforcement.mechanism==='audit-proxy'?'审计代理':'PATH 命令入口'}，发生在转发或 exec 之前。`
+  :'放行、阻断、加白、转人工和已知悉都写入本机 Review，重新打开仍在。这个按钮不会调用模型网关，也不会改 Network Extension。没有执行回执时状态是「已记下，未拦截」。审计代理和 PATH 入口会在动作发生前拒绝未加白的非本机外联和凭据路径；按钮追不回已经发出的连接。';
  const review=a.decision?`<p class="note">${esc(statusText)}${a.decision.inherited?' · 沿用同一规则和对象的加白':''} · ${esc(a.decision.decidedAt||'')} · ${esc(a.decision.note||'')} · 告警事实未改</p>`:'';
  return `<article class="risk-detail${disp.key==='open'?'':' acked'}">
-  <header><span class="risk-sev ${sevOf(a.severity)}">${esc(sevText)}</span><span class="risk-st ${/^(open|allow|block|release|escalate|acked)$/.test(disp.key)?disp.key:'open'}">${esc(statusText)}</span><h2>${esc(a.title)}</h2>
+  <header><span class="risk-sev ${sevOf(a.severity)}">${esc(sevText)}</span><span class="risk-st ${/^(open|allow|block|release|escalate|acked|noted)$/.test(disp.key)?disp.key:'open'}">${esc(statusText)}</span><h2>${esc(a.title)}</h2>
   <p>${esc(a.agent)} · ${esc(a.session)} · 规则 ${esc(a.ruleLabel||a.rule)} · <span class="risk-conf ${c.c}">${esc(c.t)}</span> · <span class="strength-${esc(assoc.kind)}">关联 ${esc(assoc.name)}</span>（${esc(assoc.note)}）· 执行编号 ${esc(a.call||'缺口')} · 覆盖 ${esc(covText)}</p></header>
   <p class="risk-why">${esc(a.why||'')}</p>
   ${evidenceBlock}
@@ -778,7 +797,8 @@ function renderDetail(a,payload){
    <button type="button" class="quiet" data-view="network">外网访问</button>
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
-  <p class="note">放行、阻断、加白、转人工和已知悉都记在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。</p>
+  <label class="risk-search">硬门禁允许原因（允许时必填）<textarea id="hardgate-reason" rows="2" placeholder="为什么这次可以外联，或可以读这条路径"></textarea></label>
+  <p class="risk-demo-note">${gateNote}</p>
   ${review}
   <h3>关联事件</h3>
   <ol class="risk-chain">${chain}</ol>
@@ -823,7 +843,7 @@ function renderCoverage(holder,payload,riskState){
  <p class="note" style="margin:8px 28px">绕过审计：外网列表会标出 auditBypass，以及命令里的 --noproxy / 非本机代理。风险告警 S07 只在 auditBypass=true 或已采样 viaProxy=false 时出现，不单凭参数推断。</p>
  <div class="risk-stats cov-only">
   <div class="risk-stat"><b class="${cov.proxyUp?'ok':''}">${cov.proxyUp?'在听':'未确认'}</b><span>审计代理 18891</span></div>
-  <div class="risk-stat"><b>S01</b><span>文件读 · 盲区（无 ES）</span></div>
+  <div class="risk-stat"><b>S01</b><span>进程内读文件仍是盲区；PATH 参数会拒绝凭据路径</span></div>
   <div class="risk-stat"><b>S06</b><span>配置监看 · 未接入</span></div>
   <div class="risk-stat"><b>${socketCoverage().state==='sampling'?'采样中':'看不到'}</b><span>未走代理流量 · ${socketCoverage().state==='sampling'?esc(socketCoverage().p95Text):'不估算'}</span></div>
  </div>
@@ -858,7 +878,7 @@ function packFields(a){
 }
 window.AgentReinsRisk={
  RULES,buildAlerts,applyDecisions,renderList,renderAlerts,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,isProvenShellParent,
- isAllowedHost,socketAlerts,subjectOf,dispositionOf,isOpen,relatedEvents,coverageOf,
+ isAllowedHost,socketAlerts,subjectOf,dispositionOf,enforcementFired,applyEnforcement,isOpen,relatedEvents,coverageOf,
  _lastAlerts:[]
 };
 })();

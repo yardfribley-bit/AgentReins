@@ -76,6 +76,9 @@ jobs:
           node Tests/Manual/network/test_shell_child_failures.cjs
           echo "JS_TESTS_PASSED=8"
 
+      - name: Hard-gate policy (default deny, append-only audit)
+        run: python3 tools/hardgate/test_policy.py -v
+
       - name: Run MCP supervisor unit tests (incl. Python <-> Swift MCP core parity)
         env:
           # test_swift_parity.py builds Sources/AgentReinsCore/Core*.swift with swiftc; never skip it in CI.

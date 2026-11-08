@@ -86,6 +86,33 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 pushReviewDecisions(to: message.webView, message: nil)
                 return
             }
+            if action == "loadHardGate" {
+                pushHardGate(to: message.webView, message: nil)
+                return
+            }
+            if action == "decideHardGate" {
+                let op = body["op"] as? String ?? ""
+                let subject = String(((body["subject"] as? String) ?? "").prefix(300))
+                let requestedKind = body["kind"] as? String ?? ""
+                let kind = requestedKind == "credential-read" || requestedKind == "egress"
+                    ? requestedKind
+                    : (subject.hasPrefix("path:") ? "credential-read" : "egress")
+                let reason = String(((body["reason"] as? String) ?? "").prefix(500))
+                do {
+                    if op == "allow" {
+                        try HardGateStore.approve(subject: subject, kind: kind, reason: reason)
+                        pushHardGate(to: message.webView, message: "已写入允许名单")
+                    } else if op == "deny" {
+                        try HardGateStore.deny(subject: subject, kind: kind, reason: reason)
+                        pushHardGate(to: message.webView, message: "保持拒绝。这次点击没有新的执行回执。")
+                    }
+                } catch HardGateStore.Failure.reasonRequired {
+                    pushHardGate(to: message.webView, message: "允许必须写原因，未写入允许名单")
+                } catch {
+                    pushHardGate(to: message.webView, message: "硬门禁决定没有写上")
+                }
+                return
+            }
             if action == "loadMCPAudit" {
                 pushMCPAudit(to: message.webView)
                 return
@@ -319,6 +346,28 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                     arguments: ["result": result],
                     in: nil, contentWorld: .page
                 )
+            }
+        }
+
+        private func pushHardGate(to webView: WKWebView?, message: String?) {
+            let snap = HardGateStore.snapshot()
+            var result: [String: Any] = [
+                "action": "hardGate",
+                "inbox": dropNulls(snap.inbox),
+                "receipts": dropNulls(snap.receipts),
+                "allowlist": dropNulls(snap.allowlist),
+            ]
+            if let message { result["message"] = message }
+            pushHostResult(to: webView, result: result)
+        }
+
+        private func dropNulls(_ rows: [[String: Any]]) -> [[String: Any]] {
+            rows.map { row in
+                var out: [String: Any] = [:]
+                for (key, value) in row where !(value is NSNull) {
+                    out[key] = value
+                }
+                return out
             }
         }
 

@@ -59,6 +59,7 @@ final class WorkBuddyNetworkCapture: ObservableObject {
         var environment = ProcessInfo.processInfo.environment
         environment["AGENTREINS_WORKBUDDY_NETWORK_JSONL"] = captureURL.path
         environment["AGENTREINS_CAPTURE_PARENT_PID"] = String(ProcessInfo.processInfo.processIdentifier)
+        environment["AGENTREINS_HARDGATE_POLICY"] = addon.deletingLastPathComponent().appendingPathComponent("hardgate_policy.py").path
         process.environment = environment
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice

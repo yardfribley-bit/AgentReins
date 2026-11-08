@@ -42,16 +42,38 @@ assert.match(holder.innerHTML, /阻断/);
 assert.match(holder.innerHTML, /加白/);
 assert.match(holder.innerHTML, /转人工/);
 assert.match(holder.innerHTML, /标记已知悉/);
-assert.match(holder.innerHTML, /本机处置记录/);
-assert.match(holder.innerHTML, /连接仍按原路径进行/);
-assert.doesNotMatch(holder.innerHTML, /不会调用模型网关|不会假装|不会因此被拦住/);
+assert.match(holder.innerHTML, /不会调用模型网关/);
+assert.match(holder.innerHTML, /已记下，未拦截/);
+assert.doesNotMatch(holder.innerHTML, /连接仍按原路径进行|不会假装|不会因此被拦住/);
 assert.match(holder.innerHTML, /关联事件/);
 assert.match(holder.innerHTML, /Relation 缺口/);
 assert.doesNotMatch(holder.innerHTML, /关联：已确认/);
 assert.doesNotMatch(holder.innerHTML, /已阻断连接|网关已拦截|连接已被阻断/);
 const blocked = risk.applyDecisions(alerts, [{ id: s04.id, state: 'blocked', decidedAt: '2026-11-08T01:03:00Z' }]);
-assert.equal(risk.dispositionOf(blocked.find(a => a.id === s04.id)).text, '已阻断');
-assert.equal(risk.isOpen(blocked.find(a => a.id === s04.id)), false);
+const reviewOnly = blocked.find(a => a.id === s04.id);
+assert.equal(risk.dispositionOf(reviewOnly).text, '已记下，未拦截');
+assert.notEqual(risk.dispositionOf(reviewOnly).text, '已阻断');
+assert.equal(risk.isOpen(reviewOnly), false);
+const reviewHolder = { innerHTML: '' };
+risk.renderList(reviewHolder, payload, { filter: { sev: 'all', rule: 'all', agent: 'all', disp: 'all', q: '' }, selected: s04.id, decisions: [{ id: s04.id, state: 'blocked' }] });
+assert.match(reviewHolder.innerHTML, /risk-st noted/);
+assert.match(reviewHolder.innerHTML, /已记下，未拦截/);
+assert.doesNotMatch(reviewHolder.innerHTML, /risk-st block/);
+const enforced = risk.applyEnforcement(blocked, [{ subject, action: 'deny', enforced: true, mechanism: 'audit-proxy' }]);
+assert.equal(risk.dispositionOf(enforced.find(a => a.id === s04.id)).text, '已阻断');
+assert.equal(risk.enforcementFired(enforced.find(a => a.id === s04.id)), true);
+const notFired = risk.applyEnforcement(blocked, [{ subject, action: 'deny', enforced: false, mechanism: 'audit-proxy' }]);
+assert.equal(risk.dispositionOf(notFired.find(a => a.id === s04.id)).text, '已记下，未拦截');
+const reviewMechanism = risk.applyEnforcement(blocked, [{ subject, action: 'deny', enforced: true, mechanism: 'review' }]);
+assert.equal(risk.dispositionOf(reviewMechanism.find(a => a.id === s04.id)).text, '已记下，未拦截');
+const enforcedHolder = { innerHTML: '' };
+risk.renderList(enforcedHolder, payload, {
+  filter: { sev: 'all', rule: 'all', agent: 'all', disp: 'all', q: '' }, selected: s04.id,
+  decisions: [{ id: s04.id, state: 'blocked' }],
+  receipts: [{ subject, action: 'deny', enforced: true, mechanism: 'transport-wrapper' }],
+});
+assert.match(enforcedHolder.innerHTML, /risk-st block/);
+assert.match(enforcedHolder.innerHTML, /已阻断/);
 
 const events = risk.relatedEvents(s04, payload);
 assert.ok(events.some(e => e.layer === 'model' && e.relation === 'gap'), 'no invented model event');
@@ -59,6 +81,7 @@ assert.ok(events.some(e => e.layer === 'network' && e.relation === 'explicit'));
 
 const rules = { innerHTML: '' };
 risk.renderRules(rules, payload, { decisions: [] });
+assert.doesNotMatch(rules.innerHTML, /阻断/);
 assert.match(rules.innerHTML, /v1\.1/);
 assert.match(rules.innerHTML, /误报/);
 assert.match(rules.innerHTML, /S06/);
@@ -187,8 +210,9 @@ assert.match(about.innerHTML, /短摘录/);
 assert.match(about.innerHTML, /心跳、没采到用户原话/);
 assert.match(about.innerHTML, /不会为了凑容量/);
 assert.doesNotMatch(about.innerHTML, /2GB|14 天/);
-assert.match(about.innerHTML, /本机处置记录/);
-assert.match(about.innerHTML, /连接仍按原路径进行/);
+assert.match(about.innerHTML, /已记下，未拦截/);
+assert.match(about.innerHTML, /审计代理拒绝转发/);
+assert.doesNotMatch(about.innerHTML, /连接仍按原路径进行/);
 assert.match(about.innerHTML, /<h3>下一步<\/h3>/);
 assert.match(about.innerHTML, /Endpoint Security/);
 assert.match(about.innerHTML, /Network Extension/);
@@ -208,5 +232,24 @@ assert.match(about.innerHTML, /本机安装包</);
 assert.doesNotMatch(about.innerHTML, /<img|onerror|script/);
 pages.renderAbout(about, null);
 assert.match(about.innerHTML, />本机安装包</);
+
+const heartbeat = { subject: 'host:beat.example', kind: 'egress', action: 'deny', inbox: true, heartbeat: true, tier: 'keep', enforced: true, mechanism: 'audit-proxy' };
+const firstHost = { subject: 'host:new.example', kind: 'egress', action: 'deny', inbox: true, heartbeat: false, tier: 'keep', enforced: true, mechanism: 'audit-proxy', detail: '第一次外联到新主机' };
+const firstPath = { subject: 'path:/tmp/proj/.env', kind: 'credential-read', action: 'deny', inbox: true, heartbeat: false, tier: 'keep', enforced: false, detail: '第一次读取凭据路径' };
+const repeat = { subject: 'host:old.example', kind: 'egress', action: 'deny', inbox: false, heartbeat: false, tier: 'keep', enforced: true, mechanism: 'audit-proxy' };
+const mixed = pages.inboxItems(filePayload, [], { inbox: [heartbeat, firstHost, firstPath, repeat] });
+assert.equal(mixed.filter(i => i.gate).length, 2);
+assert.equal(mixed.filter(i => i.bucket && i.bucket.id === 'confirm').length, 1);
+const firedInbox = { innerHTML: '' };
+pages.renderInbox(firedInbox, { tasks: [], artifacts: [] }, { inboxId: 'gate:host:new.example', hardGate: { inbox: [firstHost] } });
+assert.match(firedInbox.innerHTML, /已阻断/);
+assert.match(firedInbox.innerHTML, /允许/);
+assert.match(firedInbox.innerHTML, /保持拒绝/);
+const quietInbox = { innerHTML: '' };
+pages.renderInbox(quietInbox, { tasks: [], artifacts: [] }, { inboxId: 'gate:path:/tmp/proj/.env', hardGate: { inbox: [firstPath] } });
+assert.match(quietInbox.innerHTML, /已记下，未拦截/);
+assert.doesNotMatch(quietInbox.innerHTML, /已阻断/);
+const closed = pages.inboxItems({ tasks: [] }, [], { inbox: [firstHost], allowlist: [{ subject: 'host:new.example', actor: 'user', reason: '发布需要', kind: 'egress' }] });
+assert.equal(closed.filter(i => i.gate).length, 0);
 
 console.log('runtime console ok');

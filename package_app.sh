@@ -80,6 +80,8 @@ copy_helper AgentReinsKeychainHelper
 cp "$PROJECT_DIR/Resources/agentguard-memory-scan.py" "$APP_BUNDLE/Contents/Resources/"
 cp "$INTEL_BIN_DIR/AgentReins_AgentReins.bundle/Resources/workbuddy_network_capture.py" \
   "$APP_BUNDLE/Contents/Resources/"
+cp "$PROJECT_DIR/Sources/AgentReins/Resources/hardgate_policy.py" \
+  "$APP_BUNDLE/Contents/Resources/hardgate_policy.py"
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
 cp -R "$PROJECT_DIR/BrowserExtension" "$APP_BUNDLE/Contents/Resources/BrowserExtension"
 # Shared RealtimeWorkspace JS rule engine + supervisor MCP (same engine as live UI).
@@ -180,7 +182,8 @@ for res in \
   agentreins-mcp/redact_secrets.py \
   agentreins-mcp/redact_vectors.json \
   RealtimeWorkspace/risk-alerts.js \
-  RealtimeWorkspace/network-view.js; do
+  RealtimeWorkspace/network-view.js \
+  hardgate_policy.py; do
   [[ -s "$APP_BUNDLE/Contents/Resources/$res" ]] || guard_fail "missing or empty Contents/Resources/$res"
 done
 if grep -l -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN -e AGENTREINS_REDACT_SELFTEST \

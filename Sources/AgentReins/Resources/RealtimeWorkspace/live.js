@@ -8,7 +8,7 @@ const statuses={running:'进行中',awaiting_confirmation:'等我确认',complet
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
-const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
+const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false,hardGate:{inbox:[],receipts:[],allowlist:[]},hardGateLoaded:false};
 const consoleState={fileId:null,reasonId:null,inboxId:null,inboxBucket:'work',fileMode:'list',returnNote:'',returnInvalid:false};
 const CONSOLE_VIEWS=['alerts','rules','coverage','inbox','files','reason','supervise','about'];
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
@@ -351,6 +351,13 @@ function collectorPhrase(){
  if(health.length)return '已收到采集源状态';
  return '采集未启动';
 }
+function ensureHardGate(){
+ if(riskState.hardGateLoaded)return;
+ const handler=window.webkit?.messageHandlers?.agentreins;
+ if(!handler){riskState.hardGateLoaded=true;return;}
+ handler.postMessage({action:'loadHardGate'});
+ riskState.hardGateLoaded=true;
+}
 function ensureReviewDecisions(){
  if(riskState.decisionsLoaded)return;
  const handler=window.webkit?.messageHandlers?.agentreins;
@@ -385,6 +392,7 @@ function requestRiskTransports(){
 function renderRisk(){
  const api=window.AgentReinsRisk;if(!api){$('alerts-view').innerHTML=empty('风险告警模块未加载。');return;}
  ensureReviewDecisions();
+ ensureHardGate();
  if(view==='coverage'||view==='supervise')ensureMCPAudit();
  if(view==='alerts'||view==='rules'||view==='coverage'||view==='files')requestRiskTransports();
  if(view==='alerts')api.renderList($('alerts-view'),shown,riskState);
@@ -399,10 +407,10 @@ function renderConsole(){
  const api=window.AgentReinsConsole;if(!api)return;
  if(view==='files')api.renderFiles($('files-view'),shown,consoleState);
  else if(view==='reason')api.renderReason($('reason-view'),shown,{...consoleState,decisions:riskState.decisions});
- else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions});
+ else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions,hardGate:riskState.hardGate});
  else if(view==='supervise')api.renderSupervise($('supervise-view'),shown,riskState);
  else if(view==='about')api.renderAbout($('about-view'),window.agentreinsInstall);
- const inbox=api.inboxItems?.(shown,riskState.decisions)||[];
+ const inbox=api.inboxItems?.(shown,riskState.decisions,{hardGate:riskState.hardGate})||[];
  const left=inbox.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const ib=$('inbox-badge');if(ib){ib.hidden=!left;ib.textContent=String(left);}
 }
@@ -506,6 +514,11 @@ window.agentreinsHostResult=result=>{
   riskState.decisions=result.decisions;riskState.decisionsLoaded=true;
   if(CONSOLE_VIEWS.includes(view))renderRisk();
  }
+ if(result?.action==='hardGate'){
+  riskState.hardGate={inbox:result.inbox||[],receipts:result.receipts||[],allowlist:result.allowlist||[]};
+  riskState.hardGateLoaded=true;
+  if(CONSOLE_VIEWS.includes(view))renderRisk();
+ }
  if(result?.action==='evidenceExported'&&result.path){/* toast already shows the path */}
  if(result?.action==='diskUsage'){
   riskState.disk=result;
@@ -571,9 +584,14 @@ document.addEventListener('click',e=>{
   const api=window.AgentReinsRisk;const alert=(riskState.alerts||[]).find(a=>a.id===el.dataset.riskId)||api?.buildAlerts?.(shown)?.find(a=>a.id===el.dataset.riskId);
   if(!alert){toast('找不到这条告警');return;}
   const subject=api?.subjectOf?.(alert)||'';
-  if(state==='allowlisted'&&!subject){toast('没有可加白的主机或路径，未写入');return;}
+  if((state==='allowlisted'||state==='blocked'||state==='gateway_block')&&!subject){toast('没有可处置的主机或路径，未写入硬门禁');return;}
+  const reason=(document.getElementById('hardgate-reason')?.value||'').trim();
+  if(state==='allowlisted'&&!reason){toast('允许必须写原因，未写入允许名单');return;}
+  const kind=subject.startsWith('path:')?'credential-read':'egress';
+  if(state==='allowlisted')bridge('decideHardGate',{op:'allow',subject,kind,reason},{silent:true});
+  if(state==='blocked'||state==='gateway_block')bridge('decideHardGate',{op:'deny',subject,kind,reason:reason||'用户在告警上选择阻断'},{silent:true});
   const stored=state==='acknowledged'||state==='known'?'acked':state==='gateway_allow'?'released':state==='gateway_block'?'blocked':state;
-  const note=(stored==='released'||stored==='blocked')?'已记入本机 Review。放行和阻断目前是处置记录，连接仍按原路径进行。':'';
+  const note=(stored==='released'||stored==='blocked')?'已记入本机 Review。未调用模型网关，未改 Network Extension。没有执行回执时不显示为已拦住。':'';
   const evidenceText=api?.evidenceTextFor?.(alert)||'';
   const row={id:alert.id,state:stored,note,subject,rule:alert.rule,decidedAt:new Date().toISOString(),effect:stored.startsWith('gateway_')?'gateway-demo':'persisted'};
   riskState.decisions=[row,...riskState.decisions.filter(d=>d.id!==alert.id)];
@@ -598,6 +616,17 @@ document.addEventListener('click',e=>{
  else if(el.dataset.retentionClean!=null){
   const sent=bridge('applyRetention',{},{silent:true});
   if(!sent)toast('当前没有原生通道，清理只在 AgentReins 里执行');
+ }
+ else if(el.dataset.hardgateDecide){
+  const op=el.dataset.hardgateDecide==='allow'?'allow':'deny';
+  const subject=el.dataset.hardgateSubject||'';
+  const kind=el.dataset.hardgateKind||(subject.startsWith('path:')?'credential-read':'egress');
+  const reason=(document.getElementById('hardgate-reason')?.value||'').trim();
+  if(op==='allow'&&!reason){consoleState.hardGateReasonInvalid=true;toast('允许必须写原因');renderConsole();return;}
+  consoleState.hardGateReasonInvalid=false;
+  consoleState.hardGateReason=reason;
+  const sent=bridge('decideHardGate',{op,subject,kind,reason:reason||'保持拒绝'},{silent:true});
+  if(!sent)toast('当前没有原生通道，允许名单没有写入');
  }
  else if(el.dataset.acceptDecide){
   const state=el.dataset.acceptDecide;

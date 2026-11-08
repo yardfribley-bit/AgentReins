@@ -1,5 +1,10 @@
 #!/usr/bin/env python3
-"""Agent-only PATH entry. No permission decisions, shell parsing or proxy changes."""
+"""Agent-only PATH entry. Supervised agents hit the hard gate before exec.
+
+Non-loopback destinations and credential-like paths are denied unless a user
+allowlist entry has a reason. The real binary is not executed on deny.
+Unguarded shells (no AGENTREINS_TRANSPORT_AGENT) are unchanged.
+"""
 import datetime,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
 BASE=pathlib.Path(__file__).resolve().parent
 ENCRYPTED_TOOLS={'ssh','scp','sftp','rsync'}
@@ -243,6 +248,59 @@ def content_audit(evidence, request_text='', response_text='', trace_dir=None):
             traces.append(helper)
     return module.audit(request_text, response_text, bool(response_text) or bool(traces), host, scope='transport_text', trace_files=traces)
 
+_hard_gate_mod=None
+def load_hard_gate():
+    global _hard_gate_mod
+    if _hard_gate_mod is not None:
+        return _hard_gate_mod
+    override=os.environ.get('AGENTREINS_HARDGATE_POLICY')
+    here=pathlib.Path(__file__).resolve()
+    candidates=[]
+    if override:
+        candidates.append(pathlib.Path(override))
+    if len(here.parents)>2:
+        candidates.append(here.parents[2]/'Sources'/'AgentReins'/'Resources'/'hardgate_policy.py')
+    candidates.append(here.with_name('hardgate_policy.py'))
+    for path in candidates:
+        if path.is_file():
+            spec=importlib.util.spec_from_file_location('agentreins_hardgate', path)
+            module=importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _hard_gate_mod=module
+            return module
+    raise FileNotFoundError('hardgate_policy.py')
+
+def fallback_must_deny(args):
+    """Fail closed when the policy module cannot be loaded."""
+    blob=' '.join(str(a) for a in args)
+    if re.search(r'(?i)(^|[\s/\"\'=])\.env(\.|$|[\s/\"\'])|\.ssh/|\.aws/|id_rsa|id_ed25519|keychain|\.config/gcloud|\.azure/|\.kube/config|\.docker/config\.json|(^|[\s/])\.netrc(\s|$)', blob):
+        return True
+    for arg in args:
+        text=str(arg)
+        if '://' not in text:
+            continue
+        if re.search(r'(?i)^file:', text):
+            return True
+        if re.search(r'(?i)://(\[::1\]|127(?:\.\d{1,3}){3}|localhost)(?::|/|$)', text):
+            continue
+        return True
+    return False
+
+def transport_hard_gate(tool, args, env):
+    """Return 126 when this supervised command must not run. None to continue."""
+    try:
+        gate=load_hard_gate()
+        code,_rows=gate.commit_wrapper(tool, args, os.getcwd(), str(pathlib.Path.home()), extra_destination=command_destination(tool, args, env), env=env)
+    except Exception:
+        if fallback_must_deny(args):
+            sys.stderr.write('AgentReins 硬门禁模块没有加载，这条非本机外联或凭据路径不会执行。\n')
+            return 126
+        return None
+    if code:
+        sys.stderr.write('AgentReins 已拒绝这条命令，真实程序不会执行。允许需要在待我处理里写原因。\n')
+        return code
+    return None
+
 def main():
     tool=pathlib.Path(sys.argv[0]).name
     if not entry_allowed(tool):raise SystemExit('Invalid transport entry')
@@ -251,6 +309,9 @@ def main():
     if pathlib.Path(real).resolve().parent==BASE/'bin':raise SystemExit('Recursive transport entry')
     agent=env.get('AGENTREINS_TRANSPORT_AGENT')
     if agent not in ('WorkBuddy','Codex','Cursor'):os.execv(real,[real,*args])
+    blocked=transport_hard_gate(tool, args, env)
+    if blocked:
+        return blocked
     default_root=pathlib.Path.home()/'Library'/'Application Support'/'AgentGuard'/'transport-audit'
     root=pathlib.Path(env.get('AGENTREINS_TRANSPORT_ROOT') or default_root)
     try:
