@@ -1,3 +1,4 @@
+import AgentReinsCore
 import CryptoKit
 import Foundation
 import SQLite3
@@ -2053,23 +2054,25 @@ final class EvidenceDatabase: @unchecked Sendable {
         var rows: [RetentionCandidate] = []
         while sqlite3_step(statement) == SQLITE_ROW {
             guard let key = text(statement, 0) else { continue }
-            let fields = EvidenceValueFields(
-                kind: text(statement, 3) ?? "",
-                op: text(statement, 4) ?? "",
-                ruleId: text(statement, 5) ?? "",
-                action: text(statement, 6) ?? "",
-                severity: text(statement, 7) ?? "",
-                source: text(statement, 8) ?? "",
-                userIntent: text(statement, 9) ?? "",
-                command: text(statement, 10) ?? "",
-                path: text(statement, 11) ?? "",
-                toolName: text(statement, 12) ?? "",
-                toolCallId: text(statement, 13) ?? "",
-                modelText: text(statement, 14) ?? "",
-                processId: sqlite3_column_type(statement, 15) == SQLITE_NULL ? nil : Int(sqlite3_column_int(statement, 15)),
-                payloadBytes: Int(sqlite3_column_int(statement, 2))
-            )
-            rows.append(RetentionCandidate(key: key, observedAt: sqlite3_column_double(statement, 1), tier: EvidenceValue.tier(fields)))
+            let processId: Int? = sqlite3_column_type(statement, 15) == SQLITE_NULL ? nil : Int(sqlite3_column_int(statement, 15))
+            var fields = EvidenceValueFields()
+            fields.kind = text(statement, 3) ?? ""
+            fields.op = text(statement, 4) ?? ""
+            fields.ruleId = text(statement, 5) ?? ""
+            fields.action = text(statement, 6) ?? ""
+            fields.severity = text(statement, 7) ?? ""
+            fields.source = text(statement, 8) ?? ""
+            fields.userIntent = text(statement, 9) ?? ""
+            fields.command = text(statement, 10) ?? ""
+            fields.path = text(statement, 11) ?? ""
+            fields.toolName = text(statement, 12) ?? ""
+            fields.toolCallId = text(statement, 13) ?? ""
+            fields.modelText = text(statement, 14) ?? ""
+            fields.processId = processId
+            fields.payloadBytes = Int(sqlite3_column_int(statement, 2))
+            let tier = EvidenceValue.tier(fields)
+            let observedAt = sqlite3_column_double(statement, 1)
+            rows.append(RetentionCandidate(key: key, observedAt: observedAt, tier: tier))
         }
         return rows
     }
@@ -2198,38 +2201,58 @@ final class EvidenceDatabase: @unchecked Sendable {
     /// Full session text is not what we store. The agent file remains the place to read it on demand.
     private func thinForStorage(_ event: GuardEvent) -> GuardEvent {
         let modelText = [event.modelResponse, event.modelPrompt].compactMap { $0 }.joined(separator: "\n")
-        let fields = EvidenceValueFields(
-            kind: event.kind, op: event.op, ruleId: event.ruleId, action: event.action,
-            severity: event.severity, source: event.source ?? "", userIntent: event.userIntent ?? "",
-            command: event.command ?? "", path: event.path, toolName: event.toolName ?? "",
-            toolCallId: event.toolCallId ?? "", modelText: modelText,
-            processId: event.processId.map(Int.init), payloadBytes: modelText.utf8.count + (event.command?.utf8.count ?? 0) + (event.fileDiff?.utf8.count ?? 0)
-        )
+        let commandBytes = event.command?.utf8.count ?? 0
+        let diffBytes = event.fileDiff?.utf8.count ?? 0
+        var fields = EvidenceValueFields()
+        fields.kind = event.kind
+        fields.op = event.op
+        fields.ruleId = event.ruleId
+        fields.action = event.action
+        fields.severity = event.severity
+        fields.source = event.source ?? ""
+        fields.userIntent = event.userIntent ?? ""
+        fields.command = event.command ?? ""
+        fields.path = event.path
+        fields.toolName = event.toolName ?? ""
+        fields.toolCallId = event.toolCallId ?? ""
+        fields.modelText = modelText
+        fields.processId = event.processId.map { Int($0) }
+        fields.payloadBytes = modelText.utf8.count + commandBytes + diffBytes
         let tier = EvidenceValue.tier(fields)
         let cap = tier == .keep ? EvidenceValue.keepFieldCap : EvidenceValue.excerptLimit
-        func cut(_ value: String?) -> String? {
-            guard let value, value.count > cap else { return value }
-            if let window = EvidenceValue.mismatchWindow(value, limit: cap) { return window }
-            return String(value.prefix(cap))
-        }
+        let command = Self.clip(event.command, cap: cap)
+        let userIntent = Self.clip(event.userIntent, cap: cap)
+        let modelDecision = Self.clip(event.modelDecision, cap: cap)
+        let modelReasoning = Self.clip(event.modelReasoning, cap: cap)
+        let modelPrompt = Self.clip(event.modelPrompt, cap: cap)
+        let modelResponse = Self.clip(event.modelResponse, cap: cap)
+        let beforeContent = Self.clip(event.beforeContent, cap: cap)
+        let afterContent = Self.clip(event.afterContent, cap: cap)
+        let fileDiff = Self.clip(event.fileDiff, cap: cap)
         return GuardEvent(
             id: event.id, kind: event.kind, ruleId: event.ruleId, path: event.path,
-            command: cut(event.command), agent: event.agent, op: event.op, severity: event.severity,
+            command: command, agent: event.agent, op: event.op, severity: event.severity,
             ts: event.ts, action: event.action, sessionId: event.sessionId, traceId: event.traceId,
-            turnId: event.turnId, toolCallId: event.toolCallId, userIntent: cut(event.userIntent),
-            modelDecision: cut(event.modelDecision), modelReasoning: cut(event.modelReasoning),
-            modelPrompt: cut(event.modelPrompt), modelResponse: cut(event.modelResponse),
+            turnId: event.turnId, toolCallId: event.toolCallId, userIntent: userIntent,
+            modelDecision: modelDecision, modelReasoning: modelReasoning,
+            modelPrompt: modelPrompt, modelResponse: modelResponse,
             toolName: event.toolName, model: event.model, inputTokens: event.inputTokens,
             outputTokens: event.outputTokens, cachedTokens: event.cachedTokens,
             reasoningTokens: event.reasoningTokens, costUSD: event.costUSD,
-            beforeContent: cut(event.beforeContent), afterContent: cut(event.afterContent),
-            fileDiff: cut(event.fileDiff), codeFindings: event.codeFindings, source: event.source,
+            beforeContent: beforeContent, afterContent: afterContent,
+            fileDiff: fileDiff, codeFindings: event.codeFindings, source: event.source,
             attributionConfidence: event.attributionConfidence, attributionMethod: event.attributionMethod,
             processId: event.processId, parentProcessId: event.parentProcessId,
             localAddress: event.localAddress, remoteHost: event.remoteHost, remotePort: event.remotePort,
             remoteDomain: event.remoteDomain, startedAt: event.startedAt, endedAt: event.endedAt,
             durationMS: event.durationMS, relatedPath: event.relatedPath
         )
+    }
+
+    private static func clip(_ value: String?, cap: Int) -> String? {
+        guard let value, value.count > cap else { return value }
+        if let window = EvidenceValue.mismatchWindow(value, limit: cap) { return window }
+        return String(value.prefix(cap))
     }
 
     static func fileBytes(_ url: URL) -> Int64 {
