@@ -71,9 +71,9 @@ jobs:
           node Tests/Manual/network/test_socket_ledger_view.cjs
           node Tests/Manual/network/test_xss_network_views.cjs
           ESC_MUTANT_MIN_KILL=33 node tools/mutate_esc_calls.cjs Sources/AgentReins/Resources/RealtimeWorkspace/network-view.js Tests/Manual/network/test_xss_network_views.cjs
+          node Tests/Manual/network/test_runtime_console.cjs
           node Tests/Manual/network/test_phase2_views.cjs
           node Tests/Manual/network/test_shell_child_failures.cjs
-          node Tests/Manual/network/test_runtime_console.cjs
           echo "JS_TESTS_PASSED=8"
 
       - name: Run MCP supervisor unit tests (incl. Python <-> Swift MCP core parity)

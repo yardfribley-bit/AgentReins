@@ -17,6 +17,7 @@ enum RealtimeWorkspaceTransport {
         let observing: Bool, truncated: Bool
         let error: String?, continuity: String?
         let count: Int, unattributed: Int
+        let verification: String
     }
     static func publicationKey(_ payload: RealtimeWorkspacePayload) -> PublicationKey {
         PublicationKey(tasks: payload.tasks.map { $0.id + "\u{0}" + $0.projectionRevision },
@@ -24,7 +25,8 @@ enum RealtimeWorkspaceTransport {
             processes: payload.processes, health: payload.health, artifacts: payload.artifacts,
             locations: payload.ipGeolocations, readTaskIDs: payload.readTaskIDs,
             observing: payload.observing, truncated: payload.truncated, error: payload.persistenceError,
-            continuity: payload.continuityNotice, count: payload.collectedCount, unattributed: payload.unattributedCount)
+            continuity: payload.continuityNotice, count: payload.collectedCount, unattributed: payload.unattributedCount,
+            verification: payload.verification?.fingerprint ?? "none")
     }
     struct DetailDelta: Encodable {
         let taskID: String

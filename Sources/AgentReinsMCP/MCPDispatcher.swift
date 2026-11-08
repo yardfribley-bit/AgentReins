@@ -68,6 +68,14 @@ enum MCPDispatcher {
          "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
         ["name": "list_mcp_audit", "description": "HMAC-chained MCP read audit.",
          "inputSchema": ["type": "object", "properties": schemaProps(), "additionalProperties": false]],
+        ["name": "list_tool_calls", "description": "Read-only tool-call cards: reasoning excerpt, tool name and arguments, host effects joined by time and process. Does not copy session logs into evidence.",
+         "inputSchema": ["type": "object", "properties": schemaProps([
+            "agent": ["type": "string"] as [String: Any],
+            "session_id": ["type": "string"] as [String: Any],
+         ]), "additionalProperties": false]],
+        ["name": "get_session_verification", "description": "Read-only verification for one session: cards, unclaimed file changes, completion checklist.",
+         "inputSchema": ["type": "object", "properties": ["session_id": ["type": "string"]],
+                         "required": ["session_id"], "additionalProperties": false]],
     ]
 
     /// Returns a JSON-RPC response object, or nil when `message` is a notification (no `id`).
@@ -184,7 +192,7 @@ enum MCPDispatcher {
         if banned.contains(where: { lower.contains($0) }) {
             throw NSError(domain: "AgentReinsMCP", code: 1, userInfo: [NSLocalizedDescriptionKey: "write tools are not available"])
         }
-        let allowed = Set(["list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit"])
+        let allowed = Set(["list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit", "list_tool_calls", "get_session_verification"])
         guard allowed.contains(name) else {
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown tool: \(name)"])
         }
@@ -212,7 +220,7 @@ enum MCPDispatcher {
         // A pending Keychain must not sit inside flush (the helper wait is up to 20s) and then
         // blow the HTTP timeout. The page is the log as it already is.
         if name == "list_mcp_audit" && keyState != "pending" { Ctx.flushAudit() }
-        let needsRecords = name == "list_agents" || name == "list_alerts" || name == "get_execution" || name == "list_network"
+        let needsRecords = name == "list_agents" || name == "list_alerts" || name == "get_execution" || name == "list_network" || name == "list_tool_calls" || name == "get_session_verification"
         let loaded: Transport.Load
         if needsRecords {
             loaded = Transport.loadReporting(deadline: deadline, isCancelled: isCancelled)
@@ -258,6 +266,13 @@ enum MCPDispatcher {
                 coverage["readStopped"] = str(validation["statusText"]) ?? "read budget exceeded"
             }
             return deliver(coverage, loaded, keyState)
+        case "list_tool_calls":
+            return deliver(SessionVerificationTool.list(records, args: args, offset: page.offset, limit: page.limit), loaded, keyState)
+        case "get_session_verification":
+            guard let sessionID = str(args["session_id"]), !sessionID.isEmpty else {
+                throw NSError(domain: "AgentReinsMCP", code: 3, userInfo: [NSLocalizedDescriptionKey: "session_id required"])
+            }
+            return deliver(SessionVerificationTool.session(records, sessionID: sessionID), loaded, keyState)
         case "list_mcp_audit":
             let limit = page.limit ?? 30
             let paged = AuditPage.page(log: Paths.auditLog, seal: Paths.auditSeal,

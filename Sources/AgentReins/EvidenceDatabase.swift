@@ -1914,7 +1914,16 @@ final class EvidenceDatabase: @unchecked Sendable {
             links[key] = storedHash
         }
         if hashes.isEmpty { return true }
-        var visited = Set<String>(), cursor = links["GENESIS"]
+        var cursor = links["GENESIS"]
+        if cursor == nil {
+            // A prefix of the chain was compressed into an archive. One dangling
+            // previous hash is that archived tip. A hole in the middle leaves
+            // more than one and still fails.
+            let dangling = Set(links.keys).subtracting(hashes).subtracting(["GENESIS"])
+            guard dangling.count == 1, let root = dangling.first else { return false }
+            cursor = links[root]
+        }
+        var visited = Set<String>()
         while let hash = cursor, visited.insert(hash).inserted { cursor = links[hash] }
         return visited == hashes
     }

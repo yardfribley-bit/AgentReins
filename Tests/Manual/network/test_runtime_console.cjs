@@ -90,21 +90,34 @@ assert.match(files.innerHTML, /未采到 diff|之前/);
 assert.match(files.innerHTML, /S08 敏感文件/);
 assert.doesNotMatch(files.innerHTML, /AL-0|今日 Critical 3/);
 
-const reason = pages.reasoningRows(filePayload);
-assert.ok(reason.some(r => r.relation === 'explicit' && r.model && r.model.id === 'm1'));
-assert.ok(reason.some(r => r.relation === 'gap'));
-const paired = reason.find(r => r.relation === 'explicit');
-assert.equal(pages.alignmentVerdict(paired, []).label, '可对照');
-assert.equal(pages.alignmentVerdict({
-  relation: 'explicit', basis: '同一执行编号',
-  model: { call: 'c9', output: '只读取，不联网' },
-  execs: [{ execution: { command: 'curl https://cdn.example/x' } }],
-}, [{ call: 'c9', rule: 'S04', title: '外联非白名单' }]).label, '言行不一');
-assert.equal(pages.alignmentVerdict(reason.find(r => r.relation === 'gap'), []).label, '不可对照');
 const reasonHolder = { innerHTML: '' };
-pages.renderReason(reasonHolder, filePayload, { reasonId: reason.find(r => r.relation === 'gap').id });
-assert.match(reasonHolder.innerHTML, /缺口/);
+pages.renderReason(reasonHolder, filePayload, {});
+assert.match(reasonHolder.innerHTML, /~\/\.claude\/projects/);
 assert.doesNotMatch(reasonHolder.innerHTML, /言行不一|言行一致/);
+const verified = {
+  tasks: filePayload.tasks,
+  verification: {
+    sources: [{ agent: 'Claude Code', state: 'present', note: '读了 1 个 jsonl。' }],
+    cards: [{
+      id: 'toolu_1', sessionId: 'sess-1', agent: 'Claude Code', timestamp: '2026-11-08T02:00:02Z',
+      status: 'mismatched', toolName: 'Edit', arguments: '{"file_path":"/tmp/proj/a.swift"}',
+      said: '我改 a.swift。', happened: [],
+      mismatches: [{ kind: 'claimed_edit_without_diff', label: '说了没做', detail: '它调用 Edit 要改 /tmp/proj/a.swift，这个时间窗里没有文件 diff。' }],
+      note: '它调用 Edit 要改 /tmp/proj/a.swift，这个时间窗里没有文件 diff。',
+    }],
+    unclaimed: [],
+    checklists: [{ sessionId: 'sess-1', taskId: 't1', doneText: '已完成，改了 1 个文件。', claimedFiles: 1, actualFiles: 1, egressCount: 0, credentialsTouched: false }],
+  },
+};
+pages.renderReason(reasonHolder, verified, { decisions: [] });
+assert.match(reasonHolder.innerHTML, /它说/);
+assert.match(reasonHolder.innerHTML, /它调/);
+assert.match(reasonHolder.innerHTML, /真发生/);
+assert.match(reasonHolder.innerHTML, /说了没做/);
+assert.match(reasonHolder.innerHTML, /对不上/);
+assert.match(reasonHolder.innerHTML, /data-accept-decide="accept"/);
+assert.match(reasonHolder.innerHTML, /data-accept-decide="return"/);
+assert.doesNotMatch(reasonHolder.innerHTML, /言行一致/);
 
 const inbox = pages.inboxItems(filePayload, []);
 assert.equal(inbox.length, 1);

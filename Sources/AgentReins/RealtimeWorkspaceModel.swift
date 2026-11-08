@@ -1,3 +1,4 @@
+import AgentReinsVerify
 import Foundation
 
 /// Presentation-only projection. Never reads historical tasks or guesses cross-turn causality.
@@ -20,6 +21,7 @@ struct RealtimeWorkspacePayload: Encodable {
     var lazyTasks = false
     var collectedOrder: [String]? = nil
     var detailDelta: RealtimeWorkspaceTransport.DetailDelta? = nil
+    var verification: SessionVerificationDocument? = nil
 }
 struct RealtimeCollectedRecord: Encodable {
     var networkBody: RealtimeNetworkBodyPreview? = nil

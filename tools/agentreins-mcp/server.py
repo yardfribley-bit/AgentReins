@@ -20,6 +20,7 @@ _ROOT = pathlib.Path(__file__).resolve().parent
 if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
+from session_verification import effects_from_transport, get_session_verification, list_tool_calls
 from evidence import (
     KEY_WARM,
     KeychainUnavailable,
@@ -101,6 +102,25 @@ TOOLS = [
         "description": "Recent supervisor MCP read audit entries (hash-chained append-only log).",
         "inputSchema": {"type": "object", "properties": dict(_PAGE), "additionalProperties": False},
     },
+    {
+        "name": "list_tool_calls",
+        "description": "Read-only tool-call cards: reasoning excerpt, tool name and arguments, host effects. Does not copy session logs into evidence.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {**_PAGE, "agent": {"type": "string"}, "session_id": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "get_session_verification",
+        "description": "Read-only verification for one session: cards, unclaimed file changes, completion checklist.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"session_id": {"type": "string"}},
+            "required": ["session_id"],
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -174,6 +194,25 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         ))
     if name == "get_coverage":
         return _stamp(get_coverage())
+    if name == "list_tool_calls":
+        from evidence import load_transport_records
+
+        try:
+            records = load_transport_records()
+        except Exception:
+            records = []
+        return _stamp(list_tool_calls(arguments, effects_from_transport(records)))
+    if name == "get_session_verification":
+        session_id = arguments.get("session_id")
+        if not session_id:
+            raise ValueError("session_id required")
+        from evidence import load_transport_records
+
+        try:
+            records = load_transport_records()
+        except Exception:
+            records = []
+        return _stamp(get_session_verification(str(session_id), effects_from_transport(records)))
     if name == "list_mcp_audit":
         return _stamp(list_mcp_audit(
             limit=_opt_int(arguments.get("limit")) if arguments.get("limit") is not None else 30,

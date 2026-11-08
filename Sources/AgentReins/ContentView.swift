@@ -14,7 +14,7 @@ struct ContentView: View {
     var body: some View {
         RealtimeWorkspaceView(payload: realtime.payload(processes: processGuard.processInventory,
             health: eventStore.collectorHealth, observing: fileGuard.running || processGuard.running || workBuddyNetworkCapture.proxyRunning,
-            error: eventStore.persistenceError, geolocation: geolocation), onMarkRead: { realtime.markRead($0) }, onRefreshArtifacts: { realtime.refreshArtifacts() }, onResolveIP: { geolocation.resolve([$0]) })
+            error: eventStore.persistenceError, geolocation: geolocation, fileWatching: fileGuard.running), onMarkRead: { realtime.markRead($0) }, onRefreshArtifacts: { realtime.refreshArtifacts() }, onResolveIP: { geolocation.resolve([$0]) })
         .frame(minWidth: 900, minHeight: 600)
         .toolbar {
             Button("敏感数据规则", systemImage: "shield.lefthalf.filled") {
