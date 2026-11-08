@@ -235,11 +235,12 @@ class HTTPTransportTests(unittest.TestCase):
             self.assertTrue(structured["mcpEndpoint"]["processAlive"])
             usage = structured["diskUsage"]
             self.assertFalse(usage["opensEvidenceDatabase"])
-            self.assertEqual(usage["maxAgeDays"], 14)
-            self.assertEqual(usage["maxBytes"], 2 * 1024 * 1024 * 1024)
+            self.assertFalse(usage["keepAutoDrop"])
+            self.assertEqual(usage["backstopAppliesTo"], "noise-and-bulk")
             self.assertIn("evidenceBytes", usage)
-            self.assertIn("打开 evidence.sqlite3", usage["policy"])
-            self.assertIn("不能无限追加", usage["policy"])
+            self.assertIn("egress", " ".join(usage["keep"]))
+            self.assertIn("heartbeats", " ".join(usage["drop"]))
+            self.assertIn("高价值", usage["policy"])
             net = client.call("list_network", {})["result"]
             self.assertFalse(net["isError"], net)
             self.assertIn("network", net["structuredContent"])

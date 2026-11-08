@@ -113,8 +113,8 @@ final class EventStore: ObservableObject {
         retentionTask?.cancel()
     }
 
-    /// Background only. Each pass deletes a few indexed batches and returns, so a huge
-    /// evidence file cannot stall MCP reads or the UI. MCP does not open this database.
+    /// Background only. Each pass drops a few noise or bulk rows and skips keep-tier
+    /// evidence, so a huge file cannot stall MCP reads or the UI. MCP does not open this database.
     private func startEvidenceRetention(database: EvidenceDatabase) {
         retentionTask = Task.detached(priority: .background) {
             try? await Task.sleep(for: .seconds(20))

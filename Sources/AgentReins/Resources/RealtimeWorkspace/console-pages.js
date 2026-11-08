@@ -291,7 +291,7 @@ function renderAbout(holder, install){
  const kicker=esc(installLabel(install));
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。看得见主机层里已经采到的 agent 行为，并在本机确认、加白、复查。</p></div></div>
  <div class="about-body">
- <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据库默认保留 14 天、上限 2GB。超过就按时间删旧记录，不能无限追加。监督读取只看文件大小，不打开这个库。</p></article>
+ <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p></article>
  <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）</li><li>放行和阻断接到模型网关与 Network Extension</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
  </div>`;
 }

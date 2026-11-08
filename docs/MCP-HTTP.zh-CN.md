@@ -101,7 +101,7 @@ python3 scripts/install_mcp_http.py --require-token
 
 同一进程里的 `tools/call` 串行执行，`initialize` / `tools/list` 不排队。读工具有 8 秒预算（`AGENTREINS_MCP_TOOL_BUDGET_SECONDS`）。预算用完就返回明确错误，证据文件不会被改写，也不会一直拖到客户端把连接扔掉。HTTP 请求的外层超时默认 12 秒。`Integrity.append` 对审计日志 `flock`，避免 HTTP 进程和 stdio 进程同时写坏链。
 
-`get_coverage` 的 `diskUsage` 只 `stat` 证据库和相关文件的大小，不打开 `evidence.sqlite3`。默认保留 14 天、上限 2GB。超过就由 App 在后台按 `observed_at` 索引分批删除。无限追加是不可接受的。
+`get_coverage` 的 `diskUsage` 只 `stat` 文件大小，不打开 `evidence.sqlite3`。留什么看产品价值，不看一个容量数字：外联、凭据、策略命中、处置、文件改动、验收决定、言行不一致的短摘录，以及工具名、路径、时间和 pid 会留着，不会自动丢掉。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。容量只在这些低价值数据清完之后作为保险。
 
 启动 HTTP 服务时会清掉本端口上没在监听的 `--http` 进程，以及父进程已经退出（ppid 1）的 stdio 残留。正在监听的那一个不动。别的端口上的 MCP 不动。
 
@@ -115,7 +115,7 @@ python3 scripts/install_mcp_http.py --require-token
 | 某个客户端连不上 | 这一版只回 JSON，不推 SSE。客户端若只要旧的 HTTP+SSE，继续用 stdio |
 | `Host` 403 | URL 请写 `127.0.0.1`，不要写局域网 IP。`localhost` 若被解析成 `::1` 会连不上，因为没有 IPv6 监听 |
 | 日志里 `request abandoned`，`tools/call` 一直没有响应 | 读超过预算或 12 秒外层超时。现在会先返回 `tool read stopped` 或 `-32000`，并写明证据没有被改写。`pgrep -lf AgentReinsMCP` 若看到多个，重启 LaunchAgent 会清掉同端口的残留；正在听 18977 的那个会留下 |
-| `get_coverage.diskUsage.evidenceBytes` 很大 | 证据库到了 14 天 / 2GB 上限后，App 后台删旧行。文件在压缩前不会缩小，但不会再无限变大。这次读取没有打开数据库 |
+| `get_coverage.diskUsage.evidenceBytes` 很大 | 先看 `diskUsage.policy`。高价值记录不会为了缩小文件被自动删掉。心跳、大块原文和会话副本会在后台按索引分批清掉。文件在压缩前不会缩小。这次读取没有打开数据库 |
 
 测试钩子（HTTP 请求改不了，只在进程启动时读）：`AGENTREINS_MCP_ENDPOINT_FILE`、`AGENTREINS_MCP_TOKEN_FILE`。给测试用，避免覆盖正在使用的发现文件或 token。
 

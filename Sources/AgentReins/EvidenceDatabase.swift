@@ -61,10 +61,12 @@ struct CollectorHealthRecord: Equatable, Sendable {
 }
 
 struct EvidenceRetentionPolicy: Equatable, Sendable {
-    var maxAge: TimeInterval = EvidenceRetentionDefaults.maxAge
-    var maxBytes: Int64 = EvidenceRetentionDefaults.maxBytes
-    var batchRows: Int = EvidenceRetentionDefaults.batchRows
-    var maxBatches: Int = EvidenceRetentionDefaults.maxBatchesPerPass
+    var noiseMaxAge: TimeInterval = EvidenceValue.noiseMaxAge
+    var bulkMaxAge: TimeInterval = EvidenceValue.bulkMaxAge
+    /// Applies to noise and bulk only. Keep-tier rows are not deleted to satisfy it.
+    var backstopBytes: Int64 = EvidenceValue.backstopBytes
+    var batchRows: Int = EvidenceValue.batchRows
+    var maxBatches: Int = EvidenceValue.maxBatchesPerPass
     static let `default` = EvidenceRetentionPolicy()
 }
 
@@ -72,6 +74,8 @@ struct EvidencePruneResult: Equatable, Sendable {
     var deletedRecords: Int
     var deletedRaw: Int
     var deletedEvents: Int
+    var collapsedRaw: Int
+    var keptSkipped: Int
     var batches: Int
     var onDiskBytes: Int64
     var overCap: Bool
@@ -548,7 +552,7 @@ final class EvidenceDatabase: @unchecked Sendable {
             guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO evidence_parse_jobs(evidence_key) VALUES(?)", -1, &work, nil) == SQLITE_OK else { throw failure("prepare durable parse work") }
             defer { sqlite3_finalize(work) }
             for event in events {
-                let payload = try encoder.encode(event)
+                let payload = try encoder.encode(thinForStorage(event))
                 let digits = Array("0123456789abcdef".utf8)
                 var hex = [UInt8](); hex.reserveCapacity(64)
                 for byte in SHA256.hash(data: payload) {
@@ -1924,63 +1928,232 @@ final class EvidenceDatabase: @unchecked Sendable {
         guard sqlite3_backup_step(backup, -1) == SQLITE_DONE else { throw failure("backup") }
     }
 
-    /// One short pass. Deletes use the `observed_at` index and a row limit, so a 27GB file
-    /// is not scanned. The writer lock is held only for each small batch. MCP never opens
-    /// this database. The file on disk does not shrink until a later compact; new writes
-    /// reuse freed pages, so the file stops growing past the high-water mark.
+    /// One short pass over rows the time index can see. Noise and bulk are eligible to go.
+    /// Keep-tier rows (security, file changes, review actions, mismatch excerpts, join keys)
+    /// are skipped. Review decisions live in realtime-review-decisions-v1.json and are not
+    /// rows in this database, so this pass does not touch that file. MCP never opens it.
     func prune(policy: EvidenceRetentionPolicy = .default, now: Date = Date()) throws -> EvidencePruneResult {
         lock.lock(); defer { lock.unlock() }
+        try executeUnlocked("CREATE TABLE IF NOT EXISTS retention_cursor(id INTEGER PRIMARY KEY CHECK(id=1), observed_at REAL NOT NULL)")
+        try executeUnlocked("INSERT OR IGNORE INTO retention_cursor VALUES(1, 0)")
         var deletedRecords = 0
-        var deletedRaw = 0
         var deletedEvents = 0
+        var collapsedRaw = 0
+        var keptSkipped = 0
         var batches = 0
         let onDisk = Self.fileBytes(fileURL)
-        let cutoff = now.addingTimeInterval(-policy.maxAge).timeIntervalSince1970
+        let over = onDisk > policy.backstopBytes
+        let noiseCutoff = now.addingTimeInterval(-policy.noiseMaxAge).timeIntervalSince1970
+        let bulkCutoff = now.addingTimeInterval(-policy.bulkMaxAge).timeIntervalSince1970
         let rawIndexed = try indexExistsUnlocked("raw_evidence_time")
-        let eventsIndexed = try indexExistsUnlocked("agent_event_observed")
         if !rawIndexed && onDisk < 512 * 1024 * 1024 {
             try executeUnlocked("CREATE INDEX IF NOT EXISTS raw_evidence_time ON raw_evidence(observed_at)")
         }
-        if !eventsIndexed && onDisk < 512 * 1024 * 1024 {
-            try executeUnlocked("CREATE INDEX IF NOT EXISTS agent_event_observed ON agent_event_stream(observed_at)")
-        }
         let rawReady = try indexExistsUnlocked("raw_evidence_time")
-        let eventsReady = try indexExistsUnlocked("agent_event_observed")
         while batches < policy.maxBatches {
-            let before = deletedRecords + deletedRaw + deletedEvents
-            let aged = try deleteEvidenceBatchUnlocked(before: cutoff, limit: policy.batchRows, ignoreAge: false)
-            deletedRecords += aged
-            let stillOver = Self.fileBytes(fileURL) > policy.maxBytes
-            if aged == 0 && stillOver {
-                deletedRecords += try deleteEvidenceBatchUnlocked(before: cutoff, limit: policy.batchRows, ignoreAge: true)
+            let before = deletedRecords + deletedEvents + collapsedRaw
+            let cursor = try retentionCursorUnlocked()
+            let eligibleBefore = over ? now.timeIntervalSince1970 + 1 : noiseCutoff
+            let batch = try evidenceCandidatesUnlocked(after: cursor, before: eligibleBefore, limit: policy.batchRows)
+            if batch.isEmpty {
+                try setRetentionCursorUnlocked(0)
+            } else {
+                var drop: [String] = []
+                for row in batch {
+                    switch row.tier {
+                    case .keep:
+                        keptSkipped += 1
+                    case .noise:
+                        drop.append(row.key)
+                    case .bulk:
+                        if over || row.observedAt < bulkCutoff { drop.append(row.key) }
+                        else { keptSkipped += 1 }
+                    }
+                }
+                deletedRecords += try deleteEvidenceKeysUnlocked(drop)
+                try setRetentionCursorUnlocked(batch.last?.observedAt ?? cursor)
             }
             if rawReady {
-                deletedRaw += try deleteTimeBatchUnlocked(
-                    table: "raw_evidence", timeColumn: "observed_at", before: cutoff,
-                    limit: policy.batchRows, ignoreAge: aged == 0 && stillOver)
+                collapsedRaw += try collapseRawPayloadsUnlocked(before: over ? now.timeIntervalSince1970 + 1 : bulkCutoff, limit: policy.batchRows)
             }
-            if eventsReady {
-                deletedEvents += try deleteTimeBatchUnlocked(
-                    table: "agent_event_stream", timeColumn: "observed_at", before: cutoff,
-                    limit: policy.batchRows, ignoreAge: false)
-            }
+            deletedEvents += try deleteNoisyAgentEventsUnlocked(before: noiseCutoff, limit: policy.batchRows)
             batches += 1
-            if deletedRecords + deletedRaw + deletedEvents == before { break }
+            if deletedRecords + deletedEvents + collapsedRaw == before { break }
         }
         _ = try? executeUnlocked("PRAGMA wal_checkpoint(PASSIVE)")
         let bytesNow = Self.fileBytes(fileURL)
+        let stillOver = bytesNow > policy.backstopBytes
         return EvidencePruneResult(
             deletedRecords: deletedRecords,
-            deletedRaw: deletedRaw,
+            deletedRaw: 0,
             deletedEvents: deletedEvents,
+            collapsedRaw: collapsedRaw,
+            keptSkipped: keptSkipped,
             batches: batches,
             onDiskBytes: bytesNow,
-            overCap: bytesNow > policy.maxBytes,
+            overCap: stillOver,
             rawIndexSkipped: !rawReady && onDisk >= 512 * 1024 * 1024,
-            note: bytesNow > policy.maxBytes
-                ? "已按时间和上限删除旧行。文件暂时不会缩小，新写入会复用空页，所以不会无限变大。自动压缩会把整库再写一遍，超过 512MB 时不做。"
-                : "证据库在 14 天和 2GB 上限内。"
+            note: EvidenceValue.policySummary
         )
+    }
+
+    private struct RetentionCandidate {
+        var key: String
+        var observedAt: Double
+        var tier: EvidenceTier
+    }
+
+    private func retentionCursorUnlocked() throws -> Double {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "SELECT observed_at FROM retention_cursor WHERE id=1", -1, &statement, nil) == SQLITE_OK else {
+            throw failure("read retention cursor")
+        }
+        defer { sqlite3_finalize(statement) }
+        guard sqlite3_step(statement) == SQLITE_ROW else { return 0 }
+        return sqlite3_column_double(statement, 0)
+    }
+
+    private func setRetentionCursorUnlocked(_ value: Double) throws {
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "UPDATE retention_cursor SET observed_at=? WHERE id=1", -1, &statement, nil) == SQLITE_OK else {
+            throw failure("write retention cursor")
+        }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, value)
+        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("write retention cursor") }
+    }
+
+    private func evidenceCandidatesUnlocked(after cursor: Double, before cutoff: Double, limit: Int) throws -> [RetentionCandidate] {
+        let capped = max(1, min(limit, 500))
+        let sql = """
+        SELECT evidence_key, observed_at, length(payload),
+          json_extract(CAST(payload AS TEXT),'$.kind'),
+          json_extract(CAST(payload AS TEXT),'$.op'),
+          json_extract(CAST(payload AS TEXT),'$.ruleId'),
+          json_extract(CAST(payload AS TEXT),'$.action'),
+          json_extract(CAST(payload AS TEXT),'$.severity'),
+          json_extract(CAST(payload AS TEXT),'$.source'),
+          substr(COALESCE(json_extract(CAST(payload AS TEXT),'$.userIntent'),''),1,400),
+          substr(COALESCE(json_extract(CAST(payload AS TEXT),'$.command'),''),1,400),
+          substr(COALESCE(json_extract(CAST(payload AS TEXT),'$.path'),''),1,300),
+          substr(COALESCE(json_extract(CAST(payload AS TEXT),'$.toolName'),''),1,120),
+          substr(COALESCE(json_extract(CAST(payload AS TEXT),'$.toolCallId'),''),1,120),
+          substr(COALESCE(json_extract(CAST(payload AS TEXT),'$.modelResponse'), json_extract(CAST(payload AS TEXT),'$.modelPrompt'), ''),1,400),
+          json_extract(CAST(payload AS TEXT),'$.processId')
+        FROM evidence_records
+        WHERE observed_at > ? AND observed_at < ?
+        ORDER BY observed_at ASC
+        LIMIT \(capped)
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare value prune") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, cursor)
+        sqlite3_bind_double(statement, 2, cutoff)
+        var rows: [RetentionCandidate] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let key = text(statement, 0) else { continue }
+            let fields = EvidenceValueFields(
+                kind: text(statement, 3) ?? "",
+                op: text(statement, 4) ?? "",
+                ruleId: text(statement, 5) ?? "",
+                action: text(statement, 6) ?? "",
+                severity: text(statement, 7) ?? "",
+                source: text(statement, 8) ?? "",
+                userIntent: text(statement, 9) ?? "",
+                command: text(statement, 10) ?? "",
+                path: text(statement, 11) ?? "",
+                toolName: text(statement, 12) ?? "",
+                toolCallId: text(statement, 13) ?? "",
+                modelText: text(statement, 14) ?? "",
+                processId: sqlite3_column_type(statement, 15) == SQLITE_NULL ? nil : Int(sqlite3_column_int(statement, 15)),
+                payloadBytes: Int(sqlite3_column_int(statement, 2))
+            )
+            rows.append(RetentionCandidate(key: key, observedAt: sqlite3_column_double(statement, 1), tier: EvidenceValue.tier(fields)))
+        }
+        return rows
+    }
+
+    /// Replace a large raw body with the hash we already stored. The chain columns stay.
+    private func collapseRawPayloadsUnlocked(before cutoff: Double, limit: Int) throws -> Int {
+        let capped = max(1, min(limit, 500))
+        let sql = """
+        SELECT evidence_key, payload_sha256 FROM raw_evidence
+        WHERE observed_at < ? AND payload_sha256 IS NOT NULL AND length(payload) > 2048
+        ORDER BY observed_at ASC LIMIT \(capped)
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare raw collapse") }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, cutoff)
+        var keys: [(String, String)] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            if let key = text(statement, 0), let sha = text(statement, 1) { keys.append((key, sha)) }
+        }
+        if keys.isEmpty { return 0 }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        var update: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "UPDATE raw_evidence SET payload=? WHERE evidence_key=?", -1, &update, nil) == SQLITE_OK else {
+            try? executeUnlocked("ROLLBACK")
+            throw failure("prepare raw collapse update")
+        }
+        defer { sqlite3_finalize(update) }
+        for (key, sha) in keys {
+            let stub = Data("{\"retention\":\"summary\",\"sha256\":\"\(sha)\"}".utf8)
+            _ = stub.withUnsafeBytes { sqlite3_bind_blob(update, 1, $0.baseAddress, Int32(stub.count), SQLITE_TRANSIENT) }
+            bind(key, at: 2, to: update)
+            guard sqlite3_step(update) == SQLITE_DONE else {
+                try? executeUnlocked("ROLLBACK")
+                throw failure("collapse raw payload")
+            }
+            sqlite3_reset(update)
+            sqlite3_clear_bindings(update)
+        }
+        try executeUnlocked("COMMIT")
+        return keys.count
+    }
+
+    /// Only rows that are clearly heartbeat / missing-prompt noise, and not a security or file event.
+    private func deleteNoisyAgentEventsUnlocked(before cutoff: Double, limit: Int) throws -> Int {
+        guard try indexExistsUnlocked("agent_event_observed") || Self.fileBytes(fileURL) < 512 * 1024 * 1024 else { return 0 }
+        if !(try indexExistsUnlocked("agent_event_observed")), Self.fileBytes(fileURL) < 512 * 1024 * 1024 {
+            try executeUnlocked("CREATE INDEX IF NOT EXISTS agent_event_observed ON agent_event_stream(observed_at)")
+        }
+        guard try indexExistsUnlocked("agent_event_observed") else { return 0 }
+        let capped = max(1, min(limit, 500))
+        let sql = """
+        SELECT event_id, substr(CAST(payload AS TEXT),1,1500) FROM agent_event_stream
+        WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped)
+        """
+        var statement: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, sql, -1, &statement, nil) == SQLITE_OK else { return 0 }
+        defer { sqlite3_finalize(statement) }
+        sqlite3_bind_double(statement, 1, cutoff)
+        var drop: [String] = []
+        while sqlite3_step(statement) == SQLITE_ROW {
+            guard let id = text(statement, 0) else { continue }
+            let head = text(statement, 1) ?? ""
+            let noisy = head.range(of: "heartbeat|用户需求未采集|automation_id", options: .regularExpression) != nil
+            let valuable = head.range(of: "security.finding|file.activity|network.activity|tool.call", options: []) != nil
+            if noisy && !valuable { drop.append(id) }
+        }
+        if drop.isEmpty { return 0 }
+        try executeUnlocked("BEGIN IMMEDIATE")
+        var delete: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "DELETE FROM agent_event_stream WHERE event_id=?", -1, &delete, nil) == SQLITE_OK else {
+            try? executeUnlocked("ROLLBACK")
+            return 0
+        }
+        defer { sqlite3_finalize(delete) }
+        var count = 0
+        for id in drop {
+            bind(id, at: 1, to: delete)
+            if sqlite3_step(delete) == SQLITE_DONE { count += Int(sqlite3_changes(handle)) }
+            sqlite3_reset(delete)
+            sqlite3_clear_bindings(delete)
+        }
+        try executeUnlocked("COMMIT")
+        return count
     }
 
     private func indexExistsUnlocked(_ name: String) throws -> Bool {
@@ -1993,25 +2166,21 @@ final class EvidenceDatabase: @unchecked Sendable {
         return sqlite3_step(statement) == SQLITE_ROW
     }
 
-    /// Indexed `ORDER BY observed_at LIMIT`. Child rows go first so the foreign key does not reject the parent delete.
-    private func deleteEvidenceBatchUnlocked(before cutoff: Double, limit: Int, ignoreAge: Bool) throws -> Int {
-        let capped = max(1, min(limit, 500))
+    private func deleteEvidenceKeysUnlocked(_ keys: [String]) throws -> Int {
+        if keys.isEmpty { return 0 }
         try executeUnlocked("CREATE TEMP TABLE IF NOT EXISTS prune_keys(evidence_key TEXT PRIMARY KEY)")
         try executeUnlocked("DELETE FROM prune_keys")
-        let insert = ignoreAge
-            ? "INSERT INTO prune_keys SELECT evidence_key FROM evidence_records ORDER BY observed_at ASC LIMIT \(capped)"
-            : "INSERT INTO prune_keys SELECT evidence_key FROM evidence_records WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped)"
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, insert, -1, &statement, nil) == SQLITE_OK else { throw failure("prepare prune keys") }
-        defer { sqlite3_finalize(statement) }
-        if !ignoreAge { sqlite3_bind_double(statement, 1, cutoff) }
-        guard sqlite3_step(statement) == SQLITE_DONE else { throw failure("select prune keys") }
-        var count = 0
-        var probe: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, "SELECT COUNT(*) FROM prune_keys", -1, &probe, nil) == SQLITE_OK else { throw failure("count prune keys") }
-        defer { sqlite3_finalize(probe) }
-        if sqlite3_step(probe) == SQLITE_ROW { count = Int(sqlite3_column_int(probe, 0)) }
-        if count == 0 { return 0 }
+        var insert: OpaquePointer?
+        guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO prune_keys(evidence_key) VALUES(?)", -1, &insert, nil) == SQLITE_OK else {
+            throw failure("prepare prune keys")
+        }
+        defer { sqlite3_finalize(insert) }
+        for key in keys {
+            bind(key, at: 1, to: insert)
+            guard sqlite3_step(insert) == SQLITE_DONE else { throw failure("insert prune key") }
+            sqlite3_reset(insert)
+            sqlite3_clear_bindings(insert)
+        }
         try executeUnlocked("BEGIN IMMEDIATE")
         do {
             try executeUnlocked("DELETE FROM evidence_parse_order WHERE evidence_key IN (SELECT evidence_key FROM prune_keys)")
@@ -2023,45 +2192,44 @@ final class EvidenceDatabase: @unchecked Sendable {
             try? executeUnlocked("ROLLBACK")
             throw error
         }
-        return count
+        return keys.count
     }
 
-    private func deleteTimeBatchUnlocked(table: String, timeColumn: String, before cutoff: Double, limit: Int, ignoreAge: Bool) throws -> Int {
-        let capped = max(1, min(limit, 500))
-        // Table and column names are fixed by the callers above, never by input.
-        let sql = ignoreAge
-            ? "DELETE FROM \(table) WHERE rowid IN (SELECT rowid FROM \(table) ORDER BY \(timeColumn) ASC LIMIT \(capped))"
-            : "DELETE FROM \(table) WHERE rowid IN (SELECT rowid FROM \(table) WHERE \(timeColumn) < ? ORDER BY \(timeColumn) ASC LIMIT \(capped))"
-        // WITHOUT ROWID tables have no rowid. Delete by the primary key selected from the time index.
-        let keyed: String
-        switch table {
-        case "raw_evidence":
-            keyed = ignoreAge
-                ? "DELETE FROM raw_evidence WHERE evidence_key IN (SELECT evidence_key FROM raw_evidence ORDER BY observed_at ASC LIMIT \(capped))"
-                : "DELETE FROM raw_evidence WHERE evidence_key IN (SELECT evidence_key FROM raw_evidence WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped))"
-        case "agent_event_stream":
-            keyed = ignoreAge
-                ? "DELETE FROM agent_event_stream WHERE event_id IN (SELECT event_id FROM agent_event_stream ORDER BY observed_at ASC LIMIT \(capped))"
-                : "DELETE FROM agent_event_stream WHERE event_id IN (SELECT event_id FROM agent_event_stream WHERE observed_at < ? ORDER BY observed_at ASC LIMIT \(capped))"
-        default:
-            keyed = sql
+    /// Full session text is not what we store. The agent file remains the place to read it on demand.
+    private func thinForStorage(_ event: GuardEvent) -> GuardEvent {
+        let modelText = [event.modelResponse, event.modelPrompt].compactMap { $0 }.joined(separator: "\n")
+        let fields = EvidenceValueFields(
+            kind: event.kind, op: event.op, ruleId: event.ruleId, action: event.action,
+            severity: event.severity, source: event.source ?? "", userIntent: event.userIntent ?? "",
+            command: event.command ?? "", path: event.path, toolName: event.toolName ?? "",
+            toolCallId: event.toolCallId ?? "", modelText: modelText,
+            processId: event.processId.map(Int.init), payloadBytes: modelText.utf8.count + (event.command?.utf8.count ?? 0) + (event.fileDiff?.utf8.count ?? 0)
+        )
+        let tier = EvidenceValue.tier(fields)
+        let cap = tier == .keep ? EvidenceValue.keepFieldCap : EvidenceValue.excerptLimit
+        func cut(_ value: String?) -> String? {
+            guard let value, value.count > cap else { return value }
+            if let window = EvidenceValue.mismatchWindow(value, limit: cap) { return window }
+            return String(value.prefix(cap))
         }
-        try executeUnlocked("BEGIN IMMEDIATE")
-        var statement: OpaquePointer?
-        guard sqlite3_prepare_v2(handle, keyed, -1, &statement, nil) == SQLITE_OK else {
-            try? executeUnlocked("ROLLBACK")
-            throw failure("prepare \(table) prune")
-        }
-        defer { sqlite3_finalize(statement) }
-        if !ignoreAge { sqlite3_bind_double(statement, 1, cutoff) }
-        let step = sqlite3_step(statement)
-        if step != SQLITE_DONE {
-            try? executeUnlocked("ROLLBACK")
-            throw failure("prune \(table)")
-        }
-        let changes = Int(sqlite3_changes(handle))
-        try executeUnlocked("COMMIT")
-        return changes
+        return GuardEvent(
+            id: event.id, kind: event.kind, ruleId: event.ruleId, path: event.path,
+            command: cut(event.command), agent: event.agent, op: event.op, severity: event.severity,
+            ts: event.ts, action: event.action, sessionId: event.sessionId, traceId: event.traceId,
+            turnId: event.turnId, toolCallId: event.toolCallId, userIntent: cut(event.userIntent),
+            modelDecision: cut(event.modelDecision), modelReasoning: cut(event.modelReasoning),
+            modelPrompt: cut(event.modelPrompt), modelResponse: cut(event.modelResponse),
+            toolName: event.toolName, model: event.model, inputTokens: event.inputTokens,
+            outputTokens: event.outputTokens, cachedTokens: event.cachedTokens,
+            reasoningTokens: event.reasoningTokens, costUSD: event.costUSD,
+            beforeContent: cut(event.beforeContent), afterContent: cut(event.afterContent),
+            fileDiff: cut(event.fileDiff), codeFindings: event.codeFindings, source: event.source,
+            attributionConfidence: event.attributionConfidence, attributionMethod: event.attributionMethod,
+            processId: event.processId, parentProcessId: event.parentProcessId,
+            localAddress: event.localAddress, remoteHost: event.remoteHost, remotePort: event.remotePort,
+            remoteDomain: event.remoteDomain, startedAt: event.startedAt, endedAt: event.endedAt,
+            durationMS: event.durationMS, relatedPath: event.relatedPath
+        )
     }
 
     static func fileBytes(_ url: URL) -> Int64 {

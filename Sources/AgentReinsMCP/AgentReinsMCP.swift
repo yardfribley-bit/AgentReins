@@ -704,9 +704,12 @@ enum DiskUsage {
             "evidenceBytes": evidenceBytes,
             "realtimeBytes": realtimeBytes,
             "socketLedgerBytes": ledgerBytes,
-            "maxBytes": EvidenceRetentionDefaults.maxBytes,
-            "maxAgeDays": 14,
-            "policy": "保留 14 天，单库上限 2GB。超过就按 observed_at 索引分批删旧行。不会整表扫描，也不会在这次读取里打开 evidence.sqlite3。文件在压缩前不会缩小，但新写入复用空页，所以不能无限追加。",
+            "policy": EvidenceValue.policySummary,
+            "keep": EvidenceValue.keepTopics,
+            "drop": EvidenceValue.dropTopics,
+            "backstopBytes": EvidenceValue.backstopBytes,
+            "backstopAppliesTo": "noise-and-bulk",
+            "keepAutoDrop": false,
             "opensEvidenceDatabase": false,
         ] as [String: Any]
     }

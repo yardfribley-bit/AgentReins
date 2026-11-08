@@ -4,15 +4,6 @@ import Foundation
 /// The listener on this port stays. Stdio processes with a live parent stay.
 /// Same-port `--http` processes that are not listening, and MCP processes
 /// reparented to pid 1 after their client died, are orphans.
-/// Live evidence must not grow without a bound. These defaults are the product policy:
-/// 14 days and 2 GiB. Infinite append is not acceptable.
-public enum EvidenceRetentionDefaults {
-    public static let maxAge: TimeInterval = 14 * 24 * 60 * 60
-    public static let maxBytes: Int64 = 2 * 1024 * 1024 * 1024
-    public static let batchRows = 200
-    public static let maxBatchesPerPass = 4
-}
-
 public enum MCPHTTPOrphans {
     public struct Proc: Equatable {
         public var pid: Int32
