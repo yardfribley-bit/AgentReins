@@ -279,6 +279,21 @@ textarea#accept-note{width:100%;border:1px solid var(--line);border-radius:6px;p
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 @media(max-width:1100px){.risk-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.risk-split{grid-template-columns:1fr}.risk-rules,.risk-covg{grid-template-columns:1fr}}
 @media(max-width:650px){.risk-ph,.risk-stats,.risk-split,.risk-rules,.risk-covg,.about-body{margin-left:12px;margin-right:12px}.risk-ph{padding-left:12px;padding-right:12px}}
+.tc-card{border:1px solid var(--line);border-left:4px solid var(--green);border-radius:10px;background:var(--surface);margin:0 0 12px;padding:14px 16px}
+.tc-card.mismatched{border-left-color:var(--red);background:var(--red-bg)}
+.tc-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}
+.tc-status.matched{color:var(--green)}.tc-status.mismatched{color:var(--red)}
+.tc-grid{display:grid;grid-template-columns:1fr 1fr 1.15fr;gap:10px}
+.tc-grid h3,.tc-effect b{font-size:12px}
+.tc-grid pre,.tc-effect pre{white-space:pre-wrap;background:var(--tint);border-radius:6px;padding:8px;max-height:220px;overflow:auto}
+.tc-flags{margin:8px 0 0;padding-left:18px}
+.tc-flags li{margin:4px 0}
+.tc-check{border:1px solid var(--line);border-radius:10px;padding:14px 16px;margin:12px 0;background:var(--surface)}
+.unclaimed-title{margin:18px 0 8px;font-size:16px}
+.diff-line{display:block}
+.diff-line.add{background:var(--green-bg);color:var(--green)}
+.diff-line.remove{background:var(--red-bg);color:var(--red)}
+@media(max-width:900px){.tc-grid{grid-template-columns:1fr}}
 /* Phase 2 · 外网访问 by destination, connection map, destination detail, coverage banner, empty graph */
 .network-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:10px 0}
 .network-agent-pills,.network-mode,.map-filter{display:flex;gap:4px;flex-wrap:wrap}

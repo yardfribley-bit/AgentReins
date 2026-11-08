@@ -398,7 +398,7 @@ function renderRisk(){
 function renderConsole(){
  const api=window.AgentReinsConsole;if(!api)return;
  if(view==='files')api.renderFiles($('files-view'),shown,consoleState);
- else if(view==='reason')api.renderReason($('reason-view'),shown,consoleState);
+ else if(view==='reason')api.renderReason($('reason-view'),shown,{...consoleState,decisions:riskState.decisions});
  else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions});
  else if(view==='supervise')api.renderSupervise($('supervise-view'),shown,riskState);
  else if(view==='about')api.renderAbout($('about-view'),window.agentreinsInstall);
@@ -507,6 +507,11 @@ window.agentreinsHostResult=result=>{
   if(CONSOLE_VIEWS.includes(view))renderRisk();
  }
  if(result?.action==='evidenceExported'&&result.path){/* toast already shows the path */}
+ if(result?.action==='diskUsage'){
+  riskState.disk=result;
+  riskState.diskLoaded=true;
+  if(view==='about')renderConsole();
+ }
  if(result?.action==='mcpAudit'&&Array.isArray(result.entries)){
   riskState.mcpAudit=result.entries;
   riskState.mcpAuditPath=result.path||'';
@@ -532,7 +537,7 @@ document.addEventListener('click',e=>{
  else if(el.dataset.networkAgentPill){networkAgent=el.dataset.networkAgentPill;renderNetwork();}
  else if(el.dataset.action==='toggle-details'){const collapsed=document.body.classList.toggle('details-collapsed');$('toggle-details').textContent=collapsed?'显示详情':'收起详情';}
  else if(el.dataset.zoom){window.AgentReinsFlow.zoom(el.dataset.zoom);}
- else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;networkDestination=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage'||view==='files')riskState.transportsRequested=false;if(view==='supervise'||view==='coverage')riskState.mcpAuditLoaded=false;render();}
+ else if(el.dataset.view){window.agentreinsCommandsOpen=false;const audit=document.querySelector('.transport-audit');if(audit)audit.hidden=true;view=el.dataset.view;if(view==='network'){networkTask=null;networkDestination=null;riskState.transportsRequested=false;window.agentreinsLoadLocalTransports?.();}if(view==='alerts'||view==='rules'||view==='coverage'||view==='files')riskState.transportsRequested=false;if(view==='supervise'||view==='coverage')riskState.mcpAuditLoaded=false;if(view==='about')bridge('loadDiskUsage',{},{silent:true});render();}
  else if(el.dataset.graphMode){graphMode=el.dataset.graphMode;renderGraph();}
  else if(el.dataset.networkScope){networkTask=el.dataset.networkScope;taskID=networkTask;following=false;networkQuery='';networkSelected=null;view='network';if(shown.tasks.find(t=>t.id===networkTask)?.detailsLoaded===false)requestTask(networkTask);render();}
  else if(el.hasAttribute('data-network-all')){networkTask=null;renderNetwork();}
@@ -582,10 +587,22 @@ document.addEventListener('click',e=>{
  else if(el.dataset.reasonId){consoleState.reasonId=el.dataset.reasonId;renderConsole();}
  else if(el.dataset.inboxBucket){consoleState.inboxBucket=el.dataset.inboxBucket==='noise'?'noise':'work';consoleState.inboxId=null;consoleState.returnInvalid=false;renderConsole();}
  else if(el.dataset.inboxId){consoleState.inboxId=el.dataset.inboxId;consoleState.returnInvalid=false;renderConsole();}
+ else if(el.dataset.verifySession!=null){consoleState.sessionId=el.dataset.verifySession||null;renderConsole();}
+ else if(el.dataset.retentionSave!=null){
+  const days=Number(document.getElementById('retain-days')?.value||21);
+  const gb=Number(document.getElementById('retain-gb')?.value||0);
+  const hours=Number(document.getElementById('retain-hours')?.value||24);
+  const sent=bridge('saveRetentionPolicy',{dropAfterHours:hours,bulkRetainDays:days,bulkMaxGigabytes:gb},{silent:true});
+  if(!sent)toast('当前没有原生通道，保留规则只留在本页');
+ }
+ else if(el.dataset.retentionClean!=null){
+  const sent=bridge('applyRetention',{},{silent:true});
+  if(!sent)toast('当前没有原生通道，清理只在 AgentReins 里执行');
+ }
  else if(el.dataset.acceptDecide){
   const state=el.dataset.acceptDecide;
   if(!['accept','return','needs_evidence'].includes(state))return;
-  const note=(document.getElementById('accept-note')?.value||'').trim();
+  const note=(document.getElementById(el.dataset.noteField||'accept-note')?.value||'').trim();
   consoleState.returnNote=note;
   if(state==='return'&&!note){consoleState.returnInvalid=true;toast('退回必须写原因');renderConsole();return;}
   consoleState.returnInvalid=false;

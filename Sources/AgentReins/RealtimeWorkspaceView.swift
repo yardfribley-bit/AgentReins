@@ -90,6 +90,21 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 pushMCPAudit(to: message.webView)
                 return
             }
+            if action == "applyRetention" {
+                let webView = message.webView
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    guard let database = try? EvidenceDatabase.shared() else {
+                        self?.pushHostResult(to: webView, result: ["action": "diskUsage", "message": "证据库现在打不开。"])
+                        return
+                    }
+                    if let result = try? database.prune() {
+                        self?.pushHostResult(to: webView, result: ["action": "diskUsage", "message": result.note])
+                    } else {
+                        self?.pushHostResult(to: webView, result: ["action": "diskUsage", "message": "清理没有完成，当前库没有删。"])
+                    }
+                }
+                return
+            }
             if action == "deleteReviewDecision" {
                 guard let id = body["id"] as? String, !id.isEmpty, id.count <= 240 else { return }
                 _ = RealtimeReviewStore.remove(id: id)
@@ -678,7 +693,7 @@ final class RealtimeWorkspaceState: ObservableObject {
     private var deliveryCacheArtifacts: [RealtimeArtifact] = []
     private var deliveryCache: [RealtimeTask] = []
     private var addressCache: [String] = []
-    func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil) -> RealtimeWorkspacePayload {
+    func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil, fileWatching: Bool = false) -> RealtimeWorkspacePayload {
         let tasks = projectedTasks()
         if deliveryCacheVersion != taskProjectionBuilds || deliveryCacheArtifacts != artifacts {
             deliveryCache = RealtimeWorkspaceProjector.assessingDelivery(tasks, artifacts: artifacts)
@@ -702,6 +717,14 @@ final class RealtimeWorkspaceState: ObservableObject {
             }
         }
         value.artifacts = artifacts; value.readTaskIDs = Array(readTaskIDs)
+        let logs = SessionLogIndex.shared.current()
+        SessionLogIndex.shared.kick(databaseURL: EvidenceDatabase.defaultURL()) { [weak self] in
+            DispatchQueue.main.async { self?.revision += 1 }
+        }
+        value.verification = SessionVerificationFeed.document(tasks: value.tasks, collected: value.collected, processes: value.processes, logs: logs, fileWatching: fileWatching)
+        if let document = value.verification {
+            SessionLogIndex.shared.persistVerdicts(document, databaseURL: EvidenceDatabase.defaultURL())
+        }
         let notices = [continuityNotice, evidenceError, checkpointError].compactMap { $0 }
         value.continuityNotice = notices.isEmpty ? nil : notices.joined(separator: " · ")
         return value

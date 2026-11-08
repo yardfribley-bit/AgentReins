@@ -25,7 +25,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 REPO = pathlib.Path(__file__).resolve().parents[2]
 INSTALLER = REPO / "scripts" / "install_mcp_http.py"
-TOOLS = {"list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit"}
+TOOLS = {"list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit", "list_tool_calls", "get_session_verification"}
 
 
 class InstallerPlistTests(unittest.TestCase):

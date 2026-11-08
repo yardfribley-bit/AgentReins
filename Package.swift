@@ -21,13 +21,18 @@ let package = Package(
             path: "Sources/AgentReinsCore",
             swiftSettings: [ .swiftLanguageMode(.v5) ]
         ),
+        .target(
+            name: "AgentReinsVerify",
+            path: "Sources/AgentReinsVerify",
+            swiftSettings: [ .swiftLanguageMode(.v5) ]
+        ),
         .executableTarget(
             name: "AgentReins",
-            dependencies: ["AgentReinsCore"],
+            dependencies: ["AgentReinsCore", "AgentReinsVerify"],
             path: "Sources/AgentReins",
             resources: [.copy("Resources")],
             swiftSettings: [ .swiftLanguageMode(.v5) ],
-            linkerSettings: [.linkedLibrary("sqlite3")]
+            linkerSettings: [.linkedLibrary("sqlite3"), .linkedLibrary("compression")]
         ),
         .executableTarget(
             name: "AgentReinsNativeHost",
@@ -51,7 +56,7 @@ let package = Package(
         ),
         .executableTarget(
             name: "AgentReinsMCP",
-            dependencies: ["AgentReinsCore", "AgentReinsPeerIdent"],
+            dependencies: ["AgentReinsCore", "AgentReinsPeerIdent", "AgentReinsVerify"],
             path: "Sources/AgentReinsMCP",
             swiftSettings: [ .swiftLanguageMode(.v5) ],
             linkerSettings: [.linkedLibrary("proc")]
@@ -63,8 +68,13 @@ let package = Package(
         ),
         .testTarget(
             name: "AgentReinsTests",
-            dependencies: ["AgentReins", "AgentReinsCore"],
+            dependencies: ["AgentReins", "AgentReinsCore", "AgentReinsVerify"],
             path: "Tests/AgentReinsTests"
+        ),
+        .testTarget(
+            name: "AgentReinsVerifyTests",
+            dependencies: ["AgentReinsVerify"],
+            path: "Tests/AgentReinsVerifyTests"
         )
     ]
 )

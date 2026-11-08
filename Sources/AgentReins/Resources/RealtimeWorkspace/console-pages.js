@@ -82,87 +82,84 @@ function fileAlertRows(payload){
  }
  return out;
 }
+function diffHTML(text){
+ return String(text||'').split('\n').map(line=>{
+  const cls=line.startsWith('+')&&!line.startsWith('+++')?'add':line.startsWith('-')&&!line.startsWith('---')?'remove':'';
+  return `<span class="diff-line ${cls}">${esc(line)}</span>`;
+ }).join('');
+}
+function fileBody(row){
+ if(row.diff)return `<pre class="mono diff-view">${diffHTML(row.diff)}</pre>`;
+ if(row.before||row.after)return `<div class="diff-pair"><section><h3>之前</h3><pre class="mono">${esc(row.before||'未采到之前的内容')}</pre></section><section><h3>之后</h3><pre class="mono">${esc(row.after||'未采到之后的内容')}</pre></section></div>`;
+ return '<p class="empty">未采到 diff。</p>';
+}
+function toolFileCards(verification){
+ return list(verification&&verification.cards).filter(card=>list(card.happened).some(effect=>effect.kind==='file'||effect.kind==='credential'));
+}
+function unclaimedChanges(payload){
+ const verification=payload&&payload.verification;
+ if(verification)return list(verification.unclaimed);
+ return fileRows(payload).map(row=>({id:row.id,path:row.path,diff:row.diff,before:row.before,after:row.after,timestamp:row.at,why:'这次投影没有会话日志，改动还挂不到调用上。',credential:CRED.test(row.path||'')}));
+}
 function renderFiles(holder,payload,state){
  const rows=fileRows(payload);
- const selected=rows.find(r=>r.id===(state?.fileId))||null;
- const alerts=list(window.AgentReinsRisk?._lastAlerts);
- const table=rows.length?`<table class="risk-table"><thead><tr><th>路径</th><th>操作</th><th>Agent</th><th>关联</th><th>时间</th></tr></thead><tbody>${rows.map(r=>{
-  const a=assocOf(r);
-  const sens=CRED.test(r.path);
-  return `<tr class="${selected&&selected.id===r.id?'sel':''}"><td><button type="button" class="risk-link" data-file-id="${esc(r.id)}"><b>${esc(cut(r.path,72))}</b>${sens?'<div class="t2">凭证路径 · 不因此单独生成告警</div>':''}</button></td><td>${esc(cut(r.op,40))}</td><td>${esc(r.agent)}<div class="t2">${esc(cut(r.session,24))}</div></td><td><span class="strength-${esc(a.kind)}">${esc(a.name)}</span></td><td class="mono">${esc(time(r.at))}</td></tr>`;
- }).join('')}</tbody></table>`:'<div class="risk-empty"><h2>还没有采到文件事件</h2><p>文件卡片和 kind=file 的采集记录都会出现在这里。没有记录就不画 diff，也不编 S08–S10 告警。</p></div>';
- let detail='';
- if(selected){
-  const related=alerts.filter(a=>a.evidence?.path&&selected.path&&a.evidence.path===selected.path);
-  const body=selected.diff?`<pre class="mono diff-view">${esc(selected.diff)}</pre>${selected.diffTruncated?'<p class="note">diff 被截断。</p>':''}`
-   :(selected.before||selected.after)?`<div class="diff-pair"><section><h3>之前</h3><pre class="mono">${esc(selected.before||'未采到之前的内容')}</pre></section><section><h3>之后</h3><pre class="mono">${esc(selected.after||'未采到之后的内容')}</pre></section></div>`
-   :'<p class="empty">未采到 diff。不把文件名当成内容已经核对。</p>';
-  const finds=selected.findings.length?`<ul>${selected.findings.map(f=>`<li>${esc(f.ruleId||f.title||'finding')} · ${esc(f.severity||'')} · ${esc(cut(f.evidence||f.title||'',120))}</li>`).join('')}</ul>`:'<p class="note">这条记录上没有代码发现。</p>';
-  detail=`<article class="risk-detail"><h2>${esc(selected.path)}</h2><p>${esc(selected.agent)} · ${esc(selected.op)} · 来源 ${esc(selected.source)} · 执行编号 ${esc(selected.call||'缺口')}</p>${body}<h3>已有发现</h3>${finds}<h3>相关告警</h3>${related.length?related.map(a=>`<button type="button" class="risk-link" data-dest-alert="${esc(a.id)}">${esc(a.rule)} · ${esc(a.title)}</button>`).join(''):'<p class="note">没有路径对得上的风险告警。S08 敏感文件、S09 批量删除、S10 工作区外写入未接入，不在这里现编。</p>'}</article>`;
- }
+ const verification=payload&&payload.verification;
+ const cards=toolFileCards(verification);
+ const unclaimed=unclaimedChanges(payload);
+ const selectedId=state&&state.fileId;
+ const selected=unclaimed.find(row=>row.id===selectedId)||null;
  const mode=state?.fileMode==='alerts'?'alerts':'list';
  const fileHits=fileAlertRows(payload);
  const alertTable=fileHits.length?`<table class="risk-table"><thead><tr><th>规则</th><th>告警</th><th>路径</th><th>Agent</th><th>时间</th></tr></thead><tbody>${fileHits.map(a=>`<tr><td>${esc(a.rule)}</td><td><button type="button" class="risk-link" ${a.kind==='alert'?`data-dest-alert="${esc(a.id)}"`:`data-file-id="${esc(a.fileId||'')}"`}><b>${esc(a.title)}</b><div class="t2">${esc(cut(a.why,90))}</div></button></td><td class="mono">${esc(cut(a.path,48))}</td><td>${esc(a.agent||'')}</td><td class="mono">${esc(time(a.at))}</td></tr>`).join('')}</tbody></table>`:'<div class="risk-empty"><h2>没有文件改动告警</h2><p>S08 敏感文件被改、S09 批量删除、S10 工作区外写入都没有检测器。这里只列出已经挂在文件路径上的风险告警，或文件卡片自带的代码发现。没有这些就不编一条。</p></div>';
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">只列已采到的文件事件</div><h1>文件改动</h1><p>有 diff 才显示 diff。凭证路径会标出来，但不会因此发明一条告警。</p></div><span class="t2">${mode==='alerts'?fileHits.length+' 条告警':rows.length+' 条改动'}</span></div><div class="risk-actions" style="margin:0 28px 10px"><button type="button" class="${mode==='list'?'primary':'quiet'}" data-file-mode="list">改动列表</button><button type="button" class="${mode==='alerts'?'primary':'quiet'}" data-file-mode="alerts">文件告警</button></div><div class="risk-main" style="margin:0 28px">${mode==='alerts'?alertTable:table}${mode==='list'?detail:''}</div>`;
-}
-
-function textOf(card){
- return String(card?.output||card?.summary||card?.input||'').trim();
-}
-function reasoningRows(payload){
- const rows=[];
- for(const t of tasksOf(payload)){
-  const cards=list(t.cards);
-  const models=cards.filter(c=>/model|plan/.test(String(c.kind||c.detailType||'')));
-  const execs=cards.filter(c=>c.execution?.command||/^(command|tool)$/.test(String(c.kind||'')));
-  const used=new Set();
-  for(const m of models){
-   const call=m.call||null;
-   const matched=call?execs.filter(e=>(e.call||e.execution?.call)&&String(e.call||e.execution.call)===String(call)):[];
-   matched.forEach(e=>used.add(e.id));
-   rows.push({
-    id:'m:'+String(m.id),
-    task:t,model:m,execs:matched,
-    relation:matched.length?'explicit':'gap',
-    basis:matched.length?'模型记录与命令共用执行编号':(call?'这个执行编号没有对上的命令':'模型记录没有执行编号，不能对照')
-   });
-  }
-  for(const e of execs){
-   if(used.has(e.id))continue;
-   rows.push({id:'e:'+String(e.id),task:t,model:null,execs:[e],relation:'gap',basis:'有主机动作，没有同一执行编号的模型输出'});
-  }
- }
- return rows;
-}
-function alignmentVerdict(row,alerts){
- if(row.relation!=='explicit'||!row.model)return {label:'不可对照',kind:'gap',why:row.basis};
- const said=textOf(row.model);
- const call=row.model.call;
- const hit=list(alerts).find(a=>a.call&&call&&String(a.call)===String(call)&&['S02','S04','S05','S07'].includes(a.rule));
- if(hit&&/不联网|不会外联|不外联|只读取|只读|不上传/.test(said)){
-  return {label:'言行不一',kind:'mismatch',why:'模型文本里有不外联或只读的说法，同一执行编号已有 '+hit.rule+'：'+(hit.title||'')};
- }
- if(said&&row.execs.length)return {label:'可对照',kind:'paired',why:'同一执行编号两边都有记录。没有结构化的矛盾，不判成一致，也不判成不一。'};
- return {label:'缺口',kind:'gap',why:row.basis};
-}
-function renderReason(holder,payload,state){
- const rows=reasoningRows(payload);
- const selected=rows.find(r=>r.id===state?.reasonId)||null;
- const table=rows.length?`<table class="risk-table"><thead><tr><th>时间</th><th>执行编号</th><th>模型侧已采到的文本</th><th>主机动作</th><th>关联</th></tr></thead><tbody>${rows.map(r=>{
-  const call=r.model?.call||r.execs[0]?.call||'缺口';
-  const said=r.model?cut(textOf(r.model),80):'未采到模型输出';
-  const did=r.execs.map(e=>e.execution?.command||e.title||e.kind).filter(Boolean).join('；')||'未采到命令';
-  const verdict=alignmentVerdict(r,window.AgentReinsRisk&&window.AgentReinsRisk._lastAlerts);
-  return `<tr class="${selected&&selected.id===r.id?'sel':''}"><td class="mono">${esc(time(r.model?.timestamp||r.execs[0]?.timestamp))}</td><td class="mono">${esc(cut(call,18))}</td><td><button type="button" class="risk-link" data-reason-id="${esc(r.id)}">${esc(said)}</button></td><td>${esc(cut(did,80))}</td><td>${esc(verdict.label)}<div class="t2">${esc(r.basis)}</div></td></tr>`;
- }).join('')}</tbody></table>`:'<div class="risk-empty"><h2>还没有可并列的模型记录和主机动作</h2><p>本页不自动写「言行一致」或「言行不一」。对不上就保持缺口。</p></div>';
+ const attached=cards.length?cards.map(card=>{
+  const files=list(card.happened).filter(effect=>effect.kind==='file'||effect.kind==='credential');
+  return `<article class="tc-card ${esc(card.status||'matched')}"><header class="tc-head"><b>${esc(card.toolName||'工具')}</b><span>${esc(time(card.timestamp))} · ${esc(card.status==='mismatched'?'对不上':'对上了')}</span></header><p class="t2">它调 ${esc(card.toolName||'')} ${esc(cut(card.arguments||'',120))}</p>${files.map(effect=>`<section><h3>${esc(effect.path||'文件')}${effect.credential?' · 凭证路径':''}</h3>${fileBody(effect)}</section>`).join('')}</article>`;
+ }).join(''):'';
+ const unclaimedHTML=unclaimed.length?`<h2 class="unclaimed-title">无人认领的改动</h2><table class="risk-table"><thead><tr><th>路径</th><th>时间</th><th>原因</th></tr></thead><tbody>${unclaimed.map(row=>`<tr class="${selected&&selected.id===row.id?'sel':''}"><td><button type="button" class="risk-link" data-file-id="${esc(row.id)}"><b>${esc(cut(row.path,72))}</b>${row.credential?'<div class="t2">凭证路径</div>':''}</button></td><td class="mono">${esc(time(row.timestamp))}</td><td>${esc(row.why||'')}</td></tr>`).join('')}</tbody></table>`:'<h2 class="unclaimed-title">无人认领的改动</h2><p class="note">没有无人认领的改动。</p>';
  let detail='';
  if(selected){
-  const said=selected.model?textOf(selected.model):'';
-  const did=selected.execs.map(e=>e.execution?.command||e.output||e.title||'').join('\n');
-  const verdict=alignmentVerdict(selected,window.AgentReinsRisk&&window.AgentReinsRisk._lastAlerts);
-  detail=`<article class="risk-detail"><p class="t2">${esc(selected.task.agent||'')} · 执行编号 ${esc(selected.model?.call||selected.execs[0]?.call||'缺口')}</p><h2>${esc(verdict.label)}</h2><p>${esc(verdict.why)}</p><div class="diff-pair"><section><h3>模型侧</h3><pre class="mono">${esc(said||'未采到。不用任务标题代替。')}</pre></section><section><h3>主机侧</h3><pre class="mono">${esc(did||'未采到命令或工具回传。')}</pre></section></div><p class="note">动机看不到。没有同一执行编号，或两边文本对不上一条已有告警时，保持不可对照。</p></article>`;
+  detail=`<article class="risk-detail"><h2>${esc(selected.path)}</h2><p>${esc(selected.why||'')}</p>${fileBody(selected)}</article>`;
  }
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">同一执行编号才并列</div><h1>推理与动作</h1><p>左边是已采到的模型或计划文本，右边是同一执行编号的命令。没有编号的行标成缺口。</p></div></div><div class="risk-main" style="margin:0 28px">${table}${detail}</div>`;
+ const listHTML=cards.length||unclaimed.length?`${attached}${unclaimedHTML}${detail}`:'<div class="risk-empty"><h2>还没有采到文件事件</h2><p>有 diff 才挂到对应的工具调用下面。没有记录就不画 diff。S08 敏感文件、S09 批量删除、S10 工作区外写入还没有检测器。</p></div>';
+ const count=mode==='alerts'?fileHits.length:cards.length+unclaimed.length;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">改动跟调用走</div><h1>文件改动</h1><p>每次 diff 挂在引起它的那次工具调用下面。对不上调用的，放在无人认领的改动。S08 敏感文件检测器还没接上，凭证路径只标出来。</p></div><span class="t2">${count} 条</span></div><div class="risk-actions" style="margin:0 28px 10px"><button type="button" class="${mode==='list'?'primary':'quiet'}" data-file-mode="list">改动列表</button><button type="button" class="${mode==='alerts'?'primary':'quiet'}" data-file-mode="alerts">文件告警</button></div><div class="risk-main" style="margin:0 28px">${mode==='alerts'?alertTable:listHTML}</div>`;
+}
+
+function joinLabel(kind){
+ return { 'call-id':'按调用编号对上','time-pid':'按时间和进程树对上','time-window':'按时间窗对上' }[kind]||kind||'';
+}
+function happenedBlock(effect){
+ const title=effect.kind==='file'||effect.kind==='credential'?(effect.path||'文件'):effect.kind==='network'?(effect.remote||'外联'):(effect.command||effect.kind||'进程');
+ return `<div class="tc-effect"><b>${esc(title)}</b><span class="t2">${esc(joinLabel(effect.join))}</span>${effect.diff?`<pre class="mono diff-view">${diffHTML(effect.diff)}</pre>`:''}${(effect.before||effect.after)&&!effect.diff?fileBody(effect):''}</div>`;
+}
+function renderToolCard(card){
+ const status=card.status==='mismatched'?'mismatched':'matched';
+ const said=String(card.said||'').trim()?esc(card.said)+(card.saidTruncated?'<p class="t2">只留了开头一段，全文仍在原来的会话日志里。</p>':''):'<span class="t2">这次调用前面没有推理文本。</span>';
+ const happened=list(card.happened);
+ const flags=list(card.mismatches).map(item=>`<li><b>${esc(item.label)}</b> ${esc(item.detail||'')}</li>`).join('');
+ return `<article class="tc-card ${status}"><header class="tc-head"><b class="tc-status ${status}">${status==='matched'?'对上了':'对不上'}</b><span>${esc(card.agent||'')} · ${esc(time(card.timestamp))}</span></header><div class="tc-grid"><section><h3>它说</h3><pre class="mono">${said}</pre></section><section><h3>它调</h3><p><b>${esc(card.toolName||'工具')}</b></p><pre class="mono">${esc(card.arguments||'没有参数')}</pre></section><section><h3>真发生</h3>${happened.length?happened.map(happenedBlock).join(''):'<span class="t2">这个时间窗里没有对上的主机记录。</span>'}</section></div>${flags?`<ul class="tc-flags">${flags}</ul>`:''}${card.note?`<p class="t2">${esc(card.note)}</p>`:''}</article>`;
+}
+function renderChecklist(item,state){
+ const decisions=list(state&&state.decisions);
+ const decision=item.taskId?decisions.find(row=>row.id==='task:'+item.taskId):null;
+ const invalid=state&&state.returnInvalid?' invalid':'';
+ const recorded=decision?`<p class="note">已记录 ${esc(decision.state==='accept'?'通过':decision.state==='return'?'已退回':decision.state)} · ${esc(decision.note||'')}</p>`:'';
+ const buttons=item.taskId?`<label class="risk-search">退回原因（退回时必填）<textarea id="checklist-note" class="${invalid.trim()}" rows="2" placeholder="写清要退回的原因">${esc(state&&state.returnNote||'')}</textarea></label><div class="risk-actions"><button type="button" class="primary" data-accept-decide="accept" data-task-id="${esc(item.taskId)}" data-note-field="checklist-note">通过</button><button type="button" class="quiet" data-accept-decide="return" data-task-id="${esc(item.taskId)}" data-note-field="checklist-note">退回</button></div>`:'<p class="note">这条完成声明还没对上待我处理里的任务，通过和退回先不写。</p>';
+ return `<article class="tc-check"><h3>它说做完了</h3><p>${esc(cut(item.doneText||'',180))}</p><ul class="tc-flags"><li>它说改了 ${esc(item.claimedFiles)} 个文件，主机记下 ${esc(item.actualFiles)} 个</li><li>外联 ${esc(item.egressCount)} 次</li><li>凭证 ${item.credentialsTouched?'碰到了':'没碰到'}</li></ul>${recorded}${buttons}</article>`;
+}
+function renderReason(holder,payload,state){
+ const verification=payload&&payload.verification;
+ const sources=list(verification&&verification.sources);
+ const cards=list(verification&&verification.cards);
+ const session=state&&state.sessionId;
+ const shown=session?cards.filter(card=>card.sessionId===session):cards;
+ const checks=list(verification&&verification.checklists).filter(item=>!session||item.sessionId===session);
+ const sourceNote=sources.length?sources.map(item=>`${esc(item.agent)}：${esc(item.note||item.state)}`).join('<br>'):'这次投影没有带上会话日志。Claude Code 在 ~/.claude/projects，Codex 在 ~/.codex/sessions。';
+ const sessions=[...new Set(cards.map(card=>card.sessionId).filter(Boolean))];
+ const picker=sessions.length>1?`<div class="risk-actions">${sessions.map(id=>`<button type="button" class="${session===id?'primary':'quiet'}" data-verify-session="${esc(id)}">${esc(cut(id,24))}</button>`).join('')}<button type="button" class="${session?'quiet':'primary'}" data-verify-session="">全部</button></div>`:'';
+ const body=shown.length?shown.map(renderToolCard).join('')+checks.map(item=>renderChecklist(item,state)).join(''):`<div class="risk-empty"><h2>还没有可核对的工具调用</h2><p>${sourceNote}</p><p>目录不在，或日志里没有工具调用时，这里是空的。</p></div>`;
+ const mismatches=shown.filter(card=>card.status==='mismatched').length;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">核得清</div><h1>推理对齐</h1><p>一张卡片三列：它说、它调、真发生。只标三种对不上：说了没做、做了没说、做的比说的多。对不上的留在这里，通过或退回进待我处理。</p></div><span class="t2">${shown.length} 次调用${mismatches?` · ${mismatches} 次对不上`:''}</span></div><div class="risk-main" style="margin:0 28px">${picker}${body}</div>`;
 }
 
 function taskBucket(t){
@@ -266,7 +263,9 @@ const MCP_TOOLS=[
  {name:'get_execution',note:'一条执行的命令、目的地、下载哈希。密钥打码。'},
  {name:'list_network',note:'运输审计加进程采样。代理流量的对端 IP 不是目的域名。'},
  {name:'get_coverage',note:'覆盖和盲区。没采到就是 unknown。'},
- {name:'list_mcp_audit',note:'监督者自己的读取也进哈希链。'}
+ {name:'list_mcp_audit',note:'监督者自己的读取也进哈希链。'},
+ {name:'list_tool_calls',note:'只读。工具调用卡片：它说、它调、真发生。'},
+ {name:'get_session_verification',note:'只读。一次会话的核对、无人认领的改动、完成核对。'}
 ];
 function renderSupervise(holder,payload,state){
  const audit=list(state?.mcpAudit);
@@ -291,12 +290,12 @@ function renderAbout(holder, install){
  const kicker=esc(installLabel(install));
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。看得见主机层里已经采到的 agent 行为，并在本机确认、加白、复查。</p></div></div>
  <div class="about-body">
- <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p></article>
+ <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">清理走已经在跑的分层：心跳和没采到原话满一天，大块原文满三天。外联、凭据、文件改动、验收决定和短摘录不动。</p></article>
  <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）</li><li>放行和阻断接到模型网关与 Network Extension</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
  </div>`;
 }
 
 window.AgentReinsConsole={
- fileRows,fileAlertRows,renderFiles,reasoningRows,alignmentVerdict,renderReason,inboxItems,inboxNoiseReason,evidencePack,evidenceItems,renderInbox,renderSupervise,renderAbout
+ fileRows,fileAlertRows,renderFiles,unclaimedChanges,renderReason,inboxItems,inboxNoiseReason,evidencePack,evidenceItems,renderInbox,renderSupervise,renderAbout
 };
 })();
