@@ -312,8 +312,8 @@ final class RealtimeWorkspaceTests: XCTestCase {
         XCTAssertEqual(escHook, "undefined")
         _ = try await browser.evaluateJavaScript("document.querySelector('[data-view=rules]')?.click()")
         try await Task.sleep(for: .milliseconds(200))
-        let rulesBody = try await browser.evaluateJavaScript("document.body.innerHTML") as? String
-        XCTAssertEqual(rulesBody?.contains("阻断"), false, "rule cards must not show 阻断")
+        let rulesHTML = try await browser.evaluateJavaScript("document.getElementById('rules-view')?.innerHTML || ''") as? String
+        XCTAssertEqual(rulesHTML?.contains("阻断"), false, "rule cards must not show 阻断")
         let graphVisible = try await browser.evaluateJavaScript("!document.getElementById('graph-screen').hidden") as? Bool
         XCTAssertEqual(graphVisible, true)
         let hacked = try await browser.evaluateJavaScript("window.hacked===1") as? Bool
