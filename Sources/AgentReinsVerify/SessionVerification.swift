@@ -25,11 +25,11 @@ public enum SessionVerification {
         )
     }
 
-    public static func parseClaude(_ data: Data, sourcePath: String) -> ParseBatch {
+    public static func parseClaude(_ data: Data, sourcePath: String = "claude.jsonl") -> ParseBatch {
         parseLines(data, sourcePath: sourcePath, agent: "Claude Code", kind: .claude, sessionHint: sessionHint(sourcePath))
     }
 
-    public static func parseCodex(_ data: Data, sourcePath: String) -> ParseBatch {
+    public static func parseCodex(_ data: Data, sourcePath: String = "codex.jsonl") -> ParseBatch {
         parseLines(data, sourcePath: sourcePath, agent: "Codex", kind: .codex, sessionHint: sessionHint(sourcePath))
     }
 
