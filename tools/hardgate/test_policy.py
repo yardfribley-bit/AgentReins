@@ -6,6 +6,7 @@ import pathlib
 import stat
 import subprocess
 import tempfile
+import time
 import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parents[2]
@@ -259,6 +260,33 @@ class EnforcementTests(unittest.TestCase):
         env.pop("AGENTREINS_HARDGATE_POLICY", None)
         return env
 
+    def _wait_until_exec(self, argv, env):
+        """Return once the real binary has run.
+
+        The wrapper then signs evidence. On a cold CI keychain that wait is
+        longer than the exec itself, so the marker is the proof, not process exit.
+        """
+        proc = subprocess.Popen(argv, env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        try:
+            deadline = time.time() + 20
+            while time.time() < deadline:
+                if self.marker.exists():
+                    return 0
+                if proc.poll() is not None:
+                    err = proc.stderr.read() if proc.stderr else ""
+                    self.assertEqual(proc.returncode, 0, err)
+                    return proc.returncode
+                time.sleep(0.05)
+            self.fail("wrapper did not exec the real binary")
+        finally:
+            if proc.poll() is None:
+                proc.kill()
+                proc.wait(timeout=5)
+            if proc.stdout:
+                proc.stdout.close()
+            if proc.stderr:
+                proc.stderr.close()
+
     def test_wrapper_does_not_exec_denied_egress(self):
         env = self._env("curl")
         proc = subprocess.run(
@@ -280,11 +308,7 @@ class EnforcementTests(unittest.TestCase):
 
     def test_wrapper_executes_loopback(self):
         env = self._env("curl")
-        proc = subprocess.run(
-            [str(WRAPPER), "http://127.0.0.1:9/health"],
-            env=env, capture_output=True, text=True, timeout=10,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._wait_until_exec([str(WRAPPER), "http://127.0.0.1:9/health"], env), 0)
         self.assertTrue(self.marker.exists())
         self.assertEqual(policy.load_rows(self.root / "gate"), [])
 
@@ -316,11 +340,7 @@ class EnforcementTests(unittest.TestCase):
         gate = self.root / "gate"
         policy.user_allow(gate, "host:allowed.example", "egress", "发布需要")
         env = self._env("curl")
-        proc = subprocess.run(
-            [str(WRAPPER), "https://allowed.example/v1"],
-            env=env, capture_output=True, text=True, timeout=10,
-        )
-        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self._wait_until_exec([str(WRAPPER), "https://allowed.example/v1"], env), 0)
         self.assertTrue(self.marker.exists())
         passes = [r for r in policy.load_rows(gate) if r["action"] == "pass"]
         self.assertTrue(passes)
