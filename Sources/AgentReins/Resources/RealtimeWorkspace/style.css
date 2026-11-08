@@ -232,12 +232,14 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 .risk-ev .ly{font:10px ui-monospace,monospace;color:var(--purple);margin-right:6px}
 .risk-ev p{font-size:12px;margin:4px 0}
 .risk-ev small{display:block;color:var(--muted);font-size:11px}
-.risk-demo-note{font-size:11px;color:#6d5a32;background:var(--orange-bg);padding:8px 10px;border-radius:6px;margin:8px 0}
 .demo-action{border-style:dashed}
 .cov-gap,.cov-miss{color:var(--orange)}.cov-ok{color:var(--green)}
 .health-steps{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px;margin:8px 28px;padding:0;list-style:none}
 .health-steps li{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px}
 .health-steps b{display:block}.health-steps span{display:block;margin:4px 0;font-size:13px}.health-steps small{color:var(--muted);font-size:11px}
+.inbox-switch{display:flex;gap:8px;margin:0 28px 12px}
+.inbox-switch button{border:1px solid var(--line);border-radius:999px;padding:4px 10px;background:var(--surface);font-size:12px}
+.inbox-switch button.on{border-color:#cfc5f1;background:var(--soft)}
 .inbox-layout{display:grid;grid-template-columns:280px minmax(0,1fr);gap:12px;margin:0 28px}
 .inbox-item{display:block;width:100%;text-align:left;border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:8px;background:var(--surface)}
 .inbox-item.on{border-color:#cfc5f1;background:var(--soft)}
@@ -255,7 +257,11 @@ textarea#accept-note{width:100%;border:1px solid var(--line);border-radius:6px;p
 .diff-view,.diff-pair pre{background:#f7f5f1;border-radius:6px;padding:10px;max-height:320px;overflow:auto}
 .tool-list{list-style:none;padding:0;display:grid;gap:8px}
 .tool-list span{display:block;color:var(--muted);font-size:11px}
-.about-grid{margin:0 28px}
+.about-body{display:grid;gap:12px;margin:8px 28px 0;max-width:720px}
+.about-body h3{margin-bottom:8px}
+.about-body p{font-size:13px;line-height:1.75}
+.about-next{margin:0;padding-left:1.15em;font-size:13px;line-height:1.75}
+.about-next li{margin:2px 0}
 .risk-st.confirmed{color:var(--green)}.risk-st.allow{color:#4d5ea8}.risk-st.demo{color:var(--orange)}.risk-st.open{color:var(--red)}
 @media(max-width:1100px){.rules-layout,.inbox-layout,.health-steps,.diff-pair{grid-template-columns:1fr}}
 .risk-rc{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:14px 16px}
@@ -272,7 +278,7 @@ textarea#accept-note{width:100%;border:1px solid var(--line);border-radius:6px;p
 .risk-lvl{font-size:11px;padding:2px 6px;border-radius:4px}.risk-lvl.full{background:var(--green-bg);color:var(--green)}.risk-lvl.part{background:var(--orange-bg);color:var(--orange)}.risk-lvl.none{background:var(--red-bg);color:var(--red)}
 .mono{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 @media(max-width:1100px){.risk-stats{grid-template-columns:repeat(2,minmax(0,1fr))}.risk-split{grid-template-columns:1fr}.risk-rules,.risk-covg{grid-template-columns:1fr}}
-@media(max-width:650px){.risk-ph,.risk-stats,.risk-split,.risk-rules,.risk-covg{margin-left:12px;margin-right:12px}.risk-ph{padding-left:12px;padding-right:12px}}
+@media(max-width:650px){.risk-ph,.risk-stats,.risk-split,.risk-rules,.risk-covg,.about-body{margin-left:12px;margin-right:12px}.risk-ph{padding-left:12px;padding-right:12px}}
 /* Phase 2 · 外网访问 by destination, connection map, destination detail, coverage banner, empty graph */
 .network-toolbar{display:flex;flex-wrap:wrap;align-items:center;gap:10px;margin:10px 0}
 .network-agent-pills,.network-mode,.map-filter{display:flex;gap:4px;flex-wrap:wrap}

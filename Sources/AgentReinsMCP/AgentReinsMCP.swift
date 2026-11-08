@@ -118,54 +118,104 @@ enum Transport {
         var records: [[String: Any]]
         /// True when more than `limit` transport directories exist; only the newest `limit` are returned.
         var truncated: Bool
+        /// The read hit its time or size budget and stopped. Evidence files were not modified.
+        var stopped: Bool = false
+        var stopReason: String? = nil
     }
+
+    static let maxTransportBytes = 2 * 1024 * 1024
 
     static func load(limit: Int = 80) -> [[String: Any]] { loadReporting(limit: limit).records }
 
     /// Names + root mtime. A warm list_agents returns this without re-reading transport.json files.
+    /// A stopped scan is reused for a couple of seconds so a burst of tools/call does not rescan.
     private static let cacheLock = NSLock()
     private static var cacheKey: String?
     private static var cacheLoad: Load?
+    private static var cacheAt = Date.distantPast
 
-    static func loadReporting(limit: Int = 80) -> Load {
+    static func loadReporting(limit: Int = 80, deadline: Date? = nil, isCancelled: @escaping () -> Bool = { false }) -> Load {
         let root = Paths.transport.resolvingSymlinksInPath()
         let names = ((try? FileManager.default.contentsOfDirectory(atPath: root.path)) ?? []).filter { !$0.hasPrefix(".") }
         let mtime = ((try? FileManager.default.attributesOfItem(atPath: root.path))?[.modificationDate] as? Date)?
             .timeIntervalSince1970 ?? 0
         let key = "\(root.path)|\(names.count)|\(mtime)|\(limit)"
         cacheLock.lock()
-        if cacheKey == key, let cacheLoad {
-            cacheLock.unlock()
-            return cacheLoad
+        if let cacheLoad {
+            let fresh = Date().timeIntervalSince(cacheAt) < 2
+            if (cacheKey == key && !cacheLoad.stopped) || fresh {
+                cacheLock.unlock()
+                return cacheLoad
+            }
         }
         cacheLock.unlock()
-        let fresh = loadReportingUncached(limit: limit)
+        if isCancelled() {
+            return Load(records: [], truncated: false, stopped: true, stopReason: "request cancelled")
+        }
+        let fresh = loadReportingUncached(limit: limit, deadline: deadline, isCancelled: isCancelled)
         cacheLock.lock()
         cacheKey = key
         cacheLoad = fresh
+        cacheAt = Date()
         cacheLock.unlock()
         return fresh
     }
 
-    static func loadReportingUncached(limit: Int = 80) -> Load {
+    static func loadReportingUncached(limit: Int = 80, deadline: Date? = nil, isCancelled: @escaping () -> Bool = { false }) -> Load {
         Paths.ensureSupport()
         let root = Paths.transport.resolvingSymlinksInPath()
         let path = root.path
         if path.hasPrefix("/private/tmp") || path.hasPrefix("/tmp/") { return Load(records: [], truncated: false) }
-        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.contentModificationDateKey]) else {
+        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
             return Load(records: [], truncated: false)
         }
-        let sorted = dirs.map { $0.appendingPathComponent("transport.json") }
-            .filter { FileManager.default.fileExists(atPath: $0.path) }
-            .sorted {
-                let a = (try? $0.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                let b = (try? $1.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-                return a > b
+        var stopped = false
+        var stopReason: String?
+        func halt(_ reason: String) {
+            stopped = true
+            stopReason = reason
+        }
+        var jsons: [URL] = []
+        for (index, dir) in dirs.enumerated() {
+            if isCancelled() { halt("request cancelled"); break }
+            if let deadline, index % 80 == 0, Date() >= deadline {
+                halt("transport directory scan exceeded the read budget")
+                break
             }
-        let truncated = sorted.count > limit
-        let files = sorted.prefix(limit)
+            let file = dir.appendingPathComponent("transport.json")
+            if file.lastPathComponent.contains("evidence.sqlite") { continue }
+            if FileManager.default.fileExists(atPath: file.path) { jsons.append(file) }
+        }
+        var ranked: [(Date, URL)] = []
+        for (index, file) in jsons.enumerated() {
+            if isCancelled() { halt("request cancelled"); break }
+            if let deadline, index % 80 == 0, Date() >= deadline {
+                halt("transport directory scan exceeded the read budget")
+                break
+            }
+            let when = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
+            ranked.append((when, file))
+        }
+        ranked.sort { $0.0 > $1.0 }
+        let truncated = ranked.count > limit || stopped
+        let files = ranked.prefix(limit).map(\.1)
         var rows: [[String: Any]] = []
         for file in files {
+            if isCancelled() { halt("request cancelled"); break }
+            if let deadline, Date() >= deadline {
+                halt("transport file reads exceeded the read budget")
+                break
+            }
+            let attrs = try? FileManager.default.attributesOfItem(atPath: file.path)
+            let size = (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+            if size > maxTransportBytes {
+                rows.append([
+                    "runID": file.deletingLastPathComponent().lastPathComponent,
+                    "call": file.deletingLastPathComponent().lastPathComponent,
+                    "readSkipped": "transport.json is \(size) bytes; skipped so this call would not read it whole",
+                ])
+                continue
+            }
             guard let data = try? Data(contentsOf: file),
                   let item = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                   let inv = item["invocation"] as? [String: Any],
@@ -186,7 +236,7 @@ enum Transport {
             row["evidencePath"] = file.path
             rows.append(row)
         }
-        return Load(records: rows, truncated: truncated)
+        return Load(records: rows, truncated: truncated, stopped: stopped, stopReason: stopReason)
     }
 }
 
@@ -564,11 +614,24 @@ enum SocketLedger {
             return loadCached
         }
         loadLock.unlock()
+        if size > 8 * 1024 * 1024 {
+            return [
+                "connections": [[String: Any]](),
+                "total": 0,
+                "coverage": [
+                    "state": "unread",
+                    "confidence": "Unknown",
+                    "bytes": size,
+                    "note": "socket-ledger.json 有 \(size) 字节，这次没有整文件读入。证据没有被改写。",
+                ] as [String: Any],
+            ]
+        }
         let seal = SocketLedgerCore.sealPath(ledger: url, defaultLedger: defaultURL, integrityDir: Paths.integrityDir)
         // Pending warmup: do not launch the helper on the tool thread (a cold Keychain is a 15s hang).
+        // 0.5s is enough to share the lock with the sampler; a longer wait is how tools/call used to hang.
         let key: Data? = KeychainWarmup.shared.state == "pending" ? nil : (try? integrity.loadKey(create: false))
         let value = SocketLedgerCore.load(ledger: url, seal: seal, key: key, crypto: Ctx.crypto, agent: agent, since: since,
-                                          until: until, limit: limit)
+                                          until: until, limit: limit, lockWait: 0.5)
         loadLock.lock()
         loadKeySig = sig
         loadCached = value
@@ -628,6 +691,39 @@ let inProcessBlindSpot: [String: Any] = [
     "note": "Read/Edit/Write/Glob 等不派生子进程、也不打开套接字的进程内工具，不在系统级采样和审计代理的可见范围内。这里没看到，不能当成没发生。Network Extension 不在本接口范围内。",
 ]
 
+/// Stat only. Never opens evidence.sqlite3, so a 27GB database cannot stall tools/call.
+enum DiskUsage {
+    static func snapshot() -> [String: Any] {
+        let support = Paths.support
+        let evidence = support.appendingPathComponent("evidence.sqlite3")
+        let realtime = support.appendingPathComponent("realtime-active-v1.json.sqlite3")
+        let evidenceBytes = fileFamily(evidence)
+        let realtimeBytes = fileFamily(realtime)
+        let ledgerBytes = byteSize(SocketLedger.url)
+        return [
+            "evidenceBytes": evidenceBytes,
+            "realtimeBytes": realtimeBytes,
+            "socketLedgerBytes": ledgerBytes,
+            "policy": EvidenceValue.policySummary,
+            "keep": EvidenceValue.keepTopics,
+            "drop": EvidenceValue.dropTopics,
+            "backstopBytes": EvidenceValue.backstopBytes,
+            "backstopAppliesTo": "noise-and-bulk",
+            "keepAutoDrop": false,
+            "opensEvidenceDatabase": false,
+        ] as [String: Any]
+    }
+
+    private static func fileFamily(_ url: URL) -> Int64 {
+        byteSize(url) + byteSize(URL(fileURLWithPath: url.path + "-wal")) + byteSize(URL(fileURLWithPath: url.path + "-shm"))
+    }
+
+    private static func byteSize(_ url: URL) -> Int64 {
+        let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
+        return (attrs?[.size] as? NSNumber)?.int64Value ?? 0
+    }
+}
+
 enum Coverage {
     static func get(_ integrity: Integrity, validation: [String: Any]? = nil) -> [String: Any] {
         let validation = validation ?? integrity.validate()
@@ -654,6 +750,7 @@ enum Coverage {
             "legacyPathPolicy": "never_read_/private/tmp",
             "runtime": "swift-mcp-no-system-node-python",
             "mcpEndpoint": EndpointDiscovery.snapshot(),
+            "diskUsage": DiskUsage.snapshot(),
             "confidence": "Unknown",
         ]
         if let status = str(validation["keychainStatus"]) { result["keychainStatus"] = status }
@@ -917,7 +1014,7 @@ enum Ctx {
     static let keychain = ProcessKeychainCache(HelperKeychain(helper: HelperKeychain.packaged()))
     private static let auditQueue = DispatchQueue(label: "com.agentreins.mcp.audit")
     private static let validationQueue = DispatchQueue(label: "com.agentreins.mcp.validation")
-    private static var validationCache: (token: String, value: [String: Any])?
+    private static var validationCache: (token: String, value: [String: Any], partial: Bool, at: Date)?
 
     static func integrity() -> Integrity {
         Paths.ensureSupport()
@@ -943,12 +1040,24 @@ enum Ctx {
     static func flushAudit() { auditQueue.sync { } }
 
     /// Reuses the last `validate()` while the audit log, seals, evidence files and key fingerprint are unchanged.
-    static func cachedValidation(_ integrity: Integrity) -> [String: Any] {
+    /// A scan that stopped for the read budget is reused for a few seconds, then tried again.
+    /// Pass a deadline so a huge transport tree cannot sit in this call until the client gives up.
+    static func cachedValidation(_ integrity: Integrity, deadline: Date? = nil) -> [String: Any] {
         validationQueue.sync {
+            if let validationCache, validationCache.partial, Date().timeIntervalSince(validationCache.at) < 5 {
+                return validationCache.value
+            }
             let token = validationToken(integrity)
-            if let validationCache, validationCache.token == token { return validationCache.value }
-            let value = integrity.validate()
-            if validationToken(integrity) == token { validationCache = (token, value) }
+            if let validationCache, validationCache.token == token, !validationCache.partial { return validationCache.value }
+            if let deadline, Date() >= deadline {
+                return IntegrityReadBudget.stopResult("这次调用的时限在开始校验前已经用完。证据没有被改写。这不是篡改结论。")
+            }
+            let budget = deadline.map { IntegrityReadBudget(deadline: $0) }
+            let value = integrity.validate(budget: budget)
+            let partial = str(value["status"]) == "read_budget_exceeded" || str(value["scan"]) == "stopped"
+            if partial || validationToken(integrity) == token {
+                validationCache = (token, value, partial, Date())
+            }
             return value
         }
     }

@@ -243,17 +243,19 @@ extension Integrity {
     private static var evidenceMarker = ""
     private static var evidenceCached: [String: Any]?
 
-    public func validateEvidenceFiles(_ key: Data, _ marker: [String: Any]?) -> [String: Any] {
+    public func validateEvidenceFiles(_ key: Data, _ marker: [String: Any]?, budget: IntegrityReadBudget? = nil) -> [String: Any] {
         // Unchanged run directories: reuse the last HMAC pass. get_coverage appends one audit line
-        // and would otherwise re-read every transport.json.
+        // and would otherwise re-read every transport.json. A stopped scan is not cached: the next
+        // call can finish when the disk is idle.
         let fp = transportDirectoryFingerprint()
         let keyTag = String(crypto.shaHex(data: key).prefix(16))
         let markerTag = str(marker?["establishedAt"]) ?? ""
         if fp == Self.evidenceFP, keyTag == Self.evidenceKey, markerTag == Self.evidenceMarker,
-           let evidenceCached = Self.evidenceCached {
+           let evidenceCached = Self.evidenceCached, str(evidenceCached["scan"]) != "stopped" {
             return evidenceCached
         }
-        let result = validateEvidenceFilesUncached(key, marker)
+        let result = validateEvidenceFilesUncached(key, marker, budget: budget)
+        if str(result["scan"]) == "stopped" { return result }
         Self.evidenceFP = fp
         Self.evidenceKey = keyTag
         Self.evidenceMarker = markerTag
@@ -261,7 +263,7 @@ extension Integrity {
         return result
     }
 
-    private func validateEvidenceFilesUncached(_ key: Data, _ marker: [String: Any]?) -> [String: Any] {
+    private func validateEvidenceFilesUncached(_ key: Data, _ marker: [String: Any]?, budget: IntegrityReadBudget?) -> [String: Any] {
         var result: [String: Any] = ["ok": true, "checked": 0, "confidence": "Observed", "keyLimitation": Self.limitation]
         var tampered: [[String: Any]] = [], legacyItems: [[String: Any]] = []
         var missingMac: [String] = [], missingRuns: [String] = []
@@ -303,8 +305,29 @@ extension Integrity {
             return finish()
         }
         var checked = 0
-        let files = evidenceFiles()
+        let bounded = evidenceFilesBounded(maxDirectories: budget == nil ? nil : 2000, deadline: budget?.deadline)
+        let files = bounded.files
+        var skippedLarge: [String] = []
+        if bounded.stopped {
+            result["scan"] = "stopped"
+            result["status"] = "read_budget_exceeded"
+            result["statusText"] = "传输目录太大或这次调用的时限到了，证据文件没有扫完。证据没有被改写。这不是篡改结论。"
+            result["ok"] = false
+            result["confidence"] = "Unknown"
+        }
         for path in files {
+            if let budget, budget.expired() {
+                result["scan"] = "stopped"
+                result["status"] = "read_budget_exceeded"
+                result["statusText"] = "证据扫描在时限内没有做完，已核对 \(checked) 个文件后停下。证据没有被改写。这不是篡改结论。"
+                result["ok"] = false
+                result["confidence"] = "Unknown"
+                break
+            }
+            if let budget, byteSize(path) > Int64(budget.maxFileBytes) {
+                skippedLarge.append(path.path)
+                continue
+            }
             let mac = macFile(path)
             guard known.contains(path.deletingLastPathComponent().lastPathComponent) || exists(mac) else { continue }
             checked += 1
@@ -327,6 +350,11 @@ extension Integrity {
             }
         }
         result["checked"] = checked
+        if !skippedLarge.isEmpty {
+            result["skippedLarge"] = skippedLarge
+            result["confidence"] = "Unknown"
+            result["note"] = "有 \(skippedLarge.count) 个文件超过单次读取上限，没有读入。这不是篡改结论。"
+        }
         let onDisk = Set(files.filter { $0.lastPathComponent == "transport.json" }
             .map { $0.deletingLastPathComponent().lastPathComponent })
         let missing = known.subtracting(onDisk).sorted()

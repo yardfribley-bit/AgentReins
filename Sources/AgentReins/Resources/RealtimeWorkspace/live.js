@@ -9,7 +9,7 @@ const typeNames={user:'用户原话',context:'模型上下文',model:'模型往�
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
 const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false};
-const consoleState={fileId:null,reasonId:null,inboxId:null,fileMode:'list',returnNote:'',returnInvalid:false};
+const consoleState={fileId:null,reasonId:null,inboxId:null,inboxBucket:'work',fileMode:'list',returnNote:'',returnInvalid:false};
 const CONSOLE_VIEWS=['alerts','rules','coverage','inbox','files','reason','supervise','about'];
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
 const hydratedTasks=new Map(),pendingTasks=new Set(),collectedCache=new Map();
@@ -401,7 +401,7 @@ function renderConsole(){
  else if(view==='reason')api.renderReason($('reason-view'),shown,consoleState);
  else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions});
  else if(view==='supervise')api.renderSupervise($('supervise-view'),shown,riskState);
- else if(view==='about')api.renderAbout($('about-view'));
+ else if(view==='about')api.renderAbout($('about-view'),window.agentreinsInstall);
  const inbox=api.inboxItems?.(shown,riskState.decisions)||[];
  const left=inbox.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const ib=$('inbox-badge');if(ib){ib.hidden=!left;ib.textContent=String(left);}
@@ -568,7 +568,7 @@ document.addEventListener('click',e=>{
   const subject=api?.subjectOf?.(alert)||'';
   if(state==='allowlisted'&&!subject){toast('没有可加白的主机或路径，未写入');return;}
   const stored=state==='acknowledged'||state==='known'?'acked':state==='gateway_allow'?'released':state==='gateway_block'?'blocked':state;
-  const note=(stored==='released'||stored==='blocked')?'已记录处置。未调用模型网关，未改 Network Extension。':'';
+  const note=(stored==='released'||stored==='blocked')?'已记入本机 Review。放行和阻断目前是处置记录，连接仍按原路径进行。':'';
   const evidenceText=api?.evidenceTextFor?.(alert)||'';
   const row={id:alert.id,state:stored,note,subject,rule:alert.rule,decidedAt:new Date().toISOString(),effect:stored.startsWith('gateway_')?'gateway-demo':'persisted'};
   riskState.decisions=[row,...riskState.decisions.filter(d=>d.id!==alert.id)];
@@ -580,6 +580,7 @@ document.addEventListener('click',e=>{
  else if(el.dataset.fileMode){consoleState.fileMode=el.dataset.fileMode==='alerts'?'alerts':'list';renderConsole();}
  else if(el.dataset.fileId){consoleState.fileId=el.dataset.fileId;consoleState.fileMode='list';renderConsole();}
  else if(el.dataset.reasonId){consoleState.reasonId=el.dataset.reasonId;renderConsole();}
+ else if(el.dataset.inboxBucket){consoleState.inboxBucket=el.dataset.inboxBucket==='noise'?'noise':'work';consoleState.inboxId=null;consoleState.returnInvalid=false;renderConsole();}
  else if(el.dataset.inboxId){consoleState.inboxId=el.dataset.inboxId;consoleState.returnInvalid=false;renderConsole();}
  else if(el.dataset.acceptDecide){
   const state=el.dataset.acceptDecide;

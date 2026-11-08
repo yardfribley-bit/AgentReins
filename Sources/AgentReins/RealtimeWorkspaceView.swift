@@ -14,6 +14,10 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
     func makeNSView(context: Context) -> WKWebView {
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .nonPersistent()
+        configuration.userContentController.addUserScript(WKUserScript(
+            source: InstallIdentity.pageScript(),
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true))
         configuration.userContentController.add(context.coordinator, name: "agentreins")
         let view = WKWebView(frame: .zero, configuration: configuration)
         view.navigationDelegate = context.coordinator
@@ -93,13 +97,20 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 return
             }
             if action == "exportEvidencePack" {
-                guard let json = body["json"] as? String, !json.isEmpty, json.utf8.count <= 2_000_000 else { return }
                 let name = String(((body["name"] as? String) ?? "task").prefix(80))
+                guard let json = body["json"] as? String, !json.isEmpty else {
+                    pushHostResult(to: message.webView, result: ["action": "evidenceExported", "message": "证据包是空的，没有写入"])
+                    return
+                }
+                guard json.utf8.count <= 2_000_000 else {
+                    pushHostResult(to: message.webView, result: ["action": "evidenceExported", "message": "证据包超过 2MB，没有写入"])
+                    return
+                }
                 do {
                     let file = try RealtimeReviewStore.writeExport(name: name, json: json)
                     pushHostResult(to: message.webView, result: ["action": "evidenceExported", "path": file.path, "message": "证据包已写入 " + file.path])
                 } catch {
-                    pushHostResult(to: message.webView, result: ["action": "evidenceExported", "message": "证据包没有写下来"])
+                    pushHostResult(to: message.webView, result: ["action": "evidenceExported", "message": "证据包没有写下来：" + error.localizedDescription])
                 }
                 return
             }
@@ -124,7 +135,7 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 )
                 _ = RealtimeReviewStore.save(decision)
                 let messageText = normalized.effect == "gateway-demo"
-                    ? "已记下演示处置（未调用模型网关，未改 Network Extension）"
+                    ? "已记入本机 Review。放行和阻断目前是处置记录，连接仍按原路径进行。"
                     : "已写入本机 Review"
                 pushReviewDecisions(to: message.webView, message: messageText)
                 return

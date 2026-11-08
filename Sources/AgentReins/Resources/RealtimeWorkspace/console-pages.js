@@ -175,12 +175,27 @@ function taskBucket(t){
 function decisionFor(decisions,taskId){
  return list(decisions).find(d=>d.id==='task:'+taskId)||null;
 }
-function inboxItems(payload,decisions){
+function inboxNoiseReason(task){
+ const fields=[task?.originalRequest,task?.latestUserInput?.content,task?.title];
+ const blob=fields.map(v=>String(v||'')).join('\n');
+ if(/<\s*\/?\s*(heartbeat|automation_id|automation)\b/i.test(blob))return 'heartbeat';
+ const request=String(task?.originalRequest||task?.latestUserInput?.content||'').replace(/\s+/g,' ').trim();
+ const title=String(task?.title||'').replace(/\s+/g,' ').trim();
+ const missing=/用户需求未采集|轮次尚未关联|没有采到这次任务的用户原话|机器标记，没有用户原话/;
+ if(!request&&missing.test(title))return 'no-user-prompt';
+ if(request&&missing.test(request)&&request.length<80)return 'no-user-prompt';
+ return null;
+}
+function inboxItems(payload,decisions,opts){
+ const wantNoise=!!(opts&&opts.noise);
  const items=[];
  for(const t of tasksOf(payload)){
   const bucket=taskBucket(t);
   if(!bucket)continue;
-  items.push({task:t,bucket,decision:decisionFor(decisions,t.id)});
+  const noise=inboxNoiseReason(t);
+  if(wantNoise){if(!noise)continue;}
+  else if(noise)continue;
+  items.push({task:t,bucket,decision:decisionFor(decisions,t.id),noise:noise||null});
  }
  const order={confirm:0,review:1,failed:2};
  return items.sort((a,b)=>order[a.bucket.id]-order[b.bucket.id]||new Date(b.task.startedAt)-new Date(a.task.startedAt));
@@ -205,22 +220,29 @@ function evidencePack(task,decision){
 }
 function renderInbox(holder,payload,state){
  const decisions=list(state?.decisions);
- const items=inboxItems(payload,decisions);
+ const noiseMode=state?.inboxBucket==='noise';
+ const items=inboxItems(payload,decisions,noiseMode?{noise:true}:null);
+ const noiseItems=inboxItems(payload,decisions,{noise:true});
  const open=items.filter(i=>!i.decision||i.decision.state==='needs_evidence');
+ const noiseOpen=noiseItems.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const selected=items.find(i=>i.task.id===state?.inboxId)||open[0]||items[0]||null;
  const queue=items.length?items.map(i=>{
   const done=i.decision&&i.decision.state!=='needs_evidence';
   const label=done?(i.decision.state==='accept'?'已通过':i.decision.state==='return'?'已退回':'待补证据'):i.bucket.label;
-  return `<button type="button" class="inbox-item${selected&&selected.task.id===i.task.id?' on':''}" data-inbox-id="${esc(i.task.id)}"><b>${esc(cut(i.task.originalRequest||i.task.title||i.task.id,42))}</b><small>${esc(i.task.agent||'')} · ${esc(label)}</small></button>`;
- }).join(''):'<p class="empty">没有等你处理的任务。进行中的任务仍在任务过程里，这里不把它们算进队列。</p>';
+  const noiseNote=i.noise==='heartbeat'?'心跳':'没有用户原话';
+  return `<button type="button" class="inbox-item${selected&&selected.task.id===i.task.id?' on':''}" data-inbox-id="${esc(i.task.id)}"><b>${esc(cut(i.task.originalRequest||i.task.title||i.task.id,42))}</b><small>${esc(i.task.agent||'')} · ${esc(noiseMode?noiseNote+' · '+label:label)}</small></button>`;
+ }).join(''):`<p class="empty">${noiseMode?'噪声桶是空的。':'没有等你验收的任务。心跳和「用户需求未采集」在「噪声」里，证据还在，没有删除。'}</p>`;
+ const switcher=`<div class="inbox-switch"><button type="button" class="${noiseMode?'':'on'}" data-inbox-bucket="work">待验收 ${inboxItems(payload,decisions).filter(i=>!i.decision||i.decision.state==='needs_evidence').length}</button><button type="button" class="${noiseMode?'on':''}" data-inbox-bucket="noise">噪声 ${noiseOpen}</button></div>`;
  let card='';
  if(selected){
   const t=selected.task;
+  const noiseBanner=selected.noise?`<p class="request-missing">${selected.noise==='heartbeat'?'这是心跳或机器标记，不是要你验收的用户请求。':'没有采到用户原话，所以默认待办不列出它。'}证据还在任务过程里，这里没有删除。</p>`:'';
   const request=t.originalRequest||t.latestUserInput?.content;
   const ev=evidenceItems(t);
   const arts=list(payload?.artifacts).filter(a=>a.taskID===t.id);
   const invalid=state?.returnInvalid?' invalid':'';
   card=`<article class="risk-detail"><p class="t2">${esc(t.agent||'')} · ${esc(t.lifecycleStatus||'unknown')}</p><h2>${esc(cut(request||t.title||t.id,120))}</h2>
+   ${noiseBanner}
    ${request?'':`<p class="request-missing">没有采到这次任务的用户原话。这是采集缺口，不用模型回复代替。</p>`}
    <h3>交付物</h3>${arts.length?arts.map(a=>`<p>${esc(a.name||a.path)} · ${a.exists?'文件存在已确认':'文件存在未确认'}</p>`).join(''):'<p class="note">没有识别到交付物。不把退出码当成交付。</p>'}
    <h3>证据</h3><ul class="ev-list">${ev.length?ev.map(e=>`<li class="strength-${esc(e.kind)}"><b>${esc(e.title)}</b><span>${esc(e.association)}</span><small>${esc(e.summary)} · ${esc(e.note)}</small></li>`).join(''):'<li>没有卡片。</li>'}</ul>
@@ -235,7 +257,7 @@ function renderInbox(holder,payload,state){
    <p class="note">通过、退回、补证据写入本机 Review。退回没有原因时不会保存。导出的是当前投影，不是一份被签过名的证据。</p>
   </article>`;
  }
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">人的决定留在本机</div><h1>待我处理</h1><p>等我确认、待验收、失败。风险告警仍是打开后的第一页。</p></div><span class="t2">${open.length} 条未结束</span></div><div class="inbox-layout"><aside>${queue}</aside><div>${card||'<p class="empty">选左边一条。</p>'}</div></div>`;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">人的决定留在本机</div><h1>待我处理</h1><p>${noiseMode?'心跳和没采到用户原话的轮次。默认待办不含这些。':'等我确认、待验收、失败。心跳和「用户需求未采集」不进默认队列。'}</p></div><span class="t2">${open.length} 条未结束</span></div>${switcher}<div class="inbox-layout"><aside>${queue}</aside><div>${card||'<p class="empty">选左边一条。</p>'}</div></div>`;
 }
 
 const MCP_TOOLS=[
@@ -255,13 +277,26 @@ function renderSupervise(holder,payload,state){
  <section class="risk-card"><h3>最近的监督读取</h3><p class="note">${esc(cut(state?.mcpAuditPath||'审计日志路径未提供',140))}</p><table class="risk-table"><thead><tr><th>时间</th><th>调用方</th><th>工具</th><th>hash</th></tr></thead><tbody>${rows}</tbody></table></section></div>
  <p class="note" style="margin:16px 28px">边界：被监督方看不到监督者的推理。本页不能删改证据。完整性如果校验失败，覆盖度页会写明，不在这里标成已通过。</p>`;
 }
-function renderAbout(holder){
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机运行时</div><h1>关于 AgentReins</h1><p>看得见主机层里已经采到的 agent 行为，并让人确认或加白。没有采到的层保持缺口。</p></div></div>
- <div class="risk-rules about-grid"><article class="risk-rc"><h3>这版会做的</h3><p>风险告警来自运输审计、内容审计和已对上的文件卡片。确认、加白、已知悉、任务通过 / 退回写入本机 Review。证据包可以导出当前投影。</p></article>
- <article class="risk-rc"><h3>这版不会假装的</h3><p>放行和阻断不调用模型网关，也不改 Network Extension。WebLens 数字是示例。S06、S08–S10、组织授权范围、FOFA、靶场检出率都未接入。版本号不从安装包读取，避免写一个对不上的 build。</p><p class="note">MCP supervisor 契约版本 0.1.0，见 tools/agentreins-mcp/server.py。</p></article></div>`;
+function installLabel(install){
+ const src=install===undefined?(typeof window!=='undefined'?window.agentreinsInstall:null):install;
+ const clean=v=>{const s=String(v??'').trim();return /^[A-Za-z0-9._-]{1,40}$/.test(s)?s:'';};
+ const version=src&&typeof src==='object'?clean(src.version):'';
+ const build=src&&typeof src==='object'?clean(src.build):'';
+ if(version&&build)return '本机安装包 · '+version+'（'+build+'）';
+ if(version)return '本机安装包 · '+version;
+ if(build)return '本机安装包 · '+build;
+ return '本机安装包';
+}
+function renderAbout(holder, install){
+ const kicker=esc(installLabel(install));
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。看得见主机层里已经采到的 agent 行为，并在本机确认、加白、复查。</p></div></div>
+ <div class="about-body">
+ <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p></article>
+ <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）</li><li>放行和阻断接到模型网关与 Network Extension</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
+ </div>`;
 }
 
 window.AgentReinsConsole={
- fileRows,fileAlertRows,renderFiles,reasoningRows,alignmentVerdict,renderReason,inboxItems,evidencePack,evidenceItems,renderInbox,renderSupervise,renderAbout
+ fileRows,fileAlertRows,renderFiles,reasoningRows,alignmentVerdict,renderReason,inboxItems,inboxNoiseReason,evidencePack,evidenceItems,renderInbox,renderSupervise,renderAbout
 };
 })();

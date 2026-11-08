@@ -778,7 +778,7 @@ function renderDetail(a,payload){
    <button type="button" class="quiet" data-view="network">外网访问</button>
    <button type="button" class="quiet" data-view="rules">规则说明</button>
   </div>
-  <p class="risk-demo-note">放行、阻断、加白、转人工和已知悉都写入本机 Review，重新打开仍在。阻断和放行不会调用模型网关，也不会改 Network Extension，连接不会因此被拦住。</p>
+  <p class="note">放行、阻断、加白、转人工和已知悉都记在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。</p>
   ${review}
   <h3>关联事件</h3>
   <ol class="risk-chain">${chain}</ol>

@@ -92,6 +92,8 @@ final class RealtimeReviewStoreTests: XCTestCase {
     func testExportStaysInsideInjectedDirectory() throws {
         let file = try RealtimeReviewStore.writeExport(name: "../evil task", json: "{\"schema\":\"agentreins.acceptance.v1\"}")
         XCTAssertTrue(file.path.hasPrefix(tempDir.path))
+        XCTAssertEqual(file.deletingLastPathComponent().lastPathComponent, "exports")
+        XCTAssertTrue(FileManager.default.fileExists(atPath: file.path))
         XCTAssertFalse(file.lastPathComponent.contains("/"))
         let text = try String(contentsOf: file, encoding: .utf8)
         XCTAssertTrue(text.contains("agentreins.acceptance.v1"))

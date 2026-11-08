@@ -233,6 +233,14 @@ class HTTPTransportTests(unittest.TestCase):
             self.assertIn("rules", structured)
             self.assertEqual(structured["mcpEndpoint"]["state"], "listening")
             self.assertTrue(structured["mcpEndpoint"]["processAlive"])
+            usage = structured["diskUsage"]
+            self.assertFalse(usage["opensEvidenceDatabase"])
+            self.assertFalse(usage["keepAutoDrop"])
+            self.assertEqual(usage["backstopAppliesTo"], "noise-and-bulk")
+            self.assertIn("evidenceBytes", usage)
+            self.assertIn("egress", " ".join(usage["keep"]))
+            self.assertIn("heartbeats", " ".join(usage["drop"]))
+            self.assertIn("高价值", usage["policy"])
             net = client.call("list_network", {})["result"]
             self.assertFalse(net["isError"], net)
             self.assertIn("network", net["structuredContent"])
@@ -648,6 +656,59 @@ class HTTPTransportTests(unittest.TestCase):
             self.assertEqual(status, 200, raw)
             self.assertEqual(json.loads(raw)["result"]["protocolVersion"], "2025-03-26")
             self.assertTrue(hdrs.get("mcp-session-id"))
+        finally:
+            server.stop()
+
+    def test_tool_budget_answers_before_the_client_gives_up(self) -> None:
+        port = free_port()
+        server = Running(self.bin, port, extra_env={
+            "AGENTREINS_MCP_TOOL_BUDGET_SECONDS": "0.35",
+            "AGENTREINS_MCP_TOOL_DELAY_MS": "5000",
+            "AGENTREINS_MCP_REQUEST_TIMEOUT_SECONDS": "10",
+        })
+        try:
+            self.wait_health(server)
+            client = Client(port, name="budget")
+            client.initialize()
+            before = server.log()
+            started = time.perf_counter()
+            status, _, raw = client.post({
+                "jsonrpc": "2.0", "id": 31, "method": "tools/call",
+                "params": {"name": "get_coverage", "arguments": {}},
+            }, timeout=3)
+            elapsed = time.perf_counter() - started
+            self.assertLess(elapsed, 1.5, raw[:400])
+            self.assertEqual(status, 200, raw)
+            body = json.loads(raw)
+            result = body["result"]
+            self.assertTrue(result["isError"], result)
+            text = result["structuredContent"]["error"]
+            self.assertIn("budget", text)
+            self.assertIn("Evidence was not modified", text)
+            self.assertNotIn("request abandoned", server.log()[len(before):])
+        finally:
+            server.stop()
+
+    def test_reap_dry_run_names_same_port_orphans_only(self) -> None:
+        port = free_port()
+        fixture = pathlib.Path(tempfile.mkdtemp(prefix="ar-mcp-ps-")) / "ps.txt"
+        fixture.write_text(
+            "4242 1 /Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP --http --port %d\n"
+            "99 1 /Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP --http --port 18977\n"
+            "7 400 /bin/zsh\n" % port,
+            encoding="utf-8",
+        )
+        server = Running(self.bin, port, extra_env={
+            "AGENTREINS_MCP_PS_FIXTURE": str(fixture),
+            "AGENTREINS_MCP_REAP_DRY_RUN": "1",
+        })
+        try:
+            self.wait_health(server)
+            log = server.log()
+            self.assertIn("orphan http pid=4242", log)
+            self.assertNotIn("pid=99", log)
+            self.assertNotIn("pid=7", log)
+            self.assertEqual(server.proc.poll(), None)
         finally:
             server.stop()
 

@@ -21,7 +21,10 @@ private enum AuditHmacCache {
 extension Integrity {
     /// evidence.py validate_audit: keyed HMAC chain split into current (decides ok) and legacy (Unknown).
     /// Never re-signs anything on read.
-    public func validate() -> [String: Any] {
+    public func validate(budget: IntegrityReadBudget? = nil) -> [String: Any] {
+        if let budget, budget.expired() {
+            return IntegrityReadBudget.stopResult("这次调用的时限在开始校验前已经用完。证据没有被改写。这不是篡改结论。")
+        }
         var result: [String: Any] = [
             "mode": "keyed-HMAC-SHA256 append-only + required seal + evidence MAC + run inventory",
             "keyPath": "keychain:\(Self.accountHmac)", "logPath": auditLog.path, "ok": true, "entriesChecked": 0,
@@ -75,19 +78,30 @@ extension Integrity {
                 result["note"] = "never_anchored"
                 result["neverAnchored"] = true
             }
-            let ev = validateEvidenceFiles(key, marker)
+            let ev = validateEvidenceFiles(key, marker, budget: budget)
             result["evidenceFiles"] = ev
             if (ev["ok"] as? Bool) != true {
                 tampered.append(contentsOf: ev["tampered"] as? [[String: Any]] ?? [])
                 result["confidence"] = "Unknown"
             }
             finishSplit(&result, tampered, gaps, legacyAudit, marker)
+            if str(ev["scan"]) == "stopped" {
+                result["status"] = "read_budget_exceeded"
+                result["statusText"] = str(ev["statusText"]) ?? "证据扫描在时限内没有做完，已停下。证据没有被改写。这不是篡改结论。"
+                result["scan"] = "stopped"
+                result["ok"] = false
+                result["confidence"] = "Unknown"
+            }
             result["b6"] = b6
             return result
         }
         if eraKeyMismatch(key) {
             tampered.append(["reason": "hmac_key_replaced_after_signed_era"])
             result["confidence"] = "Unknown"
+        }
+        if let budget, byteSize(auditLog) > Int64(budget.maxFileBytes) {
+            return IntegrityReadBudget.stopResult(
+                "审计日志 \(byteSize(auditLog)) 字节，超过单次读取上限。这次没有整文件读入。证据没有被改写。这不是篡改结论。")
         }
         let lines = self.lines()
         let unchanged = AuditHmacCache.path == auditLog.path && AuditHmacCache.size == Integrity.lineCacheSize
@@ -216,13 +230,22 @@ extension Integrity {
                 tampered.append(["reason": "seal_unreadable", "error": "JSONDecodeError"])
             }
         }
-        let ev = validateEvidenceFiles(key, marker)
+        let ev = validateEvidenceFiles(key, marker, budget: budget)
         result["evidenceFiles"] = ev
+        let scanStopped = str(ev["scan"]) == "stopped"
         if (ev["ok"] as? Bool) != true {
             tampered.append(contentsOf: ev["tampered"] as? [[String: Any]] ?? [])
             result["confidence"] = "Unknown"
         }
         finishSplit(&result, tampered, gaps, legacyAudit, marker)
+        if scanStopped {
+            // finishSplit would otherwise report ok. A cut-off scan is not a pass and not tampering.
+            result["status"] = "read_budget_exceeded"
+            result["statusText"] = str(ev["statusText"]) ?? "证据扫描在时限内没有做完，已停下。证据没有被改写。这不是篡改结论。"
+            result["scan"] = "stopped"
+            result["ok"] = false
+            result["confidence"] = "Unknown"
+        }
         if (result["ok"] as? Bool) != true { result["confidence"] = "Unknown" }
         result["b6"] = b6
         // Same-uid key forgeability (b6): local MACs alone never claim Observed, even when ok=true.

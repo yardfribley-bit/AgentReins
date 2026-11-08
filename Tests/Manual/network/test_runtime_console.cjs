@@ -42,7 +42,9 @@ assert.match(holder.innerHTML, /阻断/);
 assert.match(holder.innerHTML, /加白/);
 assert.match(holder.innerHTML, /转人工/);
 assert.match(holder.innerHTML, /标记已知悉/);
-assert.match(holder.innerHTML, /不会调用模型网关/);
+assert.match(holder.innerHTML, /本机处置记录/);
+assert.match(holder.innerHTML, /连接仍按原路径进行/);
+assert.doesNotMatch(holder.innerHTML, /不会调用模型网关|不会假装|不会因此被拦住/);
 assert.match(holder.innerHTML, /关联事件/);
 assert.match(holder.innerHTML, /Relation 缺口/);
 assert.doesNotMatch(holder.innerHTML, /关联：已确认/);
@@ -119,6 +121,34 @@ pages.renderInbox(inboxHolder, filePayload, { inboxId: 't1', decisions: returned
 assert.match(inboxHolder.innerHTML, /已退回/);
 assert.match(inboxHolder.innerHTML, /撤销决定/);
 assert.match(inboxHolder.innerHTML, /invalid/);
+assert.match(inboxHolder.innerHTML, /噪声/);
+assert.match(inboxHolder.innerHTML, /改一下配置/);
+
+const noisyPayload = {
+  tasks: [
+    filePayload.tasks[0],
+    { id: 'hb', agent: 'Codex', lifecycleStatus: 'stopped', title: '<heartbeat>ping', originalRequest: '<heartbeat>ping', startedAt: '2026-11-08T04:00:00Z', cards: [] },
+    { id: 'gap', agent: 'Codex', lifecycleStatus: 'completed', title: '当前轮次 · 用户需求未采集', startedAt: '2026-11-08T04:01:00Z', cards: [] },
+    { id: 'att', agent: 'Codex', lifecycleStatus: 'stopped', title: '用户附件输入 · 未附带文字', startedAt: '2026-11-08T04:02:00Z', cards: [] },
+  ],
+  collected: [], artifacts: [], health: [],
+};
+assert.equal(pages.inboxNoiseReason(noisyPayload.tasks[1]), 'heartbeat');
+assert.equal(pages.inboxNoiseReason(noisyPayload.tasks[2]), 'no-user-prompt');
+assert.equal(pages.inboxNoiseReason(noisyPayload.tasks[3]), null);
+const work = pages.inboxItems(noisyPayload, []).map(i => i.task.id).sort();
+assert.deepEqual(work, ['att', 't1']);
+const noise = pages.inboxItems(noisyPayload, [], { noise: true }).map(i => i.task.id).sort();
+assert.deepEqual(noise, ['gap', 'hb']);
+const noiseHolder = { innerHTML: '' };
+pages.renderInbox(noiseHolder, noisyPayload, { decisions: [], inboxBucket: 'work' });
+assert.match(noiseHolder.innerHTML, /改一下配置/);
+assert.match(noiseHolder.innerHTML, /用户附件输入/);
+assert.match(noiseHolder.innerHTML, /不进默认队列/);
+assert.doesNotMatch(noiseHolder.innerHTML, /data-inbox-id="gap"|data-inbox-id="hb"/);
+pages.renderInbox(noiseHolder, noisyPayload, { decisions: [], inboxBucket: 'noise' });
+assert.match(noiseHolder.innerHTML, /用户需求未采集/);
+assert.match(noiseHolder.innerHTML, /没有删除/);
 const fileAlertsHolder = { innerHTML: '' };
 pages.renderFiles(fileAlertsHolder, filePayload, { fileMode: 'alerts' });
 assert.match(fileAlertsHolder.innerHTML, /S08 敏感文件被改/);
@@ -132,7 +162,38 @@ assert.doesNotMatch(sup.innerHTML, /已启用监督/);
 
 const about = { innerHTML: '' };
 pages.renderAbout(about);
-assert.match(about.innerHTML, /0\.1\.0/);
-assert.match(about.innerHTML, /不从安装包读取/);
+assert.match(about.innerHTML, /关于 AgentReins/);
+assert.match(about.innerHTML, /agent 安全观测/);
+assert.match(about.innerHTML, /确认、加白、复查/);
+assert.match(about.innerHTML, /现在能做的/);
+assert.match(about.innerHTML, /证据按值留/);
+assert.match(about.innerHTML, /外联、凭据、策略命中/);
+assert.match(about.innerHTML, /文件改动/);
+assert.match(about.innerHTML, /待我处理的决定/);
+assert.match(about.innerHTML, /短摘录/);
+assert.match(about.innerHTML, /心跳、没采到用户原话/);
+assert.match(about.innerHTML, /不会为了凑容量/);
+assert.doesNotMatch(about.innerHTML, /2GB|14 天/);
+assert.match(about.innerHTML, /本机处置记录/);
+assert.match(about.innerHTML, /连接仍按原路径进行/);
+assert.match(about.innerHTML, /<h3>下一步<\/h3>/);
+assert.match(about.innerHTML, /Endpoint Security/);
+assert.match(about.innerHTML, /Network Extension/);
+assert.match(about.innerHTML, /WebLens/);
+assert.match(about.innerHTML, /本机安装包/);
+assert.doesNotMatch(about.innerHTML, /不会假装|不从安装包读取|这版不会|这版会做的/);
+assert.doesNotMatch(about.innerHTML, /1\.1\.0|176|FOFA|靶场/);
+pages.renderAbout(about, { version: '1.1.0', build: '176' });
+assert.match(about.innerHTML, /本机安装包 · 1\.1\.0（176）/);
+pages.renderAbout(about, { version: '1.1.0' });
+assert.match(about.innerHTML, /本机安装包 · 1\.1\.0</);
+assert.doesNotMatch(about.innerHTML, /本机安装包 · 1\.1\.0（/);
+pages.renderAbout(about, { build: '20261108.1713' });
+assert.match(about.innerHTML, /本机安装包 · 20261108\.1713/);
+pages.renderAbout(about, { version: '<img src=x onerror=alert(1)>', build: '176"></script>' });
+assert.match(about.innerHTML, /本机安装包</);
+assert.doesNotMatch(about.innerHTML, /<img|onerror|script/);
+pages.renderAbout(about, null);
+assert.match(about.innerHTML, />本机安装包</);
 
 console.log('runtime console ok');
