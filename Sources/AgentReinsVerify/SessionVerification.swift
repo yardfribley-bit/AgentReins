@@ -15,14 +15,19 @@ public enum SessionVerification {
         return (String(chars.prefix(excerptLimit)), true)
     }
 
-    public static func load(claudeRoot: String, codexRoot: String, maxFiles: Int = 32, maxBytes: Int = 512 * 1024) -> SessionLogSnapshot {
+    public static func load(claudeRoot: String, codexRoot: String, workbuddyRoots: [String] = [], maxFiles: Int = 32, maxBytes: Int = 512 * 1024) -> SessionLogSnapshot {
         let claude = readTree(root: claudeRoot, agent: "Claude Code", kind: .claude, maxFiles: maxFiles, maxBytes: maxBytes)
         let codex = readTree(root: codexRoot, agent: "Codex", kind: .codex, maxFiles: maxFiles, maxBytes: maxBytes)
-        return SessionLogSnapshot(
-            calls: (claude.calls + codex.calls).sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp < $1.timestamp },
-            completions: claude.completions.merging(codex.completions) { _, new in new },
-            sources: [claude.source, codex.source]
-        )
+        let buddies = workbuddyRoots.map { root in
+            let agent = (root as NSString).lastPathComponent.lowercased().contains("codebuddy") || root.lowercased().contains("/.codebuddy") || root.contains("CodeBuddy")
+                ? "CodeBuddy" : "WorkBuddy"
+            return readTree(root: root, agent: agent, kind: .workbuddy, maxFiles: maxFiles, maxBytes: maxBytes)
+        }
+        var completions = claude.completions.merging(codex.completions) { _, new in new }
+        for buddy in buddies { completions.merge(buddy.completions) { _, new in new } }
+        let calls = (claude.calls + codex.calls + buddies.flatMap(\.calls))
+            .sorted { $0.timestamp == $1.timestamp ? $0.id < $1.id : $0.timestamp < $1.timestamp }
+        return SessionLogSnapshot(calls: calls, completions: completions, sources: [claude.source, codex.source] + buddies.map(\.source))
     }
 
     public static func parseClaude(_ data: Data, sourcePath: String = "claude.jsonl") -> ParseBatch {
@@ -52,7 +57,7 @@ public enum SessionVerification {
             nextTime[call.id] = upcoming[call.sessionId]
             upcoming[call.sessionId] = call.timestamp
         }
-        var owner: [String: (callID: String, rank: Int, distance: TimeInterval)] = [:]
+        var owner: [String: (callID: String, rank: Int, distance: TimeInterval, name: String)] = [:]
         for effect in effects {
             for call in ordered {
                 guard let match = match(call: call, effect: effect, next: nextTime[call.id], tree: tree) else { continue }
@@ -61,7 +66,7 @@ public enum SessionVerification {
                     if match.rank < existing.rank { continue }
                     if match.rank == existing.rank && distance >= existing.distance { continue }
                 }
-                owner[effect.id] = (call.id, match.rank, distance)
+                owner[effect.id] = (call.id, match.rank, distance, match.name)
             }
         }
         var happened: [String: [VerificationEffect]] = [:]
@@ -72,7 +77,7 @@ public enum SessionVerification {
             happened[hit.callID, default: []].append(VerificationEffect(
                 id: effect.id, kind: effect.kind, path: effect.path, diff: effect.diff,
                 before: effect.before, after: effect.after, command: effect.command,
-                remote: effect.remote, timestamp: effect.timestamp, join: matchName(hit.rank),
+                remote: effect.remote, timestamp: effect.timestamp, join: hit.name,
                 credential: effect.credential || effect.kind == "credential" || isCredential(effect.path) || isCredential(effect.command)
             ))
         }
@@ -353,7 +358,7 @@ public struct SessionVerificationDocument: Codable, Equatable, Sendable {
     }
 }
 
-private enum LogKind { case claude, codex }
+private enum LogKind { case claude, codex, workbuddy }
 
 private struct TreeRead {
     var calls: [ParsedToolCall]
@@ -453,7 +458,8 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
             malformed += 1
             continue
         }
-        if kind == .claude {
+        let claudeShape = kind == .claude || (kind == .workbuddy && row["message"] != nil)
+        if claudeShape {
             if let id = string(row["sessionId"]) ?? string(row["session_id"]) { session = id }
             let type = string(row["type"]) ?? ""
             let message = row["message"] as? [String: Any]
@@ -484,6 +490,30 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
             }
             if let done = donePhrase(pending) { completions[session] = done }
             if donePhrase(pending) != nil { pending = "" }
+        } else if kind == .workbuddy {
+            if let id = string(row["sessionId"]) ?? string(row["session_id"]) { session = id }
+            let type = string(row["type"]) ?? ""
+            if type == "reasoning" {
+                if let text = textDeep(row["content"]) ?? textDeep(row["rawContent"]), !text.isEmpty {
+                    pending = SessionVerification.excerpt(text).text
+                }
+                continue
+            }
+            if type == "message", string(row["role"]) == "user" {
+                pending = ""
+                continue
+            }
+            guard type == "function_call" else { continue }
+            guard let timestamp = VerifyTime.parse(row["timestamp"]) else {
+                malformed += 1
+                continue
+            }
+            let callId = string(row["callId"]) ?? string(row["call_id"]) ?? "workbuddy-\(lineStart)"
+            let name = string(row["name"]) ?? "unknown_tool"
+            let arguments = jsonText(row["arguments"] ?? row["input"])
+            let said = string(row["reasoning"]) ?? pending
+            calls.append(makeCall(id: unique(callId, &seen), callId: callId, session: session, agent: agent, sourcePath: sourcePath, offset: lineStart, timestamp: timestamp, pid: int32(row["pid"]), reasoning: said, toolName: name, arguments: arguments))
+            pending = ""
         } else {
             let type = string(row["type"]) ?? ""
             let payload = row["payload"] as? [String: Any] ?? [:]
@@ -689,9 +719,19 @@ private func windowEnd(_ call: ParsedToolCall, next: Date?) -> Date {
     return min(cap, max(call.timestamp.addingTimeInterval(0.5), untilNext))
 }
 
+private func pathHit(call: ParsedToolCall, effect: HostEffect) -> Bool {
+    guard effect.kind == "file" || effect.kind == "credential", let path = effect.path, !path.isEmpty else { return false }
+    if let session = effect.sessionId, session != call.sessionId { return false }
+    guard call.claimedPaths.contains(where: { covers($0, path) }) else { return false }
+    return abs(effect.timestamp.timeIntervalSince(call.timestamp)) <= 120
+}
+
 private func match(call: ParsedToolCall, effect: HostEffect, next: Date?, tree: [Int32: Int32]) -> (rank: Int, name: String)? {
     if let toolCallId = effect.toolCallId, toolCallId == call.callId || toolCallId == call.id {
         return (3, "call-id")
+    }
+    if pathHit(call: call, effect: effect) {
+        return (2, "path")
     }
     let start = call.timestamp.addingTimeInterval(-SessionVerification.leadSeconds)
     let end = windowEnd(call, next: next)
@@ -701,14 +741,6 @@ private func match(call: ParsedToolCall, effect: HostEffect, next: Date?, tree: 
         return treeMatch(callPid, effectPid, tree) ? (2, "time-pid") : nil
     }
     return (1, "time-window")
-}
-
-private func matchName(_ rank: Int) -> String {
-    switch rank {
-    case 3: return "call-id"
-    case 2: return "time-pid"
-    default: return "time-window"
-    }
 }
 
 private func hasFileChange(_ effect: VerificationEffect) -> Bool {
@@ -765,7 +797,13 @@ private func covers(_ stated: String, _ actual: String) -> Bool {
 
 private func mismatches(call: ParsedToolCall, happened: [VerificationEffect], fileObservation: String) -> [VerificationMismatch] {
     var out: [VerificationMismatch] = []
-    if call.claimsEdit, fileObservation == "present", !happened.contains(where: { ($0.kind == "file" || $0.kind == "credential") && hasFileChange($0) }) {
+    let sawClaimedFile = happened.contains { effect in
+        guard effect.kind == "file" || effect.kind == "credential" else { return false }
+        if hasFileChange(effect) { return true }
+        guard let path = effect.path else { return false }
+        return call.claimedPaths.contains { covers($0, path) }
+    }
+    if call.claimsEdit, fileObservation == "present", !sawClaimedFile {
         let paths = call.claimedPaths.isEmpty ? call.toolName : call.claimedPaths.joined(separator: "、")
         out.append(VerificationMismatch(kind: "claimed_edit_without_diff", label: "说了没做", detail: "它调用 \(call.toolName) 要改 \(paths)，这个时间窗里没有文件 diff。"))
     }

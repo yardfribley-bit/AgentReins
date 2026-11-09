@@ -236,14 +236,20 @@ final class AgentTreeFileObserver {
         let method = grade == "confirmed"
             ? "confirmed. " + FileLayerCapture.limits
             : "possible (sampled). " + FileLayerCapture.limits
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime]
+        let stamp = formatter.string(from: Date())
         if hit.credential && hit.op == "read" {
-            let formatter = ISO8601DateFormatter()
-            formatter.formatOptions = [.withInternetDateTime]
             CredentialObservationLog.append(
                 CredentialObservationLog.Row(
-                    path: hit.path, grade: grade, agent: agent ?? "", at: formatter.string(from: Date()),
+                    path: hit.path, grade: grade, agent: agent ?? "", at: stamp,
                     source: source, blocked: false),
                 to: CredentialObservationLog.defaultURL())
+        }
+        if hit.op == "modify" {
+            FileObservationLog.append(
+                FileObservationLog.Row(path: hit.path, at: stamp, agent: agent ?? "", op: "modify"),
+                to: FileObservationLog.defaultURL())
         }
         return GuardEvent(
             id: id, kind: "file", ruleId: hit.credential ? "credential_observe" : "agent_tree_write",

@@ -318,6 +318,7 @@ enum HardGateStore {
             guard boolValue(row["inbox"]), !boolValue(row["heartbeat"]) else { continue }
             guard (row["action"] as? String) == "deny" else { continue }
             guard let subject = row["subject"] as? String, !subject.isEmpty else { continue }
+            if HardGateReceipts.isTelemetrySubject(subject) { continue }
             if closed.contains(subject) || seen.contains(subject) { continue }
             seen.insert(subject)
             picked.append(row)

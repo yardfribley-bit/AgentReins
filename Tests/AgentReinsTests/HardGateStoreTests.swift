@@ -95,6 +95,24 @@ final class HardGateStoreTests: XCTestCase {
         XCTAssertNil(noted.first?["mechanism"] as? String)
     }
 
+    func testTelemetryDenyStaysOutOfTheInbox() throws {
+        _ = try HardGateStore.append(actor: "enforcer", record: [
+            "action": "deny", "kind": "egress", "subject": "host:galileotelemetry.tencent.com",
+            "reason": "default-deny egress", "inbox": true, "heartbeat": false, "enforced": true,
+            "mechanism": "audit-proxy",
+        ])
+        _ = try HardGateStore.append(actor: "enforcer", record: [
+            "action": "deny", "kind": "egress", "subject": "host:new.example",
+            "reason": "default-deny egress", "inbox": true, "heartbeat": false, "enforced": true,
+            "mechanism": "transport-wrapper",
+        ])
+        XCTAssertEqual(HardGateStore.snapshot().inbox.compactMap { $0["subject"] as? String }, ["host:new.example"])
+        let denies = HardGateReceipts.enforcedDenies(from: HardGateStore.auditURL, limit: 10)
+        XCTAssertEqual(denies.map(\.subject), [
+            "host:galileotelemetry.tencent.com", "host:new.example",
+        ])
+    }
+
     func testFreshInstallSeedsDefaultDenyPolicy() throws {
         XCTAssertTrue(HardGateStore.seedDefaults())
         let hosts = HardGateStore.snapshot().allowlist.compactMap { $0["subject"] as? String }

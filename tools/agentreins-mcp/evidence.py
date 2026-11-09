@@ -778,6 +778,105 @@ def credential_observation_alerts(limit: int = 80) -> list[dict[str, Any]]:
     return alerts
 
 
+def hardgate_audit_path() -> pathlib.Path:
+    override = os.environ.get("AGENTREINS_HARDGATE_ROOT")
+    if override:
+        return pathlib.Path(override) / "audit.jsonl"
+    return pathlib.Path.home() / "Library/Application Support/AgentReins/hardgate/audit.jsonl"
+
+
+def _tail_text(path: pathlib.Path, max_bytes: int = 256 * 1024) -> str:
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            data = handle.read()
+    except OSError:
+        return ""
+    if size > max_bytes:
+        cut = data.find(b"\n")
+        if cut >= 0:
+            data = data[cut + 1:]
+    return data.decode("utf-8", "replace")
+
+
+def hardgate_enforced_denies(limit: int = 80) -> list[dict[str, Any]]:
+    """Blocked commands return before transport.json exists. Read the audit tail."""
+    path = hardgate_audit_path()
+    if not path.is_file():
+        return []
+    rows: list[dict[str, Any]] = []
+    for line in _tail_text(path).splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("action") != "deny" or row.get("enforced") is not True:
+            continue
+        subject = str(row.get("subject") or "")
+        if not subject:
+            continue
+        rows.append(row)
+    return rows[-limit:]
+
+
+def hardgate_block_alerts(limit: int = 80) -> list[dict[str, Any]]:
+    alerts = []
+    for row in hardgate_enforced_denies(limit):
+        subject = str(row.get("subject") or "")
+        mechanism = str(row.get("mechanism") or "")
+        why = "已阻断。硬门禁拒绝了 %s，真实程序没有执行。" % subject
+        if mechanism == "transport-wrapper":
+            why += " 退出码 126。"
+        alerts.append({
+            "id": "hardgate:%s:%s" % (row.get("at") or "", subject),
+            "rule": "hardgate",
+            "title": "已阻断",
+            "agent": "监督进程树",
+            "session": None,
+            "call": None,
+            "confidence": "Observed",
+            "timestamp": row.get("at"),
+            "sub": subject,
+            "why": why,
+            "finding": None,
+            "blocked": True,
+            "disposition": "已阻断",
+        })
+    return alerts
+
+
+def blocked_network_rows(limit: int = 80) -> list[dict[str, Any]]:
+    rows = []
+    for row in hardgate_enforced_denies(limit):
+        subject = str(row.get("subject") or "")
+        kind = str(row.get("kind") or "")
+        if kind != "egress" and not subject.startswith("host:"):
+            continue
+        host = subject[5:] if subject.startswith("host:") else subject
+        mechanism = str(row.get("mechanism") or "")
+        rows.append({
+            "executionId": "hardgate:%s:%s" % (row.get("at") or "", subject),
+            "agent": "监督进程树",
+            "tool": mechanism or "hardgate",
+            "destination": host,
+            "destinationSource": "hardgate",
+            "allowed": False,
+            "blocked": True,
+            "disposition": "已阻断",
+            "nonWhitelist": True,
+            "auditBypass": False,
+            "startedAt": row.get("at"),
+            "exitCode": 126 if mechanism == "transport-wrapper" else None,
+            "confidence": "Observed",
+        })
+    return rows
+
+
 def list_alerts(
     agent: str | None = None,
     since: str | None = None,
@@ -844,6 +943,29 @@ def list_alerts(
             "sub": alert.get("sub"),
             "why": alert.get("why"),
             "finding": alert.get("finding"),
+        }
+        if agent and agent != "all" and str(item.get("agent")) != agent:
+            continue
+        if rule and rule != "all" and str(item.get("rule")) != rule:
+            continue
+        if not _in_time_range(item.get("timestamp"), since_ts, until_ts):
+            continue
+        out.append(redact_obj(item))
+    for alert in hardgate_block_alerts():
+        item = {
+            "id": alert.get("id"),
+            "rule": normalize_rule(alert.get("rule")),
+            "title": alert.get("title"),
+            "agent": alert.get("agent"),
+            "session": alert.get("session"),
+            "executionId": alert.get("call"),
+            "confidence": conf_label(alert.get("confidence")),
+            "timestamp": alert.get("timestamp"),
+            "sub": alert.get("sub"),
+            "why": alert.get("why"),
+            "finding": alert.get("finding"),
+            "blocked": True,
+            "disposition": "已阻断",
         }
         if agent and agent != "all" and str(item.get("agent")) != agent:
             continue
@@ -1425,6 +1547,12 @@ def list_network(
                 "confidence": "Observed" if host else "Unknown",
             }
         )
+    for blocked in blocked_network_rows():
+        if agent and agent != "all" and str(blocked.get("agent")) != agent and str(agent).lower() not in ("workbuddy", "codebuddy"):
+            continue
+        if until_ts is not None and not _in_time_range(blocked.get("startedAt"), since_ts, until_ts):
+            continue
+        rows.append(blocked)
     page_offset, page_limit = _parse_page(limit, offset, cursor, None)
     fetch = min(5000, max(200, page_offset + (page_limit if page_limit is not None else 200)))
     sockets = load_socket_ledger(agent=agent, since=since, limit=fetch, until=until)

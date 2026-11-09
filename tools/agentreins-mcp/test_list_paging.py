@@ -72,7 +72,8 @@ class ListPaging(unittest.TestCase):
             return alerts, {"engine": "test", "warning": None}
 
         with mock.patch.object(evidence, "build_alerts_via_bridge", side_effect=bridge), \
-             mock.patch.object(evidence, "credential_observation_alerts", return_value=[]):
+             mock.patch.object(evidence, "credential_observation_alerts", return_value=[]), \
+             mock.patch.object(evidence, "hardgate_block_alerts", return_value=[]):
             window = evidence.list_alerts(records=records, since="2026-10-28T02:00:00Z", until="2026-10-28T04:00:00Z")
             self.assertEqual([a["executionId"] for a in window["alerts"]], ["b"])
             page = evidence.list_alerts(records=records, limit=1)
@@ -103,6 +104,28 @@ class ListPaging(unittest.TestCase):
         self.assertEqual(alert["sub"], "/tmp/job/.env")
         self.assertEqual(alert["confidence"], "Inferred")
         self.assertIn("拦不住", alert["why"])
+
+    def test_list_alerts_and_network_mark_enforced_denies_blocked(self) -> None:
+        row = {
+            "at": "2026-11-09T08:00:00Z", "action": "deny", "kind": "egress",
+            "subject": "host:blocked.example", "enforced": True, "mechanism": "transport-wrapper",
+            "tier": "keep", "inbox": True,
+        }
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "audit.jsonl"
+            path.write_text(json.dumps(row) + "\n", encoding="utf-8")
+            with mock.patch.object(evidence, "hardgate_audit_path", return_value=path), \
+                 mock.patch.object(evidence, "build_alerts_via_bridge", return_value=([], {"engine": "test"})), \
+                 mock.patch.object(evidence, "credential_observation_alerts", return_value=[]):
+                alerts = evidence.list_alerts(records=[])
+                network = evidence.list_network(records=[])
+        self.assertEqual(alerts["alerts"][0]["title"], "已阻断")
+        self.assertEqual(alerts["alerts"][0]["disposition"], "已阻断")
+        self.assertIn("126", alerts["alerts"][0]["why"])
+        self.assertEqual(network["network"][0]["disposition"], "已阻断")
+        self.assertEqual(network["network"][0]["destination"], "blocked.example")
+        self.assertEqual(network["network"][0]["exitCode"], 126)
+        self.assertTrue(network["network"][0]["blocked"])
 
     def test_list_network_until_filters_sockets_and_pages(self) -> None:
         rows = [

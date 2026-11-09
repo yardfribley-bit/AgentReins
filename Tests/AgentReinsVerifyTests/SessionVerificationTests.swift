@@ -51,6 +51,31 @@ final class SessionVerificationTests: XCTestCase {
         XCTAssertFalse(call.claimsEdit)
     }
 
+    func testWorkBuddyEditJoinsALaterFileChangeByPath() throws {
+        let line = #"{"type":"function_call","sessionId":"wb-1","timestamp":"2026-11-09T01:00:00Z","name":"Edit","callId":"call-1","arguments":"{\"file_path\":\"/tmp/proj/add.js\"}"}"#
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("wb-\(UUID().uuidString)", isDirectory: true)
+        let projects = root.appendingPathComponent("projects", isDirectory: true)
+        try FileManager.default.createDirectory(at: projects, withIntermediateDirectories: true)
+        try Data(line.utf8).write(to: projects.appendingPathComponent("session.jsonl"))
+        defer { try? FileManager.default.removeItem(at: root) }
+        let loaded = SessionVerification.load(
+            claudeRoot: root.appendingPathComponent("missing-claude").path,
+            codexRoot: root.appendingPathComponent("missing-codex").path,
+            workbuddyRoots: [projects.path])
+        XCTAssertEqual(loaded.calls.count, 1)
+        let call = try XCTUnwrap(loaded.calls.first)
+        XCTAssertEqual(call.agent, "WorkBuddy")
+        XCTAssertEqual(call.claimedPaths, ["/tmp/proj/add.js"])
+        XCTAssertTrue(call.claimsEdit)
+        XCTAssertTrue(loaded.sources.contains { $0.agent == "WorkBuddy" && $0.state == "present" })
+        let file = HostEffect(id: "f1", kind: "file", timestamp: call.timestamp.addingTimeInterval(40), path: "/tmp/proj/add.js", source: "file-observe")
+        let document = SessionVerification.verify(calls: loaded.calls, effects: [file])
+        XCTAssertEqual(document.fileObservation, "present")
+        XCTAssertEqual(document.cards.first?.status, "matched")
+        XCTAssertEqual(document.cards.first?.happened.first?.join, "path")
+        XCTAssertTrue(document.unclaimed.isEmpty)
+    }
+
     func testMissingLogDirectoryStaysEmpty() {
         let missing = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString).path
         let loaded = SessionVerification.load(claudeRoot: missing, codexRoot: missing)

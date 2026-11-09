@@ -118,7 +118,13 @@ def flag_value(args, name):
     return None
 
 def command_destination(tool, args, env):
-    found=destination_from_args(args)
+    names=[str(item) for item in args]
+    # git config user.name / user.email are keys, not hosts. Only a URL in that
+    # command is a destination.
+    if tool in ('git','npm','yarn','pnpm','pip') and 'config' in names:
+        found=destination_from_args([item for item in args if '://' in str(item)])
+    else:
+        found=destination_from_args(args)
     if found: return found
     if tool=='gh':
         host=flag_value(args,'--hostname')
