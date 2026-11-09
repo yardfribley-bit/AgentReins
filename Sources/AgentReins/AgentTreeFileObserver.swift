@@ -1,4 +1,6 @@
+import AgentReinsCore
 import CryptoKit
+import Darwin
 import Foundation
 
 /// Samples open vnodes on Cursor, Claude, Codex, and WorkBuddy process trees.
