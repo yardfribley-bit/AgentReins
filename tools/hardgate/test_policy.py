@@ -14,6 +14,7 @@ POLICY_PATH = ROOT / "Sources" / "AgentReins" / "Resources" / "hardgate_policy.p
 SERVER_PATH = ROOT / "tools" / "agentreins-mcp" / "server.py"
 WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "curl"
 SH_WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "sh"
+CAT_WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "cat"
 
 
 def load_policy():
@@ -82,6 +83,7 @@ class ClassifyTests(unittest.TestCase):
             "~/.kube/config",
             "~/.docker/config.json",
             "~/.netrc",
+            "~/.npmrc",
             "credentials.json",
             "secrets/api.pem",
             "security",
@@ -99,6 +101,7 @@ class ClassifyTests(unittest.TestCase):
         self.assertIn("path:/users/dev/.kube/config", joined)
         self.assertIn("path:/users/dev/.docker/config.json", joined)
         self.assertIn("path:/users/dev/.netrc", joined)
+        self.assertIn("path:/users/dev/.npmrc", joined)
         self.assertIn("path:/work/proj/credentials.json", joined)
         self.assertIn("path:/work/proj/secrets/api.pem", joined)
         self.assertIn("path:keychain", joined)
@@ -373,6 +376,43 @@ class EnforcementTests(unittest.TestCase):
         rows = policy.load_rows(self.root / "gate")
         self.assertEqual(rows[0]["action"], "deny")
         self.assertEqual(rows[0]["mechanism"], "transport-wrapper")
+
+    def test_cat_denies_credential_paths_and_passes_other_files(self):
+        env = self._env("cat")
+        env["AGENTREINS_TRANSPORT_AGENT"] = "WorkBuddy"
+        env["CODEBUDDY_SESSION_ID"] = "bd89b095-1111-4111-8111-111111111111"
+        cred = self.root / ".aws" / "credentials"
+        cred.parent.mkdir()
+        cred.write_text("aws_secret_access_key=fake\n")
+        denied = subprocess.run(
+            [str(CAT_WRAPPER), str(cred)],
+            env=env, cwd=str(self.root), capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(denied.returncode, 126, denied.stderr)
+        self.assertNotIn("aws_secret_access_key", denied.stdout)
+        self.assertFalse(self.marker.exists())
+        rows = policy.load_rows(self.root / "gate")
+        self.assertEqual(rows[0]["kind"], "credential-read")
+        self.assertTrue(rows[0]["enforced"])
+        self.assertEqual(rows[0]["mechanism"], "transport-wrapper")
+        self.assertEqual(rows[0]["agent"], "WorkBuddy")
+        self.assertEqual(rows[0]["session"], "bd89b095-1111-4111-8111-111111111111")
+        dot = self.root / ".env"
+        dot.write_text("TOKEN=fake\n")
+        again = subprocess.run(
+            [str(CAT_WRAPPER), ".env"],
+            env=env, cwd=str(self.root), capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(again.returncode, 126, again.stderr)
+        plain = self.root / "readme.txt"
+        plain.write_text("hello\n")
+        passed = subprocess.run(
+            [str(CAT_WRAPPER), str(plain)],
+            env=env, cwd=str(self.root), capture_output=True, text=True, timeout=10,
+        )
+        self.assertEqual(passed.returncode, 0, passed.stderr)
+        self.assertTrue(self.marker.exists())
+        self.assertFalse(self.transport.exists())
 
     def test_wrapper_executes_loopback(self):
         env = self._env("curl")

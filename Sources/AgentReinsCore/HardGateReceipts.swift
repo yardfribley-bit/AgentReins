@@ -12,8 +12,10 @@ public enum HardGateReceipts {
         public var enforced: Bool
         public var mechanism: String
         public var detail: String
+        public var agent: String
+        public var session: String
 
-        public init(at: String, action: String, kind: String, subject: String, enforced: Bool, mechanism: String, detail: String) {
+        public init(at: String, action: String, kind: String, subject: String, enforced: Bool, mechanism: String, detail: String, agent: String = "", session: String = "") {
             self.at = at
             self.action = action
             self.kind = kind
@@ -21,6 +23,8 @@ public enum HardGateReceipts {
             self.enforced = enforced
             self.mechanism = mechanism
             self.detail = detail
+            self.agent = agent
+            self.session = session
         }
     }
 
@@ -57,7 +61,9 @@ public enum HardGateReceipts {
                 subject: subject,
                 enforced: true,
                 mechanism: obj["mechanism"] as? String ?? "",
-                detail: obj["detail"] as? String ?? ""
+                detail: obj["detail"] as? String ?? "",
+                agent: obj["agent"] as? String ?? "",
+                session: obj["session"] as? String ?? ""
             ))
         }
         if rows.count <= limit { return rows }

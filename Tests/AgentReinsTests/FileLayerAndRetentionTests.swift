@@ -225,6 +225,22 @@ final class MCPHealthAndStaleDataTests: XCTestCase {
         XCTAssertTrue(FileLayerCapture.isShell(paths[11]!))
         XCTAssertTrue(FileLayerCapture.isPython(paths[12]!))
         XCTAssertEqual(tree[12], "workbuddy")
+        let nodePaths: [Int32: String] = [
+            10: "/usr/local/bin/node",
+            11: "/bin/zsh",
+            12: "/usr/bin/python3",
+        ]
+        let commands: [Int32: String] = [
+            10: "/usr/local/bin/node /Users/me/.codebuddy/bin/codebuddy -p",
+        ]
+        let viaArgv = FileLayerCapture.agentTree(pids: pids, parents: parents, paths: nodePaths, commands: commands)
+        XCTAssertEqual(viaArgv[10], "workbuddy")
+        XCTAssertEqual(viaArgv[11], "workbuddy")
+        XCTAssertEqual(viaArgv[12], "workbuddy")
+        let held = FileLayerCapture.hits(
+            opens: [FileLayerCapture.OpenFile(path: "/tmp/job/.env", writable: false)],
+            workspace: "/tmp/proj")
+        XCTAssertTrue(held.contains { $0.path == "/tmp/job/.env" && $0.op == "read" && $0.credential })
         let files = FileLayerCapture.watchFiles(home: "/Users/me", workspaces: [], directoryNames: [
             "/tmp": ["job"],
             "/private/tmp": ["job"],

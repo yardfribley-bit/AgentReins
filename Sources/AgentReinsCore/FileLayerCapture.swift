@@ -228,16 +228,48 @@ public enum FileLayerCapture {
         return out
     }
 
-    /// Basename / bundle path only. A project directory named Cursor is not an agent.
-    public static func agentOwner(path: String) -> String? {
+    /// Basename / bundle path, then the command line. `codebuddy` is often a
+    /// node script, so `proc_pidpath` is `/usr/local/bin/node` and the script
+    /// path only shows up in argv. A project directory named Cursor is not an agent.
+    public static func agentOwner(path: String, command: String = "") -> String? {
+        if let owner = ownerFromPath(path) { return owner }
+        return ownerFromCommand(command)
+    }
+
+    /// Interpreters and shells whose path is not the agent binary. Their argv
+    /// (or an ancestor's) is what names codebuddy / cursor / codex / claude.
+    public static func shouldReadCommand(path: String) -> Bool {
+        if ownerFromPath(path) != nil { return false }
+        let base = (path as NSString).lastPathComponent.lowercased()
+        if base.isEmpty || base == "node" || base == "nodejs" || base == "electron" { return true }
+        return isShell(path) || isPython(path)
+    }
+
+    private static func ownerFromPath(_ path: String) -> String? {
         let base = (path as NSString).lastPathComponent.lowercased()
         let lower = path.lowercased()
         if base == "cursor-agent" || lower.contains("/cursor.app/") { return "cursor" }
         if base == "claude" { return "claude" }
         if base == "codex" || base.hasPrefix("codex-") || lower.contains("/codex.app/") { return "codex" }
-        if base == "workbuddy" || base == "codebuddy" || lower.contains("/workbuddy.app/") || lower.contains("/codebuddy.app/") {
+        if base == "workbuddy" || base == "codebuddy" || lower.contains("/workbuddy.app/") || lower.contains("/codebuddy.app/")
+            || lower.contains("/.workbuddy/") || lower.contains("/.codebuddy/") {
             return "workbuddy"
         }
+        return nil
+    }
+
+    private static func ownerFromCommand(_ command: String) -> String? {
+        let blob = command.lowercased()
+        guard !blob.isEmpty else { return nil }
+        if blob.contains("/.codebuddy/") || blob.contains("/.workbuddy/") || blob.contains("/workbuddy.app/") || blob.contains("/codebuddy.app/") {
+            return "workbuddy"
+        }
+        if blob.range(of: #"(^|[\\/\s])(codebuddy|workbuddy)($|[\\/\s])"#, options: .regularExpression) != nil {
+            return "workbuddy"
+        }
+        if blob.contains("cursor-agent") || blob.contains("/cursor.app/") { return "cursor" }
+        if blob.contains("/codex.app/") || blob.contains("/.codex/") { return "codex" }
+        if blob.range(of: #"(^|[\\/\s])claude($|[\\/\s])"#, options: .regularExpression) != nil { return "claude" }
         return nil
     }
 
@@ -253,10 +285,10 @@ public enum FileLayerCapture {
 
     /// Agent processes plus their descendants. A `python` child of the agent's
     /// shell is included even though python itself is not an agent binary.
-    public static func agentTree(pids: [Int32], parents: [Int32: Int32], paths: [Int32: String], generations: Int = 32) -> [Int32: String] {
+    public static func agentTree(pids: [Int32], parents: [Int32: Int32], paths: [Int32: String], commands: [Int32: String] = [:], generations: Int = 32) -> [Int32: String] {
         var owner: [Int32: String] = [:]
         for pid in pids {
-            if let agent = agentOwner(path: paths[pid] ?? "") { owner[pid] = agent }
+            if let agent = agentOwner(path: paths[pid] ?? "", command: commands[pid] ?? "") { owner[pid] = agent }
         }
         var guardrail = 0
         var progressed = true

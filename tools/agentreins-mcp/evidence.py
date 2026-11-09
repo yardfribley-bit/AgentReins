@@ -824,10 +824,21 @@ def hardgate_enforced_denies(limit: int = 80) -> list[dict[str, Any]]:
     return rows[-limit:]
 
 
+def _telemetry_subject(subject: str) -> bool:
+    host = subject[5:] if str(subject).startswith("host:") else str(subject)
+    return "telemetry" in host.lower()
+
+
 def hardgate_block_alerts(limit: int = 80) -> list[dict[str, Any]]:
-    alerts = []
+    """Telemetry stays out of the alert list. Repeats of one subject keep the newest row."""
+    newest: dict[str, dict[str, Any]] = {}
     for row in hardgate_enforced_denies(limit):
         subject = str(row.get("subject") or "")
+        if row.get("noise") == "telemetry" or _telemetry_subject(subject):
+            continue
+        newest[subject] = row
+    alerts = []
+    for subject, row in newest.items():
         mechanism = str(row.get("mechanism") or "")
         why = "已阻断。硬门禁拒绝了 %s，真实程序没有执行。" % subject
         if mechanism == "transport-wrapper":
@@ -836,8 +847,8 @@ def hardgate_block_alerts(limit: int = 80) -> list[dict[str, Any]]:
             "id": "hardgate:%s:%s" % (row.get("at") or "", subject),
             "rule": "hardgate",
             "title": "已阻断",
-            "agent": "监督进程树",
-            "session": None,
+            "agent": row.get("agent") or "监督进程树",
+            "session": row.get("session"),
             "call": None,
             "confidence": "Observed",
             "timestamp": row.get("at"),
@@ -861,7 +872,8 @@ def blocked_network_rows(limit: int = 80) -> list[dict[str, Any]]:
         mechanism = str(row.get("mechanism") or "")
         rows.append({
             "executionId": "hardgate:%s:%s" % (row.get("at") or "", subject),
-            "agent": "监督进程树",
+            "agent": row.get("agent") or "监督进程树",
+            "session": row.get("session"),
             "tool": mechanism or "hardgate",
             "destination": host,
             "destinationSource": "hardgate",
@@ -974,6 +986,7 @@ def list_alerts(
         if not _in_time_range(item.get("timestamp"), since_ts, until_ts):
             continue
         out.append(redact_obj(item))
+    out.sort(key=lambda item: str(item.get("timestamp") or ""), reverse=True)
     page_offset, page_limit = _parse_page(limit, offset, cursor, None)
     window = _page_window(out, page_offset, page_limit)
     result = {

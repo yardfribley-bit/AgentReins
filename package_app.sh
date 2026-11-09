@@ -93,7 +93,7 @@ cp "$PROJECT_DIR/Sources/AgentReins/Resources/hardgate_policy.py" "$TRANSPORT_RE
 cp "$PROJECT_DIR/Sources/AgentReins/Resources/content_audit.py" "$TRANSPORT_RES/content_audit.py"
 cp "$PROJECT_DIR/tools/redact_secrets.py" "$TRANSPORT_RES/redact_secrets.py"
 chmod 755 "$TRANSPORT_RES/auto.py"
-for tool in bash brew chmod curl gh git rsync scp sftp sh ssh wget; do
+for tool in bash brew chmod curl gh git rsync scp sftp sh ssh wget cat head tail less more cp base64 xxd strings grep; do
   ln -s ../auto.py "$TRANSPORT_RES/bin/$tool"
 done
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
@@ -203,15 +203,16 @@ for res in \
   transport-audit/hardgate_policy.py \
   transport-audit/content_audit.py \
   transport-audit/redact_secrets.py \
-  transport-audit/bin/curl; do
+  transport-audit/bin/curl \
+  transport-audit/bin/cat; do
   [[ -s "$APP_BUNDLE/Contents/Resources/$res" || -L "$APP_BUNDLE/Contents/Resources/$res" ]] || guard_fail "missing or empty Contents/Resources/$res"
 done
 [[ -L "$APP_BUNDLE/Contents/Resources/transport-audit/bin/curl" ]] \
   || guard_fail "transport-audit/bin/curl must be a symlink to auto.py"
 grep -q 'commit_wrapper' "$APP_BUNDLE/Contents/Resources/transport-audit/auto.py" \
   || guard_fail "packaged transport wrapper is missing the hard gate"
-grep -q 'transport-wrappers/2' "$APP_BUNDLE/Contents/Resources/transport-audit/VERSION" \
-  || guard_fail "packaged transport wrapper VERSION is not transport-wrappers/2"
+grep -q 'transport-wrappers/3' "$APP_BUNDLE/Contents/Resources/transport-audit/VERSION" \
+  || guard_fail "packaged transport wrapper VERSION is not transport-wrappers/3"
 if grep -l -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN -e AGENTREINS_REDACT_SELFTEST \
      "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"*.py "$APP_BUNDLE/Contents/Resources/socket-sampler/"*.py 2>/dev/null; then
   guard_fail "a packaged script still carries a test-only Keychain/self-test switch"

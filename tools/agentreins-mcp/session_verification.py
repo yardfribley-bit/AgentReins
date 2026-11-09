@@ -8,6 +8,8 @@ import json
 import os
 import re
 import pathlib
+import threading
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -25,6 +27,16 @@ POS_CRED = re.compile(r"密钥|凭证|凭据|密码|token|secret|credential|\.en
 REDIRECT = re.compile(r"(?:^|[^>&\d])>>?\s*([^\s|&;]+)")
 SECRET = re.compile(r"(?i)(password|token|secret|api_key|authorization)\s*[:=]\s*[\"']?[^\"',\s}]+")
 COUNT = re.compile(r"(\d+)\s*(?:个文件|个路径|files?)", re.I)
+# A live CodeBuddy tree can hold hundreds of project jsonl, some with multi-megabyte
+# function_call_result lines. list_tool_calls has to stay under a few seconds.
+WORKBUDDY_FILES = 8
+WORKBUDDY_AGE_S = 48 * 60 * 60
+WORKBUDDY_SCAN = 4 * 1024 * 1024
+WORKBUDDY_LINES = 160
+DIR_ENTRY_CAP = 6000
+TREE_CACHE_S = 30
+_TREE_CACHE: dict[tuple, tuple] = {}
+_TREE_LOCK = threading.Lock()
 
 
 def excerpt(text: str) -> tuple[str, bool]:
@@ -335,33 +347,28 @@ def _read_tree(root: str, agent: str, kind: str, max_files: int, max_bytes: int)
         return {"calls": [], "completions": {}, "source": _source(agent, root, "absent", 0, 0, 0, "目录不在：%s" % root)}
     if not path.is_dir():
         return {"calls": [], "completions": {}, "source": _source(agent, root, "unreadable", 0, 0, 0, "路径不是目录：%s" % root)}
-    files = []
-    seen = 0
-    capped = False
-    for file in path.rglob("*.jsonl"):
-        seen += 1
-        if seen > 5000:
-            capped = True
-            break
-        if file.is_symlink() or not file.is_file():
-            continue
-        files.append(file)
-    files.sort(key=lambda item: item.stat().st_mtime, reverse=True)
-    chosen = files[:max_files]
+    if kind == "workbuddy":
+        max_files = min(max_files, WORKBUDDY_FILES)
+        max_age = WORKBUDDY_AGE_S
+    else:
+        max_age = 14 * 24 * 60 * 60
+    chosen, skipped, capped = _newest_jsonl(path, max_files, max_age)
+    stamp = tuple((str(item), stat.st_mtime_ns, stat.st_size) for item, stat in chosen)
+    cache_key = (str(path), kind, max_files, max_bytes)
+    now = time.monotonic()
+    with _TREE_LOCK:
+        cached = _TREE_CACHE.get(cache_key)
+        if cached and cached[0] == stamp and now - cached[1] < TREE_CACHE_S:
+            return cached[2]
     calls: list[dict[str, Any]] = []
     completions: dict[str, str] = {}
     malformed = 0
-    for file in chosen:
+    for file, _stat in chosen:
         try:
             if kind == "workbuddy":
-                text = _recent_short_lines(file)
+                text = _recent_short_lines(file, max_scan=WORKBUDDY_SCAN, max_lines=WORKBUDDY_LINES)
             else:
-                data = file.read_bytes()
-                if len(data) > max_bytes:
-                    data = data[-max_bytes:]
-                    cut = data.find(b"\n")
-                    if cut >= 0:
-                        data = data[cut + 1:]
+                data = _read_tail_bytes(file, max_bytes)
                 text = data.decode("utf-8", "replace")
         except OSError:
             malformed += 1
@@ -371,13 +378,76 @@ def _read_tree(root: str, agent: str, kind: str, max_files: int, max_bytes: int)
         completions.update(batch["completions"])
         malformed += batch["malformed"]
     note = "读了 %d 个 jsonl。卡片只留调用编号和摘录，不把日志抄进证据库。" % len(chosen) if chosen else "目录在，里面没有 jsonl。"
-    if capped or len(files) > len(chosen):
-        note = "只读了最近 %d 个 jsonl。全文仍在原来的日志里。" % len(chosen)
-    return {"calls": calls, "completions": completions, "source": _source(agent, root, "present", len(chosen), max(0, len(files) - len(chosen)), malformed, note)}
+    if capped or skipped:
+        note = "只读了最近 %d 个 jsonl（%d 小时内）。全文仍在原来的日志里。" % (len(chosen), max_age // 3600)
+    result = {"calls": calls, "completions": completions, "source": _source(agent, root, "present", len(chosen), skipped, malformed, note)}
+    with _TREE_LOCK:
+        _TREE_CACHE[cache_key] = (stamp, now, result)
+    return result
 
 
-def _recent_short_lines(path: pathlib.Path, max_scan: int = 32 * 1024 * 1024, max_line: int = 65_536, max_lines: int = 4_000) -> str:
-    """Skip giant function_call_result lines so the tool calls in front of them stay visible."""
+def _newest_jsonl(root: pathlib.Path, max_files: int, max_age: float) -> tuple[list[tuple[pathlib.Path, os.stat_result]], int, bool]:
+    """Newest jsonl under root, without reading file bodies. Stops after a directory budget."""
+    cutoff = time.time() - max_age
+    stack = [root]
+    best: list[tuple[float, str]] = []
+    seen = 0
+    capped = False
+    while stack:
+        current = stack.pop()
+        try:
+            entries = list(os.scandir(current))
+        except OSError:
+            continue
+        for entry in entries:
+            seen += 1
+            if seen > DIR_ENTRY_CAP:
+                capped = True
+                break
+            try:
+                if entry.is_symlink():
+                    continue
+                if entry.is_dir(follow_symlinks=False):
+                    if entry.name not in ("node_modules", ".git"):
+                        stack.append(pathlib.Path(entry.path))
+                    continue
+                if not entry.name.endswith(".jsonl") or not entry.is_file(follow_symlinks=False):
+                    continue
+                stat = entry.stat(follow_symlinks=False)
+            except OSError:
+                continue
+            if stat.st_mtime < cutoff:
+                continue
+            best.append((stat.st_mtime, entry.path))
+        if capped:
+            break
+    best.sort(reverse=True)
+    chosen = []
+    for _mtime, name in best[:max_files]:
+        file = pathlib.Path(name)
+        try:
+            chosen.append((file, file.stat()))
+        except OSError:
+            continue
+    skipped = max(0, len(best) - len(chosen))
+    return chosen, skipped, capped
+
+
+def _read_tail_bytes(path: pathlib.Path, max_bytes: int) -> bytes:
+    size = path.stat().st_size
+    with path.open("rb") as handle:
+        if size > max_bytes:
+            handle.seek(size - max_bytes)
+            data = handle.read(max_bytes)
+            cut = data.find(b"\n")
+            if cut >= 0:
+                data = data[cut + 1:]
+            return data
+        return handle.read()
+
+
+def _recent_short_lines(path: pathlib.Path, max_scan: int = WORKBUDDY_SCAN, max_line: int = 65_536, max_lines: int = WORKBUDDY_LINES) -> str:
+    """Keep recent short lines. A giant function_call_result is skipped and not buffered."""
     size = path.stat().st_size
     if size <= 0:
         return ""
@@ -385,24 +455,28 @@ def _recent_short_lines(path: pathlib.Path, max_scan: int = 32 * 1024 * 1024, ma
     with path.open("rb") as handle:
         pos = size
         scanned = 0
-        pending = b""
+        carry = b""
         while pos > 0 and scanned < max_scan and len(lines) < max_lines:
-            step = min(256 * 1024, pos)
+            step = min(64 * 1024, pos)
             pos -= step
             handle.seek(pos)
             chunk = handle.read(step)
             scanned += len(chunk)
-            pending = chunk + pending
-            parts = pending.split(b"\n")
-            pending = parts[0]
+            data = chunk + carry
+            parts = data.split(b"\n")
+            carry = parts[0]
+            if len(carry) > max_line:
+                carry = b""
+            if len(parts) == 1:
+                continue
             for part in reversed(parts[1:]):
-                if len(part) > max_line:
+                if not part or len(part) > max_line:
                     continue
                 lines.append(part)
                 if len(lines) >= max_lines:
                     break
-        if pos == 0 and pending and len(pending) <= max_line:
-            lines.append(pending)
+        if pos == 0 and carry and len(carry) <= max_line:
+            lines.append(carry)
     return b"\n".join(reversed(lines)).decode("utf-8", "replace")
 
 

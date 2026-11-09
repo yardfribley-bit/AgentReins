@@ -9,12 +9,14 @@ public enum ProcessTable {
         public var pid: Int32
         public var ppid: Int32
         public var path: String
+        public var comm: String
         public var startedAt: Date
 
-        public init(pid: Int32, ppid: Int32, path: String, startedAt: Date) {
+        public init(pid: Int32, ppid: Int32, path: String, comm: String = "", startedAt: Date) {
             self.pid = pid
             self.ppid = ppid
             self.path = path
+            self.comm = comm
             self.startedAt = startedAt
         }
     }
@@ -42,8 +44,11 @@ public enum ProcessTable {
             var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
             let n = proc_pidpath(pid, &buffer, UInt32(buffer.count))
             let path = n > 0 ? String(cString: buffer) : ""
+            let comm = withUnsafePointer(to: &info.pbi_comm) { pointer in
+                pointer.withMemoryRebound(to: CChar.self, capacity: 16) { String(cString: $0) }
+            }
             let started = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec))
-            rows.append(Row(pid: pid, ppid: Int32(bitPattern: info.pbi_ppid), path: path, startedAt: started))
+            rows.append(Row(pid: pid, ppid: Int32(bitPattern: info.pbi_ppid), path: path, comm: comm, startedAt: started))
         }
         return rows
     }
