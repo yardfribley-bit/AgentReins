@@ -114,8 +114,8 @@ enum HTTPTransport {
         }
         if rc == 0 { return true }
         if errno != EINPROGRESS && errno != EAGAIN { return false }
-        var pollfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
-        if poll(&pollfd, 1, 400) <= 0 { return false }
+        var ready = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        if poll(&ready, 1, 400) <= 0 { return false }
         var err: Int32 = 0
         var len = socklen_t(MemoryLayout<Int32>.size)
         getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)

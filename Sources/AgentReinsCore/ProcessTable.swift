@@ -43,7 +43,7 @@ public enum ProcessTable {
             let n = proc_pidpath(pid, &buffer, UInt32(buffer.count))
             let path = n > 0 ? String(cString: buffer) : ""
             let started = Date(timeIntervalSince1970: TimeInterval(info.pbi_start_tvsec))
-            rows.append(Row(pid: pid, ppid: info.pbi_ppid, path: path, startedAt: started))
+            rows.append(Row(pid: pid, ppid: Int32(bitPattern: info.pbi_ppid), path: path, startedAt: started))
         }
         return rows
     }
