@@ -53,7 +53,7 @@ public enum InstalledRules {
                 "action": "block",
                 "severity": "high",
                 "message": "被监督的 Agent 读取凭据路径",
-                "naturalLanguage": "凭据路径默认拒绝，不在默认允许名单里。",
+                "naturalLanguage": "凭据路径默认拒绝。agent 的 shell 和 PATH 入口会在执行前拦住；进程内 open() 只看见，拦不住。",
             ],
         ]
         let payload: [String: Any] = ["customized": false, "rules": rules, "version": 1]

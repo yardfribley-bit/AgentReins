@@ -104,6 +104,9 @@ class ListPaging(unittest.TestCase):
         self.assertEqual(alert["sub"], "/tmp/job/.env")
         self.assertEqual(alert["confidence"], "Inferred")
         self.assertIn("拦不住", alert["why"])
+        self.assertIn("只看见，未拦截", alert["why"])
+        self.assertIs(alert["blocked"], False)
+        self.assertEqual(alert["disposition"], "只看见，未拦截")
 
     def test_list_alerts_and_network_mark_enforced_denies_blocked(self) -> None:
         row = {

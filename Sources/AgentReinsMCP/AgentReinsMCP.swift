@@ -315,7 +315,7 @@ enum Alerts {
         for (k, v) in ListPage.meta(page) { result[k] = v }
         if let warning { result["warning"] = warning }
         if !observations.isEmpty {
-            result["note"] = (result["note"] as? String ?? "") + " 另有进程内凭据读取（confirmed / possible）。PATH 包装看不到、也拦不住这类 open()。"
+            result["note"] = (result["note"] as? String ?? "") + " 另有进程内凭据读取（confirmed / possible）。这类 open() 只看见，未拦截。"
         }
         return result
     }
@@ -329,7 +329,8 @@ enum Alerts {
         }
         return newest.values.map { row in
             let why = "已阻断。硬门禁拒绝了 \(row.subject)，真实程序没有执行。"
-                + (row.mechanism == "transport-wrapper" ? " 退出码 126。" : "")
+                + ((row.mechanism == "transport-wrapper" || row.mechanism == "shell-gate") ? " 退出码 126。" : "")
+                + (row.mechanism == "shell-gate" ? " shell 在执行前拒绝了这条凭据读取。" : "")
             let who = row.agent.isEmpty ? "监督进程树" : row.agent
             return [
                 "id": "hardgate:\(row.at):\(row.subject)",
@@ -354,7 +355,7 @@ enum Alerts {
     static func credentialObservations() -> [[String: Any]] {
         CredentialObservationLog.recent(from: CredentialObservationLog.defaultURL(), limit: 80).map { row in
             let grade = row.grade == "confirmed" ? "confirmed" : "possible"
-            let why = "进程内 open() 不经过 PATH 包装，拦不住。等级 \(grade)，来源 \(row.source)。文件描述符已经关掉时只能标 possible；APFS 没有更新 atime 时这次读取看不到。"
+            let why = "进程内 open() 不经过 shell 门禁，也没有 PATH 包装，拦不住。等级 \(grade)，来源 \(row.source)。这是只看见，未拦截。文件描述符已经关掉时只能标 possible；APFS 没有更新 atime 时这次读取看不到。"
             return [
                 "id": "credential-observe:\(grade):\(row.path)",
                 "rule": "credential_observe",
@@ -367,6 +368,8 @@ enum Alerts {
                 "sub": row.path,
                 "why": why,
                 "finding": NSNull(),
+                "blocked": false,
+                "disposition": "只看见，未拦截",
             ]
         }
     }
@@ -696,7 +699,7 @@ enum NetworkTool {
                 "nonWhitelist": true,
                 "auditBypass": false,
                 "startedAt": row.at,
-                "exitCode": row.mechanism == "transport-wrapper" ? 126 as Any : NSNull(),
+                "exitCode": (row.mechanism == "transport-wrapper" || row.mechanism == "shell-gate") ? 126 as Any : NSNull(),
                 "confidence": "Observed",
             ]
         }

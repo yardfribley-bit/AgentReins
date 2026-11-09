@@ -29,20 +29,15 @@ enum TransportWrapperInstall {
         let binDir = destination.appendingPathComponent("bin").path
         let audit = home.appendingPathComponent(".agentreins/audit.sh")
         var auditUpdated = false
-        if !FileManager.default.fileExists(atPath: audit.path) {
-            let script = auditScript(binDir: binDir, home: home.path)
+        // Rewrite the generated script when the wrapper set or the shell gate
+        // changes. Retargeting paths alone left old installs without cat().
+        let desired = auditScript(binDir: binDir, home: home.path)
+        let current = (try? String(contentsOf: audit, encoding: .utf8)) ?? ""
+        if current != desired {
             try? FileManager.default.createDirectory(at: audit.deletingLastPathComponent(), withIntermediateDirectories: true)
-            if (try? Data(script.utf8).write(to: audit, options: .atomic)) != nil {
+            if (try? Data(desired.utf8).write(to: audit, options: .atomic)) != nil {
                 try? FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: audit.path)
                 auditUpdated = true
-            }
-        } else if var text = try? String(contentsOf: audit, encoding: .utf8) {
-            let updated = retarget(text, binDir: binDir)
-            if updated != text {
-                text = updated
-                if (try? Data(text.utf8).write(to: audit, options: .atomic)) != nil {
-                    auditUpdated = true
-                }
             }
         }
         let hook = spliceHooks(home: home, auditPath: audit.path)
@@ -154,6 +149,9 @@ enum TransportWrapperInstall {
         }.joined(separator: "\n")
         let quotedBin = shellQuote(binDir)
         let ca = shellQuote((home as NSString).appendingPathComponent(".mitmproxy/mitmproxy-ca-cert.pem"))
+        let auditRoot = (binDir as NSString).deletingLastPathComponent
+        let gate = shellQuote((auditRoot as NSString).appendingPathComponent("credential_shell_gate.sh"))
+        let policy = shellQuote((auditRoot as NSString).appendingPathComponent("hardgate_policy.py"))
         return """
         # AgentReins transport wrappers, installed from the app bundle.
         # A normal terminal does not enter this branch.
@@ -162,11 +160,13 @@ enum TransportWrapperInstall {
             AGENTREINS_TRANSPORT_AGENT=Codex
           elif [ -n "${CODEBUDDY_SESSION_ID:-}" ] || [ -n "${CODEBUDDY_CONVERSATION_REQUEST_ID:-}" ]; then
             AGENTREINS_TRANSPORT_AGENT=WorkBuddy
-          elif [ "${CURSOR_AGENT:-}" = "1" ]; then
+          elif [ "${CURSOR_AGENT:-}" = "1" ] || [ -n "${CURSOR_CONVERSATION_ID:-}" ]; then
             AGENTREINS_TRANSPORT_AGENT=Cursor
+          elif [ -n "${CLAUDE_SESSION_ID:-}" ] || [ "${CLAUDECODE:-}" = "1" ]; then
+            AGENTREINS_TRANSPORT_AGENT=Claude
           fi
         fi
-        if [ "$AGENTREINS_TRANSPORT_AGENT" != "WorkBuddy" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Codex" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Cursor" ]; then
+        if [ "$AGENTREINS_TRANSPORT_AGENT" != "WorkBuddy" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Codex" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Cursor" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Claude" ]; then
           return 0 2>/dev/null || exit 0
         fi
         export AGENTREINS_TRANSPORT_AGENT
@@ -190,6 +190,12 @@ enum TransportWrapperInstall {
           *) PATH="$AGENTREINS_TRANSPORT_BIN:$PATH"; export PATH ;;
         esac
         \(functions)
+        AGENTREINS_SHELL_GATE=\(gate)
+        AGENTREINS_HARDGATE_POLICY=\(policy)
+        export AGENTREINS_SHELL_GATE AGENTREINS_HARDGATE_POLICY
+        if [ -f "$AGENTREINS_SHELL_GATE" ]; then
+          . "$AGENTREINS_SHELL_GATE"
+        fi
 
         """
     }

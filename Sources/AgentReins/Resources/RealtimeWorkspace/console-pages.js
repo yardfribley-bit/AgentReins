@@ -323,9 +323,9 @@ function renderInbox(holder,payload,state){
  let card='';
  if(selected&&selected.gate){
   const row=selected.gate;
-  const fired=row.enforced===true&&(row.mechanism==='audit-proxy'||row.mechanism==='transport-wrapper');
+  const fired=row.enforced===true&&(row.mechanism==='audit-proxy'||row.mechanism==='transport-wrapper'||row.mechanism==='shell-gate');
   const status=fired?'已阻断':'已记下，未拦截';
-  const where=row.mechanism==='audit-proxy'?'审计代理':'PATH 命令入口';
+  const where=row.mechanism==='audit-proxy'?'审计代理':row.mechanism==='shell-gate'?'agent 的 shell':'PATH 命令入口';
   const invalid=state?.hardGateReasonInvalid?' invalid':'';
   card=`<article class="risk-detail"><p class="t2">${esc(row.kind==='credential-read'?'凭据路径':'外联')} · ${esc(row.subject||'')}</p><h2>${esc(status)}</h2>
    <p>${esc(row.detail||selected.task.originalRequest||'')}</p>
@@ -408,9 +408,9 @@ function renderAbout(holder, install, disk){
  const huge=bytes>=4*1024*1024*1024;
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。首页三句话：谁刚往外连或读了凭据，拦没拦住，说做完之后到底改了什么。确认、加白、复查都在本机。</p></div></div>
  <div class="about-body">
- <article class="risk-rc"><h3>现在能做的</h3><p>看得见外联和凭据读取，拦得住的会写已阻断。已阻断只在审计代理拒绝转发，或 PATH 命令入口没有执行真实命令时出现。只写了 Review、没有执行回执时，状态是「已记下，未拦截」。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说，只留能看清的短摘录。心跳、没采到用户原话、重复采样和整段会话副本会清掉。不会为了凑容量丢掉这些记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">${huge?'这份库已经很大。自动清理停了，点上面的按钮才按小批清，不会整库压缩。':'库还不大。心跳和大块原文会按小批清掉。外联、凭据、文件改动和验收决定不动。'}</p></article>
+ <article class="risk-rc"><h3>现在能做的</h3><p>看得见外联和凭据读取，拦得住的会写已阻断。已阻断只在审计代理拒绝转发、PATH 命令入口没有执行真实命令，或 agent 的 shell 在执行前拒绝凭据读取时出现。进程内 open()（例如 Read 工具读 .env 或凭据文件）写「只看见，未拦截」，没有拦住。只写了 Review、没有执行回执时，状态是「已记下，未拦截」。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说，只留能看清的短摘录。心跳、没采到用户原话、重复采样和整段会话副本会清掉。不会为了凑容量丢掉这些记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">${huge?'这份库已经很大。自动清理停了，点上面的按钮才按小批清，不会整库压缩。':'库还不大。心跳和大块原文会按小批清掉。外联、凭据、文件改动和验收决定不动。'}</p></article>
  ${staleFilesHTML(disk)}
- <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）。进程内读文件这版拦不住</li><li>Network Extension 仍未安装。绝对路径绕过 PATH、QUIC、参数里看不到目的地的 git 仍拦不住</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
+ <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）。进程内 open() 这版只看见，拦不住</li><li>Network Extension 仍未安装。绝对路径 curl、QUIC、参数里看不到目的地的 git 仍拦不住。凭据文件的绝对路径读取，在 agent 的 shell 里会在执行前拒绝</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
  </div>`;
 }
 
