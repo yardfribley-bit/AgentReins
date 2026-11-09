@@ -238,17 +238,17 @@ final class AgentTreeFileObserver {
             : "possible (sampled). " + FileLayerCapture.limits
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime]
-        let stamp = formatter.string(from: Date())
+        let observedAt = formatter.string(from: Date())
         if hit.credential && hit.op == "read" {
             CredentialObservationLog.append(
                 CredentialObservationLog.Row(
-                    path: hit.path, grade: grade, agent: agent ?? "", at: stamp,
+                    path: hit.path, grade: grade, agent: agent ?? "", at: observedAt,
                     source: source, blocked: false),
                 to: CredentialObservationLog.defaultURL())
         }
         if hit.op == "modify" {
             FileObservationLog.append(
-                FileObservationLog.Row(path: hit.path, at: stamp, agent: agent ?? "", op: "modify"),
+                FileObservationLog.Row(path: hit.path, at: observedAt, agent: agent ?? "", op: "modify"),
                 to: FileObservationLog.defaultURL())
         }
         return GuardEvent(

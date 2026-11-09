@@ -684,7 +684,7 @@ enum NetworkTool {
                 "nonWhitelist": true,
                 "auditBypass": false,
                 "startedAt": row.at,
-                "exitCode": row.mechanism == "transport-wrapper" ? 126 : NSNull(),
+                "exitCode": row.mechanism == "transport-wrapper" ? 126 as Any : NSNull(),
                 "confidence": "Observed",
             ]
         }
