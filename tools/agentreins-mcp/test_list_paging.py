@@ -127,6 +127,46 @@ class ListPaging(unittest.TestCase):
         self.assertEqual(network["network"][0]["exitCode"], 126)
         self.assertTrue(network["network"][0]["blocked"])
 
+    def test_list_alerts_is_newest_first_and_drops_telemetry(self) -> None:
+        records = [
+            _row("Cursor", "old", "s", "2026-10-28T01:00:00Z"),
+            _row("Cursor", "new", "s", "2026-10-28T09:00:00Z"),
+        ]
+        rows = [
+            {"at": "2026-11-09T08:00:00Z", "action": "deny", "kind": "egress", "subject": "host:galileotelemetry.tencent.com",
+             "enforced": True, "mechanism": "transport-wrapper", "noise": "telemetry", "agent": "WorkBuddy", "session": "s1"},
+            {"at": "2026-11-09T08:00:10Z", "action": "deny", "kind": "egress", "subject": "host:galileotelemetry.tencent.com",
+             "enforced": True, "mechanism": "transport-wrapper", "noise": "telemetry", "agent": "WorkBuddy", "session": "s1"},
+            {"at": "2026-11-09T08:00:20Z", "action": "deny", "kind": "egress", "subject": "host:example.net",
+             "enforced": True, "mechanism": "transport-wrapper", "inbox": True, "agent": "WorkBuddy", "session": "bd89b095"},
+            {"at": "2026-11-09T08:00:30Z", "action": "deny", "kind": "egress", "subject": "host:example.net",
+             "enforced": True, "mechanism": "transport-wrapper", "inbox": False, "agent": "WorkBuddy", "session": "bd89b095"},
+        ]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "audit.jsonl"
+            path.write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+            def bridge(items):
+                alerts = [{
+                    "id": row["call"], "rule": "S07", "title": "bypass", "agent": row["agent"],
+                    "session": row["session"], "call": row["call"], "confidence": "Observed",
+                    "timestamp": row["startedAt"],
+                } for row in items]
+                return alerts, {"engine": "test", "warning": None}
+
+            with mock.patch.object(evidence, "hardgate_audit_path", return_value=path), \
+                 mock.patch.object(evidence, "build_alerts_via_bridge", side_effect=bridge), \
+                 mock.patch.object(evidence, "credential_observation_alerts", return_value=[]):
+                out = evidence.list_alerts(records=records)
+        stamps = [item["timestamp"] for item in out["alerts"]]
+        self.assertEqual(stamps, sorted(stamps, reverse=True))
+        self.assertEqual(out["alerts"][0]["sub"], "host:example.net")
+        self.assertEqual(out["alerts"][0]["agent"], "WorkBuddy")
+        self.assertEqual(out["alerts"][0]["session"], "bd89b095")
+        self.assertEqual(sum(1 for item in out["alerts"] if item.get("sub") == "host:example.net"), 1)
+        self.assertFalse(any("telemetry" in str(item.get("sub") or "") for item in out["alerts"]))
+        self.assertEqual(out["alerts"][1]["executionId"], "new")
+
     def test_blocked_host_stays_on_the_first_page_when_transport_is_long(self) -> None:
         records = [_row("Cursor", "e%03d" % i, "s", "2026-10-28T01:00:00Z") for i in range(250)]
         blocked = {

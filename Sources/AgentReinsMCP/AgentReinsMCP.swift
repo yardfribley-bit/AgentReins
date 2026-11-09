@@ -304,6 +304,7 @@ enum Alerts {
             if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
             out.append(item)
         }
+        out.sort { (str($0["timestamp"]) ?? "") > (str($1["timestamp"]) ?? "") }
         let page = ListPage.slice(out, offset: offset, limit: limit)
         var result: [String: Any] = [
             "alerts": Redact.any(page.items),
@@ -321,15 +322,21 @@ enum Alerts {
 
     /// PATH 包装在 exec 之前返回 126，所以 transport.json 里没有这条。已阻断只来自 enforced=true。
     static func hardGateAlerts() -> [[String: Any]] {
-        HardGateReceipts.enforcedDenies(from: HardGateReceipts.defaultURL(), limit: 80).map { row in
+        var newest: [String: HardGateReceipts.Row] = [:]
+        for row in HardGateReceipts.enforcedDenies(from: HardGateReceipts.defaultURL(), limit: 80) {
+            if HardGateReceipts.isTelemetrySubject(row.subject) { continue }
+            newest[row.subject] = row
+        }
+        return newest.values.map { row in
             let why = "已阻断。硬门禁拒绝了 \(row.subject)，真实程序没有执行。"
                 + (row.mechanism == "transport-wrapper" ? " 退出码 126。" : "")
+            let who = row.agent.isEmpty ? "监督进程树" : row.agent
             return [
                 "id": "hardgate:\(row.at):\(row.subject)",
                 "rule": "hardgate",
                 "title": "已阻断",
-                "agent": "监督进程树",
-                "session": NSNull(),
+                "agent": who,
+                "session": row.session.isEmpty ? (NSNull() as Any) : row.session,
                 "call": NSNull(),
                 "confidence": "Observed",
                 "timestamp": row.at,
@@ -668,14 +675,18 @@ enum NetworkTool {
             guard row.kind == "egress" || row.subject.hasPrefix("host:") else { return nil }
             if let agent, agent != "all" {
                 let name = agent.lowercased()
-                if name != "监督进程树" && name != "workbuddy" && name != "codebuddy" { return nil }
+                let who = (row.agent.isEmpty ? "监督进程树" : row.agent).lowercased()
+                let same = name == who || (name == "codebuddy" && who == "workbuddy") || (name == "workbuddy" && who == "codebuddy")
+                if !same && name != "监督进程树" { return nil }
             }
             if let since, let ts = Clock.parse(row.at), ts < since { return nil }
             if let until, let ts = Clock.parse(row.at), ts > until { return nil }
             let host = row.subject.hasPrefix("host:") ? String(row.subject.dropFirst(5)) : row.subject
+            let who = row.agent.isEmpty ? "监督进程树" : row.agent
             return [
                 "executionId": "hardgate:\(row.at):\(row.subject)",
-                "agent": "监督进程树",
+                "agent": who,
+                "session": row.session.isEmpty ? (NSNull() as Any) : row.session,
                 "tool": row.mechanism.isEmpty ? "hardgate" : row.mechanism,
                 "destination": host,
                 "destinationSource": "hardgate",

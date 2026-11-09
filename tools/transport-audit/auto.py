@@ -8,6 +8,9 @@ Unguarded shells (no AGENTREINS_TRANSPORT_AGENT) are unchanged.
 import datetime,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
 BASE=pathlib.Path(__file__).resolve().parent
 ENCRYPTED_TOOLS={'ssh','scp','sftp','rsync'}
+# File readers are not network tools. Credential paths are denied; every other
+# invocation execs the real binary and writes no transport audit.
+FILE_READ_TOOLS={'cat','head','tail','less','more','cp','base64','xxd','strings','grep'}
 _TOOLS=BASE.parents[1]/'tools' if (BASE.parents[1]/'tools'/'redact_secrets.py').is_file() else BASE.parent
 # Prefer repo tools/redact_secrets.py; packaged MCP copy is a fallback.
 for _p in (BASE.parents[1]/'tools', BASE.parent, BASE):
@@ -298,11 +301,78 @@ def fallback_must_deny(args):
         return True
     return False
 
+def session_for(env, agent):
+    if agent=='WorkBuddy':
+        return env.get('CODEBUDDY_SESSION_ID') or env.get('CODEBUDDY_CONVERSATION_REQUEST_ID')
+    if agent=='Codex':
+        return env.get('CODEX_THREAD_ID')
+    if agent=='Cursor':
+        return env.get('CURSOR_CONVERSATION_ID')
+    if agent=='Claude':
+        return env.get('CLAUDE_SESSION_ID')
+    return None
+
+def agent_from_process(name, argv):
+    blob=((name or '')+' '+(argv or '')).lower()
+    if 'codebuddy' in blob or 'workbuddy' in blob: return 'WorkBuddy'
+    if 'codex' in blob: return 'Codex'
+    if 'cursor-agent' in blob or '/cursor.app/' in blob: return 'Cursor'
+    if re.search(r'(^|[\\/ ])claude($|[\\/ ])', blob): return 'Claude'
+    return None
+
+def marker_from_process(pid):
+    """Known session markers only. The rest of the environment is not kept."""
+    try:
+        proc=subprocess.run(['ps','eww','-p',str(pid)],capture_output=True,text=True,timeout=1)
+    except (OSError, subprocess.SubprocessError):
+        return {}
+    text=proc.stdout or ''
+    found={}
+    for key in ('AGENTREINS_TRANSPORT_AGENT','CODEBUDDY_SESSION_ID','CODEX_THREAD_ID','CURSOR_CONVERSATION_ID','CLAUDE_SESSION_ID'):
+        match=re.search(r'(?:^|\s)%s=(\S+)'%key, text)
+        if match: found[key]=match.group(1)
+    return found
+
+def resolve_agent_session(env):
+    """Env markers first, then a short walk of the parent chain."""
+    agent=env.get('AGENTREINS_TRANSPORT_AGENT') or ''
+    session=session_for(env, agent) or ''
+    if agent in ('WorkBuddy','Codex','Cursor','Claude') and session:
+        return agent, session
+    pid=os.getppid()
+    for _ in range(6):
+        if not pid or pid<=1: break
+        if not agent or not session:
+            try:
+                ident=subprocess.run(['ps','-p',str(pid),'-o','comm=,args='],capture_output=True,text=True,timeout=1)
+                line=(ident.stdout or '').strip()
+            except (OSError, subprocess.SubprocessError):
+                line=''
+            name, _, argv=line.partition(' ')
+            found=agent_from_process(name, argv or line)
+            if found and not agent: agent=found
+            markers=marker_from_process(pid)
+            if not agent:
+                agent=markers.get('AGENTREINS_TRANSPORT_AGENT') or agent_from_process('', ' '.join(markers.values())) or ''
+            if not session:
+                session=session_for(markers, agent) or markers.get('CODEBUDDY_SESSION_ID') or markers.get('CODEX_THREAD_ID') or markers.get('CURSOR_CONVERSATION_ID') or markers.get('CLAUDE_SESSION_ID') or ''
+            if agent in ('WorkBuddy','Codex','Cursor','Claude') and session:
+                break
+        try:
+            proc=subprocess.run(['ps','-p',str(pid),'-o','ppid='],capture_output=True,text=True,timeout=1)
+            pid=int((proc.stdout or '').strip() or '0')
+        except (OSError, subprocess.SubprocessError, ValueError):
+            break
+    if agent not in ('WorkBuddy','Codex','Cursor','Claude'):
+        agent=env.get('AGENTREINS_TRANSPORT_AGENT') or agent
+    return agent or None, session or None
+
 def transport_hard_gate(tool, args, env):
     """Return 126 when this supervised command must not run. None to continue."""
     try:
         gate=load_hard_gate()
-        code,_rows=gate.commit_wrapper(tool, args, os.getcwd(), str(pathlib.Path.home()), extra_destination=command_destination(tool, args, env), env=env)
+        agent, session=resolve_agent_session(env)
+        code,_rows=gate.commit_wrapper(tool, args, os.getcwd(), str(pathlib.Path.home()), extra_destination=command_destination(tool, args, env), env=env, agent=agent, session=session)
     except Exception:
         if fallback_must_deny(args):
             sys.stderr.write('AgentReins 硬门禁模块没有加载，这条非本机外联或凭据路径不会执行。\n')
@@ -324,6 +394,8 @@ def main():
     blocked=transport_hard_gate(tool, args, env)
     if blocked:
         return blocked
+    if tool in FILE_READ_TOOLS:
+        os.execv(real,[real,*args])
     default_root=pathlib.Path.home()/'Library'/'Application Support'/'AgentGuard'/'transport-audit'
     root=pathlib.Path(env.get('AGENTREINS_TRANSPORT_ROOT') or default_root)
     try:

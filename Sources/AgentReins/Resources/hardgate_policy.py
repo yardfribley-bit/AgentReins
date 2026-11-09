@@ -353,6 +353,8 @@ def _credential_marker(low):
         return True
     if low.endswith("/.netrc") or low == ".netrc" or low.endswith(".netrc"):
         return True
+    if low.endswith("/.npmrc") or low == ".npmrc" or low.endswith("/.pypirc") or low == ".pypirc":
+        return True
     if low.endswith("/credentials.json") or low == "credentials.json":
         return True
     if low.endswith(".pem"):
@@ -621,6 +623,10 @@ def _append_unlocked(root, record, actor):
         body["detail"] = str(record["detail"])[:200]
     if record.get("noise"):
         body["noise"] = str(record["noise"])[:40]
+    if record.get("agent"):
+        body["agent"] = str(record["agent"])[:80]
+    if record.get("session"):
+        body["session"] = str(record["session"])[:120]
     line = (json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     try:
@@ -833,7 +839,7 @@ def ensure_seeded(root=None):
         _unlock(fd)
 
 
-def commit_wrapper(tool, args, cwd, home, root=None, extra_destination=None, env=None):
+def commit_wrapper(tool, args, cwd, home, root=None, extra_destination=None, env=None, agent=None, session=None):
     """Classify and, on deny, record enforced=True. Caller must not exec when this returns 126."""
     root = gate_root(root)
     ensure_seeded(root)
@@ -852,6 +858,10 @@ def commit_wrapper(tool, args, cwd, home, root=None, extra_destination=None, env
             decision["actor"] = "enforcer"
             decision["mechanism"] = "transport-wrapper"
             decision["enforced"] = decision.get("action") == "deny"
+            if agent:
+                decision["agent"] = agent
+            if session:
+                decision["session"] = session
             try:
                 _append_unlocked(root, decision, actor="enforcer")
             except OSError:
