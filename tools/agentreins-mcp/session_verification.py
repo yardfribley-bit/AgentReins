@@ -653,18 +653,18 @@ def _match(call: dict[str, Any], effect: dict[str, Any], nxt: datetime | None, t
     tool_call = effect.get("toolCallId")
     if tool_call and tool_call in (call["callId"], call["id"]):
         return 3, "call-id"
-    if _path_hit(call, effect):
-        return 2, "path"
     start = call["timestamp"].timestamp() - LEAD_S
     end = _window_end(call, nxt).timestamp()
     stamp = effect["timestamp"].timestamp()
-    if stamp < start or stamp > end:
-        return None
-    if effect.get("sessionId") and effect.get("sessionId") != call["sessionId"]:
-        return None
-    if call.get("pid") is not None and effect.get("pid") is not None:
-        return (2, "time-pid") if _tree_match(int(call["pid"]), int(effect["pid"]), tree) else None
-    return 1, "time-window"
+    if start <= stamp <= end:
+        if effect.get("sessionId") and effect.get("sessionId") != call["sessionId"]:
+            return None
+        if call.get("pid") is not None and effect.get("pid") is not None:
+            return (2, "time-pid") if _tree_match(int(call["pid"]), int(effect["pid"]), tree) else None
+        return 1, "time-window"
+    if _path_hit(call, effect):
+        return 2, "path"
+    return None
 
 
 def _rank_name(rank: int) -> str:

@@ -49,20 +49,59 @@ enum TransportWrapperInstall {
         return Result(copied: copied, auditUpdated: auditUpdated, shellHookAdded: hook)
     }
 
+    /// Replace another install's `transport-audit/bin` with `binDir`.
+    /// A path under `Application Support` contains a space, so a second launch
+    /// must recognize that path and leave it alone.
     static func retarget(_ text: String, binDir: String) -> String {
-        guard let regex = try? NSRegularExpression(pattern: #"(/[^'\"\s]*?/transport-audit/bin)(/[A-Za-z0-9._+-]+)?"#) else {
-            return text
+        let needle = "transport-audit/bin"
+        var output = ""
+        var cursor = text.startIndex
+        while let found = text[cursor...].range(of: needle) {
+            let start = pathStart(text, needle: found.lowerBound, floor: cursor)
+            var end = found.upperBound
+            if end < text.endIndex, text[end] == "/" {
+                var next = text.index(after: end)
+                while next < text.endIndex {
+                    let ch = text[next]
+                    if ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-" || ch == "+" {
+                        next = text.index(after: next)
+                    } else {
+                        break
+                    }
+                }
+                if text.distance(from: end, to: next) > 1 { end = next }
+            }
+            let dir = String(text[start..<found.upperBound])
+            output += text[cursor..<start]
+            if dir == binDir {
+                output += text[start..<end]
+            } else {
+                output += binDir + String(text[found.upperBound..<end])
+            }
+            cursor = end
         }
-        let source = text as NSString
-        let mutable = NSMutableString(string: text)
-        let matches = regex.matches(in: text, range: NSRange(location: 0, length: source.length))
-        for match in matches.reversed() {
-            let dir = source.substring(with: match.range(at: 1))
-            if dir == binDir { continue }
-            let tool = match.range(at: 2).location != NSNotFound ? source.substring(with: match.range(at: 2)) : ""
-            mutable.replaceCharacters(in: match.range, with: binDir + tool)
+        output += text[cursor...]
+        return output
+    }
+
+    private static func pathStart(_ text: String, needle: String.Index, floor: String.Index) -> String.Index {
+        var index = needle
+        while index > floor {
+            let previous = text.index(before: index)
+            let ch = text[previous]
+            if ch == "'" || ch == "\"" { return index }
+            index = previous
         }
-        return mutable as String
+        index = needle
+        var start = needle
+        while index > floor {
+            let previous = text.index(before: index)
+            let ch = text[previous]
+            if ch == " " || ch == "\n" || ch == "\t" || ch == ":" { return index }
+            index = previous
+            start = index
+        }
+        return start
     }
 
     static func auditScript(binDir: String, home: String) -> String {

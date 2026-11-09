@@ -730,17 +730,19 @@ private func match(call: ParsedToolCall, effect: HostEffect, next: Date?, tree: 
     if let toolCallId = effect.toolCallId, toolCallId == call.callId || toolCallId == call.id {
         return (3, "call-id")
     }
+    let start = call.timestamp.addingTimeInterval(-SessionVerification.leadSeconds)
+    let end = windowEnd(call, next: next)
+    if effect.timestamp >= start, effect.timestamp <= end {
+        if effect.sessionId != nil, effect.sessionId != call.sessionId { return nil }
+        if let callPid = call.pid, let effectPid = effect.pid {
+            return treeMatch(callPid, effectPid, tree) ? (2, "time-pid") : nil
+        }
+        return (1, "time-window")
+    }
     if pathHit(call: call, effect: effect) {
         return (2, "path")
     }
-    let start = call.timestamp.addingTimeInterval(-SessionVerification.leadSeconds)
-    let end = windowEnd(call, next: next)
-    guard effect.timestamp >= start, effect.timestamp <= end else { return nil }
-    if effect.sessionId != nil, effect.sessionId != call.sessionId { return nil }
-    if let callPid = call.pid, let effectPid = effect.pid {
-        return treeMatch(callPid, effectPid, tree) ? (2, "time-pid") : nil
-    }
-    return (1, "time-window")
+    return nil
 }
 
 private func hasFileChange(_ effect: VerificationEffect) -> Bool {
