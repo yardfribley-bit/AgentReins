@@ -63,16 +63,42 @@ def _session_hint(path: str) -> str:
     return name or "session"
 
 
-def load(claude_root: str | None = None, codex_root: str | None = None, max_files: int = 32, max_bytes: int = 512 * 1024) -> dict[str, Any]:
+def workbuddy_roots(home: pathlib.Path | None = None) -> list[str]:
+    home = home or pathlib.Path.home()
+    roots = []
+    for key in ("AGENTREINS_WORKBUDDY_PROJECTS", "AGENTREINS_CODEBUDDY_PROJECTS"):
+        value = os.environ.get(key)
+        if value:
+            roots.append(value)
+    for relative in (".workbuddy/projects", ".codebuddy/projects", ".codebuddy/sessions"):
+        path = home / relative
+        if relative == ".codebuddy/sessions" and not path.exists():
+            continue
+        text = str(path)
+        if text not in roots:
+            roots.append(text)
+    return roots
+
+
+def load(claude_root: str | None = None, codex_root: str | None = None, workbuddy: list[str] | None = None, max_files: int = 32, max_bytes: int = 512 * 1024) -> dict[str, Any]:
     home = pathlib.Path.home()
     claude_root = claude_root or os.environ.get("AGENTREINS_CLAUDE_PROJECTS") or str(home / ".claude" / "projects")
     codex_root = codex_root or os.environ.get("AGENTREINS_CODEX_SESSIONS") or str(home / ".codex" / "sessions")
+    if workbuddy is None:
+        workbuddy = workbuddy_roots(home)
     claude = _read_tree(claude_root, "Claude Code", "claude", max_files, max_bytes)
     codex = _read_tree(codex_root, "Codex", "codex", max_files, max_bytes)
-    calls = sorted(claude["calls"] + codex["calls"], key=lambda row: (row["timestamp"], row["id"]))
+    buddies = []
+    for root in workbuddy:
+        low = root.lower()
+        agent = "CodeBuddy" if "codebuddy" in low else "WorkBuddy"
+        buddies.append(_read_tree(root, agent, "workbuddy", max_files, max_bytes))
+    calls = sorted(claude["calls"] + codex["calls"] + [call for tree in buddies for call in tree["calls"]], key=lambda row: (row["timestamp"], row["id"]))
     completions = dict(claude["completions"])
     completions.update(codex["completions"])
-    return {"calls": calls, "completions": completions, "sources": [claude["source"], codex["source"]]}
+    for tree in buddies:
+        completions.update(tree["completions"])
+    return {"calls": calls, "completions": completions, "sources": [claude["source"], codex["source"]] + [tree["source"] for tree in buddies]}
 
 
 def parse_claude(text: str, source_path: str = "claude.jsonl") -> dict[str, Any]:
@@ -110,7 +136,7 @@ def verify(calls: list[dict[str, Any]], effects: list[dict[str, Any]], processes
             current = owner.get(effect["id"])
             if current and (matched[0] < current[1] or (matched[0] == current[1] and distance >= current[2])):
                 continue
-            owner[effect["id"]] = (call["id"], matched[0], distance)
+            owner[effect["id"]] = (call["id"], matched[0], distance, matched[1])
     happened: dict[str, list[dict[str, Any]]] = {}
     claimed: set[str] = set()
     for effect in effects:
@@ -122,7 +148,7 @@ def verify(calls: list[dict[str, Any]], effects: list[dict[str, Any]], processes
             "id": effect["id"], "kind": effect.get("kind"), "path": effect.get("path"),
             "diff": effect.get("diff"), "before": effect.get("before"), "after": effect.get("after"),
             "command": effect.get("command"), "remote": effect.get("remote"),
-            "timestamp": effect["timestamp"], "join": _rank_name(hit[1]),
+            "timestamp": effect["timestamp"], "join": hit[3],
             "credential": bool(effect.get("credential") or effect.get("kind") == "credential" or is_credential(effect.get("path")) or is_credential(effect.get("command"))),
         })
     cards = []
@@ -161,7 +187,7 @@ def verify(calls: list[dict[str, Any]], effects: list[dict[str, Any]], processes
 
 def list_tool_calls(arguments: dict[str, Any], effects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     loaded = load()
-    host = _coerce_effects(effects or [])
+    host = _coerce_effects((effects or []) + file_observation_effects())
     calls = _coerce_calls(loaded["calls"])
     document = verify(calls, host, completions=loaded["completions"])
     cards = document["cards"]
@@ -184,13 +210,13 @@ def list_tool_calls(arguments: dict[str, Any], effects: list[dict[str, Any]] | N
         "offset": offset,
         "limit": int(limit) if limit is not None else len(cards),
         "truncated": bool(document["truncated"] or (limit is not None and offset + int(limit) < len(cards))),
-        "note": "卡片来自本机 Claude Code / Codex 日志的摘录，加上已有运输记录。日志原文不写入证据库。",
+        "note": "卡片来自本机 Claude Code、Codex、WorkBuddy / CodeBuddy 日志的摘录，加上已有运输记录和文件路径。日志原文不写入证据库。",
     }
 
 
 def get_session_verification(session_id: str, effects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     loaded = load()
-    document = verify(_coerce_calls(loaded["calls"]), _coerce_effects(effects or []), completions=loaded["completions"])
+    document = verify(_coerce_calls(loaded["calls"]), _coerce_effects((effects or []) + file_observation_effects()), completions=loaded["completions"])
     cards = [card for card in document["cards"] if card["sessionId"] == session_id]
     return {
         "sessionId": session_id,
@@ -203,6 +229,31 @@ def get_session_verification(session_id: str, effects: list[dict[str, Any]] | No
         "truncated": document["truncated"],
         "note": "这份会话日志里没有这个 session，或日志目录不在。" if not cards else "只读核对。",
     }
+
+
+def file_observation_effects(limit: int = 200) -> list[dict[str, Any]]:
+    override = os.environ.get("AGENTREINS_FILE_OBSERVATIONS")
+    path = pathlib.Path(override) if override else pathlib.Path.home() / "Library/Application Support/AgentReins/file-observations.jsonl"
+    if not path.is_file():
+        return []
+    effects = []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    for index, line in enumerate(lines[-limit:]):
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or not row.get("path"):
+            continue
+        effects.append({
+            "id": "file-observe-%s" % index, "kind": "file", "timestamp": row.get("at"),
+            "path": row.get("path"), "source": "file-observe",
+            "credential": is_credential(str(row.get("path") or "")),
+        })
+    return effects
 
 
 def effects_from_transport(records: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -223,6 +274,12 @@ def effects_from_transport(records: list[dict[str, Any]]) -> list[dict[str, Any]
         if destination:
             effects.append({"id": "transport-net-%s" % index, "kind": "network", "timestamp": parsed.isoformat(),
                             "pid": pid, "remote": destination, "command": command, "sessionId": session, "toolCallId": call, "source": "transport"})
+        file_result = record.get("fileResult") if isinstance(record.get("fileResult"), dict) else {}
+        file_path = file_result.get("path")
+        if file_path:
+            effects.append({"id": "transport-file-%s" % index, "kind": "file", "timestamp": parsed.isoformat(),
+                            "pid": pid, "path": file_path, "sessionId": session, "toolCallId": call,
+                            "credential": is_credential(str(file_path)), "source": "transport"})
         if tool or command:
             effects.append({"id": "transport-proc-%s" % index, "kind": "process", "timestamp": parsed.isoformat(),
                             "pid": pid, "command": (tool + " " + command).strip(), "sessionId": session, "toolCallId": call,
@@ -340,7 +397,8 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
         if not isinstance(row, dict):
             malformed += 1
             continue
-        if kind == "claude":
+        claude_shape = kind == "claude" or (kind == "workbuddy" and isinstance(row.get("message"), dict))
+        if claude_shape:
             session = row.get("sessionId") or row.get("session_id") or session
             message = row.get("message") if isinstance(row.get("message"), dict) else {}
             contents = _items(message.get("content"))
@@ -368,6 +426,26 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
             if done:
                 completions[session] = done
                 pending = ""
+        elif kind == "workbuddy":
+            session = row.get("sessionId") or row.get("session_id") or session
+            row_type = row.get("type") or ""
+            if row_type == "reasoning":
+                text = _deep_text(row.get("content")) or _deep_text(row.get("rawContent"))
+                if text:
+                    pending = excerpt(text)[0]
+                continue
+            if row_type == "message" and row.get("role") == "user":
+                pending = ""
+                continue
+            if row_type != "function_call":
+                continue
+            timestamp = _parse_time(row.get("timestamp"))
+            if timestamp is None:
+                malformed += 1
+                continue
+            call_id = row.get("callId") or row.get("call_id") or "workbuddy-%d" % line_start
+            calls.append(_call(call_id, session, agent, source_path, line_start, timestamp, row.get("pid"), row.get("reasoning") or pending, row.get("name") or "unknown_tool", _json_text(row.get("arguments", row.get("input"))), seen))
+            pending = ""
         else:
             payload = row.get("payload") if isinstance(row.get("payload"), dict) else {}
             payload_type = payload.get("type") or ""
@@ -558,6 +636,19 @@ def _window_end(call: dict[str, Any], nxt: datetime | None) -> datetime:
     return datetime.fromtimestamp(min(cap, until), timezone.utc)
 
 
+def _path_hit(call: dict[str, Any], effect: dict[str, Any]) -> bool:
+    if effect.get("kind") not in ("file", "credential"):
+        return False
+    path = effect.get("path") or ""
+    if not path:
+        return False
+    if effect.get("sessionId") and effect.get("sessionId") != call["sessionId"]:
+        return False
+    if not any(_covers(claimed, path) for claimed in call.get("claimedPaths") or []):
+        return False
+    return abs((effect["timestamp"] - call["timestamp"]).total_seconds()) <= 120
+
+
 def _match(call: dict[str, Any], effect: dict[str, Any], nxt: datetime | None, tree: dict[int, int]) -> tuple[int, str] | None:
     tool_call = effect.get("toolCallId")
     if tool_call and tool_call in (call["callId"], call["id"]):
@@ -565,13 +656,15 @@ def _match(call: dict[str, Any], effect: dict[str, Any], nxt: datetime | None, t
     start = call["timestamp"].timestamp() - LEAD_S
     end = _window_end(call, nxt).timestamp()
     stamp = effect["timestamp"].timestamp()
-    if stamp < start or stamp > end:
-        return None
-    if effect.get("sessionId") and effect.get("sessionId") != call["sessionId"]:
-        return None
-    if call.get("pid") is not None and effect.get("pid") is not None:
-        return (2, "time-pid") if _tree_match(int(call["pid"]), int(effect["pid"]), tree) else None
-    return 1, "time-window"
+    if start <= stamp <= end:
+        if effect.get("sessionId") and effect.get("sessionId") != call["sessionId"]:
+            return None
+        if call.get("pid") is not None and effect.get("pid") is not None:
+            return (2, "time-pid") if _tree_match(int(call["pid"]), int(effect["pid"]), tree) else None
+        return 1, "time-window"
+    if _path_hit(call, effect):
+        return 2, "path"
+    return None
 
 
 def _rank_name(rank: int) -> str:
@@ -620,7 +713,14 @@ def _covers(stated: str, actual: str) -> bool:
 
 def _mismatches(call: dict[str, Any], happened: list[dict[str, Any]], file_observation: str) -> list[dict[str, str]]:
     out = []
-    if call["claimsEdit"] and file_observation == "present" and not any((item.get("kind") in ("file", "credential") and _has_change(item)) for item in happened):
+    saw_file = False
+    for item in happened:
+        if item.get("kind") not in ("file", "credential"):
+            continue
+        if _has_change(item) or any(_covers(claimed, item.get("path") or "") for claimed in call.get("claimedPaths") or []):
+            saw_file = True
+            break
+    if call["claimsEdit"] and file_observation == "present" and not saw_file:
         paths = "、".join(call["claimedPaths"]) or call["toolName"]
         out.append({"kind": "claimed_edit_without_diff", "label": "说了没做", "detail": "它调用 %s 要改 %s，这个时间窗里没有文件 diff。" % (call["toolName"], paths)})
     unspoken = []

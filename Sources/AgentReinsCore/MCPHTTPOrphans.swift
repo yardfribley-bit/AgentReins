@@ -102,6 +102,49 @@ public enum MCPHTTPOrphans {
             return proc.pid
         }
     }
+
+    /// `launchctl kickstart -k` records SIGKILL as `last exit code = -9`
+    /// (or "Killed: 9" / SIGKILL). That exit is expected. It is not a health failure.
+    public static func isKickstartExit(_ text: String) -> Bool {
+        let lower = text.lowercased()
+        if lower.contains("sigkill") || lower.contains("killed: 9") { return true }
+        if let code = lastExitCode(text), code == -9 { return true }
+        return false
+    }
+
+    /// True only for a recorded non-zero exit that is not the kickstart SIGKILL.
+    /// Missing text and exit 0 are not errors. `-9` is not an error.
+    public static func launchdExitIsHealthError(_ text: String) -> Bool {
+        if isKickstartExit(text) { return false }
+        guard let code = lastExitCode(text) else { return false }
+        return code != 0
+    }
+
+    public static func lastExitCode(_ text: String) -> Int32? {
+        guard let regex = try? NSRegularExpression(pattern: #"(?i)last exit code\s*=\s*(-?\d+)"#) else { return nil }
+        let range = NSRange(text.startIndex..., in: text)
+        guard let match = regex.firstMatch(in: text, range: range), match.numberOfRanges > 1,
+              let codeRange = Range(match.range(at: 1), in: text),
+              let code = Int32(text[codeRange]) else { return nil }
+        return code
+    }
+
+    /// Lines the health agent may write. No victims means no line at all, so a
+    /// kickstart that only left `last exit code = -9` is not reported as an error.
+    /// A process that is still not listening is signaled, and that line does not
+    /// call the earlier SIGKILL an error.
+    public static func healthLogLines(victims: [Int32], port: Int, launchdText: String) -> [String] {
+        guard !victims.isEmpty else { return [] }
+        let detail = isKickstartExit(launchdText)
+            ? "still not accepting after kickstart; signaled"
+            : "alive but 127.0.0.1:\(port) is not accepting; signaled"
+        return victims.map { "AgentReinsMCP health: pid \($0) \(detail)" }
+    }
+
+    /// After kickstart the replacement is allowed longer to bind before it is treated as a hang.
+    public static func healthGrace(launchdText: String) -> TimeInterval {
+        isKickstartExit(launchdText) ? 45 : 12
+    }
 }
 
 /// Optional deadline for MCP reads. Nil keeps the full integrity walk used by parity tests.

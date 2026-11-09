@@ -27,7 +27,7 @@ enum SessionVerificationTool {
             "limit": page.limit,
             "truncated": page.truncated || document.truncated,
             "nextCursor": page.nextCursor,
-            "note": "卡片来自本机 Claude Code / Codex 日志的摘录，加上已有运输记录。日志原文不写入证据库。",
+            "note": "卡片来自本机 Claude Code、Codex、WorkBuddy / CodeBuddy 日志的摘录，加上已有运输记录和文件路径。日志原文不写入证据库。",
         ]
     }
 
@@ -56,7 +56,7 @@ enum SessionVerificationTool {
 
     private static func make(_ records: [[String: Any]]) -> SessionVerificationDocument {
         let roots = logRoots()
-        let logs = SessionVerification.load(claudeRoot: roots.claude, codexRoot: roots.codex)
+        let logs = SessionVerification.load(claudeRoot: roots.claude, codexRoot: roots.codex, workbuddyRoots: roots.workbuddy)
         let effects = hostEffects(records)
         var document = SessionVerification.verify(
             calls: logs.calls, effects: effects, completions: logs.completions,
@@ -66,12 +66,20 @@ enum SessionVerificationTool {
         return document
     }
 
-    private static func logRoots() -> (claude: String, codex: String) {
+    private static func logRoots() -> (claude: String, codex: String, workbuddy: [String]) {
         let env = ProcessInfo.processInfo.environment
         let home = NSHomeDirectory()
         let claude = env["AGENTREINS_CLAUDE_PROJECTS"] ?? (home as NSString).appendingPathComponent(".claude/projects")
         let codex = env["AGENTREINS_CODEX_SESSIONS"] ?? (home as NSString).appendingPathComponent(".codex/sessions")
-        return (claude, codex)
+        var workbuddy: [String] = []
+        if let extra = env["AGENTREINS_WORKBUDDY_PROJECTS"], !extra.isEmpty { workbuddy.append(extra) }
+        if let extra = env["AGENTREINS_CODEBUDDY_PROJECTS"], !extra.isEmpty { workbuddy.append(extra) }
+        for relative in [".workbuddy/projects", ".codebuddy/projects", ".codebuddy/sessions"] {
+            let path = (home as NSString).appendingPathComponent(relative)
+            if relative == ".codebuddy/sessions" && !FileManager.default.fileExists(atPath: path) { continue }
+            if !workbuddy.contains(path) { workbuddy.append(path) }
+        }
+        return (claude, codex, workbuddy)
     }
 
     private static func hostEffects(_ records: [[String: Any]]) -> [HostEffect] {
@@ -90,6 +98,12 @@ enum SessionVerificationTool {
                     id: "transport-net-\(index)", kind: "network", timestamp: timestamp, pid: pid,
                     command: args, remote: destination, sessionId: session, toolCallId: call, source: "transport"))
             }
+            if let file = filePath(record) {
+                effects.append(HostEffect(
+                    id: "transport-file-\(index)", kind: "file", timestamp: timestamp, pid: pid,
+                    path: file, sessionId: session, toolCallId: call,
+                    credential: SessionVerification.isCredential(file), source: "transport"))
+            }
             if !tool.isEmpty || !args.isEmpty {
                 effects.append(HostEffect(
                     id: "transport-proc-\(index)", kind: "process", timestamp: timestamp, pid: pid,
@@ -98,7 +112,23 @@ enum SessionVerificationTool {
                     credential: SessionVerification.isCredential(args), source: "transport"))
             }
         }
+        let formatter = ISO8601DateFormatter()
+        formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
+        let plain = ISO8601DateFormatter()
+        plain.formatOptions = [.withInternetDateTime]
+        for (index, row) in FileObservationLog.recent(from: FileObservationLog.defaultURL(), limit: 200).enumerated() {
+            let date = formatter.date(from: row.at) ?? plain.date(from: row.at)
+            guard let date else { continue }
+            effects.append(HostEffect(
+                id: "file-observe-\(index)", kind: "file", timestamp: date, path: row.path,
+                credential: SessionVerification.isCredential(row.path), source: "file-observe"))
+        }
         return effects
+    }
+
+    private static func filePath(_ record: [String: Any]) -> String? {
+        if let file = record["fileResult"] as? [String: Any], let path = str(file["path"]), !path.isEmpty { return path }
+        return nil
     }
 
     private static func destinationHost(_ record: [String: Any]) -> String? {

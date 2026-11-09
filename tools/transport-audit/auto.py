@@ -118,7 +118,13 @@ def flag_value(args, name):
     return None
 
 def command_destination(tool, args, env):
-    found=destination_from_args(args)
+    names=[str(item) for item in args]
+    # git config user.name / user.email are keys, not hosts. Only a URL in that
+    # command is a destination.
+    if tool in ('git','npm','yarn','pnpm','pip') and 'config' in names:
+        found=destination_from_args([item for item in args if '://' in str(item)])
+    else:
+        found=destination_from_args(args)
     if found: return found
     if tool=='gh':
         host=flag_value(args,'--hostname')
@@ -150,9 +156,10 @@ def load_content_audit():
     the repository root. parents[2] is the directory above the repo.
     """
     here=pathlib.Path(__file__).resolve().parent
-    candidates=[here/'content_audit.py']
-    if len(here.parents)>1:
-        candidates.append(here.parents[1]/'Sources'/'AgentReins'/'Resources'/'content_audit.py')
+    candidates=[here/'content_audit.py', here.parent/'content_audit.py']
+    for depth in (1, 2, 3):
+        if len(here.parents) > depth:
+            candidates.append(here.parents[depth]/'Sources'/'AgentReins'/'Resources'/'content_audit.py')
     for path in candidates:
         if path.is_file():
             spec=importlib.util.spec_from_file_location('agentreins_content_audit', path)
@@ -258,9 +265,14 @@ def load_hard_gate():
     candidates=[]
     if override:
         candidates.append(pathlib.Path(override))
-    if len(here.parents)>2:
-        candidates.append(here.parents[2]/'Sources'/'AgentReins'/'Resources'/'hardgate_policy.py')
+    for depth in (2, 3, 4):
+        if len(here.parents) > depth:
+            candidates.append(here.parents[depth]/'Sources'/'AgentReins'/'Resources'/'hardgate_policy.py')
+    # Installed copy: policy sits next to auto.py, or one directory above bin/.
     candidates.append(here.with_name('hardgate_policy.py'))
+    candidates.append(here.parent / 'hardgate_policy.py')
+    if len(here.parents) > 1:
+        candidates.append(here.parents[1] / 'hardgate_policy.py')
     for path in candidates:
         if path.is_file():
             spec=importlib.util.spec_from_file_location('agentreins_hardgate', path)

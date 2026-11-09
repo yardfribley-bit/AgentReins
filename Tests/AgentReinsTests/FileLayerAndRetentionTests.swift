@@ -75,6 +75,49 @@ final class FileLayerCaptureTests: XCTestCase {
         XCTAssertLessThanOrEqual(files.count, FileLayerCapture.watchCap)
     }
 
+    /// Build 204 missed Python open() of /tmp/<dir>/.env. The watch listed only
+    /// the names directly inside /tmp, so the nested file was never registered.
+    /// libproc also misses the read once that process has exited. A later atime
+    /// move with no open descriptor is possible, not confirmed, and not a block.
+    func testNestedTmpDotEnvIsRegisteredAndAClosedReadIsPossible() throws {
+        let shallow = FileLayerCapture.watchFiles(home: "/Users/me", workspaces: [], directoryNames: [
+            "/tmp": ["job", "notes.txt"],
+        ])
+        XCTAssertFalse(shallow.contains { $0.hasSuffix("/job/.env") })
+        let files = FileLayerCapture.watchFiles(home: "/Users/me", workspaces: ["/Users/me/project"], directoryNames: [
+            "/tmp": ["job", "notes.txt", ".env"],
+            "/tmp/job": [".env", "out.txt"],
+            "/private/tmp": ["job"],
+            "/private/tmp/job": [".env"],
+            "/Users/me/project": ["src"],
+            "/Users/me/project/src": [".env"],
+        ])
+        func has(_ suffix: String) -> Bool { files.contains { $0.hasSuffix(suffix) } }
+        XCTAssertTrue(has("/job/.env"))
+        XCTAssertTrue(has("/.env"))
+        XCTAssertTrue(has("/src/.env"))
+        XCTAssertFalse(has("/job/out.txt"))
+        XCTAssertFalse(has("/notes.txt"))
+        XCTAssertLessThanOrEqual(files.count, FileLayerCapture.watchCap)
+        let before = FileLayerCapture.AccessStamp(access: 10, modified: 10)
+        let afterRead = FileLayerCapture.AccessStamp(access: 11, modified: 10)
+        XCTAssertTrue(FileLayerCapture.isAccessRead(previous: before, current: afterRead))
+        XCTAssertEqual(FileLayerCapture.readGrade(descriptorStillOpen: false), "possible")
+        XCTAssertEqual(FileLayerCapture.readGrade(descriptorStillOpen: true), "confirmed")
+        let log = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("obs-\(UUID().uuidString).jsonl")
+        defer { try? FileManager.default.removeItem(at: log) }
+        let row = CredentialObservationLog.Row(
+            path: "/tmp/job/.env", grade: "possible", agent: "cursor",
+            at: "2026-11-09T07:55:00Z", source: "credential-kqueue", blocked: false)
+        CredentialObservationLog.append(row, to: log)
+        CredentialObservationLog.append(row, to: log)
+        let recent = CredentialObservationLog.recent(from: log, limit: 10)
+        XCTAssertEqual(recent.count, 1)
+        XCTAssertEqual(recent.first?.grade, "possible")
+        XCTAssertEqual(recent.first?.blocked, false)
+        XCTAssertEqual(recent.first?.path, "/tmp/job/.env")
+    }
+
     func testCommandRedirectOutsideWorkspaceAndTmpEnv() {
         let hits = FileLayerCapture.commandTargets("curl https://example.test; cat /tmp/fake.env; echo hi > /tmp/note.txt")
         XCTAssertTrue(hits.contains { $0.path == "/tmp/fake.env" && $0.op == "read" && $0.credential })
@@ -112,6 +155,61 @@ final class MCPHealthAndStaleDataTests: XCTestCase {
         XCTAssertEqual(MCPHTTPOrphans.healthVictims(procs, port: 18977, portListening: false, now: now, startedAt: started), [4])
         let young: [Int32: Date] = [4: now.addingTimeInterval(-2)]
         XCTAssertEqual(MCPHTTPOrphans.healthVictims(procs, port: 18977, portListening: false, now: now, startedAt: young), [])
+    }
+
+    func testKickstartExitNegativeNineIsNotAHealthError() {
+        let kickstart = """
+        state = running
+        last exit code = -9
+        """
+        XCTAssertTrue(MCPHTTPOrphans.isKickstartExit(kickstart))
+        XCTAssertTrue(MCPHTTPOrphans.isKickstartExit("last terminating signal = Killed: 9"))
+        XCTAssertFalse(MCPHTTPOrphans.launchdExitIsHealthError(kickstart))
+        XCTAssertFalse(MCPHTTPOrphans.launchdExitIsHealthError("last exit code = 0"))
+        XCTAssertFalse(MCPHTTPOrphans.launchdExitIsHealthError(""))
+        XCTAssertTrue(MCPHTTPOrphans.launchdExitIsHealthError("last exit code = 1"))
+        XCTAssertEqual(MCPHTTPOrphans.healthLogLines(victims: [], port: 18977, launchdText: kickstart), [])
+        XCTAssertEqual(MCPHTTPOrphans.healthGrace(launchdText: kickstart), 45)
+        XCTAssertEqual(MCPHTTPOrphans.healthGrace(launchdText: "last exit code = 1"), 12)
+        let lines = MCPHTTPOrphans.healthLogLines(victims: [4], port: 18977, launchdText: kickstart)
+        XCTAssertEqual(lines.count, 1)
+        XCTAssertFalse(lines[0].localizedCaseInsensitiveContains("error"))
+        XCTAssertFalse(lines[0].contains("-9"))
+    }
+
+    func testWrapperInstallCopiesBundleAndLeavesTheAgentSpecTree() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("wrap-\(UUID().uuidString)", isDirectory: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let source = root.appendingPathComponent("bundle/transport-audit", isDirectory: true)
+        let bin = source.appendingPathComponent("bin", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        try Data("transport-wrappers/2\n".utf8).write(to: source.appendingPathComponent("VERSION"))
+        try Data("#!/usr/bin/env python3\nprint('gate')\n".utf8).write(to: source.appendingPathComponent("auto.py"))
+        try FileManager.default.createSymbolicLink(atPath: bin.appendingPathComponent("curl").path, withDestinationPath: "../auto.py")
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
+        let old = "# AgentReins\nexport PATH='/Users/me/AgentSpec/AgentGuardApp/tools/transport-audit/bin':$PATH\ncurl() { /Users/me/AgentSpec/AgentGuardApp/tools/transport-audit/bin/curl \"$@\"; }\n"
+        let auditDir = home.appendingPathComponent(".agentreins", isDirectory: true)
+        try FileManager.default.createDirectory(at: auditDir, withIntermediateDirectories: true)
+        try Data(old.utf8).write(to: auditDir.appendingPathComponent("audit.sh"))
+        let dest = home.appendingPathComponent("Library/Application Support/AgentReins/transport-audit")
+        let first = TransportWrapperInstall.install(bundleRoot: source, destination: dest, home: home)
+        XCTAssertTrue(first.copied)
+        XCTAssertTrue(first.auditUpdated)
+        XCTAssertTrue(first.shellHookAdded)
+        let installed = try String(contentsOf: dest.appendingPathComponent("auto.py"))
+        XCTAssertTrue(installed.contains("gate"))
+        let link = try FileManager.default.destinationOfSymbolicLink(atPath: dest.appendingPathComponent("bin/curl").path)
+        XCTAssertEqual(link, "../auto.py")
+        let script = try String(contentsOf: auditDir.appendingPathComponent("audit.sh"))
+        XCTAssertFalse(script.contains("AgentSpec"))
+        XCTAssertTrue(script.contains(dest.appendingPathComponent("bin").path))
+        let zsh = try String(contentsOf: home.appendingPathComponent(".zshenv"))
+        XCTAssertTrue(zsh.contains("# BEGIN AgentReins transport"))
+        let second = TransportWrapperInstall.install(bundleRoot: source, destination: dest, home: home)
+        XCTAssertFalse(second.copied)
+        XCTAssertFalse(second.auditUpdated)
+        XCTAssertFalse(second.shellHookAdded)
     }
 
     func testStaleSuggestionsSkipTheLiveDatabase() {

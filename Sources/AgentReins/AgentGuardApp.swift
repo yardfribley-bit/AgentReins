@@ -116,6 +116,8 @@ struct AgentReinsApp: App {
                     agentDiscovery.observe(processes: inventory)
                 }
                 .task {
+                    HardGateStore.seedInstalledRules()
+                    TransportWrapperInstall.installFromBundleIfNeeded()
                     AgentReinsAppDelegate.stopLiveCollectors = {
                         workBuddyNetworkCapture.stop()
                         workBuddySight.stop()

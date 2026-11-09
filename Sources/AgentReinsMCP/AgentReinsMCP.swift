@@ -10,6 +10,9 @@ import Security
 @main
 enum AgentReinsMCP {
     static func main() {
+        // Every process start, including the health LaunchAgent. Empty rules
+        // with customized != true are filled. A customized file is left alone.
+        InstalledRules.seedSupportFiles()
         var http = false
         var httpHealth = false
         var port = EndpointDiscovery.defaultPort
@@ -286,6 +289,21 @@ enum Alerts {
             if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
             out.append(item)
         }
+        let observations = credentialObservations()
+        for item in observations {
+            if let agent, agent != "all", str(item["agent"]) != agent { continue }
+            if let rule, rule != "all", str(item["rule"]) != rule { continue }
+            if let sinceTs, let ts = Clock.parse(item["timestamp"]), ts < sinceTs { continue }
+            if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
+            out.append(item)
+        }
+        for item in hardGateAlerts() {
+            if let agent, agent != "all", str(item["agent"]) != agent { continue }
+            if let rule, rule != "all", str(item["rule"]) != rule { continue }
+            if let sinceTs, let ts = Clock.parse(item["timestamp"]), ts < sinceTs { continue }
+            if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
+            out.append(item)
+        }
         let page = ListPage.slice(out, offset: offset, limit: limit)
         var result: [String: Any] = [
             "alerts": Redact.any(page.items),
@@ -295,7 +313,55 @@ enum Alerts {
         ]
         for (k, v) in ListPage.meta(page) { result[k] = v }
         if let warning { result["warning"] = warning }
+        if !observations.isEmpty {
+            result["note"] = (result["note"] as? String ?? "") + " 另有进程内凭据读取（confirmed / possible）。PATH 包装看不到、也拦不住这类 open()。"
+        }
         return result
+    }
+
+    /// PATH 包装在 exec 之前返回 126，所以 transport.json 里没有这条。已阻断只来自 enforced=true。
+    static func hardGateAlerts() -> [[String: Any]] {
+        HardGateReceipts.enforcedDenies(from: HardGateReceipts.defaultURL(), limit: 80).map { row in
+            let why = "已阻断。硬门禁拒绝了 \(row.subject)，真实程序没有执行。"
+                + (row.mechanism == "transport-wrapper" ? " 退出码 126。" : "")
+            return [
+                "id": "hardgate:\(row.at):\(row.subject)",
+                "rule": "hardgate",
+                "title": "已阻断",
+                "agent": "监督进程树",
+                "session": NSNull(),
+                "call": NSNull(),
+                "confidence": "Observed",
+                "timestamp": row.at,
+                "sub": row.subject,
+                "why": why,
+                "finding": NSNull(),
+                "blocked": true,
+                "disposition": "已阻断",
+            ]
+        }
+    }
+
+    /// In-process open() never produces a transport.json row. The app appends a
+    /// short sidecar when libproc or the credential watch sees the path.
+    static func credentialObservations() -> [[String: Any]] {
+        CredentialObservationLog.recent(from: CredentialObservationLog.defaultURL(), limit: 80).map { row in
+            let grade = row.grade == "confirmed" ? "confirmed" : "possible"
+            let why = "进程内 open() 不经过 PATH 包装，拦不住。等级 \(grade)，来源 \(row.source)。文件描述符已经关掉时只能标 possible；APFS 没有更新 atime 时这次读取看不到。"
+            return [
+                "id": "credential-observe:\(grade):\(row.path)",
+                "rule": "credential_observe",
+                "title": grade == "confirmed" ? "凭据路径读取（confirmed）" : "凭据路径读取（possible）",
+                "agent": row.agent.isEmpty ? "Unknown" : row.agent,
+                "session": NSNull(),
+                "call": NSNull(),
+                "confidence": grade == "confirmed" ? "Observed" : "Inferred",
+                "timestamp": row.at,
+                "sub": row.path,
+                "why": why,
+                "finding": NSNull(),
+            ]
+        }
     }
 
     static func build(_ records: [[String: Any]]) -> (alerts: [[String: Any]], engine: String, warning: String?) {
@@ -568,7 +634,7 @@ enum NetworkTool {
             for (k, v) in dest { row[k] = v }
             row["confidence"] = isNull(dest["destination"]) ? "Unknown" : "Observed"
             return row
-        }
+        } + blockedNetworkRows(agent: agent, since: sinceTs, until: untilTs)
         let fetch = ListPage.socketFetchLimit(offset: offset, limit: limit)
         let sockets = SocketLedger.load(integrity, agent: agent, since: since, until: until, limit: fetch)
         let connections = sockets["connections"] as? [[String: Any]] ?? []
@@ -587,13 +653,41 @@ enum NetworkTool {
             "proxyFlows": ProxyJournal.recent(),
             "confidence": rows.isEmpty && connections.isEmpty ? "Unknown" : "Observed",
             "transportTruncated": transportTruncated,
-            "note": "network = 经审计入口的命令；realDestination/destinationSource/transportPeer 与 get_execution 同源："
+            "note": "已阻断的外联来自硬门禁回执（退出码 126，没有 transport.json）。network = 经审计入口的命令；realDestination/destinationSource/transportPeer 与 get_execution 同源："
                 + "proxy_observed / connection_observed = trace 里看到（Observed），argv_parsed = 只从命令参数推出（Inferred），"
                 + "transport_peer_only = 只知道本机代理口（Unknown）。sockets = 按进程采样的 TCP/UDP 连接，与是否走代理无关；"
                 + "会漏掉短于实测间隔（socketCoverage.missesShorterThanSeconds）的连接。",
         ]
         for (k, v) in ListPage.meta(networkPage) { result[k] = v }
         return result
+    }
+
+    private static func blockedNetworkRows(agent: String?, since: Double?, until: Double?) -> [[String: Any]] {
+        HardGateReceipts.enforcedDenies(from: HardGateReceipts.defaultURL(), limit: 80).compactMap { row in
+            guard row.kind == "egress" || row.subject.hasPrefix("host:") else { return nil }
+            if let agent, agent != "all" {
+                let name = agent.lowercased()
+                if name != "监督进程树" && name != "workbuddy" && name != "codebuddy" { return nil }
+            }
+            if let since, let ts = Clock.parse(row.at), ts < since { return nil }
+            if let until, let ts = Clock.parse(row.at), ts > until { return nil }
+            let host = row.subject.hasPrefix("host:") ? String(row.subject.dropFirst(5)) : row.subject
+            return [
+                "executionId": "hardgate:\(row.at):\(row.subject)",
+                "agent": "监督进程树",
+                "tool": row.mechanism.isEmpty ? "hardgate" : row.mechanism,
+                "destination": host,
+                "destinationSource": "hardgate",
+                "allowed": false,
+                "blocked": true,
+                "disposition": "已阻断",
+                "nonWhitelist": true,
+                "auditBypass": false,
+                "startedAt": row.at,
+                "exitCode": row.mechanism == "transport-wrapper" ? 126 as Any : NSNull(),
+                "confidence": "Observed",
+            ]
+        }
     }
 }
 

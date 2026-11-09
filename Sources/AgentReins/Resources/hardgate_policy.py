@@ -256,6 +256,31 @@ def is_loopback(host):
     return parts[0] == 127
 
 
+def is_telemetry_host(host):
+    """Product telemetry. Still denied. Not an inbox item."""
+    name = str(host or "").strip().lower().rstrip(".")
+    if name.startswith("host:"):
+        name = name[5:]
+    return "telemetry" in name
+
+
+def is_config_key(token):
+    """git/npm config keys such as user.name. Not a destination."""
+    text = str(token or "")
+    if not text or "://" in text or "@" in text or "/" in text or text.startswith("-"):
+        return False
+    return re.fullmatch(r"[A-Za-z][A-Za-z0-9_-]*(?:\.[A-Za-z0-9_-]+)+", text) is not None
+
+
+def config_keys(tool, args):
+    names = [str(item) for item in (args or [])]
+    if str(tool or "") not in ("git", "npm", "yarn", "pnpm", "pip"):
+        return set()
+    if "config" not in names:
+        return set()
+    return {item for item in names if is_config_key(item)}
+
+
 def is_heartbeat_path(path):
     if not path:
         return False
@@ -470,7 +495,13 @@ def iter_egress_targets(tool, args, extra_destination=None, env=None):
     yield_list = []
     if extra_destination:
         add(extra_destination)
+    config_only_urls = str(tool or "") in ("git", "npm", "yarn", "pnpm", "pip") and "config" in [str(item) for item in (args or [])]
+    ignored = config_keys(tool, args)
     for arg in args or []:
+        if config_only_urls and "://" not in str(arg):
+            continue
+        if str(arg) in ignored:
+            continue
         for match in _URL_RE.findall(str(arg)):
             add(match)
         for host in _hosts_in_token(arg):
@@ -499,13 +530,25 @@ def classify_egress(host, path, allowlist, seen):
             "inbox": False, "heartbeat": heartbeat, "record": True, "enforced": False,
             "reason": "allowlist",
         }
-    inbox = (not heartbeat) and subject not in (seen or set())
-    return {
+    telemetry = is_telemetry_host(host)
+    inbox = (not heartbeat) and (not telemetry) and subject not in (seen or set())
+    if telemetry:
+        detail = "遥测，保持拒绝，不进入待我处理"
+    elif inbox:
+        detail = "第一次外联到新主机"
+    elif heartbeat:
+        detail = "心跳，不进入待我处理"
+    else:
+        detail = "重复目标，保持拒绝"
+    row = {
         "action": "deny", "kind": "egress", "subject": subject, "loopback": False,
         "inbox": inbox, "heartbeat": heartbeat, "record": True, "enforced": False,
         "reason": "default-deny egress",
-        "detail": "第一次外联到新主机" if inbox else ("心跳，不进入待我处理" if heartbeat else "重复目标，保持拒绝"),
+        "detail": detail,
     }
+    if telemetry:
+        row["noise"] = "telemetry"
+    return row
 
 
 def classify_credential(subject, allowlist, seen):
@@ -576,6 +619,8 @@ def _append_unlocked(root, record, actor):
     }
     if record.get("detail"):
         body["detail"] = str(record["detail"])[:200]
+    if record.get("noise"):
+        body["noise"] = str(record["noise"])[:40]
     line = (json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     try:
@@ -739,9 +784,41 @@ def seed_rules_file(path):
     return True
 
 
+def installed_rules_paths():
+    """The two files a launch may find. The app reads AgentReins; older installs use AgentGuard."""
+    support = Path.home() / "Library" / "Application Support"
+    return [
+        support / "AgentReins" / "rules.json",
+        support / "AgentGuard" / "rules.json",
+    ]
+
+
+def live_gate_root():
+    return Path.home() / "Library" / "Application Support" / "AgentReins" / "hardgate"
+
+
+def seed_installed_rules(paths):
+    """Fill each empty, non-customized rules file. Returns True if any file was written."""
+    wrote = False
+    for path in paths:
+        if seed_rules_file(path):
+            wrote = True
+    return wrote
+
+
 def ensure_seeded(root=None):
-    """Write the default egress allowlist when the file is missing or still empty."""
+    """Write the default egress allowlist when the file is missing or still empty.
+
+    On the real install (not a test root) also seed empty rules.json. Wrappers
+    used to seed only the allowlist, so rules stayed {"rules":[],"version":1}
+    until someone ran seed_rules_file by hand.
+    """
     root = gate_root(root)
+    try:
+        if root.resolve() == live_gate_root().resolve():
+            seed_installed_rules(installed_rules_paths())
+    except OSError:
+        pass
     fd = _lock(root)
     try:
         doc = _read_allowlist_doc(root)
@@ -879,6 +956,8 @@ def open_inbox(rows, allowlist=None):
         if row.get("inbox") is not True or row.get("heartbeat") is True:
             continue
         if row.get("action") != "deny":
+            continue
+        if row.get("noise") == "telemetry" or is_telemetry_host(subject):
             continue
         if subject in closed or subject in seen:
             continue

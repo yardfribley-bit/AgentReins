@@ -183,6 +183,9 @@ function inboxNoiseReason(task){
  if(request&&missing.test(request)&&request.length<80)return 'no-user-prompt';
  return null;
 }
+function isTelemetrySubject(subject){
+ return /telemetry/i.test(String(subject||''));
+}
 function gateClosed(subject,decisions,allowlist){
  if(list(allowlist).some(e=>e&&e.subject===subject&&e.actor==='user'&&String(e.reason||'').trim()))return true;
  return list(decisions).some(d=>{
@@ -199,6 +202,7 @@ function gateInboxItems(records,decisions,allowlist){
   if(row.tier&&row.tier!=='keep')continue;
   if(row.action&&row.action!=='deny')continue;
   const subject=String(row.subject||'');
+  if(isTelemetrySubject(subject)||row.noise==='telemetry')continue;
   if(!subject||seen.has(subject)||gateClosed(subject,decisions,allowlist))continue;
   seen.add(subject);
   const id='gate:'+subject;
@@ -227,12 +231,30 @@ function inboxItems(payload,decisions,opts){
   else if(noise)continue;
   items.push({task:t,bucket,decision:decisionFor(decisions,t.id),noise:noise||null});
  }
- if(!wantNoise){
-  const gate=hardGateFrom(opts,payload);
-  items.push(...gateInboxItems(gate.inbox,decisions,gate.allowlist));
- }
+ const gate=hardGateFrom(opts,payload);
+ if(wantNoise) items.push(...telemetryNoiseItems(gate.receipts));
+ else items.push(...gateInboxItems(gate.inbox,decisions,gate.allowlist));
  const order={gate:-1,confirm:0,review:1,failed:2};
  return items.sort((a,b)=>(order[a.bucket.id]??9)-(order[b.bucket.id]??9)||new Date(b.task.startedAt)-new Date(a.task.startedAt));
+}
+function telemetryNoiseItems(records){
+ const items=[];
+ const seen=new Set();
+ for(const row of list(records)){
+  const subject=String(row&&row.subject||'');
+  if(!isTelemetrySubject(subject)&&row?.noise!=='telemetry')continue;
+  if(row.action&&row.action!=='deny')continue;
+  if(!subject||seen.has(subject))continue;
+  seen.add(subject);
+  items.push({
+   gate:row,
+   task:{id:'gate:'+subject,agent:'遥测',lifecycleStatus:'hard-gate',originalRequest:'遥测域名，默认拒绝，不进待办',title:subject,startedAt:row.at||''},
+   bucket:{id:'noise',label:'遥测'},
+   decision:null,
+   noise:'telemetry'
+  });
+ }
+ return items;
 }
 function evidenceItems(task){
  return list(task?.cards).slice(0,12).map(c=>{
@@ -256,15 +278,15 @@ function renderInbox(holder,payload,state){
  const decisions=list(state?.decisions);
  const noiseMode=state?.inboxBucket==='noise';
  const hardGate=state?.hardGate||payload?.hardGate||{};
- const items=inboxItems(payload,decisions,noiseMode?{noise:true}:{hardGate});
- const noiseItems=inboxItems(payload,decisions,{noise:true});
+ const items=inboxItems(payload,decisions,noiseMode?{noise:true,hardGate}:{hardGate});
+ const noiseItems=inboxItems(payload,decisions,{noise:true,hardGate});
  const open=items.filter(i=>!i.decision||i.decision.state==='needs_evidence');
  const noiseOpen=noiseItems.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const selected=items.find(i=>i.task.id===state?.inboxId)||open[0]||items[0]||null;
  const queue=items.length?items.map(i=>{
   const done=i.decision&&i.decision.state!=='needs_evidence';
   const label=done?(i.decision.state==='accept'?'已通过':i.decision.state==='return'?'已退回':'待补证据'):i.bucket.label;
-  const noiseNote=i.noise==='heartbeat'?'心跳':'没有用户原话';
+  const noiseNote=i.noise==='telemetry'?'遥测':i.noise==='heartbeat'?'心跳':'没有用户原话';
   return `<button type="button" class="inbox-item${selected&&selected.task.id===i.task.id?' on':''}" data-inbox-id="${esc(i.task.id)}"><b>${esc(cut(i.task.originalRequest||i.task.title||i.task.id,42))}</b><small>${esc(i.task.agent||'')} · ${esc(noiseMode?noiseNote+' · '+label:label)}</small></button>`;
  }).join(''):`<p class="empty">${noiseMode?'噪声桶是空的。':'没有等你验收的任务。心跳和「用户需求未采集」在「噪声」里，证据还在，没有删除。'}</p>`;
  const switcher=`<div class="inbox-switch"><button type="button" class="${noiseMode?'':'on'}" data-inbox-bucket="work">待验收 ${inboxItems(payload,decisions,{hardGate}).filter(i=>!i.decision||i.decision.state==='needs_evidence').length}</button><button type="button" class="${noiseMode?'on':''}" data-inbox-bucket="noise">噪声 ${noiseOpen}</button></div>`;
@@ -287,7 +309,7 @@ function renderInbox(holder,payload,state){
   </article>`;
  }else if(selected){
   const t=selected.task;
-  const noiseBanner=selected.noise?`<p class="request-missing">${selected.noise==='heartbeat'?'这是心跳或机器标记，不是要你验收的用户请求。':'没有采到用户原话，所以默认待办不列出它。'}证据还在任务过程里，这里没有删除。</p>`:'';
+  const noiseBanner=selected.noise?`<p class="request-missing">${selected.noise==='telemetry'?'这是遥测域名，默认拒绝，不进待办。':selected.noise==='heartbeat'?'这是心跳或机器标记，不是要你验收的用户请求。':'没有采到用户原话，所以默认待办不列出它。'}证据还在，这里没有删除。</p>`:'';
   const request=t.originalRequest||t.latestUserInput?.content;
   const ev=evidenceItems(t);
   const arts=list(payload?.artifacts).filter(a=>a.taskID===t.id);

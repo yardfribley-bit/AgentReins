@@ -32,6 +32,9 @@ class TransportEntryTests(unittest.TestCase):
         self.assertEqual(auto.command_destination("gh", args, {}), "github-tajleonbennis/owner/name")
         self.assertEqual(auto.command_destination("gh", ["api", "user"], {}), "api.github.com")
         self.assertIsNone(auto.command_destination("gh", ["--version"], {}))
+        self.assertIsNone(auto.command_destination("git", ["config", "user.name"], {}))
+        self.assertIsNone(auto.command_destination("git", ["config", "--global", "user.email", "a@b.c"], {}))
+        self.assertEqual(auto.command_destination("git", ["clone", "https://github.com/org/repo.git"], {}), "https://github.com/org/repo.git")
 
 
 class OutboundNameTests(unittest.TestCase):

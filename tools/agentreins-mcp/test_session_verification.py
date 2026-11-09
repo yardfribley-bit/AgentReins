@@ -67,7 +67,11 @@ class SessionVerificationTests(unittest.TestCase):
 
     def test_missing_directory_and_checklist(self):
         with tempfile.TemporaryDirectory() as tmp:
-            loaded = sv.load(str(pathlib.Path(tmp) / "missing-claude"), str(pathlib.Path(tmp) / "missing-codex"))
+            loaded = sv.load(
+                str(pathlib.Path(tmp) / "missing-claude"),
+                str(pathlib.Path(tmp) / "missing-codex"),
+                workbuddy=[],
+            )
         self.assertEqual([item["state"] for item in loaded["sources"]], ["absent", "absent"])
         call = sv.parse_claude(
             '{"type":"assistant","timestamp":"2026-11-08T02:00:02Z","sessionId":"s","message":{"content":[{"type":"text","text":"改 a.swift。"},{"type":"tool_use","id":"toolu_1","name":"Edit","input":{"file_path":"/tmp/a.swift"}}]}}\n'
