@@ -260,4 +260,26 @@ assert.doesNotMatch(quietInbox.innerHTML, /已阻断/);
 const closed = pages.inboxItems({ tasks: [] }, [], { inbox: [firstHost], allowlist: [{ subject: 'host:new.example', actor: 'user', reason: '发布需要', kind: 'egress' }] });
 assert.equal(closed.filter(i => i.gate).length, 0);
 
+const status = pages.homeStatus({
+  verification: {
+    checklists: [{ doneText: '改好了', actualFiles: 1, claimedFiles: 1 }],
+    unclaimed: [{ id: 'u1', path: '/tmp/proj/extra.js' }],
+  },
+}, [
+  { title: '连到 galileotelemetry.tencent.com', agent: 'WorkBuddy', rule: 'S04', timestamp: '2026-11-09T08:00:30Z', sub: 'host:galileotelemetry.tencent.com' },
+  { title: '连到 example.net', agent: 'WorkBuddy', rule: 'S04', timestamp: '2026-11-09T08:00:10Z', sub: 'host:example.net', enforcement: { fired: true, mechanism: 'transport-wrapper' } },
+  { title: '读取凭据 .env', agent: 'WorkBuddy', rule: 'S01', timestamp: '2026-11-09T08:00:20Z', sub: 'path:/tmp/proj/.env' },
+]);
+assert.match(status.line1, /WorkBuddy 刚刚读了凭据/);
+assert.match(status.line2, /没拦住/);
+assert.match(status.line3, /没人认领/);
+assert.doesNotMatch(status.line1 + status.detail, /galileotelemetry/);
+const newest = pages.inboxItems({
+  tasks: [
+    { id: 'old', agent: 'Cursor', lifecycleStatus: 'stopped', title: '旧任务', originalRequest: '先做这个', startedAt: '2026-11-09T01:00:00Z', cards: [] },
+    { id: 'new', agent: 'Cursor', lifecycleStatus: 'stopped', title: '新任务', originalRequest: '再做这个', startedAt: '2026-11-09T09:00:00Z', cards: [] },
+  ],
+}, []);
+assert.equal(newest[0].task.id, 'new');
+
 console.log('runtime console ok');

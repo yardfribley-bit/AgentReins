@@ -150,7 +150,7 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                         self?.pushHostResult(to: webView, result: ["action": "diskUsage", "message": "证据库现在打不开。"])
                         return
                     }
-                    if let result = try? database.prune() {
+                    if let result = try? database.prune(userConfirmed: true) {
                         self?.pushHostResult(to: webView, result: ["action": "diskUsage", "message": result.note])
                     } else {
                         self?.pushHostResult(to: webView, result: ["action": "diskUsage", "message": "清理没有完成，当前库没有删。"])

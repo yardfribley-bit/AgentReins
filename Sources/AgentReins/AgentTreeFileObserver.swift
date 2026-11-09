@@ -45,10 +45,11 @@ final class AgentTreeFileObserver {
     }
 
     private func sample() {
+        watchTick += 1
+        if RuntimeBudget.shared.isThrottled && watchTick % 6 != 0 { return }
         let rows = ProcessTable.snapshot()
         let owner = ownership(rows)
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
-        watchTick += 1
         if watchList.isEmpty || watchTick == 1 || watchTick % 2 == 0 {
             watchList = watchPaths(agentRows: mine)
             accessWatch?.replace(paths: watchList)

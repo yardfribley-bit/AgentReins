@@ -66,6 +66,7 @@ struct EvidenceRetentionPolicy: Equatable, Sendable {
     var bulkMaxAge: TimeInterval = EvidenceValue.bulkMaxAge
     /// Applies to noise and bulk only. Keep-tier rows are not deleted to satisfy it.
     var backstopBytes: Int64 = EvidenceValue.backstopBytes
+    var hardCapBytes: Int64 = EvidenceValue.hardCapBytes
     var batchRows: Int = EvidenceValue.batchRows
     var maxBatches: Int = EvidenceValue.maxBatchesPerPass
     static let `default` = EvidenceRetentionPolicy()
@@ -513,6 +514,32 @@ final class EvidenceDatabase: @unchecked Sendable {
         try append(events, withinTransaction: false)
     }
 
+    /// Past the hard cap, new noise and bulk rows are refused so a huge file
+    /// cannot keep growing. Keep-tier rows (egress, credentials, file changes) still land.
+    static func rowsToStore(_ events: [GuardEvent], onDiskBytes: Int64, hardCap: Int64 = EvidenceValue.hardCapBytes) -> [GuardEvent] {
+        guard onDiskBytes >= hardCap else { return events }
+        return events.filter { tier(of: $0) == .keep }
+    }
+
+    static func tier(of event: GuardEvent) -> EvidenceTier {
+        var fields = EvidenceValueFields()
+        fields.kind = event.kind
+        fields.op = event.op
+        fields.ruleId = event.ruleId
+        fields.action = event.action
+        fields.severity = event.severity
+        fields.source = event.source ?? ""
+        fields.userIntent = event.userIntent ?? ""
+        fields.command = event.command ?? ""
+        fields.path = event.path
+        fields.toolName = event.toolName ?? ""
+        fields.toolCallId = event.toolCallId ?? ""
+        fields.modelText = event.modelResponse ?? event.modelPrompt ?? ""
+        fields.processId = event.processId.map { Int($0) }
+        fields.payloadBytes = (event.command ?? "").utf8.count + (event.modelResponse ?? "").utf8.count
+        return EvidenceValue.tier(fields)
+    }
+
     /// Metadata-only bounded catch-up; payloads remain in the evidence store.
     func advanceSecurityInputIndex(limit: Int = 25) throws {
         lock.lock(); defer { lock.unlock() }
@@ -552,7 +579,8 @@ final class EvidenceDatabase: @unchecked Sendable {
     }
 
     private func append(_ events: [GuardEvent], withinTransaction: Bool) throws {
-        guard !events.isEmpty else { return }
+        let stored = Self.rowsToStore(events, onDiskBytes: Self.fileBytes(fileURL))
+        guard !stored.isEmpty else { return }
         lock.lock(); defer { lock.unlock() }
         if !withinTransaction { try executeUnlocked("BEGIN IMMEDIATE") }
         do {
@@ -563,7 +591,7 @@ final class EvidenceDatabase: @unchecked Sendable {
             var work: OpaquePointer?
             guard sqlite3_prepare_v2(handle, "INSERT OR IGNORE INTO evidence_parse_jobs(evidence_key) VALUES(?)", -1, &work, nil) == SQLITE_OK else { throw failure("prepare durable parse work") }
             defer { sqlite3_finalize(work) }
-            for event in events {
+            for event in stored {
                 let payload = try encoder.encode(thinForStorage(event))
                 let digits = Array("0123456789abcdef".utf8)
                 var hex = [UInt8](); hex.reserveCapacity(64)
@@ -1954,7 +1982,16 @@ final class EvidenceDatabase: @unchecked Sendable {
     /// Keep-tier rows (security, file changes, review actions, mismatch excerpts, join keys)
     /// are skipped. Review decisions live in realtime-review-decisions-v1.json and are not
     /// rows in this database, so this pass does not touch that file. MCP never opens it.
-    func prune(policy: EvidenceRetentionPolicy = .default, now: Date = Date()) throws -> EvidencePruneResult {
+    func prune(policy: EvidenceRetentionPolicy = .default, now: Date = Date(), userConfirmed: Bool = false) throws -> EvidencePruneResult {
+        let onDisk = Self.fileBytes(fileURL)
+        if !userConfirmed && onDisk >= policy.hardCapBytes {
+            return EvidencePruneResult(
+                deletedRecords: 0, deletedRaw: 0, deletedEvents: 0, collapsedRaw: 0,
+                keptSkipped: 0, batches: 0, onDiskBytes: onDisk, overCap: true,
+                rawIndexSkipped: false,
+                note: "证据库已经超过安全上限。自动清理停了，避免在这份大文件上删行或做整库压缩。在关于页点「清理旧证据」才会按小批清心跳和大块原文。"
+            )
+        }
         lock.lock(); defer { lock.unlock() }
         try executeUnlocked("CREATE TABLE IF NOT EXISTS retention_cursor(id INTEGER PRIMARY KEY CHECK(id=1), observed_at REAL NOT NULL)")
         try executeUnlocked("INSERT OR IGNORE INTO retention_cursor VALUES(1, 0)")
@@ -1963,7 +2000,6 @@ final class EvidenceDatabase: @unchecked Sendable {
         var collapsedRaw = 0
         var keptSkipped = 0
         var batches = 0
-        let onDisk = Self.fileBytes(fileURL)
         let over = onDisk > policy.backstopBytes
         let noiseCutoff = now.addingTimeInterval(-policy.noiseMaxAge).timeIntervalSince1970
         let bulkCutoff = now.addingTimeInterval(-policy.bulkMaxAge).timeIntervalSince1970
@@ -2001,7 +2037,8 @@ final class EvidenceDatabase: @unchecked Sendable {
         _ = try? executeUnlocked("PRAGMA wal_checkpoint(PASSIVE)")
         let mode = pragmaIntUnlocked("auto_vacuum")
         var reclaimed = 0
-        if mode == 2 {
+        let bytesBeforeVacuum = Self.fileBytes(fileURL)
+        if mode == 2 && bytesBeforeVacuum < policy.hardCapBytes {
             reclaimed = incrementalVacuumUnlocked(pages: over ? 2048 : 256)
         }
         let bytesNow = Self.fileBytes(fileURL)
@@ -2009,6 +2046,8 @@ final class EvidenceDatabase: @unchecked Sendable {
         var note = EvidenceValue.policySummary
         if mode != 2 {
             note += " 这份库建立时没有打开增量回收。删掉的行会变成空页，文件大小要等按增量模式重建后才下降。这次没有做会长时间锁库的整库 VACUUM。"
+        } else if bytesBeforeVacuum >= policy.hardCapBytes {
+            note += " 文件已经很大，这次只删低价值行，不做 VACUUM。"
         }
         return EvidencePruneResult(
             deletedRecords: deletedRecords,

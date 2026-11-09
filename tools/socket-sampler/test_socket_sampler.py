@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -203,6 +204,24 @@ class LedgerTests(unittest.TestCase):
             data = json.loads(path.read_text())
             self.assertEqual(len(data["connections"]), ss.MAX_ROWS)
             self.assertNotIn("old", {r["key"] for r in data["connections"]})
+
+
+class PaceTests(unittest.TestCase):
+    def test_throttled_pace_file_slows_the_sampler(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = pathlib.Path(tmp) / "runtime-pace"
+            path.write_text("throttled\n", encoding="utf-8")
+            previous = os.environ.get("AGENTREINS_PACE_FILE")
+            os.environ["AGENTREINS_PACE_FILE"] = str(path)
+            try:
+                self.assertGreaterEqual(ss.pace_interval(0.5), 8)
+                path.write_text("normal\n", encoding="utf-8")
+                self.assertEqual(ss.pace_interval(0.5), 0.5)
+            finally:
+                if previous is None:
+                    os.environ.pop("AGENTREINS_PACE_FILE", None)
+                else:
+                    os.environ["AGENTREINS_PACE_FILE"] = previous
 
 
 if __name__ == "__main__":

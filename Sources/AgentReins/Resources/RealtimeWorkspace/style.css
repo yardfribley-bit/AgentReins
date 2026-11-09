@@ -359,3 +359,7 @@ textarea#accept-note{width:100%;border:1px solid var(--line);border-radius:6px;p
 .shell-children ul{margin:8px 0 0;padding-left:18px}
 .shell-children li{margin:4px 0;line-height:1.45;overflow-wrap:anywhere}
 .shell-children li.is-fail{color:#9a3412}
+.plain-home{margin:12px 28px 0;padding:12px 14px;border:1px solid var(--line);border-radius:10px;background:var(--surface)}
+.plain-home p{margin:0 0 4px;font-size:15px;line-height:1.45}
+.plain-home .plain-detail{margin-top:8px;color:var(--muted);font-size:13px}
+.plain-home .plain-detail p{font-size:13px;color:var(--muted)}
