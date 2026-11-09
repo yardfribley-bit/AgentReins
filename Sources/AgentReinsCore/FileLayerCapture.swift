@@ -8,10 +8,36 @@ public enum FileLayerCapture {
     /// Not Endpoint Security, not `fs_usage`, and not a wrapper around cat/open.
     public static let mechanism = "libproc vnode sample on the agent process tree (proc_pidinfo / proc_pidfdinfo). Not Endpoint Security, not fs_usage, not a command wrapper."
 
-    /// A descriptor that is already closed is invisible. Samples are about 1–2s
-    /// apart, so a short `cat` can be missed. Flags say read versus write; the
-    /// bytes are not copied. `/tmp` and `/private/tmp` are in scope.
-    public static let limits = "Only descriptors still open at sample time. A read that opens and closes between samples can be missed. Open flags say read or write, not the bytes. /tmp and /private/tmp are included. This is not a complete file audit."
+    /// libproc only sees descriptors still open. A second kqueue watch on a
+    /// bounded credential set uses access-time (NOTE_ATTRIB). APFS may skip
+    /// or coalesce atime, so a kqueue hit without an open descriptor is only
+    /// "possible (sampled)". This is not a full-disk watch and not Endpoint Security.
+    public static let limits = "libproc sees only descriptors still open, so a short read between samples can be missed. A kqueue NOTE_ATTRIB watch on known credential paths and .env* under the agent working directory, /tmp, and /private/tmp records an access-time move. If the agent still has the file open, the read is confirmed. If not, it is possible (sampled): APFS often does not update atime on every read. File bytes are not copied."
+
+    public static let watchCap = 256
+
+    public struct AccessStamp: Equatable, Sendable {
+        public var access: TimeInterval
+        public var modified: TimeInterval
+        public init(access: TimeInterval, modified: TimeInterval) {
+            self.access = access
+            self.modified = modified
+        }
+    }
+
+    /// Access time moved, and the move is not the same moment as a content write.
+    public static func isAccessRead(previous: AccessStamp, current: AccessStamp) -> Bool {
+        guard current.access > previous.access + 0.000_001 else { return false }
+        let wrote = current.modified > previous.modified + 0.000_001
+        if wrote && abs(current.access - current.modified) < 1 { return false }
+        return true
+    }
+
+    /// `confirmed` when a tracked agent still holds the descriptor. Otherwise the
+    /// access-time signal is only `possible` (sampled).
+    public static func readGrade(descriptorStillOpen: Bool) -> String {
+        descriptorStillOpen ? "confirmed" : "possible"
+    }
 
     public struct OpenFile: Equatable, Sendable {
         public var path: String
@@ -103,11 +129,58 @@ public enum FileLayerCapture {
         let root = (home as NSString).expandingTildeInPath
         let names = [
             ".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/config", ".ssh/known_hosts",
-            ".aws/credentials", ".aws/config", ".netrc",
+            ".aws/credentials", ".aws/config",
+            ".config/gcloud/application_default_credentials.json",
+            ".config/gcloud/credentials.db",
+            ".netrc", ".npmrc", ".pypirc",
             ".config/gh/hosts.yml",
             "Library/Keychains/login.keychain-db",
         ]
         return names.map { (root as NSString).appendingPathComponent($0) }
+    }
+
+    public static func isDotEnvName(_ name: String) -> Bool {
+        let base = (name as NSString).lastPathComponent
+        if base == ".env" || base.hasPrefix(".env.") { return true }
+        return base.range(of: #"(?i)\.env(?:\.|$)"#, options: .regularExpression) != nil
+    }
+
+    /// Bounded credential set. `directoryNames` is a one-level listing the caller
+    /// already made. No full-disk walk happens here.
+    public static func watchFiles(home: String, workspaces: [String], directoryNames: [String: [String]]) -> [String] {
+        var out: [String] = []
+        var seen = Set<String>()
+        func add(_ path: String) {
+            guard out.count < watchCap else { return }
+            let cleaned = (path as NSString).standardizingPath
+            guard !cleaned.isEmpty, seen.insert(cleaned).inserted else { return }
+            out.append(cleaned)
+        }
+        for path in builtinCredentialFiles(home: home) { add(path) }
+        let root = (home as NSString).expandingTildeInPath
+        let credentialDirs = [
+            (root as NSString).appendingPathComponent(".ssh"),
+            (root as NSString).appendingPathComponent(".aws"),
+            (root as NSString).appendingPathComponent(".config/gcloud"),
+            (root as NSString).appendingPathComponent("Library/Keychains"),
+        ]
+        for dir in credentialDirs {
+            for name in directoryNames[dir] ?? [] {
+                let base = (name as NSString).lastPathComponent
+                guard base != ".", base != "..", !base.isEmpty else { continue }
+                add((dir as NSString).appendingPathComponent(base))
+            }
+        }
+        var envDirs = workspaces
+        envDirs.append("/tmp")
+        envDirs.append("/private/tmp")
+        for dir in envDirs {
+            let key = (dir as NSString).standardizingPath
+            for name in directoryNames[key] ?? directoryNames[dir] ?? [] where isDotEnvName(name) {
+                add((key as NSString).appendingPathComponent((name as NSString).lastPathComponent))
+            }
+        }
+        return out
     }
 
     /// Shell redirects and absolute credential paths inside a tool command.

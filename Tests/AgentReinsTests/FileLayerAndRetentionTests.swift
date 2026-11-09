@@ -37,6 +37,43 @@ final class FileLayerCaptureTests: XCTestCase {
         XCTAssertTrue(files.contains("/Users/me/Library/Keychains/login.keychain-db"))
     }
 
+    func testAccessTimeReadIsDistinctFromAWriteAndGradeFollowsTheOpenDescriptor() {
+        let before = FileLayerCapture.AccessStamp(access: 100, modified: 50)
+        let read = FileLayerCapture.AccessStamp(access: 140, modified: 50)
+        let write = FileLayerCapture.AccessStamp(access: 180, modified: 180)
+        XCTAssertTrue(FileLayerCapture.isAccessRead(previous: before, current: read))
+        XCTAssertFalse(FileLayerCapture.isAccessRead(previous: before, current: write))
+        XCTAssertFalse(FileLayerCapture.isAccessRead(previous: before, current: before))
+        XCTAssertEqual(FileLayerCapture.readGrade(descriptorStillOpen: true), "confirmed")
+        XCTAssertEqual(FileLayerCapture.readGrade(descriptorStillOpen: false), "possible")
+    }
+
+    func testWatchSetIncludesKnownCredentialDirsAndDotEnvOnly() {
+        let home = "/Users/me"
+        let ssh = "/Users/me/.ssh"
+        let tmp = "/tmp"
+        let workspace = "/Users/me/project"
+        let files = FileLayerCapture.watchFiles(home: home, workspaces: [workspace], directoryNames: [
+            ssh: ["id_ed25519", "config"],
+            "/Users/me/.config/gcloud": ["application_default_credentials.json"],
+            "/Users/me/Library/Keychains": ["login.keychain-db"],
+            tmp: ["fake.env", "notes.txt", ".env.local"],
+            workspace: [".env", "main.swift"],
+        ])
+        XCTAssertTrue(files.contains("/Users/me/.ssh/id_ed25519"))
+        XCTAssertTrue(files.contains("/Users/me/.aws/credentials"))
+        XCTAssertTrue(files.contains("/Users/me/.config/gcloud/application_default_credentials.json"))
+        XCTAssertTrue(files.contains("/Users/me/.npmrc"))
+        XCTAssertTrue(files.contains("/Users/me/.pypirc"))
+        XCTAssertTrue(files.contains("/Users/me/Library/Keychains/login.keychain-db"))
+        XCTAssertTrue(files.contains("/tmp/fake.env"))
+        XCTAssertTrue(files.contains("/tmp/.env.local"))
+        XCTAssertTrue(files.contains("/Users/me/project/.env"))
+        XCTAssertFalse(files.contains("/tmp/notes.txt"))
+        XCTAssertFalse(files.contains("/Users/me/project/main.swift"))
+        XCTAssertLessThanOrEqual(files.count, FileLayerCapture.watchCap)
+    }
+
     func testCommandRedirectOutsideWorkspaceAndTmpEnv() {
         let hits = FileLayerCapture.commandTargets("curl https://example.test; cat /tmp/fake.env; echo hi > /tmp/note.txt")
         XCTAssertTrue(hits.contains { $0.path == "/tmp/fake.env" && $0.op == "read" && $0.credential })

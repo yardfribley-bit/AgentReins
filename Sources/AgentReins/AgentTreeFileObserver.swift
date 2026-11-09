@@ -11,7 +11,9 @@ final class AgentTreeFileObserver {
     var onEvents: (([GuardEvent]) -> Void)?
     private let queue = DispatchQueue(label: "com.agentreins.file-layer", qos: .utility)
     private var timer: DispatchSourceTimer?
+    private var accessWatch: CredentialPathWatch?
     private var seen: [Int32: Set<String>] = [:]
+    private var confirmedPaths = Set<String>()
     private var cursor = 0
     private let lock = NSLock()
 
@@ -23,6 +25,9 @@ final class AgentTreeFileObserver {
         source.setEventHandler { [weak self] in self?.sample() }
         source.resume()
         timer = source
+        let watch = CredentialPathWatch(queue: queue)
+        watch.onAccess = { [weak self] path in self?.noteAccess(path) }
+        accessWatch = watch
         lock.unlock()
     }
 
@@ -30,6 +35,8 @@ final class AgentTreeFileObserver {
         lock.lock()
         timer?.cancel()
         timer = nil
+        accessWatch?.stop()
+        accessWatch = nil
         lock.unlock()
     }
 
@@ -54,6 +61,7 @@ final class AgentTreeFileObserver {
             }
         }
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
+        accessWatch?.replace(paths: watchPaths(agentRows: mine))
         let slice: [ProcessTable.Row]
         if mine.count <= 48 {
             slice = mine
@@ -76,7 +84,8 @@ final class AgentTreeFileObserver {
             for hit in hits {
                 let key = "\(hit.op)|\(hit.path)"
                 guard known.insert(key).inserted else { continue }
-                events.append(Self.event(hit: hit, agent: agent, pid: row.pid, ppid: row.ppid))
+                confirmedPaths.insert(hit.path)
+                events.append(Self.event(hit: hit, agent: agent, pid: row.pid, ppid: row.ppid, grade: "confirmed", source: "libproc-vnode"))
             }
             seen[row.pid] = known
         }
@@ -90,16 +99,96 @@ final class AgentTreeFileObserver {
         return base == "AgentReins" || base == "AgentReinsMCP"
     }
 
-    private static func event(hit: FileLayerCapture.Hit, agent: String, pid: Int32, ppid: Int32) -> GuardEvent {
+    /// kqueue saw the access time move. If a tracked agent still holds the
+    /// descriptor, the read is confirmed. If the descriptor already closed, the
+    /// same event is only possible (sampled).
+    private func noteAccess(_ path: String) {
+        let rows = ProcessTable.snapshot()
+        var owner: [Int32: String] = [:]
+        for row in rows {
+            if let agent = FileLayerCapture.agentOwner(path: row.path) { owner[row.pid] = agent }
+        }
+        var guardrails = 0
+        var progressed = true
+        while progressed && guardrails < 8 {
+            progressed = false
+            guardrails += 1
+            for row in rows where owner[row.pid] == nil {
+                if let parent = owner[row.ppid] {
+                    owner[row.pid] = parent
+                    progressed = true
+                }
+            }
+        }
+        let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
+        var holder: ProcessTable.Row?
+        var holderAgent: String?
+        for row in mine {
+            let opens = LibprocOpenFiles.sample(pid: row.pid)
+            if opens.contains(where: { Self.samePath($0.path, path) }) {
+                holder = row
+                holderAgent = owner[row.pid]
+                break
+            }
+        }
+        let grade = FileLayerCapture.readGrade(descriptorStillOpen: holder != nil)
+        if grade == "possible", confirmedPaths.contains(path) { return }
+        if grade == "confirmed" { confirmedPaths.insert(path) }
+        let agents = Set(mine.compactMap { owner[$0.pid] })
+        let agent = holderAgent ?? (agents.count == 1 ? agents.first : nil)
+        let hit = FileLayerCapture.Hit(path: path, op: "read", credential: true)
+        let event = Self.event(
+            hit: hit, agent: agent, pid: holder?.pid ?? 0, ppid: holder?.ppid ?? 0,
+            grade: grade, source: "credential-kqueue")
+        let deliver = onEvents
+        DispatchQueue.main.async { deliver?([event]) }
+    }
+
+    private func watchPaths(agentRows: [ProcessTable.Row]) -> [String] {
+        var names: [String: [String]] = [:]
+        let home = NSHomeDirectory()
+        let root = (home as NSString).expandingTildeInPath
+        var workspaces: [String] = []
+        var dirs = [
+            (root as NSString).appendingPathComponent(".ssh"),
+            (root as NSString).appendingPathComponent(".aws"),
+            (root as NSString).appendingPathComponent(".config/gcloud"),
+            (root as NSString).appendingPathComponent("Library/Keychains"),
+            "/tmp", "/private/tmp",
+        ]
+        for row in agentRows {
+            let cwd = ProcessTable.workingDirectory(row.pid)
+            if cwd.hasPrefix("/") { workspaces.append(cwd); dirs.append(cwd) }
+        }
+        for dir in dirs {
+            names[(dir as NSString).standardizingPath] = Self.oneLevelNames(dir)
+        }
+        return FileLayerCapture.watchFiles(home: home, workspaces: workspaces, directoryNames: names)
+    }
+
+    private static func oneLevelNames(_ dir: String) -> [String] {
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        return Array(names.prefix(2000))
+    }
+
+    private static func samePath(_ lhs: String, _ rhs: String) -> Bool {
+        (lhs as NSString).standardizingPath == (rhs as NSString).standardizingPath
+    }
+
+    private static func event(hit: FileLayerCapture.Hit, agent: String?, pid: Int32, ppid: Int32, grade: String, source: String) -> GuardEvent {
         let stamp = Int(Date().timeIntervalSince1970 / 3600)
-        let id = stableUUID("\(agent)|\(pid)|\(hit.op)|\(hit.path)|\(stamp)")
+        let id = stableUUID("\(agent ?? "unknown")|\(pid)|\(hit.op)|\(hit.path)|\(grade)|\(stamp)")
+        let method = grade == "confirmed"
+            ? "confirmed. " + FileLayerCapture.limits
+            : "possible (sampled). " + FileLayerCapture.limits
         return GuardEvent(
             id: id, kind: "file", ruleId: hit.credential ? "credential_observe" : "agent_tree_write",
             path: hit.path, command: nil, agent: agent, op: hit.op,
-            severity: hit.credential ? "high" : "info", ts: Date(), action: "observed",
-            source: "libproc-vnode", attributionConfidence: .confirmed,
-            attributionMethod: FileLayerCapture.mechanism + " " + FileLayerCapture.limits,
-            processId: pid, parentProcessId: ppid)
+            severity: hit.credential ? "high" : "info", ts: Date(), action: grade,
+            source: source,
+            attributionConfidence: grade == "confirmed" ? .confirmed : (agent == nil ? .unknown : .inferred),
+            attributionMethod: method,
+            processId: pid == 0 ? nil : pid, parentProcessId: ppid == 0 ? nil : ppid)
     }
 
     private static func stableUUID(_ value: String) -> UUID {
