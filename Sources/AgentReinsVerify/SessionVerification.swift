@@ -855,7 +855,7 @@ private func int32(_ value: Any?) -> Int32? {
 
 private func jsonText(_ value: Any?) -> String {
     if let text = value as? String { return text }
-    guard let value, JSONSerialization.isValidJSONObject(value), let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys]) else {
+    guard let value, JSONSerialization.isValidJSONObject(value), let data = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .withoutEscapingSlashes]) else {
         return ""
     }
     return String(data: data, encoding: .utf8) ?? ""
