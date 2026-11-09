@@ -25,8 +25,32 @@ enum SessionVerificationFeed {
         for row in collected {
             effects.append(contentsOf: effectsForCollected(row))
         }
+        effects.append(contentsOf: hardGateEffects())
         if effects.count > 2000 { effects = Array(effects.suffix(2000)) }
         return effects
+    }
+
+    /// Blocked commands never create a transport row. The audit tail is one read.
+    static func hardGateEffects() -> [HostEffect] {
+        HardGateReceipts.enforcedDenies(from: HardGateReceipts.defaultURL(), limit: 40).compactMap { row in
+            let credential = row.subject.hasPrefix("path:")
+            let network = row.subject.hasPrefix("host:")
+            guard credential || network else { return nil }
+            let target = String(row.subject.dropFirst(5))
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            guard let timestamp = formatter.date(from: row.at) else { return nil }
+            return HostEffect(
+                id: "hardgate-\(row.at)-\(row.subject)", kind: credential ? "credential" : "network",
+                timestamp: timestamp, pid: row.shellPid == 0 ? nil : row.shellPid,
+                path: credential ? target : nil, command: row.command.isEmpty ? nil : row.command,
+                remote: network ? target : nil,
+                sessionId: row.session.isEmpty ? nil : row.session,
+                credential: credential, source: "hardgate",
+                exitCode: row.exitCode, durationMs: row.durationMs,
+                parents: row.parentPid == 0 ? nil : String(row.parentPid),
+                verdict: row.mechanism.isEmpty ? "shell-gate" : row.mechanism)
+        }
     }
 
     static func processLinks(_ processes: [RealtimeProcess]) -> [ProcessLink] {

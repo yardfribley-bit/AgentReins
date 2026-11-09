@@ -19,13 +19,15 @@ TAIL_S = 20
 CARD_CAP = 200
 CRED = re.compile(r"(\.ssh/|/\.aws/|\.env(?:\.|$)|id_rsa|id_ed25519|credentials\.json|\.pem\b|secrets?\.)", re.I)
 DONE = re.compile(r"(已完成|完成了|做完了|改好了|任务完成|all done|i(?:'ve| have) (?:finished|completed|done))", re.I)
+SUCCESS = re.compile(r"成功|读到了|已经读|已读取|拿到了|读取成功|读出来了|succeeded|successfully", re.I)
+DENIES_SUCCESS = re.compile(r"失败|拒绝|没有读到|没读到|拦|blocked|exit\s*126|退出码\s*126|不会执行", re.I)
 EDIT = {"edit", "write", "multiedit", "notebookedit", "apply_patch", "str_replace", "str_replace_editor", "search_replace", "write_file", "edit_file", "create_file", "update_file"}
 NEG_NET = re.compile(r"(?:不|不会|没有|没)[^。；\n]{0,24}(?:联网|外联|网络|访问|请求|下载|上传|curl|wget|fetch)")
 POS_NET = re.compile(r"网络|外联|联网|请求|下载|上传|curl|wget|fetch|https?://|访问")
 NEG_CRED = re.compile(r"(?:不|不会|没有|没)[^。；\n]{0,12}(?:密钥|凭证|凭据|密码|token|secret|\.env|ssh|私钥)", re.I)
 POS_CRED = re.compile(r"密钥|凭证|凭据|密码|token|secret|credential|\.env|ssh|私钥|id_rsa|api_key", re.I)
 REDIRECT = re.compile(r"(?:^|[^>&\d])>>?\s*([^\s|&;]+)")
-SECRET = re.compile(r"(?i)(password|token|secret|api_key|authorization)\s*[:=]\s*[\"']?[^\"',\s}]+")
+SECRET = re.compile(r"(?i)(aws_secret_access_key|aws_access_key_id|password|token|secret|api_key|authorization)\s*[:=]\s*[\"']?[^\s\"',}]+")
 COUNT = re.compile(r"(\d+)\s*(?:个文件|个路径|files?)", re.I)
 # A live CodeBuddy tree can hold hundreds of project jsonl, some with multi-megabyte
 # function_call_result lines. list_tool_calls has to stay under a few seconds.
@@ -163,6 +165,8 @@ def verify(calls: list[dict[str, Any]], effects: list[dict[str, Any]], processes
             "diff": effect.get("diff"), "before": effect.get("before"), "after": effect.get("after"),
             "command": effect.get("command"), "remote": effect.get("remote"),
             "timestamp": effect["timestamp"], "join": hit[3],
+            "pid": effect.get("pid"), "parents": effect.get("parents"), "binary": effect.get("binary"),
+            "verdict": effect.get("verdict"), "exitCode": effect.get("exitCode"), "durationMs": effect.get("durationMs"),
             "credential": bool(effect.get("credential") or effect.get("kind") == "credential" or is_credential(effect.get("path")) or is_credential(effect.get("command"))),
         })
     cards = []
@@ -175,6 +179,9 @@ def verify(calls: list[dict[str, Any]], effects: list[dict[str, Any]], processes
             "status": "matched" if not mismatches else "mismatched",
             "mismatches": mismatches, "said": call["reasoning"], "saidTruncated": call["reasoningTruncated"],
             "toolName": call["toolName"], "arguments": call["arguments"], "argumentsTruncated": call["argumentsTruncated"],
+            "resultExcerpt": call.get("resultExcerpt") or "", "resultTruncated": bool(call.get("resultTruncated")),
+            "resultBytes": int(call.get("resultBytes") or 0),
+            "acknowledgement": call.get("acknowledgement") or "", "acknowledgementTruncated": bool(call.get("acknowledgementTruncated")),
             "happened": attached, "note": _note(call, attached, mismatches, file_observation),
         })
     truncated = len(cards) > CARD_CAP
@@ -201,7 +208,7 @@ def verify(calls: list[dict[str, Any]], effects: list[dict[str, Any]], processes
 
 def list_tool_calls(arguments: dict[str, Any], effects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     loaded = load()
-    host = _coerce_effects((effects or []) + file_observation_effects())
+    host = _coerce_effects((effects or []) + file_observation_effects() + hardgate_execution_effects())
     calls = _coerce_calls(loaded["calls"])
     document = verify(calls, host, completions=loaded["completions"])
     cards = document["cards"]
@@ -224,13 +231,13 @@ def list_tool_calls(arguments: dict[str, Any], effects: list[dict[str, Any]] | N
         "offset": offset,
         "limit": int(limit) if limit is not None else len(cards),
         "truncated": bool(document["truncated"] or (limit is not None and offset + int(limit) < len(cards))),
-        "note": "卡片来自本机 Claude Code、Codex、WorkBuddy / CodeBuddy 日志的摘录，加上已有运输记录和文件路径。日志原文不写入证据库。",
+        "note": "一条命令三步：模型提出、主机执行、模型收到。只留短摘录和编号，不把会话日志或文件内容写入证据。",
     }
 
 
 def get_session_verification(session_id: str, effects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     loaded = load()
-    document = verify(_coerce_calls(loaded["calls"]), _coerce_effects((effects or []) + file_observation_effects()), completions=loaded["completions"])
+    document = verify(_coerce_calls(loaded["calls"]), _coerce_effects((effects or []) + file_observation_effects() + hardgate_execution_effects()), completions=loaded["completions"])
     cards = [card for card in document["cards"] if session_matches(str(card["sessionId"]), str(session_id))]
     return {
         "sessionId": session_id,
@@ -266,6 +273,66 @@ def file_observation_effects(limit: int = 200) -> list[dict[str, Any]]:
             "id": "file-observe-%s" % index, "kind": "file", "timestamp": row.get("at"),
             "path": row.get("path"), "source": "file-observe",
             "credential": is_credential(str(row.get("path") or "")),
+        })
+    return effects
+
+
+def hardgate_execution_effects(limit: int = 40) -> list[dict[str, Any]]:
+    """Tail of the hard-gate audit. Blocked commands have no transport.json.
+
+    One bounded read. The row is the path and the verdict, not the file bytes.
+    """
+    override = os.environ.get("AGENTREINS_HARDGATE_ROOT")
+    path = pathlib.Path(override) / "audit.jsonl" if override else pathlib.Path.home() / "Library/Application Support/AgentReins/hardgate/audit.jsonl"
+    if not path.is_file():
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - 64 * 1024))
+            data = handle.read()
+    except OSError:
+        return []
+    if size > 64 * 1024:
+        cut = data.find(b"\n")
+        if cut >= 0:
+            data = data[cut + 1:]
+    effects = []
+    for line in data.decode("utf-8", "replace").splitlines()[-limit:]:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            row = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(row, dict) or row.get("action") != "deny" or row.get("enforced") is not True:
+            continue
+        subject = str(row.get("subject") or "")
+        if subject.startswith("path:"):
+            kind, target = "credential", subject[5:]
+        elif subject.startswith("host:"):
+            kind, target = "network", subject[5:]
+        else:
+            continue
+        parents = row.get("parentPid")
+        effects.append({
+            "id": "hardgate-%s-%s" % (row.get("at") or "", subject),
+            "kind": kind,
+            "timestamp": row.get("at"),
+            "sessionId": row.get("session") or None,
+            "command": row.get("command") or "",
+            "path": target if kind == "credential" else None,
+            "remote": target if kind == "network" else None,
+            "credential": kind == "credential",
+            "pid": row.get("shellPid"),
+            "parents": str(parents) if parents else None,
+            "binary": None,
+            "verdict": row.get("mechanism") or "shell-gate",
+            "exitCode": row.get("exitCode") if row.get("exitCode") is not None else 126,
+            "durationMs": row.get("durationMs") if row.get("durationMs") is not None else 0,
+            "source": "hardgate",
         })
     return effects
 
@@ -497,6 +564,9 @@ def _source(agent: str, root: str, state: str, files_read: int, skipped: int, ma
 def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]:
     calls = []
     completions: dict[str, str] = {}
+    results: dict[str, tuple[str, bool, int]] = {}
+    acks: dict[str, tuple[str, bool]] = {}
+    last_result = ""
     malformed = 0
     pending = ""
     session = _session_hint(source_path)
@@ -525,6 +595,16 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
             if row.get("type") == "user" and not any(item.get("type") == "tool_result" for item in contents):
                 pending = ""
                 continue
+            if any(item.get("type") == "tool_result" for item in contents):
+                for item in contents:
+                    if item.get("type") != "tool_result":
+                        continue
+                    call_id = str(item.get("tool_use_id") or "")
+                    body = _result_text(item.get("content"))
+                    if call_id and body:
+                        results[call_id] = _pack_result(body)
+                        last_result = call_id
+                continue
             if row.get("type") != "assistant" and not any(item.get("type") == "tool_use" for item in contents):
                 continue
             timestamp = _parse_time(row.get("timestamp"))
@@ -538,6 +618,9 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
                     piece = item.get("thinking") or item.get("text") or ""
                     if piece:
                         pending = piece if not pending else pending + "\n" + piece
+                        if last_result and last_result not in acks:
+                            acks[last_result] = excerpt(SECRET.sub(r"\1=[redacted]", pending.strip()))
+                            last_result = ""
                 elif item_type == "tool_use":
                     call_id = item.get("id") or "claude-%d" % line_start
                     calls.append(_call(call_id, session, agent, source_path, line_start, timestamp, row.get("pid"), pending, item.get("name") or "unknown_tool", _json_text(item.get("input")), seen))
@@ -556,6 +639,19 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
                 continue
             if row_type == "message" and row.get("role") == "user":
                 pending = ""
+                continue
+            if row_type in ("function_call_result", "function_call_output"):
+                call_id = str(row.get("callId") or row.get("call_id") or "")
+                body = _result_text(row.get("output") or row.get("result"))
+                if call_id and body:
+                    results[call_id] = _pack_result(body)
+                    last_result = call_id
+                continue
+            if row_type == "message" and row.get("role") == "assistant":
+                text = _deep_text(row.get("content")) or ""
+                if last_result and last_result not in acks and text:
+                    acks[last_result] = excerpt(SECRET.sub(r"\1=[redacted]", text.strip()))
+                    last_result = ""
                 continue
             if row_type != "function_call":
                 continue
@@ -593,17 +689,34 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
             if row.get("type") == "event_msg" and payload_type == "task_complete":
                 completions[session] = payload.get("last_agent_message") or payload.get("message") or "已完成"
                 continue
+            if row.get("type") == "response_item" and payload_type in ("function_call_output", "function_call_result"):
+                call_id = str(payload.get("call_id") or payload.get("callId") or "")
+                body = _result_text(payload.get("output") or payload.get("result"))
+                if call_id and body:
+                    results[call_id] = _pack_result(body)
+                    last_result = call_id
+                continue
             if row.get("type") == "response_item" and payload_type == "message" and payload.get("role") == "assistant":
-                text = _deep_text(payload.get("content"))
-                done = _done(text or "")
+                text = _deep_text(payload.get("content")) or ""
+                done = _done(text)
                 if done:
                     completions[session] = done
+                if last_result and last_result not in acks and text:
+                    acks[last_result] = excerpt(SECRET.sub(r"\1=[redacted]", text.strip()))
+                    last_result = ""
                 continue
             if row.get("type") != "response_item" or payload_type not in ("function_call", "custom_tool_call"):
                 continue
             call_id = payload.get("call_id") or "codex-%d" % line_start
             calls.append(_call(call_id, session, agent, source_path, line_start, timestamp, row.get("pid") or payload.get("pid"), pending, payload.get("name") or "unknown_tool", _json_text(payload.get("arguments", payload.get("input"))), seen))
             pending = ""
+    for call in calls:
+        packed = results.get(call["callId"])
+        if packed:
+            call["resultExcerpt"], call["resultTruncated"], call["resultBytes"] = packed
+        ack = acks.get(call["callId"])
+        if ack:
+            call["acknowledgement"], call["acknowledgementTruncated"] = ack
     return {"calls": calls, "completions": completions, "malformed": malformed}
 
 
@@ -727,7 +840,33 @@ def _call(call_id: str, session: str, agent: str, source_path: str, offset: int,
         "pid": int(pid) if isinstance(pid, int) else None, "reasoning": said, "reasoningTruncated": said_cut,
         "toolName": tool, "arguments": args, "argumentsTruncated": args_cut,
         "claimedPaths": _claimed_paths(tool, arguments or ""), "claimsEdit": _claims_edit(tool, arguments or ""),
+        "resultExcerpt": "", "resultTruncated": False, "resultBytes": 0,
+        "acknowledgement": "", "acknowledgementTruncated": False,
     }
+
+
+def _result_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        parts = [_result_text(item) for item in value]
+        return "\n".join(part for part in parts if part)
+    if isinstance(value, dict):
+        return str(value.get("text") or value.get("content") or "")
+    return "" if value is None else str(value)
+
+
+def _pack_result(body: str) -> tuple[str, bool, int]:
+    raw = body or ""
+    cleaned = SECRET.sub(r"\1=[redacted]", raw)
+    text, cut = excerpt(cleaned.strip())
+    return text, cut, len(raw.encode("utf-8"))
+
+
+def _claims_success(text: str) -> bool:
+    if not text or not SUCCESS.search(text):
+        return False
+    return DENIES_SUCCESS.search(text) is None
 
 
 def _ancestors(pid: int, tree: dict[int, int]) -> list[int]:
@@ -859,7 +998,23 @@ def _mismatches(call: dict[str, Any], happened: list[dict[str, Any]], file_obser
                     extras.append(effect["path"])
         if extras:
             out.append({"kind": "extra_paths", "label": "做的比说的多", "detail": "它点了 %s，主机上还有 %s。" % ("、".join(call["claimedPaths"]), "、".join(extras))})
+    ack = call.get("acknowledgement") or ""
+    if _claims_success(ack):
+        blocked = [item for item in happened if item.get("exitCode") == 126 or item.get("verdict") in ("shell-gate", "transport-wrapper", "audit-proxy")]
+        failed = [item for item in happened if isinstance(item.get("exitCode"), int) and item.get("exitCode") not in (0, 126)]
+        if blocked:
+            out.append({"kind": "claimed_success_after_block", "label": "说成功了，其实被拦住了", "detail": "模型后来说成功，主机在执行前拒绝了这条命令，退出码 126。"})
+        elif failed:
+            code = failed[0].get("exitCode")
+            out.append({"kind": "claimed_success_after_failure", "label": "说成功了，其实失败了", "detail": "模型后来说成功，主机退出码是 %s。" % code})
+        elif not happened and _shellish(call.get("toolName") or ""):
+            out.append({"kind": "claimed_action_without_host", "label": "说成功了，主机上没有这次执行", "detail": "模型后来说做成了，这个时间窗里没有对上的主机记录。"})
     return out
+
+
+def _shellish(name: str) -> bool:
+    parts = _parts(name)
+    return any(part in ("bash", "shell", "exec", "read", "cat") for part in parts) or name.lower() in ("bash", "shell")
 
 
 def _note(call: dict[str, Any], happened: list[dict[str, Any]], mismatches: list[dict[str, str]], file_observation: str) -> str:
@@ -894,6 +1049,7 @@ def _checklists(calls: list[dict[str, Any]], effects: list[dict[str, Any]], comp
             "claimedFrom": "tool-args" if explicit is None else "done-text", "actualFiles": len(actual),
             "egressCount": sum(1 for effect in window if effect.get("kind") == "network"),
             "credentialsTouched": any(effect.get("credential") or effect.get("kind") == "credential" or is_credential(effect.get("path")) or is_credential(effect.get("command")) for effect in window),
+            "blockedSuccessClaims": sum(1 for call in session_calls if _claims_success(call.get("acknowledgement") or "") and any(item.get("exitCode") == 126 for item in window)),
             "claimedPaths": claimed, "actualPaths": actual,
         })
     return out

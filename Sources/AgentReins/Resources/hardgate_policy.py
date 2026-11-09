@@ -639,6 +639,17 @@ def _append_unlocked(root, record, actor):
         body["agent"] = str(record["agent"])[:80]
     if record.get("session"):
         body["session"] = str(record["session"])[:120]
+    command = record.get("command")
+    if isinstance(command, str) and command:
+        body["command"] = command[:180]
+    if record.get("shellPid") is not None:
+        body["shellPid"] = int(record["shellPid"])
+    if record.get("parentPid") is not None:
+        body["parentPid"] = int(record["parentPid"])
+    if record.get("exitCode") is not None:
+        body["exitCode"] = int(record["exitCode"])
+    if record.get("durationMs") is not None:
+        body["durationMs"] = int(record["durationMs"])
     line = (json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     try:
@@ -1001,6 +1012,18 @@ def _shell_session(agent, env):
     return None
 
 
+_COMMAND_SECRET = re.compile(
+    r"(?i)(aws_secret_access_key|aws_access_key_id|password|token|secret|api_key|authorization)\s*[:=]\s*[\"']?[^\s\"',}]+"
+)
+
+
+def command_excerpt(command):
+    """The command text, capped and redacted. Never the bytes that were read."""
+    text = _COMMAND_SECRET.sub(r"\1=[redacted]", str(command or ""))
+    text = " ".join(text.split())
+    return text[:180]
+
+
 def normalize_shell_command(command, home):
     """Expand $HOME so ~/.aws and $HOME/.aws classify as the same path. Do not read the file."""
     text = str(command or "")
@@ -1010,7 +1033,7 @@ def normalize_shell_command(command, home):
     return text
 
 
-def commit_shell(command, cwd, home, root=None, env=None, agent=None, session=None):
+def commit_shell(command, cwd, home, root=None, env=None, agent=None, session=None, shell_pid=None, parent_pid=None):
     """Deny a credential read before the shell runs the command.
 
     Returns 126 when the command text names a credential path that is not
@@ -1042,6 +1065,13 @@ def commit_shell(command, cwd, home, root=None, env=None, agent=None, session=No
             decision["enforced"] = decision.get("action") == "deny"
             if decision.get("action") == "deny":
                 decision["detail"] = "shell 在执行前拒绝了凭据读取"
+                decision["command"] = command_excerpt(text)
+                decision["exitCode"] = 126
+                decision["durationMs"] = 0
+                if shell_pid is not None:
+                    decision["shellPid"] = int(shell_pid)
+                if parent_pid is not None:
+                    decision["parentPid"] = int(parent_pid)
             if agent:
                 decision["agent"] = agent
             if session:
@@ -1073,10 +1103,18 @@ def shell_gate_main(argv=None):
     home = os.environ.get("HOME") or str(Path.home())
     agent = os.environ.get("AGENTREINS_TRANSPORT_AGENT") or ""
     session = _shell_session(agent, os.environ)
+
+    def _pid(name):
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).isdigit():
+            return None
+        return int(raw)
+
     try:
         return commit_shell(
             command, cwd, home,
             env=os.environ, agent=agent or None, session=session,
+            shell_pid=_pid("AGENTREINS_GATE_PID"), parent_pid=_pid("AGENTREINS_GATE_PPID"),
         )
     except Exception:
         return 126

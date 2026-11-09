@@ -144,7 +144,9 @@ public enum SessionVerification {
                 id: effect.id, kind: effect.kind, path: effect.path, diff: effect.diff,
                 before: effect.before, after: effect.after, command: effect.command,
                 remote: effect.remote, timestamp: effect.timestamp, join: hit.name,
-                credential: effect.credential || effect.kind == "credential" || isCredential(effect.path) || isCredential(effect.command)
+                credential: effect.credential || effect.kind == "credential" || isCredential(effect.path) || isCredential(effect.command),
+                pid: effect.pid, parents: effect.parents, binary: effect.binary, verdict: effect.verdict,
+                exitCode: effect.exitCode, durationMs: effect.durationMs
             ))
         }
         var cards: [ToolCallCard] = []
@@ -158,7 +160,9 @@ public enum SessionVerification {
                 status: mismatches.isEmpty ? "matched" : "mismatched",
                 mismatches: mismatches, said: call.reasoning, saidTruncated: call.reasoningTruncated,
                 toolName: call.toolName, arguments: call.arguments, argumentsTruncated: call.argumentsTruncated,
-                happened: effectsForCall, note: note
+                happened: effectsForCall, note: note,
+                resultExcerpt: call.resultExcerpt, resultTruncated: call.resultTruncated, resultBytes: call.resultBytes,
+                acknowledgement: call.acknowledgement, acknowledgementTruncated: call.acknowledgementTruncated
             ))
         }
         let truncated = cards.count > cardCap
@@ -237,7 +241,12 @@ public struct ParsedToolCall: Codable, Equatable, Sendable {
     public var argumentsTruncated: Bool
     public var claimedPaths: [String]
     public var claimsEdit: Bool
-    public init(id: String, callId: String, sessionId: String, agent: String, sourcePath: String, sourceOffset: Int, timestamp: Date, pid: Int32?, reasoning: String, reasoningTruncated: Bool, toolName: String, arguments: String, argumentsTruncated: Bool, claimedPaths: [String], claimsEdit: Bool) {
+    public var resultExcerpt: String
+    public var resultTruncated: Bool
+    public var resultBytes: Int
+    public var acknowledgement: String
+    public var acknowledgementTruncated: Bool
+    public init(id: String, callId: String, sessionId: String, agent: String, sourcePath: String, sourceOffset: Int, timestamp: Date, pid: Int32?, reasoning: String, reasoningTruncated: Bool, toolName: String, arguments: String, argumentsTruncated: Bool, claimedPaths: [String], claimsEdit: Bool, resultExcerpt: String = "", resultTruncated: Bool = false, resultBytes: Int = 0, acknowledgement: String = "", acknowledgementTruncated: Bool = false) {
         self.id = id
         self.callId = callId
         self.sessionId = sessionId
@@ -253,6 +262,11 @@ public struct ParsedToolCall: Codable, Equatable, Sendable {
         self.argumentsTruncated = argumentsTruncated
         self.claimedPaths = claimedPaths
         self.claimsEdit = claimsEdit
+        self.resultExcerpt = resultExcerpt
+        self.resultTruncated = resultTruncated
+        self.resultBytes = resultBytes
+        self.acknowledgement = acknowledgement
+        self.acknowledgementTruncated = acknowledgementTruncated
     }
 }
 
@@ -271,7 +285,12 @@ public struct HostEffect: Codable, Equatable, Sendable {
     public var toolCallId: String?
     public var credential: Bool
     public var source: String
-    public init(id: String, kind: String, timestamp: Date, pid: Int32? = nil, path: String? = nil, diff: String? = nil, before: String? = nil, after: String? = nil, command: String? = nil, remote: String? = nil, sessionId: String? = nil, toolCallId: String? = nil, credential: Bool = false, source: String) {
+    public var exitCode: Int?
+    public var durationMs: Int?
+    public var binary: String?
+    public var parents: String?
+    public var verdict: String?
+    public init(id: String, kind: String, timestamp: Date, pid: Int32? = nil, path: String? = nil, diff: String? = nil, before: String? = nil, after: String? = nil, command: String? = nil, remote: String? = nil, sessionId: String? = nil, toolCallId: String? = nil, credential: Bool = false, source: String, exitCode: Int? = nil, durationMs: Int? = nil, binary: String? = nil, parents: String? = nil, verdict: String? = nil) {
         self.id = id
         self.kind = kind
         self.timestamp = timestamp
@@ -286,6 +305,11 @@ public struct HostEffect: Codable, Equatable, Sendable {
         self.toolCallId = toolCallId
         self.credential = credential
         self.source = source
+        self.exitCode = exitCode
+        self.durationMs = durationMs
+        self.binary = binary
+        self.parents = parents
+        self.verdict = verdict
     }
 }
 
@@ -321,7 +345,13 @@ public struct VerificationEffect: Codable, Equatable, Sendable {
     public var timestamp: Date
     public var join: String
     public var credential: Bool
-    public init(id: String, kind: String, path: String? = nil, diff: String? = nil, before: String? = nil, after: String? = nil, command: String? = nil, remote: String? = nil, timestamp: Date, join: String, credential: Bool) {
+    public var pid: Int32?
+    public var parents: String?
+    public var binary: String?
+    public var verdict: String?
+    public var exitCode: Int?
+    public var durationMs: Int?
+    public init(id: String, kind: String, path: String? = nil, diff: String? = nil, before: String? = nil, after: String? = nil, command: String? = nil, remote: String? = nil, timestamp: Date, join: String, credential: Bool, pid: Int32? = nil, parents: String? = nil, binary: String? = nil, verdict: String? = nil, exitCode: Int? = nil, durationMs: Int? = nil) {
         self.id = id
         self.kind = kind
         self.path = path
@@ -333,6 +363,12 @@ public struct VerificationEffect: Codable, Equatable, Sendable {
         self.timestamp = timestamp
         self.join = join
         self.credential = credential
+        self.pid = pid
+        self.parents = parents
+        self.binary = binary
+        self.verdict = verdict
+        self.exitCode = exitCode
+        self.durationMs = durationMs
     }
 }
 
@@ -350,9 +386,14 @@ public struct ToolCallCard: Codable, Equatable, Sendable {
     public var toolName: String
     public var arguments: String
     public var argumentsTruncated: Bool
+    public var resultExcerpt: String
+    public var resultTruncated: Bool
+    public var resultBytes: Int
+    public var acknowledgement: String
+    public var acknowledgementTruncated: Bool
     public var happened: [VerificationEffect]
     public var note: String
-    public init(id: String, callId: String, sessionId: String, agent: String, timestamp: Date, pid: Int32?, status: String, mismatches: [VerificationMismatch], said: String, saidTruncated: Bool, toolName: String, arguments: String, argumentsTruncated: Bool, happened: [VerificationEffect], note: String) {
+    public init(id: String, callId: String, sessionId: String, agent: String, timestamp: Date, pid: Int32?, status: String, mismatches: [VerificationMismatch], said: String, saidTruncated: Bool, toolName: String, arguments: String, argumentsTruncated: Bool, happened: [VerificationEffect], note: String, resultExcerpt: String = "", resultTruncated: Bool = false, resultBytes: Int = 0, acknowledgement: String = "", acknowledgementTruncated: Bool = false) {
         self.id = id
         self.callId = callId
         self.sessionId = sessionId
@@ -366,6 +407,11 @@ public struct ToolCallCard: Codable, Equatable, Sendable {
         self.toolName = toolName
         self.arguments = arguments
         self.argumentsTruncated = argumentsTruncated
+        self.resultExcerpt = resultExcerpt
+        self.resultTruncated = resultTruncated
+        self.resultBytes = resultBytes
+        self.acknowledgement = acknowledgement
+        self.acknowledgementTruncated = acknowledgementTruncated
         self.happened = happened
         self.note = note
     }
@@ -393,6 +439,7 @@ public struct CompletionChecklist: Codable, Equatable, Sendable {
     public var actualFiles: Int
     public var egressCount: Int
     public var credentialsTouched: Bool
+    public var blockedSuccessClaims: Int
     public var claimedPaths: [String]
     public var actualPaths: [String]
 }
@@ -600,6 +647,9 @@ private func sessionHint(_ path: String) -> String {
 private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: LogKind, sessionHint: String) -> ParseBatch {
     var calls: [ParsedToolCall] = []
     var completions: [String: String] = [:]
+    var results: [String: (text: String, truncated: Bool, bytes: Int)] = [:]
+    var acks: [String: (text: String, truncated: Bool)] = [:]
+    var lastResult = ""
     var malformed = 0
     var pending = ""
     var session = sessionHint
@@ -625,6 +675,17 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
                 pending = ""
                 continue
             }
+            if toolResult {
+                for item in contents where string(item["type"]) == "tool_result" {
+                    let callId = string(item["tool_use_id"]) ?? ""
+                    let body = resultBody(item["content"])
+                    if !callId.isEmpty, !body.isEmpty {
+                        results[callId] = packResult(body)
+                        lastResult = callId
+                    }
+                }
+                continue
+            }
             guard type == "assistant" || contents.contains(where: { string($0["type"]) == "tool_use" }) else { continue }
             guard let timestamp = VerifyTime.parse(row["timestamp"]) else {
                 if contents.contains(where: { string($0["type"]) == "tool_use" }) { malformed += 1 }
@@ -635,7 +696,13 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
                 let itemType = string(item["type"]) ?? ""
                 if itemType == "thinking" || itemType == "text" {
                     let piece = string(item["thinking"]) ?? string(item["text"]) ?? ""
-                    if !piece.isEmpty { pending = pending.isEmpty ? piece : pending + "\n" + piece }
+                    if !piece.isEmpty {
+                        pending = pending.isEmpty ? piece : pending + "\n" + piece
+                        if !lastResult.isEmpty, acks[lastResult] == nil {
+                            acks[lastResult] = SessionVerification.excerpt(redact(pending.trimmingCharacters(in: .whitespacesAndNewlines)))
+                            lastResult = ""
+                        }
+                    }
                 } else if itemType == "tool_use" {
                     let callId = string(item["id"]) ?? "claude-\(lineStart)"
                     let name = string(item["name"]) ?? "unknown_tool"
@@ -657,6 +724,23 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
             }
             if type == "message", string(row["role"]) == "user" {
                 pending = ""
+                continue
+            }
+            if type == "function_call_result" || type == "function_call_output" {
+                let callId = string(row["callId"]) ?? string(row["call_id"]) ?? ""
+                let body = resultBody(row["output"] ?? row["result"])
+                if !callId.isEmpty, !body.isEmpty {
+                    results[callId] = packResult(body)
+                    lastResult = callId
+                }
+                continue
+            }
+            if type == "message", string(row["role"]) == "assistant" {
+                let text = textDeep(row["content"]) ?? ""
+                if !lastResult.isEmpty, acks[lastResult] == nil, !text.isEmpty {
+                    acks[lastResult] = SessionVerification.excerpt(redact(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+                    lastResult = ""
+                }
                 continue
             }
             guard type == "function_call" else { continue }
@@ -693,8 +777,23 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
                 completions[session] = text
                 continue
             }
+            if type == "response_item", payloadType == "function_call_output" || payloadType == "function_call_result" {
+                let callId = string(payload["call_id"]) ?? string(payload["callId"]) ?? ""
+                let body = resultBody(payload["output"] ?? payload["result"])
+                if !callId.isEmpty, !body.isEmpty {
+                    results[callId] = packResult(body)
+                    lastResult = callId
+                }
+                continue
+            }
             if type == "response_item", payloadType == "message", string(payload["role"]) == "assistant" {
-                if let text = textDeep(payload["content"]), let done = donePhrase(text) { completions[session] = done }
+                if let text = textDeep(payload["content"]) {
+                    if let done = donePhrase(text) { completions[session] = done }
+                    if !lastResult.isEmpty, acks[lastResult] == nil, !text.isEmpty {
+                        acks[lastResult] = SessionVerification.excerpt(redact(text.trimmingCharacters(in: .whitespacesAndNewlines)))
+                        lastResult = ""
+                    }
+                }
                 continue
             }
             guard type == "response_item", payloadType == "function_call" || payloadType == "custom_tool_call" else { continue }
@@ -704,6 +803,19 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
             calls.append(makeCall(id: unique(callId, &seen), callId: callId, session: session, agent: agent, sourcePath: sourcePath, offset: lineStart, timestamp: timestamp, pid: pid, reasoning: pending, toolName: name, arguments: arguments))
             pending = ""
         }
+    }
+    calls = calls.map { call in
+        var copy = call
+        if let result = results[call.callId] {
+            copy.resultExcerpt = result.text
+            copy.resultTruncated = result.truncated
+            copy.resultBytes = result.bytes
+        }
+        if let ack = acks[call.callId] {
+            copy.acknowledgement = ack.text
+            copy.acknowledgementTruncated = ack.truncated
+        }
+        return copy
     }
     return ParseBatch(calls: calls, completions: completions, malformed: malformed)
 }
@@ -829,9 +941,36 @@ private func collectPaths(_ value: Any, into paths: inout [String]) {
 }
 
 private func redact(_ text: String) -> String {
-    guard let regex = try? NSRegularExpression(pattern: #"(?i)(password|token|secret|api_key|authorization)\s*[:=]\s*["']?[^"',\s}]+"#) else { return text }
+    guard let regex = try? NSRegularExpression(pattern: #"(?i)(aws_secret_access_key|aws_access_key_id|password|token|secret|api_key|authorization)\s*[:=]\s*["']?[^\s"',}]+"#) else { return text }
     let range = NSRange(text.startIndex..., in: text)
     return regex.stringByReplacingMatches(in: text, range: range, withTemplate: "$1=[redacted]")
+}
+
+private func resultBody(_ value: Any?) -> String {
+    if let text = value as? String { return text }
+    if let items = value as? [String] { return items.joined(separator: "\n") }
+    if let items = value as? [[String: Any]] {
+        return items.map { resultBody($0["text"] ?? $0["content"]) }.filter { !$0.isEmpty }.joined(separator: "\n")
+    }
+    if let object = value as? [String: Any] { return resultBody(object["text"] ?? object["content"]) }
+    return ""
+}
+
+private func packResult(_ body: String) -> (text: String, truncated: Bool, bytes: Int) {
+    let cleaned = redact(body.trimmingCharacters(in: .whitespacesAndNewlines))
+    let packed = SessionVerification.excerpt(cleaned)
+    return (packed.text, packed.truncated, body.utf8.count)
+}
+
+private func claimsSuccess(_ text: String) -> Bool {
+    guard text.range(of: #"成功|读到了|已经读|已读取|拿到了|读取成功|读出来了|succeeded|successfully"#, options: [.regularExpression, .caseInsensitive]) != nil else { return false }
+    return text.range(of: #"失败|拒绝|没有读到|没读到|拦|blocked|exit\s*126|退出码\s*126|不会执行"#, options: [.regularExpression, .caseInsensitive]) == nil
+}
+
+private func shellish(_ name: String) -> Bool {
+    let parts = toolParts(name)
+    if parts.contains(where: { ["bash", "shell", "exec", "read", "cat"].contains($0) }) { return true }
+    return ["bash", "shell"].contains(name.lowercased())
 }
 
 private enum VerifyTime {
@@ -995,6 +1134,20 @@ private func mismatches(call: ParsedToolCall, happened: [VerificationEffect], fi
             out.append(VerificationMismatch(kind: "extra_paths", label: "做的比说的多", detail: "它点了 \(call.claimedPaths.joined(separator: "、"))，主机上还有 \(unique.joined(separator: "、"))。"))
         }
     }
+    if claimsSuccess(call.acknowledgement) {
+        let blocked = happened.contains { $0.exitCode == 126 || ["shell-gate", "transport-wrapper", "audit-proxy"].contains($0.verdict ?? "") }
+        let failed = happened.first { effect in
+            guard let code = effect.exitCode else { return false }
+            return code != 0 && code != 126
+        }
+        if blocked {
+            out.append(VerificationMismatch(kind: "claimed_success_after_block", label: "说成功了，其实被拦住了", detail: "模型后来说成功，主机在执行前拒绝了这条命令，退出码 126。"))
+        } else if let failed, let code = failed.exitCode {
+            out.append(VerificationMismatch(kind: "claimed_success_after_failure", label: "说成功了，其实失败了", detail: "模型后来说成功，主机退出码是 \(code)。"))
+        } else if happened.isEmpty, shellish(call.toolName) {
+            out.append(VerificationMismatch(kind: "claimed_action_without_host", label: "说成功了，主机上没有这次执行", detail: "模型后来说做成了，这个时间窗里没有对上的主机记录。"))
+        }
+    }
     return out
 }
 
@@ -1026,12 +1179,14 @@ private func checklist(allCalls: [ParsedToolCall], effects: [HostEffect], comple
         let actual = Array(Set(inWindow.filter { $0.kind == "file" }.compactMap(\.path))).sorted()
         let egress = inWindow.filter { $0.kind == "network" }.count
         let credentials = inWindow.contains { $0.credential || $0.kind == "credential" || SessionVerification.isCredential($0.path) || SessionVerification.isCredential($0.command) }
+        let blockedClaims = sessionCalls.filter { claimsSuccess($0.acknowledgement) && inWindow.contains { $0.exitCode == 126 } }.count
         let explicit = explicitFileCount(done)
         return CompletionChecklist(
             sessionId: session, agent: sessionCalls.first?.agent ?? "", taskId: taskIDs[session],
             doneText: SessionVerification.excerpt(done).text,
             claimedFiles: explicit ?? claimed.count, claimedFrom: explicit == nil ? "tool-args" : "done-text",
             actualFiles: actual.count, egressCount: egress, credentialsTouched: credentials,
+            blockedSuccessClaims: blockedClaims,
             claimedPaths: claimed, actualPaths: actual
         )
     }

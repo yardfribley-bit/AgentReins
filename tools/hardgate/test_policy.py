@@ -631,19 +631,21 @@ class ShellGateTests(unittest.TestCase):
         self.assertNotIn(self.SECRET, proc.stdout, label)
         self.assertNotIn(self.SECRET, proc.stderr, label)
 
-    def test_commit_shell_records_the_path_and_not_the_command_text(self):
-        token = "INLINE_TOKEN_SHOULD_NOT_BE_STORED"
+    def test_commit_shell_records_the_path_and_a_redacted_command_excerpt(self):
         code = policy.commit_shell(
-            "cat %s # %s" % (self.home / ".aws" / "credentials", token),
+            "cat %s && echo aws_secret_access_key=%s" % (self.home / ".aws" / "credentials", "FAKEONLY_NOT_A_REAL_KEY"),
             str(self.home), str(self.home), root=self.gate_root,
-            agent="Cursor", session="cursor-session-1",
+            agent="Cursor", session="cursor-session-1", shell_pid=42, parent_pid=7,
         )
         self.assertEqual(code, 126)
         raw = (self.gate_root / "audit.jsonl").read_text(encoding="utf-8")
-        self.assertNotIn(token, raw)
+        self.assertNotIn("FAKEONLY_NOT_A_REAL_KEY", raw)
         self.assertNotIn(self.SECRET, raw)
         self.assertIn("shell-gate", raw)
         self.assertIn("/.aws/credentials", raw)
+        self.assertIn("aws_secret_access_key=[redacted]", raw)
+        self.assertEqual(policy.load_rows(self.gate_root)[0]["exitCode"], 126)
+        self.assertEqual(policy.load_rows(self.gate_root)[0]["shellPid"], 42)
         rows = policy.load_rows(self.gate_root)
         self.assertTrue(rows[0]["enforced"])
         self.assertEqual(rows[0]["agent"], "Cursor")

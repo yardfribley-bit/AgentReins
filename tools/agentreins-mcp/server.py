@@ -104,7 +104,7 @@ TOOLS = [
     },
     {
         "name": "list_tool_calls",
-        "description": "Read-only tool-call cards: reasoning excerpt, tool name and arguments, host effects. Does not copy session logs into evidence.",
+        "description": "Read-only chain for each tool call: what the model asked, what the host did, what the model was told. Excerpts and join keys only.",
         "inputSchema": {
             "type": "object",
             "properties": {**_PAGE, "agent": {"type": "string"}, "session_id": {"type": "string"}},

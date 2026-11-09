@@ -27,7 +27,7 @@ enum SessionVerificationTool {
             "limit": page.limit,
             "truncated": page.truncated || document.truncated,
             "nextCursor": page.nextCursor,
-            "note": "卡片来自本机 Claude Code、Codex、WorkBuddy / CodeBuddy 日志的摘录，加上已有运输记录和文件路径。日志原文不写入证据库。",
+            "note": "一条命令三步：模型提出、主机执行、模型收到。只留短摘录和编号，不把会话日志或文件内容写入证据。",
         ]
     }
 
@@ -57,7 +57,7 @@ enum SessionVerificationTool {
     private static func make(_ records: [[String: Any]]) -> SessionVerificationDocument {
         let roots = logRoots()
         let logs = SessionVerification.load(claudeRoot: roots.claude, codexRoot: roots.codex, workbuddyRoots: roots.workbuddy)
-        let effects = hostEffects(records)
+        let effects = hostEffects(records) + hardGateEffects()
         var document = SessionVerification.verify(
             calls: logs.calls, effects: effects, completions: logs.completions,
             fileChannel: effects.contains { $0.kind == "file" },
@@ -132,6 +132,23 @@ enum SessionVerificationTool {
             effects.append(HostEffect(
                 id: "file-observe-\(index)", kind: "file", timestamp: date, path: row.path,
                 credential: SessionVerification.isCredential(row.path), source: "file-observe"))
+        }
+        let plainGate = ISO8601DateFormatter()
+        plainGate.formatOptions = [.withInternetDateTime]
+        for row in HardGateReceipts.enforcedDenies(from: HardGateReceipts.defaultURL(), limit: 40) {
+            let credential = row.subject.hasPrefix("path:")
+            let network = row.subject.hasPrefix("host:")
+            guard credential || network, let timestamp = plainGate.date(from: row.at) else { continue }
+            let target = String(row.subject.dropFirst(5))
+            effects.append(HostEffect(
+                id: "hardgate-\(row.at)-\(row.subject)", kind: credential ? "credential" : "network",
+                timestamp: timestamp, pid: row.shellPid == 0 ? nil : row.shellPid,
+                path: credential ? target : nil, command: row.command.isEmpty ? nil : row.command,
+                remote: network ? target : nil, sessionId: row.session.isEmpty ? nil : row.session,
+                credential: credential, source: "hardgate",
+                exitCode: row.exitCode, durationMs: row.durationMs,
+                parents: row.parentPid == 0 ? nil : String(row.parentPid),
+                verdict: row.mechanism.isEmpty ? "shell-gate" : row.mechanism))
         }
         return effects
     }

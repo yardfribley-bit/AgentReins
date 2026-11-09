@@ -132,12 +132,27 @@ function happenedBlock(effect){
  const title=effect.kind==='file'||effect.kind==='credential'?(effect.path||'文件'):effect.kind==='network'?(effect.remote||'外联'):(effect.command||effect.kind||'进程');
  return `<div class="tc-effect"><b>${esc(title)}</b><span class="t2">${esc(joinLabel(effect.join))}</span>${effect.diff?`<pre class="mono diff-view">${diffHTML(effect.diff)}</pre>`:''}${(effect.before||effect.after)&&!effect.diff?fileBody(effect):''}</div>`;
 }
+function hostLine(effect){
+ const verdict=effect.verdict==='shell-gate'?'shell 在执行前拒绝':effect.verdict==='transport-wrapper'?'PATH 入口拒绝':effect.verdict==='audit-proxy'?'审计代理拒绝':(effect.verdict||'');
+ const exit=effect.exitCode==null?'退出码没采到':'退出码 '+effect.exitCode;
+ const dur=effect.durationMs==null?'耗时没采到':effect.durationMs+' 毫秒';
+ const binary=effect.binary?('实际程序 '+effect.binary):(effect.exitCode===126?'真实程序没有执行':'实际程序没采到');
+ const pid=effect.pid?('pid '+effect.pid):'pid 没采到';
+ const parents=effect.parents?('父进程 '+effect.parents):'';
+ const hit=effect.credential?('凭据路径 '+(effect.path||effect.command||'')):effect.kind==='network'?('外联 '+(effect.remote||'')):effect.kind==='file'?('文件 '+(effect.path||'')):(effect.command||effect.kind||'');
+ return [pid,parents,binary,verdict,hit,exit,dur].filter(Boolean).join(' · ');
+}
 function renderToolCard(card){
  const status=card.status==='mismatched'?'mismatched':'matched';
- const said=String(card.said||'').trim()?esc(card.said)+(card.saidTruncated?'<p class="t2">只留了开头一段，全文仍在原来的会话日志里。</p>':''):'<span class="t2">这次调用前面没有推理文本。</span>';
+ const said=String(card.said||'').trim()?esc(card.said)+(card.saidTruncated?'<p class="t2">只留了开头一段。</p>':''):'<span class="t2">这次调用前面没有推理文本。</span>';
  const happened=list(card.happened);
+ const result=String(card.resultExcerpt||'').trim();
+ const resultLine=result?esc(result)+(card.resultTruncated?'<p class="t2">只留了开头一段。</p>':''):'<span class="t2">没有采到返回给模型的结果。</span>';
+ const ack=String(card.acknowledgement||'').trim();
+ const ackLine=ack?esc(ack):'<span class="t2">后面没有再说话。</span>';
  const flags=list(card.mismatches).map(item=>`<li><b>${esc(item.label)}</b> ${esc(item.detail||'')}</li>`).join('');
- return `<article class="tc-card ${status}"><header class="tc-head"><b class="tc-status ${status}">${status==='matched'?'对上了':'对不上'}</b><span>${esc(card.agent||'')} · ${esc(time(card.timestamp))}</span></header><div class="tc-grid"><section><h3>它说</h3><pre class="mono">${said}</pre></section><section><h3>它调</h3><p><b>${esc(card.toolName||'工具')}</b></p><pre class="mono">${esc(card.arguments||'没有参数')}</pre></section><section><h3>真发生</h3>${happened.length?happened.map(happenedBlock).join(''):'<span class="t2">这个时间窗里没有对上的主机记录。</span>'}</section></div>${flags?`<ul class="tc-flags">${flags}</ul>`:''}${card.note?`<p class="t2">${esc(card.note)}</p>`:''}</article>`;
+ const host=happened.length?happened.map(effect=>`<div class="tc-effect"><b>${esc(hostLine(effect))}</b><span class="t2">${esc(joinLabel(effect.join))}</span>${effect.diff?`<pre class="mono diff-view">${diffHTML(effect.diff)}</pre>`:''}</div>`).join(''):'<span class="t2">这个时间窗里没有对上的主机记录。</span>';
+ return `<article class="tc-card ${status}"><header class="tc-head"><b class="tc-status ${status}">${status==='matched'?'对上了':'对不上'}</b><span>${esc(card.agent||'')} · 会话 ${esc(cut(card.sessionId||'',36))} · ${esc(time(card.timestamp))}</span></header><div class="tc-grid"><section><h3>模型提出</h3><p><b>${esc(card.toolName||'工具')}</b></p><pre class="mono">${esc(card.arguments||'没有参数')}</pre><p class="t2">动手前</p><pre class="mono">${said}</pre></section><section><h3>主机执行</h3>${host}</section><section><h3>模型收到</h3><p class="t2">${card.resultBytes?esc(card.resultBytes)+' 字节，只留摘录':'大小没采到'}</p><pre class="mono">${resultLine}</pre><p class="t2">下一句</p><pre class="mono">${ackLine}</pre></section></div>${flags?`<ul class="tc-flags">${flags}</ul>`:''}${card.note?`<p class="t2">${esc(card.note)}</p>`:''}</article>`;
 }
 function renderChecklist(item,state){
  const decisions=list(state&&state.decisions);
@@ -145,7 +160,7 @@ function renderChecklist(item,state){
  const invalid=state&&state.returnInvalid?' invalid':'';
  const recorded=decision?`<p class="note">已记录 ${esc(decision.state==='accept'?'通过':decision.state==='return'?'已退回':decision.state)} · ${esc(decision.note||'')}</p>`:'';
  const buttons=item.taskId?`<label class="risk-search">退回原因（退回时必填）<textarea id="checklist-note" class="${invalid.trim()}" rows="2" placeholder="写清要退回的原因">${esc(state&&state.returnNote||'')}</textarea></label><div class="risk-actions"><button type="button" class="primary" data-accept-decide="accept" data-task-id="${esc(item.taskId)}" data-note-field="checklist-note">通过</button><button type="button" class="quiet" data-accept-decide="return" data-task-id="${esc(item.taskId)}" data-note-field="checklist-note">退回</button></div>`:'<p class="note">这条完成声明还没对上待我处理里的任务，通过和退回先不写。</p>';
- return `<article class="tc-check"><h3>它说做完了</h3><p>${esc(cut(item.doneText||'',180))}</p><ul class="tc-flags"><li>它说改了 ${esc(item.claimedFiles)} 个文件，主机记下 ${esc(item.actualFiles)} 个</li><li>外联 ${esc(item.egressCount)} 次</li><li>凭证 ${item.credentialsTouched?'碰到了':'没碰到'}</li></ul>${recorded}${buttons}</article>`;
+ return `<article class="tc-check"><h3>它说做完了</h3><p>${esc(cut(item.doneText||'',180))}</p><ul class="tc-flags"><li>它说改了 ${esc(item.claimedFiles)} 个文件，主机记下 ${esc(item.actualFiles)} 个</li><li>外联 ${esc(item.egressCount)} 次</li><li>凭证 ${item.credentialsTouched?'碰到了':'没碰到'}</li><li>拦住后仍说成功 ${esc(item.blockedSuccessClaims||0)} 次</li></ul>${recorded}${buttons}</article>`;
 }
 function renderReason(holder,payload,state){
  const verification=payload&&payload.verification;
@@ -159,7 +174,7 @@ function renderReason(holder,payload,state){
  const picker=sessions.length>1?`<div class="risk-actions">${sessions.map(id=>`<button type="button" class="${session===id?'primary':'quiet'}" data-verify-session="${esc(id)}">${esc(cut(id,24))}</button>`).join('')}<button type="button" class="${session?'quiet':'primary'}" data-verify-session="">全部</button></div>`:'';
  const body=shown.length?shown.map(renderToolCard).join('')+checks.map(item=>renderChecklist(item,state)).join(''):`<div class="risk-empty"><h2>还没有可核对的工具调用</h2><p>${sourceNote}</p><p>目录不在，或日志里没有工具调用时，这里是空的。</p></div>`;
  const mismatches=shown.filter(card=>card.status==='mismatched').length;
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">核得清</div><h1>推理对齐</h1><p>一张卡片三列：它说、它调、真发生。只标三种对不上：说了没做、做了没说、做的比说的多。对不上的留在这里，通过或退回进待我处理。</p></div><span class="t2">${shown.length} 次调用${mismatches?` · ${mismatches} 次对不上`:''}</span></div><div class="risk-main" style="margin:0 28px">${picker}${body}</div>`;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">核得清</div><h1>推理对齐</h1><p>一条命令从上到下：模型提出、主机执行、模型收到。对不上的包括说了没做、做了没说、做的比说的多，以及说成功了其实被拦住或失败。对不上的留在这里，通过或退回进待我处理。</p></div><span class="t2">${shown.length} 次调用${mismatches?` · ${mismatches} 次对不上`:''}</span></div><div class="risk-main" style="margin:0 28px">${picker}${body}</div>`;
 }
 
 function taskBucket(t){

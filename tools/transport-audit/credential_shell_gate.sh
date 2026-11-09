@@ -53,10 +53,12 @@ _agentreins_gate_check() {
     _agentreins_py=python3
   fi
   AGENTREINS_GATE_COMMAND="$_agentreins_cmd"
-  export AGENTREINS_GATE_COMMAND
+  AGENTREINS_GATE_PID=$$
+  AGENTREINS_GATE_PPID=${PPID:-}
+  export AGENTREINS_GATE_COMMAND AGENTREINS_GATE_PID AGENTREINS_GATE_PPID
   _agentreins_status=0
   PYTHONDONTWRITEBYTECODE=1 "$_agentreins_py" "$AGENTREINS_HARDGATE_POLICY" --shell-gate || _agentreins_status=$?
-  unset AGENTREINS_GATE_COMMAND
+  unset AGENTREINS_GATE_COMMAND AGENTREINS_GATE_PID AGENTREINS_GATE_PPID
   if [ "$_agentreins_status" -ne 0 ]; then
     printf '%s\n' "AgentReins 已拒绝这条命令，真实程序不会执行。允许需要在待我处理里写原因。" >&2
     return 1

@@ -817,6 +817,10 @@ final class RealtimeWorkspaceState: ObservableObject {
             parts.append(String(source.malformedLines))
         }
         parts.append(fileWatching ? "watch" : "idle")
+        let audit = HardGateReceipts.defaultURL()
+        let values = try? audit.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
+        parts.append(String(values?.fileSize ?? 0))
+        parts.append(String(values?.contentModificationDate?.timeIntervalSince1970 ?? 0))
         return parts.joined(separator: "\u{1}")
     }
 

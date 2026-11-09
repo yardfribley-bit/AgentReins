@@ -1,6 +1,7 @@
 """Session log parse and host-effect join. Fixtures are synthetic."""
 from __future__ import annotations
 
+import json
 import pathlib
 import tempfile
 import unittest
@@ -90,6 +91,53 @@ class SessionVerificationTests(unittest.TestCase):
         self.assertEqual(checklist["egressCount"], 1)
         self.assertEqual(checklist["taskId"], "task-1")
         self.assertIsInstance(checklist["doneText"], str)
+
+    def test_blocked_credential_read_chain_flags_false_success(self):
+        secret = "aws_secret_access_key=FAKEONLY_NOT_A_REAL_KEY"
+        log = "\n".join([
+            '{"type":"assistant","timestamp":"2026-11-09T08:00:00Z","sessionId":"sess-aws","message":{"content":[{"type":"text","text":"我要读取 ~/.aws/credentials 里的凭据。"},{"type":"tool_use","id":"toolu_aws","name":"Bash","input":{"command":"cat ~/.aws/credentials"}}]}}',
+            '{"type":"user","timestamp":"2026-11-09T08:00:01Z","sessionId":"sess-aws","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_aws","content":"AgentReins 已拒绝这条命令，真实程序不会执行。\\n%s"}]}}' % secret,
+            '{"type":"assistant","timestamp":"2026-11-09T08:00:02Z","sessionId":"sess-aws","message":{"content":[{"type":"text","text":"成功读取了凭据。"}]}}',
+            '{"type":"assistant","timestamp":"2026-11-09T08:00:03Z","sessionId":"sess-aws","message":{"content":[{"type":"text","text":"已完成。"}]}}',
+        ])
+        parsed = sv.parse_claude(log, "/tmp/claude.jsonl")
+        self.assertEqual(len(parsed["calls"]), 1)
+        call = parsed["calls"][0]
+        self.assertEqual(call["agent"], "Claude Code")
+        self.assertEqual(call["sessionId"], "sess-aws")
+        self.assertEqual(call["toolName"], "Bash")
+        self.assertIn("cat ~/.aws/credentials", call["arguments"])
+        self.assertIn("凭据", call["reasoning"])
+        self.assertIn("已拒绝", call["resultExcerpt"])
+        self.assertNotIn("FAKEONLY_NOT_A_REAL_KEY", call["resultExcerpt"])
+        self.assertGreater(call["resultBytes"], 0)
+        self.assertIn("成功读取", call["acknowledgement"])
+        document = sv.verify(parsed["calls"], [
+            effect(
+                id="gate-1", kind="credential", timestamp="2026-11-09T08:00:00Z",
+                sessionId="sess-aws", command="cat ~/.aws/credentials",
+                path="/Users/dev/.aws/credentials", credential=True,
+                exitCode=126, durationMs=0, verdict="shell-gate",
+                pid=4242, parents="100", source="hardgate",
+            ),
+        ], completions=parsed["completions"])
+        card = document["cards"][0]
+        self.assertEqual(card["toolName"], "Bash")
+        self.assertIn("cat ~/.aws/credentials", card["arguments"])
+        host = card["happened"][0]
+        self.assertEqual(host["exitCode"], 126)
+        self.assertEqual(host["verdict"], "shell-gate")
+        self.assertEqual(host["pid"], 4242)
+        self.assertEqual(host["parents"], "100")
+        self.assertEqual(host["durationMs"], 0)
+        self.assertIn("凭据", card["said"])
+        self.assertIn("已拒绝", card["resultExcerpt"])
+        self.assertIn("成功", card["acknowledgement"])
+        labels = [item["label"] for item in card["mismatches"]]
+        self.assertIn("说成功了，其实被拦住了", labels)
+        self.assertGreaterEqual(document["checklists"][0]["blockedSuccessClaims"], 1)
+        blob = json.dumps(document, default=str)
+        self.assertNotIn("FAKEONLY_NOT_A_REAL_KEY", blob)
 
     def test_list_tool_does_not_require_logs(self):
         with tempfile.TemporaryDirectory() as tmp:
