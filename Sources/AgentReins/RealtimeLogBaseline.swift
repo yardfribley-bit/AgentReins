@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Foundation
 
 /// Records file lengths only, never reads old log bodies. Existing files begin at EOF.
