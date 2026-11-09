@@ -121,7 +121,7 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
             if action == "loadDiskUsage" {
                 let webView = message.webView
                 DispatchQueue.global(qos: .utility).async { [weak self] in
-                    self?.pushHostResult(to: webView, result: Self.diskUsagePayload(message: nil))
+                    self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: nil))
                 }
                 return
             }
@@ -131,14 +131,14 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 DispatchQueue.global(qos: .utility).async { [weak self] in
                     let support = EvidenceDatabase.defaultURL().deletingLastPathComponent()
                     guard let url = StaleDataCatalog.canDelete(id: id, directory: support) else {
-                        self?.pushHostResult(to: webView, result: Self.diskUsagePayload(message: "这份文件不在可删名单里，没有删除。"))
+                        self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: "这份文件不在可删名单里，没有删除。"))
                         return
                     }
                     do {
                         try FileManager.default.removeItem(at: url)
-                        self?.pushHostResult(to: webView, result: Self.diskUsagePayload(message: "已删除 \(url.lastPathComponent)。正在用的证据库没有动。"))
+                        self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: "已删除 \(url.lastPathComponent)。正在用的证据库没有动。"))
                     } catch {
-                        self?.pushHostResult(to: webView, result: Self.diskUsagePayload(message: "没有删成：\(error.localizedDescription)"))
+                        self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: "没有删成：\(error.localizedDescription)"))
                     }
                 }
                 return
