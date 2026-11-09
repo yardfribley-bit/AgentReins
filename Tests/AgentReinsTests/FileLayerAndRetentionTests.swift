@@ -103,13 +103,13 @@ final class MCPHealthAndStaleDataTests: XCTestCase {
             MCPHTTPOrphans.Proc(pid: 4, ppid: 1, command: "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP --http --port 18977"),
             MCPHTTPOrphans.Proc(pid: 5, ppid: 1, command: "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP --http --port 19000"),
         ]
-        let started = [
+        let started: [Int32: Date] = [
             4: now.addingTimeInterval(-30),
             5: now.addingTimeInterval(-30),
         ]
         XCTAssertEqual(MCPHTTPOrphans.healthVictims(procs, port: 18977, portListening: true, now: now, startedAt: started), [])
         XCTAssertEqual(MCPHTTPOrphans.healthVictims(procs, port: 18977, portListening: false, now: now, startedAt: started), [4])
-        let young = [4: now.addingTimeInterval(-2)]
+        let young: [Int32: Date] = [4: now.addingTimeInterval(-2)]
         XCTAssertEqual(MCPHTTPOrphans.healthVictims(procs, port: 18977, portListening: false, now: now, startedAt: young), [])
     }
 
