@@ -57,6 +57,10 @@ enum TransportWrapperInstall {
         var output = ""
         var cursor = text.startIndex
         while let found = text[cursor...].range(of: needle) {
+            if !isBinBoundary(text, at: found.upperBound) {
+                cursor = text.index(after: found.lowerBound)
+                continue
+            }
             let span = pathSpan(text, needle: found, floor: cursor)
             let tool = String(text[found.upperBound..<span.inner.upperBound])
             let quoted = shellQuote(binDir + tool)
@@ -125,6 +129,16 @@ enum TransportWrapperInstall {
             tokenEnd = text.index(after: innerEnd)
         }
         return PathSpan(start: tokenStart, end: tokenEnd, inner: innerStart..<innerEnd)
+    }
+
+    private static func isBinBoundary(_ text: String, at index: String.Index) -> Bool {
+        guard index < text.endIndex else { return true }
+        switch text[index] {
+        case "/", "'", "\"", ":", " ", "\n", "\t", ";":
+            return true
+        default:
+            return false
+        }
     }
 
     private static func isPathChar(_ ch: Character) -> Bool {

@@ -235,10 +235,10 @@ final class MCPHealthAndStaleDataTests: XCTestCase {
     }
 
     func testAuditScriptWithASpaceParsesAndRetargetIsIdempotent() throws {
-        let bin = FileManager.default.temporaryDirectory
-            .appendingPathComponent("Library/Application Support/AgentReins/transport-audit/bin-\(UUID().uuidString)", isDirectory: true)
+        let scratch = FileManager.default.temporaryDirectory.appendingPathComponent("audit-quote-\(UUID().uuidString)", isDirectory: true)
+        let bin = scratch.appendingPathComponent("Library/Application Support/AgentReins/transport-audit/bin", isDirectory: true)
         try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
-        defer { try? FileManager.default.removeItem(at: bin.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        defer { try? FileManager.default.removeItem(at: scratch) }
         try Data("#!/bin/sh\n".utf8).write(to: bin.appendingPathComponent("curl"))
         let script = TransportWrapperInstall.auditScript(binDir: bin.path, home: "/Users/me")
         XCTAssertTrue(script.contains(TransportWrapperInstall.shellQuote(bin.path)))
