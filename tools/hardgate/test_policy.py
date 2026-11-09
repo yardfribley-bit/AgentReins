@@ -254,6 +254,16 @@ class AuditStoreTests(unittest.TestCase):
         custom.write_text('{"version":1,"customized":true,"rules":[]}', encoding="utf-8")
         self.assertFalse(policy.seed_rules_file(custom))
         self.assertEqual(json.loads(custom.read_text(encoding="utf-8"))["rules"], [])
+        both = [self.root / "AgentReins" / "rules.json", self.root / "AgentGuard" / "rules.json"]
+        both[0].parent.mkdir()
+        both[0].write_text('{"version":1,"rules":[]}', encoding="utf-8")
+        both[1].parent.mkdir()
+        both[1].write_text('{"version":1,"customized":true,"rules":[]}', encoding="utf-8")
+        self.assertTrue(policy.seed_installed_rules(both))
+        self.assertFalse(policy.seed_installed_rules(both))
+        seeded = json.loads(both[0].read_text(encoding="utf-8"))
+        self.assertEqual({row["id"] for row in seeded["rules"]}, {"default-deny-egress", "default-deny-credential-read"})
+        self.assertEqual(json.loads(both[1].read_text(encoding="utf-8"))["rules"], [])
 
     def test_mcp_server_has_no_hard_gate_write(self):
         text = SERVER_PATH.read_text(encoding="utf-8")
@@ -331,6 +341,30 @@ class EnforcementTests(unittest.TestCase):
         self.assertTrue(rows[0]["inbox"])
         self.assertEqual(rows[0]["tier"], "keep")
         self.assertIn("不会执行", proc.stderr)
+
+    def test_installed_layout_blocks_without_the_agentspec_tree(self):
+        """A fresh machine has no ~/AgentSpec checkout. The bundle copy must still deny."""
+        installed = self.root / "Application Support" / "AgentReins" / "transport-audit"
+        installed.mkdir(parents=True)
+        (installed / "auto.py").write_bytes((ROOT / "tools" / "transport-audit" / "auto.py").read_bytes())
+        (installed / "auto.py").chmod(0o755)
+        (installed / "hardgate_policy.py").write_bytes(POLICY_PATH.read_bytes())
+        (installed / "redact_secrets.py").write_bytes((ROOT / "tools" / "redact_secrets.py").read_bytes())
+        (installed / "content_audit.py").write_bytes((ROOT / "Sources" / "AgentReins" / "Resources" / "content_audit.py").read_bytes())
+        bindir = installed / "bin"
+        bindir.mkdir()
+        (bindir / "curl").symlink_to("../auto.py")
+        env = self._env("curl")
+        proc = subprocess.run(
+            [str(bindir / "curl"), "https://blocked.example/secret"],
+            env=env, capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(proc.returncode, 126, proc.stderr)
+        self.assertFalse(self.marker.exists())
+        self.assertNotIn("AgentSpec", proc.stderr)
+        rows = policy.load_rows(self.root / "gate")
+        self.assertEqual(rows[0]["action"], "deny")
+        self.assertEqual(rows[0]["mechanism"], "transport-wrapper")
 
     def test_wrapper_executes_loopback(self):
         env = self._env("curl")

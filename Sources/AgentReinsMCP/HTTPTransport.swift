@@ -91,11 +91,25 @@ enum HTTPTransport {
             started[row.pid] = row.startedAt
         }
         let listening = portAccepts(port)
-        let victims = MCPHTTPOrphans.healthVictims(procs, port: port, portListening: listening, now: Date(), startedAt: started)
+        let launchd = launchdStatusText()
+        let victims = MCPHTTPOrphans.healthVictims(
+            procs, port: port, portListening: listening, now: Date(), startedAt: started,
+            minimumAge: MCPHTTPOrphans.healthGrace(launchdText: launchd))
+        let lines = MCPHTTPOrphans.healthLogLines(victims: victims, port: port, launchdText: launchd)
         for pid in victims {
             kill(pid, SIGTERM)
-            log("AgentReinsMCP health: pid \(pid) alive but 127.0.0.1:\(port) is not accepting; signaled")
         }
+        // healthLogLines is empty when the only launchd fact is kickstart's -9.
+        for line in lines {
+            log(line)
+        }
+    }
+
+    /// launchctl print of the HTTP job. Empty when launchd has no such service.
+    /// stderr from launchctl is discarded so a missing service is not an error line.
+    private static func launchdStatusText() -> String {
+        let label = "gui/\(getuid())/com.agentreins.mcp-http"
+        return BoundedProcess.run("/bin/launchctl", arguments: ["print", label], timeout: 2)
     }
 
     static func portAccepts(_ port: Int) -> Bool {

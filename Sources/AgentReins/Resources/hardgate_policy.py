@@ -739,9 +739,41 @@ def seed_rules_file(path):
     return True
 
 
+def installed_rules_paths():
+    """The two files a launch may find. The app reads AgentReins; older installs use AgentGuard."""
+    support = Path.home() / "Library" / "Application Support"
+    return [
+        support / "AgentReins" / "rules.json",
+        support / "AgentGuard" / "rules.json",
+    ]
+
+
+def live_gate_root():
+    return Path.home() / "Library" / "Application Support" / "AgentReins" / "hardgate"
+
+
+def seed_installed_rules(paths):
+    """Fill each empty, non-customized rules file. Returns True if any file was written."""
+    wrote = False
+    for path in paths:
+        if seed_rules_file(path):
+            wrote = True
+    return wrote
+
+
 def ensure_seeded(root=None):
-    """Write the default egress allowlist when the file is missing or still empty."""
+    """Write the default egress allowlist when the file is missing or still empty.
+
+    On the real install (not a test root) also seed empty rules.json. Wrappers
+    used to seed only the allowlist, so rules stayed {"rules":[],"version":1}
+    until someone ran seed_rules_file by hand.
+    """
     root = gate_root(root)
+    try:
+        if root.resolve() == live_gate_root().resolve():
+            seed_installed_rules(installed_rules_paths())
+    except OSError:
+        pass
     fd = _lock(root)
     try:
         doc = _read_allowlist_doc(root)

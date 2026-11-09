@@ -10,6 +10,9 @@ import Security
 @main
 enum AgentReinsMCP {
     static func main() {
+        // Every process start, including the health LaunchAgent. Empty rules
+        // with customized != true are filled. A customized file is left alone.
+        InstalledRules.seedSupportFiles()
         var http = false
         var httpHealth = false
         var port = EndpointDiscovery.defaultPort
@@ -286,6 +289,14 @@ enum Alerts {
             if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
             out.append(item)
         }
+        let observations = credentialObservations()
+        for item in observations {
+            if let agent, agent != "all", str(item["agent"]) != agent { continue }
+            if let rule, rule != "all", str(item["rule"]) != rule { continue }
+            if let sinceTs, let ts = Clock.parse(item["timestamp"]), ts < sinceTs { continue }
+            if let untilTs, let ts = Clock.parse(item["timestamp"]), ts > untilTs { continue }
+            out.append(item)
+        }
         let page = ListPage.slice(out, offset: offset, limit: limit)
         var result: [String: Any] = [
             "alerts": Redact.any(page.items),
@@ -295,7 +306,32 @@ enum Alerts {
         ]
         for (k, v) in ListPage.meta(page) { result[k] = v }
         if let warning { result["warning"] = warning }
+        if !observations.isEmpty {
+            result["note"] = (result["note"] as? String ?? "") + " 另有进程内凭据读取（confirmed / possible）。PATH 包装看不到、也拦不住这类 open()。"
+        }
         return result
+    }
+
+    /// In-process open() never produces a transport.json row. The app appends a
+    /// short sidecar when libproc or the credential watch sees the path.
+    static func credentialObservations() -> [[String: Any]] {
+        CredentialObservationLog.recent(from: CredentialObservationLog.defaultURL(), limit: 80).map { row in
+            let grade = row.grade == "confirmed" ? "confirmed" : "possible"
+            let why = "进程内 open() 不经过 PATH 包装，拦不住。等级 \(grade)，来源 \(row.source)。文件描述符已经关掉时只能标 possible；APFS 没有更新 atime 时这次读取看不到。"
+            return [
+                "id": "credential-observe:\(grade):\(row.path)",
+                "rule": "credential_observe",
+                "title": grade == "confirmed" ? "凭据路径读取（confirmed）" : "凭据路径读取（possible）",
+                "agent": row.agent.isEmpty ? "Unknown" : row.agent,
+                "session": NSNull(),
+                "call": NSNull(),
+                "confidence": grade == "confirmed" ? "Observed" : "Inferred",
+                "timestamp": row.at,
+                "sub": row.path,
+                "why": why,
+                "finding": NSNull(),
+            ]
+        }
     }
 
     static func build(_ records: [[String: Any]]) -> (alerts: [[String: Any]], engine: String, warning: String?) {

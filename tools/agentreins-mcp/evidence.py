@@ -724,6 +724,60 @@ def build_alerts_fallback(records: list[dict[str, Any]]) -> list[dict[str, Any]]
     return list(by_id.values())
 
 
+def credential_observation_path() -> pathlib.Path:
+    override = os.environ.get("AGENTREINS_CREDENTIAL_OBSERVATIONS")
+    if override:
+        return pathlib.Path(override)
+    return pathlib.Path.home() / "Library/Application Support/AgentReins/credential-observations.jsonl"
+
+
+def credential_observation_alerts(limit: int = 80) -> list[dict[str, Any]]:
+    """In-process open() does not create transport.json. The app writes this sidecar."""
+    path = credential_observation_path()
+    if not path.is_file():
+        return []
+    try:
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return []
+    alerts: list[dict[str, Any]] = []
+    for line in lines[-limit:]:
+        text = line.strip()
+        if not text:
+            continue
+        try:
+            row = json.loads(text)
+        except ValueError:
+            continue
+        if not isinstance(row, dict):
+            continue
+        target = str(row.get("path") or "")
+        if not target:
+            continue
+        grade = "confirmed" if row.get("grade") == "confirmed" else "possible"
+        source = str(row.get("source") or "")
+        alerts.append(
+            {
+                "id": f"credential-observe:{grade}:{target}",
+                "rule": "credential_observe",
+                "title": "凭据路径读取（confirmed）" if grade == "confirmed" else "凭据路径读取（possible）",
+                "agent": row.get("agent") or "Unknown",
+                "session": None,
+                "call": None,
+                "confidence": "Observed" if grade == "confirmed" else "Inferred",
+                "timestamp": row.get("at"),
+                "sub": target,
+                "why": (
+                    "进程内 open() 不经过 PATH 包装，拦不住。"
+                    f"等级 {grade}，来源 {source}。"
+                    "文件描述符已经关掉时只能标 possible；APFS 没有更新 atime 时这次读取看不到。"
+                ),
+                "finding": None,
+            }
+        )
+    return alerts
+
+
 def list_alerts(
     agent: str | None = None,
     since: str | None = None,
@@ -776,6 +830,28 @@ def list_alerts(
         if not _in_time_range(item.get("timestamp"), since_ts, until_ts):
             continue
         out.append(redact_obj(item))
+    observations = credential_observation_alerts()
+    for alert in observations:
+        item = {
+            "id": alert.get("id"),
+            "rule": normalize_rule(alert.get("rule")),
+            "title": alert.get("title"),
+            "agent": alert.get("agent"),
+            "session": alert.get("session"),
+            "executionId": alert.get("call"),
+            "confidence": conf_label(alert.get("confidence")),
+            "timestamp": alert.get("timestamp"),
+            "sub": alert.get("sub"),
+            "why": alert.get("why"),
+            "finding": alert.get("finding"),
+        }
+        if agent and agent != "all" and str(item.get("agent")) != agent:
+            continue
+        if rule and rule != "all" and str(item.get("rule")) != rule:
+            continue
+        if not _in_time_range(item.get("timestamp"), since_ts, until_ts):
+            continue
+        out.append(redact_obj(item))
     page_offset, page_limit = _parse_page(limit, offset, cursor, None)
     window = _page_window(out, page_offset, page_limit)
     result = {
@@ -788,6 +864,8 @@ def list_alerts(
     result.update(_page_meta(window))
     if engine_meta.get("warning"):
         result["warning"] = engine_meta["warning"]
+    if observations:
+        result["note"] = str(result["note"]) + " 另有进程内凭据读取（confirmed / possible）。PATH 包装看不到、也拦不住这类 open()。"
     return result
 
 

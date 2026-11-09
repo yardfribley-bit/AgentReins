@@ -12,7 +12,7 @@ public enum FileLayerCapture {
     /// bounded credential set uses access-time (NOTE_ATTRIB). APFS may skip
     /// or coalesce atime, so a kqueue hit without an open descriptor is only
     /// "possible (sampled)". This is not a full-disk watch and not Endpoint Security.
-    public static let limits = "libproc sees only descriptors still open, so a short read between samples can be missed. A kqueue NOTE_ATTRIB watch on known credential paths and .env* under the agent working directory, /tmp, and /private/tmp records an access-time move. If the agent still has the file open, the read is confirmed. If not, it is possible (sampled): APFS often does not update atime on every read. File bytes are not copied."
+    public static let limits = "libproc sees only descriptors still open, so a short read between samples can be missed. A kqueue NOTE_ATTRIB watch covers known credential paths and .env* one directory under the agent working directory, /tmp, and /private/tmp, including /tmp/<dir>/.env. If the agent still has the file open, the read is confirmed. If not, it is possible (sampled): APFS often does not update atime on every read, and then neither kqueue nor the stat poll can see it. PATH wrappers do not see an in-process open(). File bytes are not copied."
 
     public static let watchCap = 256
 
@@ -145,8 +145,10 @@ public enum FileLayerCapture {
         return base.range(of: #"(?i)\.env(?:\.|$)"#, options: .regularExpression) != nil
     }
 
-    /// Bounded credential set. `directoryNames` is a one-level listing the caller
-    /// already made. No full-disk walk happens here.
+    /// Bounded credential set. `directoryNames` is a listing the caller already
+    /// made: one level for credential directories, plus one extra level under
+    /// `/tmp`, `/private/tmp`, and each agent working directory so
+    /// `/tmp/<dir>/.env` is registered. No full-disk walk happens here.
     public static func watchFiles(home: String, workspaces: [String], directoryNames: [String: [String]]) -> [String] {
         var out: [String] = []
         var seen = Set<String>()
@@ -155,6 +157,10 @@ public enum FileLayerCapture {
             let cleaned = (path as NSString).standardizingPath
             guard !cleaned.isEmpty, seen.insert(cleaned).inserted else { return }
             out.append(cleaned)
+        }
+        func listed(_ path: String) -> [String] {
+            let key = (path as NSString).standardizingPath
+            return directoryNames[key] ?? directoryNames[path] ?? []
         }
         for path in builtinCredentialFiles(home: home) { add(path) }
         let root = (home as NSString).expandingTildeInPath
@@ -165,7 +171,7 @@ public enum FileLayerCapture {
             (root as NSString).appendingPathComponent("Library/Keychains"),
         ]
         for dir in credentialDirs {
-            for name in directoryNames[dir] ?? [] {
+            for name in listed(dir) {
                 let base = (name as NSString).lastPathComponent
                 guard base != ".", base != "..", !base.isEmpty else { continue }
                 add((dir as NSString).appendingPathComponent(base))
@@ -176,8 +182,18 @@ public enum FileLayerCapture {
         envDirs.append("/private/tmp")
         for dir in envDirs {
             let key = (dir as NSString).standardizingPath
-            for name in directoryNames[key] ?? directoryNames[dir] ?? [] where isDotEnvName(name) {
-                add((key as NSString).appendingPathComponent((name as NSString).lastPathComponent))
+            for name in listed(key) {
+                let base = (name as NSString).lastPathComponent
+                guard base != ".", base != "..", !base.isEmpty else { continue }
+                let child = (key as NSString).appendingPathComponent(base)
+                if isDotEnvName(base) {
+                    add(child)
+                    continue
+                }
+                for nested in listed(child) where isDotEnvName(nested) {
+                    let nestedBase = (nested as NSString).lastPathComponent
+                    add((child as NSString).appendingPathComponent(nestedBase))
+                }
             }
         }
         return out

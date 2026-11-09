@@ -15,13 +15,16 @@ final class AgentTreeFileObserver {
     private var seen: [Int32: Set<String>] = [:]
     private var confirmedPaths = Set<String>()
     private var cursor = 0
+    private var watchList: [String] = []
+    private var accessStamps: [String: FileLayerCapture.AccessStamp] = [:]
+    private var watchTick = 0
     private let lock = NSLock()
 
     func start() {
         lock.lock()
         if timer != nil { lock.unlock(); return }
         let source = DispatchSource.makeTimerSource(queue: queue)
-        source.schedule(deadline: .now() + 1, repeating: 1.5)
+        source.schedule(deadline: .now() + 0.4, repeating: 0.4)
         source.setEventHandler { [weak self] in self?.sample() }
         source.resume()
         timer = source
@@ -61,15 +64,14 @@ final class AgentTreeFileObserver {
             }
         }
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
-        accessWatch?.replace(paths: watchPaths(agentRows: mine))
-        let slice: [ProcessTable.Row]
-        if mine.count <= 48 {
-            slice = mine
-        } else {
-            let start = cursor % mine.count
-            cursor = (start + 48) % mine.count
-            slice = (0..<48).map { mine[(start + $0) % mine.count] }
+        watchTick += 1
+        if watchList.isEmpty || watchTick % 4 == 0 {
+            watchList = watchPaths(agentRows: mine)
+            accessWatch?.replace(paths: watchList)
+            accessStamps = accessStamps.filter { watchList.contains($0.key) }
         }
+        pollAccessTimes(paths: watchList)
+        let slice = sampleSlice(mine)
         var events: [GuardEvent] = []
         let live = Set(mine.map(\.pid))
         seen = seen.filter { live.contains($0.key) }
@@ -94,6 +96,42 @@ final class AgentTreeFileObserver {
         DispatchQueue.main.async { deliver?(events) }
     }
 
+    /// Unseen processes are sampled first. A python that is still alive on this
+    /// tick can be confirmed. One that has already exited is not in `mine`.
+    private func sampleSlice(_ mine: [ProcessTable.Row]) -> [ProcessTable.Row] {
+        if mine.count <= 48 { return mine }
+        let unseen = mine.filter { seen[$0.pid] == nil }
+        let rest = mine.filter { seen[$0.pid] != nil }
+        let room = max(0, 48 - unseen.count)
+        var picked: [ProcessTable.Row] = []
+        if !rest.isEmpty && room > 0 {
+            let start = cursor % rest.count
+            picked = (0..<room).map { rest[(start + $0) % rest.count] }
+            cursor = (start + room) % rest.count
+        }
+        return Array((unseen + picked).prefix(48))
+    }
+
+    /// Stat poll of the registered set. kqueue can miss a NOTE_ATTRIB; the stamp
+    /// still moves when the kernel updates atime. No atime move means no event.
+    private func pollAccessTimes(paths: [String]) {
+        for path in paths {
+            guard let current = Self.stamp(path) else { continue }
+            let previous = accessStamps[path]
+            accessStamps[path] = current
+            guard let previous, FileLayerCapture.isAccessRead(previous: previous, current: current) else { continue }
+            noteAccess(path, source: "credential-stat")
+        }
+    }
+
+    private static func stamp(_ path: String) -> FileLayerCapture.AccessStamp? {
+        var info = stat()
+        guard stat(path, &info) == 0 else { return nil }
+        let access = TimeInterval(info.st_atimespec.tv_sec) + TimeInterval(info.st_atimespec.tv_nsec) / 1_000_000_000
+        let modified = TimeInterval(info.st_mtimespec.tv_sec) + TimeInterval(info.st_mtimespec.tv_nsec) / 1_000_000_000
+        return FileLayerCapture.AccessStamp(access: access, modified: modified)
+    }
+
     private func rowIsSelf(_ path: String) -> Bool {
         let base = (path as NSString).lastPathComponent
         return base == "AgentReins" || base == "AgentReinsMCP"
@@ -102,7 +140,7 @@ final class AgentTreeFileObserver {
     /// kqueue saw the access time move. If a tracked agent still holds the
     /// descriptor, the read is confirmed. If the descriptor already closed, the
     /// same event is only possible (sampled).
-    private func noteAccess(_ path: String) {
+    private func noteAccess(_ path: String, source: String = "credential-kqueue") {
         let rows = ProcessTable.snapshot()
         var owner: [Int32: String] = [:]
         for row in rows {
@@ -139,7 +177,7 @@ final class AgentTreeFileObserver {
         let hit = FileLayerCapture.Hit(path: path, op: "read", credential: true)
         let event = Self.event(
             hit: hit, agent: agent, pid: holder?.pid ?? 0, ppid: holder?.ppid ?? 0,
-            grade: grade, source: "credential-kqueue")
+            grade: grade, source: source)
         let deliver = onEvents
         DispatchQueue.main.async { deliver?([event]) }
     }
@@ -161,7 +199,24 @@ final class AgentTreeFileObserver {
             if cwd.hasPrefix("/") { workspaces.append(cwd); dirs.append(cwd) }
         }
         for dir in dirs {
-            names[(dir as NSString).standardizingPath] = Self.oneLevelNames(dir)
+            let key = (dir as NSString).standardizingPath
+            names[key] = Self.oneLevelNames(dir)
+        }
+        var nested = 0
+        let nestedRoots = (["/tmp", "/private/tmp"] + workspaces).map { ($0 as NSString).standardizingPath }
+        for dir in nestedRoots where nested < 64 {
+            for name in names[dir] ?? [] {
+                if nested >= 64 { break }
+                let base = (name as NSString).lastPathComponent
+                guard base != ".", base != "..", !base.isEmpty else { continue }
+                let child = (dir as NSString).appendingPathComponent(base)
+                let url = URL(fileURLWithPath: child)
+                let values = try? url.resourceValues(forKeys: [.isSymbolicLinkKey, .isDirectoryKey])
+                if values?.isSymbolicLink == true { continue }
+                guard values?.isDirectory == true else { continue }
+                names[(child as NSString).standardizingPath] = Self.oneLevelNames(child)
+                nested += 1
+            }
         }
         return FileLayerCapture.watchFiles(home: home, workspaces: workspaces, directoryNames: names)
     }
@@ -181,6 +236,15 @@ final class AgentTreeFileObserver {
         let method = grade == "confirmed"
             ? "confirmed. " + FileLayerCapture.limits
             : "possible (sampled). " + FileLayerCapture.limits
+        if hit.credential && hit.op == "read" {
+            let formatter = ISO8601DateFormatter()
+            formatter.formatOptions = [.withInternetDateTime]
+            CredentialObservationLog.append(
+                CredentialObservationLog.Row(
+                    path: hit.path, grade: grade, agent: agent ?? "", at: formatter.string(from: Date()),
+                    source: source, blocked: false),
+                to: CredentialObservationLog.defaultURL())
+        }
         return GuardEvent(
             id: id, kind: "file", ruleId: hit.credential ? "credential_observe" : "agent_tree_write",
             path: hit.path, command: nil, agent: agent, op: hit.op,

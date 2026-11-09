@@ -8,7 +8,11 @@ transport entry.
 """
 import datetime, json, os, pathlib, shlex, tempfile
 root = pathlib.Path(__file__).resolve().parents[1]
-bin_dir = root / 'tools' / 'transport-audit' / 'bin'
+installed = pathlib.Path.home() / 'Library' / 'Application Support' / 'AgentReins' / 'transport-audit'
+if (installed / 'VERSION').is_file() and (installed / 'bin' / 'curl').exists():
+    bin_dir = installed / 'bin'
+else:
+    bin_dir = root / 'tools' / 'transport-audit' / 'bin'
 tools = sorted(path.name for path in bin_dir.iterdir() if path.name != 'auto.py' and not path.name.startswith('.') and path.name.replace('.', '').replace('_', '').replace('-', '').replace('+', '').isalnum())
 if not tools:
     raise SystemExit('No transport entries installed')

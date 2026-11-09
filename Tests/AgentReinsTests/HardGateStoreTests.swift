@@ -1,4 +1,5 @@
 import XCTest
+import AgentReinsCore
 @testable import AgentReins
 
 final class HardGateStoreTests: XCTestCase {
@@ -114,6 +115,19 @@ final class HardGateStoreTests: XCTestCase {
         let custom = tempDir.appendingPathComponent("custom-rules.json")
         try Data("{\"version\":1,\"customized\":true,\"rules\":[]}".utf8).write(to: custom)
         XCTAssertFalse(HardGateStore.seedRulesFile(at: custom))
+        let home = tempDir.appendingPathComponent("home-rules")
+        let reins = InstalledRules.supportURLs(home: home)[0]
+        let legacy = InstalledRules.supportURLs(home: home)[1]
+        try FileManager.default.createDirectory(at: reins.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: legacy.deletingLastPathComponent(), withIntermediateDirectories: true)
+        try Data("{\"rules\":[],\"version\":1}".utf8).write(to: reins)
+        try Data("{\"version\":1,\"customized\":true,\"rules\":[]}".utf8).write(to: legacy)
+        let seeded = HardGateStore.seedInstalledRules(home: home)
+        XCTAssertEqual(seeded, [reins])
+        XCTAssertTrue(HardGateStore.seedInstalledRules(home: home).isEmpty)
+        let legacyDoc = try JSONSerialization.jsonObject(with: Data(contentsOf: legacy)) as? [String: Any]
+        XCTAssertEqual((legacyDoc?["customized"] as? Bool), true)
+        XCTAssertEqual((legacyDoc?["rules"] as? [Any])?.count, 0)
         let policy = HardGateStore.policyPayload()
         XCTAssertEqual(policy["egress"] as? String, "deny-unlisted")
         XCTAssertEqual(policy["credentialReads"] as? String, "deny")

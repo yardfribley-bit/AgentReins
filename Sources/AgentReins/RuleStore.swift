@@ -1,8 +1,8 @@
 import Foundation
 import SwiftUI
 
-/// 规则仓库：持久化到 ~/Library/Application Support/AgentGuard/rules.json，
-/// 与 agentguard 生态共用同一 schema。
+/// 规则仓库：读写 ~/Library/Application Support/AgentReins/rules.json。
+/// 每次启动也会把空的 AgentGuard/rules.json 种上同一份默认拒绝，customized == true 不动。
 @MainActor
 final class RuleStore: ObservableObject {
     @Published var rules: [Rule] = []
@@ -14,7 +14,7 @@ final class RuleStore: ObservableObject {
         let dir = appSup.appendingPathComponent("AgentReins", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.fileURL = dir.appendingPathComponent("rules.json")
-        HardGateStore.seedRulesFile(at: fileURL)
+        HardGateStore.seedInstalledRules()
         HardGateStore.seedDefaults()
         load()
     }
