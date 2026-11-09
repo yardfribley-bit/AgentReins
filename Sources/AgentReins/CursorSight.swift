@@ -348,7 +348,7 @@ final class CursorSight: ObservableObject {
                 action: "independently_observed", ts: timestamp, session: session, turn: turn,
                 workspace: path, intent: intent, after: content, model: model,
                 toolCallId: callID, toolName: "run_terminal_command_v2",
-                codeFindings: CodeSecurityScanner.scan(path: path, before: content, after: content),
+                codeFindings: CodeSecurityScanner.scan(path: path, before: nil, after: content),
                 confidence: .inferred,
                 method: method)
         }

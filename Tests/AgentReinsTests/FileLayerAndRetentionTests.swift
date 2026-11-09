@@ -1,3 +1,4 @@
+import SQLite3
 import XCTest
 import AgentReinsCore
 @testable import AgentReins
@@ -141,10 +142,20 @@ final class EvidenceReclaimTests: XCTestCase {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
-        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let url = root.appendingPathComponent("evidence.sqlite3")
+        let database = try EvidenceDatabase(url: url)
         XCTAssertEqual(try database.autoVacuumMode(), 2)
+        // New appends already store a short summary for oversized blobs. This row
+        // imitates a blob that was written before that rule.
+        var raw: OpaquePointer?
+        XCTAssertEqual(sqlite3_open(url.path, &raw), SQLITE_OK)
+        var insert: OpaquePointer?
+        XCTAssertEqual(sqlite3_prepare_v2(raw, "INSERT INTO raw_evidence(evidence_key,source,stream,offset_start,offset_end,observed_at,payload,payload_sha256) VALUES('legacy-blob','transport','blob',0,200000,0,?, 'abc')", -1, &insert, nil), SQLITE_OK)
         let blob = Data(repeating: 7, count: 200_000)
-        try database.appendRaw([RawEvidenceRecord(source: "transport", stream: "blob", offsetStart: 0, offsetEnd: Int64(blob.count), fingerprint: nil, observedAt: Date().addingTimeInterval(-10 * 24 * 3600), payload: blob)])
+        _ = blob.withUnsafeBytes { sqlite3_bind_blob(insert, 1, $0.baseAddress, Int32(blob.count), unsafeBitCast(-1, to: sqlite3_destructor_type.self)) }
+        XCTAssertEqual(sqlite3_step(insert), SQLITE_DONE)
+        sqlite3_finalize(insert)
+        sqlite3_close(raw)
         var policy = EvidenceRetentionPolicy.default
         policy.bulkMaxAge = 1
         let result = try database.prune(policy: policy)
