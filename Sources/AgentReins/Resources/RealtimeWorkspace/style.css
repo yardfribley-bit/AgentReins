@@ -174,6 +174,8 @@ nav button em{position:absolute;right:8px;top:8px;min-width:16px;height:16px;pad
 .risk-table tr.acked,.risk-detail.acked{opacity:.72}
 .risk-st.acked{color:var(--muted)}
 .risk-st.open{color:var(--red)}
+.risk-st.block{color:var(--red);font-weight:600}
+.risk-st.noted{color:var(--muted)}
 .risk-stats.cov-only{grid-template-columns:repeat(4,minmax(0,1fr))}
 .risk-stat,.risk-cov{background:var(--surface);border:1px solid var(--line);border-radius:10px;padding:12px 14px}
 .risk-stat b{display:block;font-size:28px;font-weight:600;line-height:1.1}

@@ -183,6 +183,39 @@ function inboxNoiseReason(task){
  if(request&&missing.test(request)&&request.length<80)return 'no-user-prompt';
  return null;
 }
+function gateClosed(subject,decisions,allowlist){
+ if(list(allowlist).some(e=>e&&e.subject===subject&&e.actor==='user'&&String(e.reason||'').trim()))return true;
+ return list(decisions).some(d=>{
+  if(!d||d.subject!==subject)return false;
+  if(d.state==='allowlisted'||d.state==='hard-allow'||d.state==='hard-deny')return true;
+  return d.actor==='user'&&(d.action==='allow'||d.action==='deny');
+ });
+}
+function gateInboxItems(records,decisions,allowlist){
+ const items=[];
+ const seen=new Set();
+ for(const row of list(records)){
+  if(!row||row.inbox!==true||row.heartbeat===true)continue;
+  if(row.tier&&row.tier!=='keep')continue;
+  if(row.action&&row.action!=='deny')continue;
+  const subject=String(row.subject||'');
+  if(!subject||seen.has(subject)||gateClosed(subject,decisions,allowlist))continue;
+  seen.add(subject);
+  const id='gate:'+subject;
+  items.push({
+   gate:row,
+   task:{id,agent:row.agent||'监督进程树',lifecycleStatus:'hard-gate',originalRequest:row.detail||(row.kind==='credential-read'?'第一次读取凭据路径':'第一次外联到新主机'),title:subject,startedAt:row.at||''},
+   bucket:{id:'gate',label:'硬门禁'},
+   decision:null
+  });
+ }
+ return items;
+}
+function hardGateFrom(opts,payload){
+ if(opts&&Array.isArray(opts.inbox))return opts;
+ if(opts&&opts.hardGate)return opts.hardGate;
+ return payload?.hardGate||{};
+}
 function inboxItems(payload,decisions,opts){
  const wantNoise=!!(opts&&opts.noise);
  const items=[];
@@ -194,8 +227,12 @@ function inboxItems(payload,decisions,opts){
   else if(noise)continue;
   items.push({task:t,bucket,decision:decisionFor(decisions,t.id),noise:noise||null});
  }
- const order={confirm:0,review:1,failed:2};
- return items.sort((a,b)=>order[a.bucket.id]-order[b.bucket.id]||new Date(b.task.startedAt)-new Date(a.task.startedAt));
+ if(!wantNoise){
+  const gate=hardGateFrom(opts,payload);
+  items.push(...gateInboxItems(gate.inbox,decisions,gate.allowlist));
+ }
+ const order={gate:-1,confirm:0,review:1,failed:2};
+ return items.sort((a,b)=>(order[a.bucket.id]??9)-(order[b.bucket.id]??9)||new Date(b.task.startedAt)-new Date(a.task.startedAt));
 }
 function evidenceItems(task){
  return list(task?.cards).slice(0,12).map(c=>{
@@ -218,7 +255,8 @@ function evidencePack(task,decision){
 function renderInbox(holder,payload,state){
  const decisions=list(state?.decisions);
  const noiseMode=state?.inboxBucket==='noise';
- const items=inboxItems(payload,decisions,noiseMode?{noise:true}:null);
+ const hardGate=state?.hardGate||payload?.hardGate||{};
+ const items=inboxItems(payload,decisions,noiseMode?{noise:true}:{hardGate});
  const noiseItems=inboxItems(payload,decisions,{noise:true});
  const open=items.filter(i=>!i.decision||i.decision.state==='needs_evidence');
  const noiseOpen=noiseItems.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
@@ -229,9 +267,25 @@ function renderInbox(holder,payload,state){
   const noiseNote=i.noise==='heartbeat'?'心跳':'没有用户原话';
   return `<button type="button" class="inbox-item${selected&&selected.task.id===i.task.id?' on':''}" data-inbox-id="${esc(i.task.id)}"><b>${esc(cut(i.task.originalRequest||i.task.title||i.task.id,42))}</b><small>${esc(i.task.agent||'')} · ${esc(noiseMode?noiseNote+' · '+label:label)}</small></button>`;
  }).join(''):`<p class="empty">${noiseMode?'噪声桶是空的。':'没有等你验收的任务。心跳和「用户需求未采集」在「噪声」里，证据还在，没有删除。'}</p>`;
- const switcher=`<div class="inbox-switch"><button type="button" class="${noiseMode?'':'on'}" data-inbox-bucket="work">待验收 ${inboxItems(payload,decisions).filter(i=>!i.decision||i.decision.state==='needs_evidence').length}</button><button type="button" class="${noiseMode?'on':''}" data-inbox-bucket="noise">噪声 ${noiseOpen}</button></div>`;
+ const switcher=`<div class="inbox-switch"><button type="button" class="${noiseMode?'':'on'}" data-inbox-bucket="work">待验收 ${inboxItems(payload,decisions,{hardGate}).filter(i=>!i.decision||i.decision.state==='needs_evidence').length}</button><button type="button" class="${noiseMode?'on':''}" data-inbox-bucket="noise">噪声 ${noiseOpen}</button></div>`;
  let card='';
- if(selected){
+ if(selected&&selected.gate){
+  const row=selected.gate;
+  const fired=row.enforced===true&&(row.mechanism==='audit-proxy'||row.mechanism==='transport-wrapper');
+  const status=fired?'已阻断':'已记下，未拦截';
+  const where=row.mechanism==='audit-proxy'?'审计代理':'PATH 命令入口';
+  const invalid=state?.hardGateReasonInvalid?' invalid':'';
+  card=`<article class="risk-detail"><p class="t2">${esc(row.kind==='credential-read'?'凭据路径':'外联')} · ${esc(row.subject||'')}</p><h2>${esc(status)}</h2>
+   <p>${esc(row.detail||selected.task.originalRequest||'')}</p>
+   <p class="note">${fired?`执行回执来自${esc(where)}，发生在转发或 exec 之前。`:'这条记录没有执行回执，所以不写成已经拦住。'}</p>
+   <label class="risk-search">允许原因（允许时必填）<textarea id="hardgate-reason" class="${invalid.trim()}" rows="3" placeholder="写明为什么可以放行">${esc(state?.hardGateReason||'')}</textarea></label>
+   <div class="risk-actions">
+    <button type="button" class="primary" data-hardgate-decide="allow" data-hardgate-subject="${esc(row.subject||'')}" data-hardgate-kind="${esc(row.kind||'')}">允许</button>
+    <button type="button" class="quiet" data-hardgate-decide="deny" data-hardgate-subject="${esc(row.subject||'')}" data-hardgate-kind="${esc(row.kind||'')}">保持拒绝</button>
+   </div>
+   <p class="note">允许会写入显式允许名单并记一条原因。拒绝不会把这条放进允许名单。心跳不会出现在这个队列。</p>
+  </article>`;
+ }else if(selected){
   const t=selected.task;
   const noiseBanner=selected.noise?`<p class="request-missing">${selected.noise==='heartbeat'?'这是心跳或机器标记，不是要你验收的用户请求。':'没有采到用户原话，所以默认待办不列出它。'}证据还在任务过程里，这里没有删除。</p>`:'';
   const request=t.originalRequest||t.latestUserInput?.content;
@@ -254,7 +308,7 @@ function renderInbox(holder,payload,state){
    <p class="note">通过、退回、补证据写入本机 Review。退回没有原因时不会保存。导出的是当前投影，不是一份被签过名的证据。</p>
   </article>`;
  }
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">人的决定留在本机</div><h1>待我处理</h1><p>${noiseMode?'心跳和没采到用户原话的轮次。默认待办不含这些。':'等我确认、待验收、失败。心跳和「用户需求未采集」不进默认队列。'}</p></div><span class="t2">${open.length} 条未结束</span></div>${switcher}<div class="inbox-layout"><aside>${queue}</aside><div>${card||'<p class="empty">选左边一条。</p>'}</div></div>`;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">人的决定留在本机</div><h1>待我处理</h1><p>${noiseMode?'心跳和没采到用户原话的轮次。默认待办不含这些。':'等我确认、待验收、失败，以及第一次去新主机或第一次读凭据路径。心跳、「用户需求未采集」和重复外联不进默认队列。'}</p></div><span class="t2">${open.length} 条未结束</span></div>${switcher}<div class="inbox-layout"><aside>${queue}</aside><div>${card||'<p class="empty">选左边一条。</p>'}</div></div>`;
 }
 
 const MCP_TOOLS=[
@@ -290,8 +344,8 @@ function renderAbout(holder, install){
  const kicker=esc(installLabel(install));
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。看得见主机层里已经采到的 agent 行为，并在本机确认、加白、复查。</p></div></div>
  <div class="about-body">
- <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。放行和阻断目前是本机处置记录，连接仍按原路径进行。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">清理走已经在跑的分层：心跳和没采到原话满一天，大块原文满三天。外联、凭据、文件改动、验收决定和短摘录不动。</p></article>
- <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）</li><li>放行和阻断接到模型网关与 Network Extension</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
+ <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。已阻断只在审计代理拒绝转发，或 PATH 命令入口没有执行真实命令时出现。只写了 Review、没有执行回执时，状态是「已记下，未拦截」。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">清理走已经在跑的分层：心跳和没采到原话满一天，大块原文满三天。外联、凭据、文件改动、验收决定和短摘录不动。</p></article>
+ <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）。进程内读文件这版拦不住</li><li>Network Extension 仍未安装。绝对路径绕过 PATH、QUIC、参数里看不到目的地的 git 仍拦不住</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
  </div>`;
 }
 

@@ -195,7 +195,71 @@ def _flow_attribution(flow):
     return fields
 
 
+_hard_gate_mod = None
+
+def _load_hard_gate():
+    global _hard_gate_mod
+    if _hard_gate_mod is not None:
+        return _hard_gate_mod
+    override = os.environ.get("AGENTREINS_HARDGATE_POLICY")
+    here = Path(__file__).resolve()
+    candidates = []
+    if override:
+        candidates.append(Path(override))
+    candidates.append(here.with_name("hardgate_policy.py"))
+    if len(here.parents) > 2:
+        candidates.append(here.parents[2] / "tools" / "hardgate" / "policy.py")
+    for path in candidates:
+        if path.is_file():
+            spec = importlib.util.spec_from_file_location("agentreins_hardgate", path)
+            if spec is None or spec.loader is None:
+                continue
+            module = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(module)
+            _hard_gate_mod = module
+            return module
+    raise ImportError("hardgate_policy.py")
+
+
+def _fail_closed(flow):
+    kill = getattr(flow, "kill", None)
+    if callable(kill):
+        try:
+            kill()
+            return True
+        except Exception:
+            return False
+    return False
+
+
+def _proxy_gate(flow):
+    """Return True when this flow is denied and must not be forwarded."""
+    try:
+        gate = _load_hard_gate()
+    except Exception:
+        return _fail_closed(flow)
+    try:
+        return bool(gate.enforce_proxy_flow(flow))
+    except Exception:
+        return _fail_closed(flow)
+
+
+def http_connect(flow):
+    # CONNECT is the tunnel. Deny before the upstream TCP connection when we can.
+    _proxy_gate(flow)
+
+
 def request(flow):
+    try:
+        denied = _proxy_gate(flow)
+    except Exception:
+        denied = _fail_closed(flow)
+    if denied:
+        try:
+            _capture(flow, "hard-gate-denied")
+        except Exception:
+            pass
+        return
     _take_transport_call(flow)
     _capture(flow, "request")
 
