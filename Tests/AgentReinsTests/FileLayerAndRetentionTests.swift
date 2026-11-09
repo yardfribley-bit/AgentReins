@@ -215,7 +215,7 @@ final class MCPHealthAndStaleDataTests: XCTestCase {
     func testPythonChildOfTheAgentShellIsInTheTree() {
         let pids: [Int32] = [10, 11, 12]
         let parents: [Int32: Int32] = [10: 1, 11: 10, 12: 11]
-        let paths = [
+        let paths: [Int32: String] = [
             10: "/Applications/WorkBuddy.app/Contents/MacOS/codebuddy",
             11: "/bin/zsh",
             12: "/usr/bin/python3",
