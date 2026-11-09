@@ -18,6 +18,9 @@ final class AgentTreeFileObserver {
     private var watchList: [String] = []
     private var accessStamps: [String: FileLayerCapture.AccessStamp] = [:]
     private var watchTick = 0
+    private var sampleChanged = true
+    private var cachedRows: [ProcessTable.Row] = []
+    private var cachedRowsAt = Date.distantPast
     private var commandCache: [Int32: (at: Date, line: String)] = [:]
     private let lock = NSLock()
 
@@ -45,9 +48,18 @@ final class AgentTreeFileObserver {
     }
 
     private func sample() {
+        if !RuntimeBudget.shared.allowMainLoop(lane: "file-layer", base: 0.4, previousChanged: sampleChanged) {
+            return
+        }
         watchTick += 1
-        if RuntimeBudget.shared.isThrottled && watchTick % 6 != 0 { return }
-        let rows = ProcessTable.snapshot()
+        let throttled = RuntimeBudget.shared.isThrottled
+        let tableInterval = throttled ? 8.0 : (sampleChanged ? 1.2 : 3.0)
+        if cachedRows.isEmpty || Date().timeIntervalSince(cachedRowsAt) >= tableInterval {
+            cachedRows = ProcessTable.snapshot()
+            cachedRowsAt = Date()
+            MainProcessMeter.noteProcessTableScan()
+        }
+        let rows = cachedRows
         let owner = ownership(rows)
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
         if watchList.isEmpty || watchTick == 1 || watchTick % 2 == 0 {
@@ -76,6 +88,7 @@ final class AgentTreeFileObserver {
             }
             seen[row.pid] = known
         }
+        sampleChanged = !events.isEmpty
         guard !events.isEmpty else { return }
         let deliver = onEvents
         DispatchQueue.main.async { deliver?(events) }

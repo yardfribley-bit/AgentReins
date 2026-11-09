@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Foundation
 import SwiftUI
 import CryptoKit
@@ -152,6 +153,9 @@ final class CodexSight: ObservableObject {
     private var realtimeSince: Date?
     private var isInitialPoll = true
     private var isPolling = false
+    private var logActivity = true
+    /// Only touched on `queue`. The cursor is the resumed directory walk.
+    nonisolated(unsafe) private let treeCursor = JSONLTreeCursor()
     private let queue = DispatchQueue(label: "com.agentspec.codexsight", qos: .utility)
 
     func start(realtimeOnly: Bool = false) {
@@ -163,7 +167,14 @@ final class CodexSight: ObservableObject {
             let root = URL(fileURLWithPath: ("~/.codex/sessions" as NSString).expandingTildeInPath)
             let cursorURL = liveCursorURL, startedAt = realtimeSince!
             queue.async { [weak self] in
-                let offsets = RealtimeLogBaseline.offsets(root: root)
+                guard let sight = self else { return }
+                var spins = 0
+                while !sight.treeCursor.discoveryFinished && spins < 4 {
+                    _ = sight.treeCursor.refresh(root: root.path, now: Date(), fullInterval: 30, entryBudget: 1500)
+                    spins += 1
+                    if !sight.treeCursor.discoveryFinished { Thread.sleep(forTimeInterval: 0.02) }
+                }
+                let offsets = sight.treeCursor.sizes
                 let restored = Self.restoreLiveCursorCheckpoint(root: root, baselineOffsets: offsets,
                                                                  from: cursorURL)
                 if !FileManager.default.fileExists(atPath: cursorURL.path) {
@@ -190,7 +201,7 @@ final class CodexSight: ObservableObject {
     }
 
     private func activate(realtimeOnly: Bool) {
-        poll()
+        poll(forced: true)
         timer = Timer.scheduledTimer(withTimeInterval: realtimeOnly ? 1.0 : 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -198,8 +209,13 @@ final class CodexSight: ObservableObject {
 
     func stop() { startupID = nil; timer?.invalidate(); timer = nil }
 
-    private func poll() {
+    private func poll(forced: Bool = false) {
         guard !isPolling else { return }
+        let base: TimeInterval = realtimeSince == nil ? 10 : 1
+        let lane = "codex-logs-\(ObjectIdentifier(self).hashValue)"
+        if !forced && !RuntimeBudget.shared.allowMainLoop(lane: lane, base: base, previousChanged: logActivity) {
+            return
+        }
         isPolling = true
         let root = ("~/.codex/sessions" as NSString).expandingTildeInPath
         let previousSizes = fileSizes
@@ -211,8 +227,20 @@ final class CodexSight: ObservableObject {
         let baselineOtherStreams = isInitialPoll
         let since = realtimeSince
         queue.async { [weak self] in
-            let batch = Self.readLiveEvents(root: root, previousSizes: previousSizes,
-                                            baselineOtherStreams: baselineOtherStreams, states: previousStates)
+            guard let sight = self else { return }
+            let refresh = sight.treeCursor.refresh(
+                root: root, now: Date(),
+                fullInterval: RuntimeBudget.shared.isThrottled ? 90 : 30,
+                entryBudget: RuntimeBudget.shared.isThrottled ? 400 : 1200)
+            let split = JSONLTreeCursor.partition(listed: refresh.listed, knownSizes: previousSizes, acceptNewSince: since)
+            var sizesForRead = previousSizes
+            sizesForRead.merge(split.baseline) { current, _ in current }
+            let batch = Self.readLiveEvents(root: root, previousSizes: sizesForRead,
+                                            baselineOtherStreams: baselineOtherStreams, states: previousStates,
+                                            prelisted: split.readable)
+            let baseline = split.baseline
+            let discoveryOpen = !refresh.discoveryFinished
+            let hadDelta = !split.readable.isEmpty
             let collectedEvents = pendingGaps + batch.events.filter { since == nil || $0.ts >= since! }
             let diagnostics = batch.raw.map { record -> JSONLDiagnosticResult in
                 var payload = record.payload
@@ -235,8 +263,9 @@ final class CodexSight: ObservableObject {
                 if !batch.raw.isEmpty || !collectedEvents.isEmpty || !checkpoints.isEmpty {
                     try database.persistCollected(raw: [], events: collectedEvents, checkpoints: checkpoints)
                 }
-                if let liveCursorURL, cursorNeedsRetry || !batch.sizes.isEmpty || !collectedEvents.isEmpty {
+                if let liveCursorURL, cursorNeedsRetry || !batch.sizes.isEmpty || !collectedEvents.isEmpty || !baseline.isEmpty {
                     var committedSizes = previousSizes
+                    committedSizes.merge(baseline) { current, _ in current }
                     committedSizes.merge(batch.sizes) { _, new in new }
                     do { try Self.saveLiveCursorCheckpoint(sizes: committedSizes, states: batch.states, to: liveCursorURL) }
                     catch { cursorWriteFailed = true }
@@ -249,7 +278,9 @@ final class CodexSight: ObservableObject {
                 guard !rawWriteFailed else { self.collectionFailures += 1; return }
                 if isConnected { self.isInitialPoll = false }
                 if self.connected != isConnected { self.connected = isConnected }
+                self.fileSizes.merge(baseline) { current, _ in current }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
+                self.logActivity = hadDelta || discoveryOpen || !collectedEvents.isEmpty
                 self.streamStates = batch.states
                 self.pendingGaps = []
                 self.cursorNeedsRetry = cursorWriteFailed
@@ -293,17 +324,37 @@ final class CodexSight: ObservableObject {
     /// again from an arbitrary 64 KiB tail.
     nonisolated static func readLiveEvents(root: String, previousSizes: [String: UInt64],
                                            baselineOtherStreams: Bool,
-                                           states previousStates: [String: StreamState] = [:])
+                                           states previousStates: [String: StreamState] = [:],
+                                           prelisted: [JSONLTreeCursor.Listed]? = nil)
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int,
             states: [String: StreamState]) {
         let fm = FileManager.default
-        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
-            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .fileResourceIdentifierKey])
-        else { return ([], [:], [], 1, previousStates) }
         let cutoff = Date().addingTimeInterval(-7 * 86_400)
         var files: [(URL, Date, UInt64, String?)] = []
         var states = previousStates
-        for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+        if let prelisted {
+            for item in prelisted {
+                let url = URL(fileURLWithPath: item.path)
+                let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .fileResourceIdentifierKey])
+                let mtime = values?.contentModificationDate ?? item.modified
+                let size = UInt64(values?.fileSize ?? Int(item.size))
+                let fingerprint = values?.fileResourceIdentifier.map { String(describing: $0) }
+                let previous = states[url.path]
+                let replaced = previous?.fingerprint != nil && previous?.fingerprint != fingerprint
+                if mtime >= cutoff, previousSizes[url.path] != size || replaced {
+                    files.append((url, mtime, size, fingerprint))
+                }
+            }
+        } else {
+        guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
+            includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey, .fileResourceIdentifierKey])
+        else { return ([], [:], [], 1, previousStates) }
+        for case let url as URL in enumerator {
+            if JSONLTreeCursor.shouldSkip(url.lastPathComponent) {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard url.pathExtension == "jsonl" else { continue }
             let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey, .fileResourceIdentifierKey])
             let mtime = values?.contentModificationDate ?? .distantPast
             let size = UInt64(values?.fileSize ?? 0)
@@ -313,6 +364,7 @@ final class CodexSight: ObservableObject {
             if mtime >= cutoff, previousSizes[url.path] != size || replaced {
                 files.append((url, mtime, size, fingerprint))
             }
+        }
         }
         var sizes: [String: UInt64] = baselineOtherStreams
             ? Dictionary(uniqueKeysWithValues: files.map { ($0.0.path, $0.2) }) : [:]

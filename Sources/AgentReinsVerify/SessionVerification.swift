@@ -47,6 +47,32 @@ public enum SessionVerification {
         fileChannel: Bool = false,
         networkChannel: Bool = false
     ) -> SessionVerificationDocument {
+        join(calls: calls, effects: effects, processes: processes, completions: completions, taskIDs: taskIDs, fileChannel: fileChannel, networkChannel: networkChannel).document
+    }
+
+    /// Same join as `verify`, plus how many call/effect pairs were actually compared.
+    /// A 500-change fixture must stay far below effects × calls.
+    public static func measure(
+        calls: [ParsedToolCall],
+        effects: [HostEffect],
+        processes: [ProcessLink] = [],
+        completions: [String: String] = [:],
+        taskIDs: [String: String] = [:],
+        fileChannel: Bool = false,
+        networkChannel: Bool = false
+    ) -> (document: SessionVerificationDocument, comparisons: Int) {
+        join(calls: calls, effects: effects, processes: processes, completions: completions, taskIDs: taskIDs, fileChannel: fileChannel, networkChannel: networkChannel)
+    }
+
+    private static func join(
+        calls: [ParsedToolCall],
+        effects: [HostEffect],
+        processes: [ProcessLink],
+        completions: [String: String],
+        taskIDs: [String: String],
+        fileChannel: Bool,
+        networkChannel: Bool
+    ) -> (document: SessionVerificationDocument, comparisons: Int) {
         let fileObservation = (fileChannel || effects.contains { $0.kind == "file" }) ? "present" : "absent"
         let networkObservation = (networkChannel || effects.contains { $0.kind == "network" }) ? "present" : "absent"
         let tree = Dictionary(processes.map { ($0.pid, $0.parentPid) }, uniquingKeysWith: { _, new in new })
@@ -58,16 +84,56 @@ public enum SessionVerification {
             upcoming[call.sessionId] = call.timestamp
         }
         var owner: [String: (callID: String, rank: Int, distance: TimeInterval, name: String)] = [:]
-        for effect in effects {
-            for call in ordered {
-                guard let match = match(call: call, effect: effect, next: nextTime[call.id], tree: tree) else { continue }
-                let distance = abs(effect.timestamp.timeIntervalSince(call.timestamp))
-                if let existing = owner[effect.id] {
-                    if match.rank < existing.rank { continue }
-                    if match.rank == existing.rank && distance >= existing.distance { continue }
-                }
-                owner[effect.id] = (call.id, match.rank, distance, match.name)
+        var comparisons = 0
+        var byToken: [String: [Int]] = [:]
+        var bySession: [String: [Int]] = [:]
+        var everyIndex: [Int] = []
+        everyIndex.reserveCapacity(ordered.count)
+        for (index, call) in ordered.enumerated() {
+            everyIndex.append(index)
+            byToken[call.callId, default: []].append(index)
+            if call.id != call.callId { byToken[call.id, default: []].append(index) }
+            bySession[call.sessionId, default: []].append(index)
+        }
+        func consider(_ index: Int, effect: HostEffect) {
+            comparisons += 1
+            let call = ordered[index]
+            guard let matched = match(call: call, effect: effect, next: nextTime[call.id], tree: tree) else { return }
+            let distance = abs(effect.timestamp.timeIntervalSince(call.timestamp))
+            if let existing = owner[effect.id] {
+                if matched.rank < existing.rank { return }
+                if matched.rank == existing.rank && distance >= existing.distance { return }
             }
+            owner[effect.id] = (call.id, matched.rank, distance, matched.name)
+        }
+        func scan(_ indices: [Int], effect: HostEffect, earliest: Date, latest: Date) {
+            var low = 0
+            var high = indices.count
+            while low < high {
+                let mid = (low + high) / 2
+                if ordered[indices[mid]].timestamp < earliest { low = mid + 1 } else { high = mid }
+            }
+            var cursor = low
+            while cursor < indices.count, ordered[indices[cursor]].timestamp <= latest {
+                consider(indices[cursor], effect: effect)
+                cursor += 1
+            }
+        }
+        // A call can join on id from any time. Time and path joins only reach
+        // calls within 120s, so the nested scan stays inside that window.
+        for effect in effects {
+            if let token = effect.toolCallId {
+                for index in byToken[token] ?? [] { consider(index, effect: effect) }
+            }
+            let indices: [Int]
+            if let session = effect.sessionId {
+                indices = bySession[session] ?? []
+            } else {
+                indices = everyIndex
+            }
+            let earliest = effect.timestamp.addingTimeInterval(-120)
+            let latest = effect.timestamp.addingTimeInterval(120)
+            scan(indices, effect: effect, earliest: earliest, latest: latest)
         }
         var happened: [String: [VerificationEffect]] = [:]
         var claimedEffects: Set<String> = []
@@ -106,10 +172,11 @@ public enum SessionVerification {
             )
         }.sorted { $0.timestamp > $1.timestamp }
         let checklists = checklist(allCalls: ordered, effects: effects, completions: completions, taskIDs: taskIDs)
-        return SessionVerificationDocument(
+        let document = SessionVerificationDocument(
             sources: [], fileObservation: fileObservation, networkObservation: networkObservation,
             cards: cards, unclaimed: unclaimed, checklists: checklists, truncated: truncated
         )
+        return (document, comparisons)
     }
 
     public static func isCredential(_ text: String?) -> Bool {
@@ -382,9 +449,15 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
     }
     let fileCap = kind == .workbuddy ? min(max(1, maxFiles), 8) : max(1, maxFiles)
     let maxAge: TimeInterval = kind == .workbuddy ? 48 * 60 * 60 : 14 * 24 * 60 * 60
+    let cacheKey = "\(expanded)|\(kind)|\(fileCap)|\(maxBytes)"
+    treeCacheLock.lock()
+    if let cached = treeCache[cacheKey], Date().timeIntervalSince(cached.at) < treeCacheTTL {
+        treeCacheLock.unlock()
+        return cached.value
+    }
+    treeCacheLock.unlock()
     let found = newestJSONL(root: expanded, maxFiles: fileCap, maxAge: maxAge)
     let stamp = found.files.map { "\($0.0.path)|\($0.1.timeIntervalSince1970)" }.joined(separator: "\n")
-    let cacheKey = "\(expanded)|\(kind)|\(fileCap)|\(maxBytes)"
     treeCacheLock.lock()
     if let cached = treeCache[cacheKey], cached.stamp == stamp, Date().timeIntervalSince(cached.at) < treeCacheTTL {
         treeCacheLock.unlock()
@@ -422,6 +495,10 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
     return value
 }
 
+private func skipLogDirectory(_ name: String) -> Bool {
+    ["node_modules", ".git", ".build", "DerivedData", "dist", ".next", "Pods", "Carthage", ".swiftpm", ".cache", "vendor", "__pycache__"].contains(name)
+}
+
 private func newestJSONL(root: String, maxFiles: Int, maxAge: TimeInterval) -> (files: [(URL, Date)], skipped: Int, capped: Bool) {
     var stack = [URL(fileURLWithPath: root)]
     var seen = 0
@@ -438,7 +515,7 @@ private func newestJSONL(root: String, maxFiles: Int, maxAge: TimeInterval) -> (
             if values?.isSymbolicLink == true { continue }
             if values?.isDirectory == true {
                 let name = url.lastPathComponent
-                if name == "node_modules" || name == ".git" { continue }
+                if skipLogDirectory(name) { continue }
                 stack.append(url)
                 continue
             }

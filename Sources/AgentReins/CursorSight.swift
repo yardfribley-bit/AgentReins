@@ -44,7 +44,7 @@ final class CursorSight: ObservableObject {
         let previousFingerprint = databaseFingerprint
         let previousTranscriptURL = latestTranscriptURL
         let previousTranscriptFingerprint = transcriptFingerprint
-        let discoverTranscript = previousTranscriptURL == nil || Date().timeIntervalSince(lastTranscriptDiscovery) >= 30
+        let discoverTranscript = previousTranscriptURL == nil || Date().timeIntervalSince(lastTranscriptDiscovery) >= (RuntimeBudget.shared.isThrottled ? 90 : 30)
         queue.async { [weak self] in
             let values = try? url.resourceValues(forKeys: [.fileSizeKey, .contentModificationDateKey])
             let fingerprint = values.map {
@@ -94,8 +94,12 @@ final class CursorSight: ObservableObject {
             options: [.skipsHiddenFiles]) else { return nil }
         var latest: (url: URL, date: Date)?
         let cutoff = Date().addingTimeInterval(-86_400)
-        for case let candidate as URL in enumerator where candidate.pathExtension == "jsonl"
-            && candidate.path.contains("/agent-transcripts/") {
+        for case let candidate as URL in enumerator {
+            if JSONLTreeCursor.shouldSkip(candidate.lastPathComponent) {
+                enumerator.skipDescendants()
+                continue
+            }
+            guard candidate.pathExtension == "jsonl", candidate.path.contains("/agent-transcripts/") else { continue }
             let modified = (try? candidate.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate ?? .distantPast
             guard modified >= cutoff else { continue }
             if latest == nil || modified > latest!.date { latest = (candidate, modified) }
