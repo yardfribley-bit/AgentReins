@@ -107,6 +107,7 @@ cp "$PROJECT_DIR/tools/agentreins-mcp/server.py" \
    "$PROJECT_DIR/tools/redact_secrets.py" \
    "$PROJECT_DIR/tools/redact_vectors.json" \
    "$PROJECT_DIR/tools/agentreins-mcp/codex-config.example.toml" \
+   "$PROJECT_DIR/tools/agentreins-mcp/supply_chain.py" \
    "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"
 # Proxy-independent per-process socket sampler (lsof/ps only) + LaunchAgent installer.
 mkdir -p "$APP_BUNDLE/Contents/Resources/socket-sampler"

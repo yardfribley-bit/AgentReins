@@ -215,6 +215,48 @@ function gateInboxItems(records,decisions,allowlist){
  }
  return items;
 }
+function supplyChainFrom(opts,payload){
+ if(opts&&opts.supplyChain)return opts.supplyChain;
+ return payload?.supplyChain||{};
+}
+function supplyItem(entry,decision){
+ return {
+  supply:entry,
+  task:{id:'supply:'+entry.id,agent:entry.agent||'',lifecycleStatus:'supply',originalRequest:entry.summary||entry.name||'',title:entry.name||entry.id,startedAt:entry.changedAt||entry.firstSeenAt||''},
+  bucket:{id:'supply',label:decision&&decision.state==='rejected'?'已拒绝':'新装入'},
+  decision:decision||null
+ };
+}
+function supplyInboxItems(doc){
+ const entries=list(doc&&doc.entries);
+ const byId=new Map(entries.filter(e=>e&&e.id).map(e=>[e.id,e]));
+ const pending=new Set(list(doc&&doc.pending));
+ const items=[];
+ for(const id of pending){
+  const entry=byId.get(id);
+  if(entry)items.push(supplyItem(entry,null));
+ }
+ for(const decision of list(doc&&doc.decisions)){
+  if(!decision||decision.state!=='rejected')continue;
+  const entry=byId.get(decision.id);
+  if(!entry||pending.has(decision.id))continue;
+  if(decision.fingerprint&&entry.fingerprint&&decision.fingerprint!==entry.fingerprint)continue;
+  items.push(supplyItem(entry,{state:'rejected',note:decision.note||'',decidedAt:decision.decidedAt||''}));
+ }
+ return items;
+}
+function supplyCard(entry,decision){
+ const kind=entry.kind==='skill'?'技能':entry.kind==='rule'?'规则':entry.kind==='plugin'?'插件':'MCP';
+ const env=list(entry.env);
+ const envText=env.length?env.map(row=>`${row.name||''}${row.credential?'（像凭据，值已打码）':'（值已打码）'}`).join('、'):'没有';
+ const hosts=list(entry.hosts);
+ const flags=list(entry.flags);
+ const run=[entry.command].concat(list(entry.args)).filter(Boolean).join(' ')||'没有单独的启动命令';
+ const rejected=decision&&decision.state==='rejected';
+ const banner=rejected?`<p class="request-missing">已拒绝。${esc(decision.note||'')} 没有改配置，也没有拦住这个进程。</p>`:'';
+ const buttons=rejected?'':`<label class="risk-search">允许时写一句原因<textarea id="supply-note" rows="2" placeholder="我看过，可以留下"></textarea></label><div class="risk-actions"><button type="button" class="primary" data-supply-decide="approve" data-supply-id="${esc(entry.id)}">允许，我看过了</button><button type="button" class="quiet" data-supply-decide="reject" data-supply-id="${esc(entry.id)}">拒绝并标出来</button></div>`;
+ return `<article class="risk-detail"><p class="t2">${esc(entry.agent||'')} · 新加的${esc(kind)}</p><h2>${esc(entry.name||entry.id||'')}</h2>${banner}<h3>从哪来</h3><p>${esc(entry.origin||'看不出来')}</p><h3>会运行</h3><p class="mono">${esc(run)}</p><h3>给了哪些环境变量</h3><p>${esc(envText)}</p><h3>会连的主机</h3><p>${esc(hosts.length?hosts.join('、'):'看不出来')}</p><h3>红旗</h3>${flags.length?`<ul class="ev-list">${flags.map(flag=>`<li><b>${esc(flag.text||flag.id||'')}</b></li>`).join('')}</ul>`:'<p>没有标红旗。</p>'}<p class="note">配置文件：${esc(entry.configPath||'')}</p><p class="note">这张卡片只是给你看。允许和拒绝都记在本机。AgentReins 不会改写 Claude、Cursor、Codex 的 MCP 配置。拒绝会标成告警，但不会拦住这个进程，也不会把它从配置里删掉。</p>${buttons}</article>`;
+}
 function hardGateFrom(opts,payload){
  if(opts&&Array.isArray(opts.inbox))return opts;
  if(opts&&opts.hardGate)return opts.hardGate;
@@ -234,7 +276,8 @@ function inboxItems(payload,decisions,opts){
  const gate=hardGateFrom(opts,payload);
  if(wantNoise) items.push(...telemetryNoiseItems(gate.receipts));
  else items.push(...gateInboxItems(gate.inbox,decisions,gate.allowlist));
- const order={gate:-1,confirm:0,review:1,failed:2};
+ if(!wantNoise) items.push(...supplyInboxItems(supplyChainFrom(opts,payload)));
+ const order={supply:-2,gate:-1,confirm:0,review:1,failed:2};
  return items.sort((a,b)=>new Date(b.task.startedAt)-new Date(a.task.startedAt)||(order[a.bucket.id]??9)-(order[b.bucket.id]??9));
 }
 function telemetryBlob(alert){
@@ -308,20 +351,23 @@ function renderInbox(holder,payload,state){
  const decisions=list(state?.decisions);
  const noiseMode=state?.inboxBucket==='noise';
  const hardGate=state?.hardGate||payload?.hardGate||{};
- const items=inboxItems(payload,decisions,noiseMode?{noise:true,hardGate}:{hardGate});
- const noiseItems=inboxItems(payload,decisions,{noise:true,hardGate});
+ const supplyChain=state?.supplyChain||payload?.supplyChain||{};
+ const items=inboxItems(payload,decisions,noiseMode?{noise:true,hardGate,supplyChain}:{hardGate,supplyChain});
+ const noiseItems=inboxItems(payload,decisions,{noise:true,hardGate,supplyChain});
  const open=items.filter(i=>!i.decision||i.decision.state==='needs_evidence');
  const noiseOpen=noiseItems.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const selected=items.find(i=>i.task.id===state?.inboxId)||open[0]||items[0]||null;
  const queue=items.length?items.map(i=>{
   const done=i.decision&&i.decision.state!=='needs_evidence';
-  const label=done?(i.decision.state==='accept'?'已通过':i.decision.state==='return'?'已退回':'待补证据'):i.bucket.label;
+  const label=i.supply?(i.decision&&i.decision.state==='rejected'?'已拒绝':'新装入'):done?(i.decision.state==='accept'?'已通过':i.decision.state==='return'?'已退回':'待补证据'):i.bucket.label;
   const noiseNote=i.noise==='telemetry'?'遥测':i.noise==='heartbeat'?'心跳':'没有用户原话';
   return `<button type="button" class="inbox-item${selected&&selected.task.id===i.task.id?' on':''}" data-inbox-id="${esc(i.task.id)}"><b>${esc(cut(i.task.originalRequest||i.task.title||i.task.id,42))}</b><small>${esc(i.task.agent||'')} · ${esc(noiseMode?noiseNote+' · '+label:label)}</small></button>`;
  }).join(''):`<p class="empty">${noiseMode?'噪声桶是空的。':'没有等你验收的任务。心跳和「用户需求未采集」在「噪声」里，证据还在，没有删除。'}</p>`;
- const switcher=`<div class="inbox-switch"><button type="button" class="${noiseMode?'':'on'}" data-inbox-bucket="work">待验收 ${inboxItems(payload,decisions,{hardGate}).filter(i=>!i.decision||i.decision.state==='needs_evidence').length}</button><button type="button" class="${noiseMode?'on':''}" data-inbox-bucket="noise">噪声 ${noiseOpen}</button></div>`;
+ const switcher=`<div class="inbox-switch"><button type="button" class="${noiseMode?'':'on'}" data-inbox-bucket="work">待验收 ${inboxItems(payload,decisions,{hardGate,supplyChain}).filter(i=>!i.decision||i.decision.state==='needs_evidence').length}</button><button type="button" class="${noiseMode?'on':''}" data-inbox-bucket="noise">噪声 ${noiseOpen}</button></div>`;
  let card='';
- if(selected&&selected.gate){
+ if(selected&&selected.supply){
+  card=supplyCard(selected.supply,selected.decision);
+ }else if(selected&&selected.gate){
   const row=selected.gate;
   const fired=row.enforced===true&&(row.mechanism==='audit-proxy'||row.mechanism==='transport-wrapper');
   const status=fired?'已阻断':'已记下，未拦截';
@@ -360,7 +406,7 @@ function renderInbox(holder,payload,state){
    <p class="note">通过、退回、补证据写入本机 Review。退回没有原因时不会保存。导出的是当前投影，不是一份被签过名的证据。</p>
   </article>`;
  }
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">人的决定留在本机</div><h1>待我处理</h1><p>${noiseMode?'心跳和没采到用户原话的轮次。默认待办不含这些。':'等我确认、待验收、失败，以及第一次去新主机或第一次读凭据路径。心跳、「用户需求未采集」和重复外联不进默认队列。'}</p></div><span class="t2">${open.length} 条未结束</span></div>${switcher}<div class="inbox-layout"><aside>${queue}</aside><div>${card||'<p class="empty">选左边一条。</p>'}</div></div>`;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">人的决定留在本机</div><h1>待我处理</h1><p>${noiseMode?'心跳和没采到用户原话的轮次。默认待办不含这些。':'等我确认、待验收、失败，第一次去新主机或第一次读凭据路径，以及新加的 MCP、技能和规则。心跳、「用户需求未采集」和重复外联不进默认队列。'}</p></div><span class="t2">${open.length} 条未结束</span></div>${switcher}<div class="inbox-layout"><aside>${queue}</aside><div>${card||'<p class="empty">选左边一条。</p>'}</div></div>`;
 }
 
 const MCP_TOOLS=[
@@ -371,7 +417,8 @@ const MCP_TOOLS=[
  {name:'get_coverage',note:'覆盖和盲区。没采到就是 unknown。'},
  {name:'list_mcp_audit',note:'监督者自己的读取也进哈希链。'},
  {name:'list_tool_calls',note:'只读。工具调用卡片：它说、它调、真发生。'},
- {name:'get_session_verification',note:'只读。一次会话的核对、无人认领的改动、完成核对。'}
+ {name:'get_session_verification',note:'只读。一次会话的核对、无人认领的改动、完成核对。'},
+ {name:'list_supply_chain',note:'只读。新加的 MCP、技能和规则。环境变量的值已打码。不改 agent 的配置。'}
 ];
 function renderSupervise(holder,payload,state){
  const audit=list(state?.mcpAudit);

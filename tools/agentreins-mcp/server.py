@@ -21,6 +21,7 @@ if str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
 
 from session_verification import effects_from_transport, get_session_verification, list_tool_calls
+from supply_chain import tool_payload as supply_chain_payload
 from evidence import (
     KEY_WARM,
     KeychainUnavailable,
@@ -121,6 +122,15 @@ TOOLS = [
             "additionalProperties": False,
         },
     },
+    {
+        "name": "list_supply_chain",
+        "description": "List newly added or changed MCP servers, skills, and rules. Read-only. Env values are redacted. Does not edit agent configs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {**_PAGE, "agent": {"type": "string"}},
+            "additionalProperties": False,
+        },
+    },
 ]
 
 
@@ -213,6 +223,12 @@ def call_tool(name: str, arguments: dict[str, Any]) -> dict[str, Any]:
         except Exception:
             records = []
         return _stamp(get_session_verification(str(session_id), effects_from_transport(records)))
+    if name == "list_supply_chain":
+        return _stamp(supply_chain_payload(
+            agent=arguments.get("agent"),
+            limit=_opt_int(arguments.get("limit")),
+            offset=_opt_int(arguments.get("offset")),
+        ))
     if name == "list_mcp_audit":
         return _stamp(list_mcp_audit(
             limit=_opt_int(arguments.get("limit")) if arguments.get("limit") is not None else 30,

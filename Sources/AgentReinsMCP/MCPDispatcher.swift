@@ -76,6 +76,10 @@ enum MCPDispatcher {
         ["name": "get_session_verification", "description": "Read-only verification for one session: cards, unclaimed file changes, completion checklist.",
          "inputSchema": ["type": "object", "properties": ["session_id": ["type": "string"]],
                          "required": ["session_id"], "additionalProperties": false]],
+        ["name": "list_supply_chain", "description": "List newly added or changed MCP servers, skills, and rules. Read-only. Env values are redacted. Does not edit agent configs.",
+         "inputSchema": ["type": "object", "properties": schemaProps([
+            "agent": ["type": "string"] as [String: Any],
+         ]), "additionalProperties": false]],
     ]
 
     /// Returns a JSON-RPC response object, or nil when `message` is a notification (no `id`).
@@ -192,7 +196,7 @@ enum MCPDispatcher {
         if banned.contains(where: { lower.contains($0) }) {
             throw NSError(domain: "AgentReinsMCP", code: 1, userInfo: [NSLocalizedDescriptionKey: "write tools are not available"])
         }
-        let allowed = Set(["list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit", "list_tool_calls", "get_session_verification"])
+        let allowed = Set(["list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit", "list_tool_calls", "get_session_verification", "list_supply_chain"])
         guard allowed.contains(name) else {
             throw NSError(domain: "AgentReinsMCP", code: 2, userInfo: [NSLocalizedDescriptionKey: "unknown tool: \(name)"])
         }
@@ -273,6 +277,10 @@ enum MCPDispatcher {
                 throw NSError(domain: "AgentReinsMCP", code: 3, userInfo: [NSLocalizedDescriptionKey: "session_id required"])
             }
             return deliver(SessionVerificationTool.session(records, sessionID: sessionID), loaded, keyState)
+        case "list_supply_chain":
+            return deliver(SupplyChainCheck.toolPayload(
+                store: SupplyChainCheck.storeURL(), agent: str(args["agent"]),
+                limit: page.limit, offset: page.offset), loaded, keyState)
         case "list_mcp_audit":
             let limit = page.limit ?? 30
             let paged = AuditPage.page(log: Paths.auditLog, seal: Paths.auditSeal,

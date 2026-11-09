@@ -157,7 +157,7 @@ class MCPReadonlyTests(unittest.TestCase):
         names = {t["name"] for t in server.TOOLS}
         self.assertEqual(
             names,
-            {"list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit", "list_tool_calls", "get_session_verification"},
+            {"list_agents", "list_alerts", "get_execution", "list_network", "get_coverage", "list_mcp_audit", "list_tool_calls", "get_session_verification", "list_supply_chain"},
         )
         for name in names:
             self.assertFalse(any(b in name for b in ("write", "delete", "save", "set_")))

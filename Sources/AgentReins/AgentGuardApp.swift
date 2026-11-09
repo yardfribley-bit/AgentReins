@@ -17,6 +17,7 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
         RuntimeBudget.shared.startSampling()
+        SupplyChainMonitor.shared.start()
         syncBackgroundJobs(unload: false)
         AppNotifier.requestAuthorization()
         BrowserProtectionInstaller.installBundledAssets()
@@ -46,6 +47,7 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
         return true
     }
     func applicationWillTerminate(_ notification: Notification) {
+        SupplyChainMonitor.shared.stop()
         Self.stopLiveCollectors?()
         MemoryScanManager.cleanupOnTerminate()
         syncBackgroundJobs(unload: true)
