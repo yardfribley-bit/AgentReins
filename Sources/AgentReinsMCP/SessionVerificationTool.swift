@@ -57,7 +57,7 @@ enum SessionVerificationTool {
     private static func make(_ records: [[String: Any]]) -> SessionVerificationDocument {
         let roots = logRoots()
         let logs = SessionVerification.load(claudeRoot: roots.claude, codexRoot: roots.codex, workbuddyRoots: roots.workbuddy)
-        let effects = hostEffects(records) + hardGateEffects()
+        let effects = hostEffects(records)
         var document = SessionVerification.verify(
             calls: logs.calls, effects: effects, completions: logs.completions,
             fileChannel: effects.contains { $0.kind == "file" },
