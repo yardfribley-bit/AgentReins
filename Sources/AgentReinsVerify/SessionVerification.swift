@@ -366,6 +366,11 @@ private struct TreeRead {
     var source: SessionLogSource
 }
 
+private let treeCacheLock = NSLock()
+private var treeCache: [String: (stamp: String, at: Date, value: TreeRead)] = [:]
+private let treeCacheTTL: TimeInterval = 30
+private let dirEntryCap = 6000
+
 private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int, maxBytes: Int) -> TreeRead {
     let expanded = (root as NSString).expandingTildeInPath
     var isDir: ObjCBool = false
@@ -375,27 +380,21 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
     guard isDir.boolValue else {
         return TreeRead(calls: [], completions: [:], source: SessionLogSource(agent: agent, root: root, state: "unreadable", filesRead: 0, filesSkipped: 0, malformedLines: 0, note: "路径不是目录：\(root)"))
     }
-    guard let enumerator = FileManager.default.enumerator(at: URL(fileURLWithPath: expanded), includingPropertiesForKeys: [.contentModificationDateKey, .isSymbolicLinkKey, .isRegularFileKey], options: [.skipsPackageDescendants]) else {
-        return TreeRead(calls: [], completions: [:], source: SessionLogSource(agent: agent, root: root, state: "unreadable", filesRead: 0, filesSkipped: 0, malformedLines: 0, note: "目录打不开：\(root)"))
+    let fileCap = kind == .workbuddy ? min(max(1, maxFiles), 8) : max(1, maxFiles)
+    let maxAge: TimeInterval = kind == .workbuddy ? 48 * 60 * 60 : 14 * 24 * 60 * 60
+    let found = newestJSONL(root: expanded, maxFiles: fileCap, maxAge: maxAge)
+    let stamp = found.files.map { "\($0.0.path)|\($0.1.timeIntervalSince1970)" }.joined(separator: "\n")
+    let cacheKey = "\(expanded)|\(kind)|\(fileCap)|\(maxBytes)"
+    treeCacheLock.lock()
+    if let cached = treeCache[cacheKey], cached.stamp == stamp, Date().timeIntervalSince(cached.at) < treeCacheTTL {
+        treeCacheLock.unlock()
+        return cached.value
     }
-    var files: [(URL, Date)] = []
-    var seen = 0
-    var capped = false
-    for case let url as URL in enumerator {
-        seen += 1
-        if seen > 5000 { capped = true; break }
-        let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .isSymbolicLinkKey, .isRegularFileKey])
-        if values?.isSymbolicLink == true { continue }
-        guard url.pathExtension == "jsonl", values?.isRegularFile != false else { continue }
-        files.append((url, values?.contentModificationDate ?? .distantPast))
-    }
-    files.sort { $0.1 > $1.1 }
-    let chosen = Array(files.prefix(max(1, maxFiles)))
-    let skipped = max(0, files.count - chosen.count) + (capped ? 1 : 0)
+    treeCacheLock.unlock()
     var calls: [ParsedToolCall] = []
     var completions: [String: String] = [:]
     var malformed = 0
-    for (url, _) in chosen {
+    for (url, _) in found.files {
         let data = kind == .workbuddy ? readRecentLines(url) : readTail(url, maxBytes: maxBytes)
         guard let data else {
             malformed += 1
@@ -406,45 +405,88 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
         completions.merge(batch.completions) { _, new in new }
         malformed += batch.malformed
     }
+    let skipped = found.skipped
     let note: String
-    if chosen.isEmpty {
-        note = capped ? "目录里文件很多，这次没有读到 jsonl。" : "目录在，里面没有 jsonl。"
-    } else if skipped > 0 {
-        note = "只读了最近 \(chosen.count) 个 jsonl，其余 \(skipped) 个这次没打开。全文仍在原来的日志里。"
+    if found.files.isEmpty {
+        note = found.capped ? "目录里文件很多，这次没有读到 jsonl。" : "目录在，里面没有 jsonl。"
+    } else if skipped > 0 || found.capped {
+        let hours = Int(maxAge / 3600)
+        note = "只读了最近 \(found.files.count) 个 jsonl（\(hours) 小时内）。全文仍在原来的日志里。"
     } else {
-        note = "读了 \(chosen.count) 个 jsonl。卡片只留调用编号和摘录，不把日志抄进证据库。"
+        note = "读了 \(found.files.count) 个 jsonl。卡片只留调用编号和摘录，不把日志抄进证据库。"
     }
-    return TreeRead(calls: calls, completions: completions, source: SessionLogSource(agent: agent, root: root, state: "present", filesRead: chosen.count, filesSkipped: skipped, malformedLines: malformed, note: note))
+    let value = TreeRead(calls: calls, completions: completions, source: SessionLogSource(agent: agent, root: root, state: "present", filesRead: found.files.count, filesSkipped: skipped, malformedLines: malformed, note: note))
+    treeCacheLock.lock()
+    treeCache[cacheKey] = (stamp, Date(), value)
+    treeCacheLock.unlock()
+    return value
+}
+
+private func newestJSONL(root: String, maxFiles: Int, maxAge: TimeInterval) -> (files: [(URL, Date)], skipped: Int, capped: Bool) {
+    var stack = [URL(fileURLWithPath: root)]
+    var seen = 0
+    var capped = false
+    var best: [(URL, Date)] = []
+    let cutoff = Date().addingTimeInterval(-maxAge)
+    let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isSymbolicLinkKey, .isDirectoryKey, .isRegularFileKey]
+    while let dir = stack.popLast() {
+        guard let items = try? FileManager.default.contentsOfDirectory(at: dir, includingPropertiesForKeys: Array(keys), options: [.skipsPackageDescendants]) else { continue }
+        for url in items {
+            seen += 1
+            if seen > dirEntryCap { capped = true; break }
+            let values = try? url.resourceValues(forKeys: keys)
+            if values?.isSymbolicLink == true { continue }
+            if values?.isDirectory == true {
+                let name = url.lastPathComponent
+                if name == "node_modules" || name == ".git" { continue }
+                stack.append(url)
+                continue
+            }
+            guard url.pathExtension == "jsonl", values?.isRegularFile != false else { continue }
+            let mtime = values?.contentModificationDate ?? .distantPast
+            if mtime < cutoff { continue }
+            best.append((url, mtime))
+        }
+        if capped { break }
+    }
+    best.sort { $0.1 > $1.1 }
+    let chosen = Array(best.prefix(maxFiles))
+    return (chosen, max(0, best.count - chosen.count), capped)
 }
 
 /// Recent short lines only. A CodeBuddy `function_call_result` can be larger
-/// than the old 512KB tail, which then hid the Read/Edit/Bash lines in front of it.
-private func readRecentLines(_ url: URL, maxScan: Int = 32 * 1024 * 1024, maxLine: Int = 65_536, maxLines: Int = 4_000) -> Data? {
+/// than the tail window. Oversized lines are dropped and not buffered.
+private func readRecentLines(_ url: URL, maxScan: Int = 4 * 1024 * 1024, maxLine: Int = 65_536, maxLines: Int = 160) -> Data? {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? handle.close() }
     let size = Int((try? handle.seekToEnd()) ?? 0)
     guard size > 0 else { return Data() }
     var pos = size
     var scanned = 0
-    var pending = Data()
+    var carry = Data()
     var lines: [Data] = []
     while pos > 0 && scanned < maxScan && lines.count < maxLines {
-        let step = min(256 * 1024, pos)
+        let step = min(64 * 1024, pos)
         pos -= step
         try? handle.seek(toOffset: UInt64(pos))
         guard let chunk = try? handle.read(upToCount: step), !chunk.isEmpty else { break }
         scanned += chunk.count
-        pending.insert(contentsOf: chunk, at: 0)
-        let parts = pending.split(separator: 0x0A, omittingEmptySubsequences: false)
-        guard parts.count > 1 else { continue }
-        pending = Data(parts[0])
+        var data = Data()
+        data.reserveCapacity(chunk.count + carry.count)
+        data.append(chunk)
+        data.append(carry)
+        let parts = data.split(separator: 0x0A, omittingEmptySubsequences: false)
+        guard !parts.isEmpty else { carry = Data(); continue }
+        carry = Data(parts[0])
+        if carry.count > maxLine { carry = Data() }
+        if parts.count == 1 { continue }
         for part in parts.dropFirst().reversed() {
-            if part.count > maxLine { continue }
+            if part.isEmpty || part.count > maxLine { continue }
             lines.append(Data(part))
             if lines.count >= maxLines { break }
         }
     }
-    if pos == 0, pending.count <= maxLine, !pending.isEmpty { lines.append(pending) }
+    if pos == 0, !carry.isEmpty, carry.count <= maxLine { lines.append(carry) }
     var out = Data()
     for line in lines.reversed() {
         out.append(line)

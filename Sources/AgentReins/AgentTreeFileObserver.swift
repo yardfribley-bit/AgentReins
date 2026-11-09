@@ -18,6 +18,7 @@ final class AgentTreeFileObserver {
     private var watchList: [String] = []
     private var accessStamps: [String: FileLayerCapture.AccessStamp] = [:]
     private var watchTick = 0
+    private var commandCache: [Int32: (at: Date, line: String)] = [:]
     private let lock = NSLock()
 
     func start() {
@@ -45,10 +46,7 @@ final class AgentTreeFileObserver {
 
     private func sample() {
         let rows = ProcessTable.snapshot()
-        let owner = FileLayerCapture.agentTree(
-            pids: rows.map(\.pid),
-            parents: Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { _, new in new }),
-            paths: Dictionary(rows.map { ($0.pid, $0.path) }, uniquingKeysWith: { _, new in new }))
+        let owner = ownership(rows)
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
         watchTick += 1
         if watchList.isEmpty || watchTick == 1 || watchTick % 2 == 0 {
@@ -118,6 +116,58 @@ final class AgentTreeFileObserver {
         return FileLayerCapture.AccessStamp(access: access, modified: modified)
     }
 
+    /// `codebuddy` launched as a node script does not show up in `proc_pidpath`.
+    /// Read argv for that process and its shell/python children, then let the
+    /// parent chain carry the owner down to `python3`.
+    private func ownership(_ rows: [ProcessTable.Row]) -> [Int32: String] {
+        FileLayerCapture.agentTree(
+            pids: rows.map(\.pid),
+            parents: Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { _, new in new }),
+            paths: Dictionary(rows.map { ($0.pid, $0.path) }, uniquingKeysWith: { _, new in new }),
+            commands: commandLines(rows))
+    }
+
+    private func commandLines(_ rows: [ProcessTable.Row]) -> [Int32: String] {
+        let byPid = Dictionary(rows.map { ($0.pid, $0) }, uniquingKeysWith: { _, new in new })
+        var commands: [Int32: String] = [:]
+        for row in rows where !row.comm.isEmpty {
+            commands[row.pid] = row.comm
+        }
+        var interesting: [Int32] = []
+        let ranked = rows.filter { FileLayerCapture.shouldReadCommand(path: $0.path) }.sorted { lhs, rhs in
+            let leftPython = FileLayerCapture.isPython(lhs.path)
+            let rightPython = FileLayerCapture.isPython(rhs.path)
+            if leftPython != rightPython { return leftPython && !rightPython }
+            return lhs.pid > rhs.pid
+        }
+        var queued = Set<Int32>()
+        for row in ranked {
+            if interesting.count >= 12 { break }
+            var pid = row.pid
+            var hops = 0
+            while pid > 1 && hops < 6 && interesting.count < 12 {
+                if queued.insert(pid).inserted { interesting.append(pid) }
+                guard let parent = byPid[pid] else { break }
+                if FileLayerCapture.agentOwner(path: parent.path) != nil { break }
+                pid = parent.pid
+                hops += 1
+            }
+        }
+        let now = Date()
+        commandCache = commandCache.filter { now.timeIntervalSince($0.value.at) < 2 }
+        for pid in interesting {
+            if let cached = commandCache[pid] {
+                commands[pid] = cached.line
+                continue
+            }
+            let line = ProcessTable.commandLine(pid)
+            guard !line.isEmpty else { continue }
+            commandCache[pid] = (now, line)
+            commands[pid] = line
+        }
+        return commands
+    }
+
     private func rowIsSelf(_ path: String) -> Bool {
         let base = (path as NSString).lastPathComponent
         return base == "AgentReins" || base == "AgentReinsMCP"
@@ -128,10 +178,7 @@ final class AgentTreeFileObserver {
     /// same event is only possible (sampled).
     private func noteAccess(_ path: String, source: String = "credential-kqueue") {
         let rows = ProcessTable.snapshot()
-        let owner = FileLayerCapture.agentTree(
-            pids: rows.map(\.pid),
-            parents: Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { _, new in new }),
-            paths: Dictionary(rows.map { ($0.pid, $0.path) }, uniquingKeysWith: { _, new in new }))
+        let owner = ownership(rows)
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
         var holder: ProcessTable.Row?
         var holderAgent: String?
