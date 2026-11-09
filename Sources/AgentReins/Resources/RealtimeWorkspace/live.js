@@ -409,7 +409,7 @@ function renderConsole(){
  else if(view==='reason')api.renderReason($('reason-view'),shown,{...consoleState,decisions:riskState.decisions});
  else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions,hardGate:riskState.hardGate});
  else if(view==='supervise')api.renderSupervise($('supervise-view'),shown,riskState);
- else if(view==='about')api.renderAbout($('about-view'),window.agentreinsInstall);
+ else if(view==='about')api.renderAbout($('about-view'),window.agentreinsInstall,riskState.disk);
  const inbox=api.inboxItems?.(shown,riskState.decisions,{hardGate:riskState.hardGate})||[];
  const left=inbox.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const ib=$('inbox-badge');if(ib){ib.hidden=!left;ib.textContent=String(left);}
@@ -636,6 +636,10 @@ document.addEventListener('click',e=>{
   consoleState.hardGateReason=reason;
   const sent=bridge('decideHardGate',{op,subject,kind,reason:reason||'保持拒绝'},{silent:true});
   if(!sent)toast('当前没有原生通道，允许名单没有写入');
+ }
+ else if(el.dataset.staleDelete){
+  const sent=bridge('deleteStaleData',{id:el.dataset.staleDelete},{silent:true});
+  if(!sent)toast('当前没有原生通道，没有删除');
  }
  else if(el.dataset.acceptDecide){
   const state=el.dataset.acceptDecide;

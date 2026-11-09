@@ -120,6 +120,7 @@ final class EventStore: ObservableObject {
             try? await Task.sleep(for: .seconds(20))
             while !Task.isCancelled {
                 _ = try? database.prune()
+                _ = TransportAuditRetention.prune(root: NativeTransportAudit.defaultLiveRoot)
                 try? await Task.sleep(for: .seconds(60))
             }
         }

@@ -67,6 +67,41 @@ public enum MCPHTTPOrphans {
             return nil
         }
     }
+
+    /// Old dev-tree binaries (`AgentSpec` / `AgentGuardApp`). The running pid is never included.
+    public static func isLegacyBundle(_ command: String) -> Bool {
+        let lower = command.lowercased()
+        return lower.contains("/agentspec/") || lower.contains("/agentguardapp/")
+    }
+
+    /// Same-port orphans, abandoned stdio, and stale MCP processes launched from the old bundle.
+    /// A legacy process that is the listener on this port is included so a new server can bind.
+    /// A legacy listener on a different port is left alone. `selfPid` is never returned.
+    public static func reapPIDs(_ procs: [Proc], selfPid: Int32, port: Int, listenerPIDs: Set<Int32>) -> [Int32] {
+        var ids = Set(orphanPIDs(procs, selfPid: selfPid, port: port, listenerPIDs: listenerPIDs))
+        for proc in procs {
+            guard proc.pid != selfPid, isAgentReinsMCP(proc.command), isLegacyBundle(proc.command) else { continue }
+            if listenerPIDs.contains(proc.pid) {
+                if commandTargetsPort(proc.command, port: port) { ids.insert(proc.pid) }
+                continue
+            }
+            if isHTTPServerCommand(proc.command) && !commandTargetsPort(proc.command, port: port) { continue }
+            ids.insert(proc.pid)
+        }
+        return ids.sorted()
+    }
+
+    /// Launchd health check: the port is not accepting, and an `--http` process for
+    /// this port has already been alive long enough that it is not still binding.
+    /// When something is listening, nobody is killed.
+    public static func healthVictims(_ procs: [Proc], port: Int, portListening: Bool, now: Date, startedAt: [Int32: Date], minimumAge: TimeInterval = 12) -> [Int32] {
+        guard !portListening else { return [] }
+        return procs.compactMap { proc in
+            guard isHTTPServerCommand(proc.command), commandTargetsPort(proc.command, port: port) else { return nil }
+            guard let start = startedAt[proc.pid], now.timeIntervalSince(start) >= minimumAge else { return nil }
+            return proc.pid
+        }
+    }
 }
 
 /// Optional deadline for MCP reads. Nil keeps the full integrity walk used by parity tests.

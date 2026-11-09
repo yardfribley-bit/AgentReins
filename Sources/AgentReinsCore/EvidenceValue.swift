@@ -81,7 +81,9 @@ public enum EvidenceValue {
         if isSecurity(fields) || isFileChange(fields) || isReviewAction(fields) || isMismatch(fields) {
             return .keep
         }
-        if isTranscriptOp(fields.op) || fields.source.lowercased().contains("socket-sampler") {
+        // Sampler and process-observation ticks carry a pid, which would otherwise
+        // look like a join key and be kept forever. They are the rows that filled the disk.
+        if isSamplerTick(fields) || isTranscriptOp(fields.op) {
             return .bulk
         }
         if isJoinKey(fields) && fields.payloadBytes <= 4_096 && fields.modelText.count <= excerptLimit {
@@ -166,5 +168,17 @@ public enum EvidenceValue {
 
     static func isTranscriptOp(_ op: String) -> Bool {
         transcriptOps.contains(op.lowercased())
+    }
+
+    private static let samplerOps: Set<String> = [
+        "process_observation", "process_socket_observation", "process_ipc_observation",
+        "process_communication_observation", "process_observation_unavailable",
+        "process_watch_attached", "process_watch_detached", "process_identity_changed",
+    ]
+
+    private static func isSamplerTick(_ fields: EvidenceValueFields) -> Bool {
+        let source = fields.source.lowercased()
+        if source.contains("socket-sampler") || source.contains("process-observation") { return true }
+        return samplerOps.contains(fields.op.lowercased())
     }
 }

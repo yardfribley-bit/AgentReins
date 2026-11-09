@@ -509,6 +509,13 @@ final class ToolActivityEvidenceProjector: ObservableObject {
             let resolved = absolute(path, workspace: workspace)
             if !resolved.isEmpty { result.append(.file(op: "read", path: resolved, relatedPath: nil)) }
         }
+        for hit in FileLayerCapture.commandTargets(command) {
+            let already = result.contains { payload in
+                if case let .file(_, path, _) = payload { return path == hit.path }
+                return false
+            }
+            if !already { result.append(.file(op: hit.op, path: hit.path, relatedPath: nil)) }
+        }
         return result
     }
 

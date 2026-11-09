@@ -340,11 +340,22 @@ function installLabel(install){
  if(build)return '本机安装包 · '+build;
  return '本机安装包';
 }
-function renderAbout(holder, install){
+function staleFilesHTML(disk){
+ const rows=list(disk&&disk.stale);
+ if(!rows.length)return '';
+ const items=rows.map(row=>{
+  const bytes=Number(row.bytes||0);
+  const label=bytes>=1e9?(bytes/1e9).toFixed(1)+' GB':bytes>=1e6?Math.round(bytes/1e6)+' MB':Math.round(bytes/1024)+' KB';
+  return `<li><b>${esc(row.name||row.path||'')}</b> <span class="mono">${esc(label)}</span> <button type="button" data-stale-delete="${esc(row.id||'')}">删除这份旧文件</button><div class="t2">${esc(row.reason||'')}</div></li>`;
+ }).join('');
+ return `<article class="risk-rc"><h3>可以清掉的旧文件</h3><p>备份、旧的重建副本和云审计暂存。点删除才会去掉。正在用的 evidence.sqlite3 不在这份名单里。</p><ul class="about-next">${items}</ul></article>`;
+}
+function renderAbout(holder, install, disk){
  const kicker=esc(installLabel(install));
  holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。看得见主机层里已经采到的 agent 行为，并在本机确认、加白、复查。</p></div></div>
  <div class="about-body">
  <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。已阻断只在审计代理拒绝转发，或 PATH 命令入口没有执行真实命令时出现。只写了 Review、没有执行回执时，状态是「已记下，未拦截」。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">清理走已经在跑的分层：心跳和没采到原话满一天，大块原文满三天。外联、凭据、文件改动、验收决定和短摘录不动。</p></article>
+ ${staleFilesHTML(disk)}
  <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）。进程内读文件这版拦不住</li><li>Network Extension 仍未安装。绝对路径绕过 PATH、QUIC、参数里看不到目的地的 git 仍拦不住</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
  </div>`;
 }

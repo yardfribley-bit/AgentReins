@@ -11,6 +11,7 @@ import Security
 enum AgentReinsMCP {
     static func main() {
         var http = false
+        var httpHealth = false
         var port = EndpointDiscovery.defaultPort
         var portFromArg = false
         var envPortInvalid = false
@@ -25,6 +26,8 @@ enum AgentReinsMCP {
             let arg = args[index]
             if arg == "--http" {
                 http = true
+            } else if arg == "--http-health" {
+                httpHealth = true
             } else if arg == "--require-token" {
                 requireToken = true
             } else if arg == "--port" {
@@ -39,7 +42,7 @@ enum AgentReinsMCP {
                 port = parsed
                 portFromArg = true
             } else if arg == "--help" || arg == "-h" {
-                FileHandle.standardError.write(Data("usage: AgentReinsMCP [--http] [--port 18977] [--require-token]\n".utf8))
+                FileHandle.standardError.write(Data("usage: AgentReinsMCP [--http] [--http-health] [--port 18977] [--require-token]\n".utf8))
                 exit(0)
             } else {
                 failArgs("unknown argument: \(arg)")
@@ -48,9 +51,13 @@ enum AgentReinsMCP {
         }
         // Overlap the Keychain helper with process startup. Tool calls do not wait out a 15s hang.
         KeychainWarmup.shared.start()
-        if http {
+        if http || httpHealth {
             if envPortInvalid && !portFromArg { failArgs("invalid AGENTREINS_MCP_PORT") }
             guard (1...65535).contains(port) else { failArgs("port must be 1...65535") }
+            if httpHealth {
+                HTTPTransport.healthCheck(port: port)
+                exit(0)
+            }
             HTTPTransport.run(port: port, requireToken: requireToken)
         }
         runStdio()
@@ -166,39 +173,43 @@ enum Transport {
         let root = Paths.transport.resolvingSymlinksInPath()
         let path = root.path
         if path.hasPrefix("/private/tmp") || path.hasPrefix("/tmp/") { return Load(records: [], truncated: false) }
-        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: nil, options: [.skipsHiddenFiles]) else {
+        if isCancelled() { return Load(records: [], truncated: false, stopped: true, stopReason: "request cancelled") }
+        if let deadline, Date() >= deadline {
+            return Load(records: [], truncated: true, stopped: true, stopReason: "transport directory scan exceeded the read budget")
+        }
+        // One bulk listing (getattrlistbulk). Do not stat transport.json in every run.
+        // A tree of thousands of directories used to miss the read budget before any row returned.
+        let keys: Set<URLResourceKey> = [.contentModificationDateKey, .isDirectoryKey]
+        guard let dirs = try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: Array(keys), options: [.skipsHiddenFiles]) else {
             return Load(records: [], truncated: false)
         }
+        var ranked: [(Date, URL)] = []
+        ranked.reserveCapacity(min(dirs.count, max(limit, 1)))
+        for dir in dirs {
+            let values = try? dir.resourceValues(forKeys: keys)
+            if values?.isDirectory == false { continue }
+            let when = values?.contentModificationDate ?? .distantPast
+            ranked.append((when, dir))
+        }
+        ranked.sort { $0.0 > $1.0 }
+        let truncated = ranked.count > limit
+        let chosen = ranked.prefix(max(limit, 0))
         var stopped = false
         var stopReason: String?
         func halt(_ reason: String) {
             stopped = true
             stopReason = reason
         }
-        var jsons: [URL] = []
-        for (index, dir) in dirs.enumerated() {
+        var files: [URL] = []
+        for dir in chosen {
             if isCancelled() { halt("request cancelled"); break }
-            if let deadline, index % 80 == 0, Date() >= deadline {
-                halt("transport directory scan exceeded the read budget")
+            if let deadline, Date() >= deadline {
+                halt("transport file reads exceeded the read budget")
                 break
             }
-            let file = dir.appendingPathComponent("transport.json")
-            if file.lastPathComponent.contains("evidence.sqlite") { continue }
-            if FileManager.default.fileExists(atPath: file.path) { jsons.append(file) }
+            let file = dir.1.appendingPathComponent("transport.json")
+            if FileManager.default.fileExists(atPath: file.path) { files.append(file) }
         }
-        var ranked: [(Date, URL)] = []
-        for (index, file) in jsons.enumerated() {
-            if isCancelled() { halt("request cancelled"); break }
-            if let deadline, index % 80 == 0, Date() >= deadline {
-                halt("transport directory scan exceeded the read budget")
-                break
-            }
-            let when = (try? file.resourceValues(forKeys: [.contentModificationDateKey]).contentModificationDate) ?? .distantPast
-            ranked.append((when, file))
-        }
-        ranked.sort { $0.0 > $1.0 }
-        let truncated = ranked.count > limit || stopped
-        let files = ranked.prefix(limit).map(\.1)
         var rows: [[String: Any]] = []
         for file in files {
             if isCancelled() { halt("request cancelled"); break }
@@ -236,7 +247,7 @@ enum Transport {
             row["evidencePath"] = file.path
             rows.append(row)
         }
-        return Load(records: rows, truncated: truncated, stopped: stopped, stopReason: stopReason)
+        return Load(records: rows, truncated: truncated || stopped, stopped: stopped, stopReason: stopReason)
     }
 }
 
@@ -730,7 +741,7 @@ enum Coverage {
         let ledger = SocketLedger.load(integrity, agent: nil, since: nil, limit: 0)["coverage"] as? [String: Any] ?? [:]
         var result: [String: Any] = [
             "rules": [
-                ["id": "S01", "status": "blind", "confidence": "Unknown", "note": "无 Endpoint Security 级文件读证据"],
+                ["id": "S01", "status": "sampled", "confidence": "Observed", "note": "libproc 打开的文件描述符（含 /tmp）。短于采样间隔的读取会漏。不是 Endpoint Security，也不读文件正文。"],
                 ["id": "S02", "status": "supported", "confidence": "Observed", "note": "content_audit credential-outbound"],
                 ["id": "S03", "status": "supported", "confidence": "Correlated", "note": "同执行编号下载后执行"],
                 ["id": "S04", "status": "supported", "confidence": "Observed", "note": "非白名单目的地"],

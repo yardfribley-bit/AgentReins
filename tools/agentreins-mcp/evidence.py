@@ -265,6 +265,7 @@ def _parse_transport_file(path: pathlib.Path) -> dict[str, Any] | None:
 
 
 def _load_transport_dir(root: pathlib.Path, limit: int) -> list[dict[str, Any]]:
+    """Newest `limit` runs only. A directory of thousands of captures must not be parsed on every call."""
     if not root.is_dir():
         _TRANSPORT_INDEX["lastTruncated"] = False
         return []
@@ -273,36 +274,41 @@ def _load_transport_dir(root: pathlib.Path, limit: int) -> list[dict[str, Any]]:
             root.chmod(0o700)
     except OSError:
         pass
+    ranked: list[tuple[int, str]] = []
     try:
-        names = {entry.name for entry in os.scandir(root) if entry.is_dir(follow_symlinks=False) and not entry.name.startswith(".")}
-        root_mtime = root.stat().st_mtime_ns
+        for entry in os.scandir(root):
+            if not entry.is_dir(follow_symlinks=False) or entry.name.startswith("."):
+                continue
+            try:
+                ranked.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+            except OSError:
+                continue
     except OSError:
         _TRANSPORT_INDEX["lastTruncated"] = False
         return []
+    ranked.sort(reverse=True)
+    chosen = ranked[: max(0, limit)]
     index = _TRANSPORT_INDEX
-    same = index.get("root") == str(root) and index.get("names") == names and index.get("rootMtime") == root_mtime
-    cached: dict[str, Any] = index.get("rows") if same else {}
-    if not same:
-        # Only directories that appeared or disappeared need a stat. Unchanged names keep their row.
-        previous = index.get("rows") if index.get("root") == str(root) else {}
-        cached = {name: previous[name] for name in names if name in previous}
-        for name in names - set(cached):
-            path = root / name / "transport.json"
-            try:
-                mtime = path.stat().st_mtime_ns if path.is_file() else None
-            except OSError:
-                mtime = None
-            row = _parse_transport_file(path) if mtime is not None else None
-            cached[name] = (mtime, row)
-        index["root"] = str(root)
-        index["rootMtime"] = root_mtime
-        index["names"] = set(names)
-        index["rows"] = cached
-    ranked = [item for item in cached.values() if item and item[1] is not None]
-    ranked.sort(key=lambda item: item[0] or 0, reverse=True)
-    rows = [item[1] for item in ranked]
-    index["lastTruncated"] = len(rows) > limit
-    return rows[:limit]
+    previous = index.get("rows") if index.get("root") == str(root) else {}
+    cached: dict[str, Any] = {}
+    rows: list[dict[str, Any]] = []
+    for mtime, name in chosen:
+        prior = previous.get(name) if isinstance(previous, dict) else None
+        if isinstance(prior, tuple) and prior[0] == mtime and prior[1] is not None:
+            cached[name] = prior
+            rows.append(prior[1])
+            continue
+        path = root / name / "transport.json"
+        row = _parse_transport_file(path) if path.is_file() else None
+        cached[name] = (mtime, row)
+        if row is not None:
+            rows.append(row)
+    index["root"] = str(root)
+    index["rootMtime"] = root.stat().st_mtime_ns if root.exists() else 0
+    index["names"] = {name for _, name in chosen}
+    index["rows"] = cached
+    index["lastTruncated"] = len(ranked) > limit
+    return rows
 
 
 def load_transport_records(root: pathlib.Path | None = None, limit: int = 80) -> list[dict[str, Any]]:
@@ -1452,7 +1458,7 @@ def get_coverage() -> dict[str, Any]:
     result = {
         "proxy": {"listening": proxy_up, "detail": detail, "confidence": "Observed" if proxy_up else "Unknown"},
         "rules": [
-            {"id": "S01", "status": "blind", "confidence": "Unknown", "note": "无 Endpoint Security 级文件读证据"},
+            {"id": "S01", "status": "sampled", "confidence": "Observed", "note": "libproc 打开的文件描述符（含 /tmp）。短于采样间隔的读取会漏。不是 Endpoint Security，也不读文件正文。"},
             {"id": "S02", "status": "supported", "confidence": "Observed", "note": "content_audit credential-outbound"},
             {"id": "S03", "status": "supported", "confidence": "Correlated", "note": "同执行编号下载后执行"},
             {"id": "S04", "status": "supported", "confidence": "Observed", "note": "非白名单目的地"},

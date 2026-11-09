@@ -56,10 +56,9 @@ enum HTTPTransport {
         // No Bonjour / mDNS.
         listener.service = nil
 
-        let reaped = HTTPProcessGuard.reap(port: port)
-        if !reaped.isEmpty {
-            log("AgentReinsMCP: reaped \(reaped.count) orphan process(es) before listen: \(reaped.map(String.init).joined(separator: ","))")
-        }
+        // Bind before any process listing. Reaping used to call /bin/ps and
+        // waitUntilExit without draining the pipe, so ps blocked forever and
+        // this process never listened. The port has to be up even if reap is slow.
         installSignals(queue: queue)
         listener.stateUpdateHandler = { listenerState in
             state.onListener(listenerState, listener: listener)
@@ -74,7 +73,53 @@ enum HTTPTransport {
                 state.fail(state: "failed", detail: "listener did not become ready")
             }
         }
+        state.startPortWatchdog()
+        HTTPProcessGuard.reapAsync(port: port)
         dispatchMain()
+    }
+
+    /// Launchd StartInterval entry. If this port's `--http` process is alive and
+    /// old enough but nothing is accepting, signal it so KeepAlive starts a new one.
+    static func healthCheck(port: Int) {
+        let rows = ProcessTable.snapshot()
+        var procs: [MCPHTTPOrphans.Proc] = []
+        var started: [Int32: Date] = [:]
+        for row in rows where (row.path as NSString).lastPathComponent == "AgentReinsMCP" {
+            let command = ProcessTable.commandLine(row.pid)
+            let text = command.isEmpty ? row.path : command
+            procs.append(.init(pid: row.pid, ppid: row.ppid, command: text))
+            started[row.pid] = row.startedAt
+        }
+        let listening = portAccepts(port)
+        let victims = MCPHTTPOrphans.healthVictims(procs, port: port, portListening: listening, now: Date(), startedAt: started)
+        for pid in victims {
+            kill(pid, SIGTERM)
+            log("AgentReinsMCP health: pid \(pid) alive but 127.0.0.1:\(port) is not accepting; signaled")
+        }
+    }
+
+    static func portAccepts(_ port: Int) -> Bool {
+        let fd = socket(AF_INET, SOCK_STREAM, 0)
+        guard fd >= 0 else { return false }
+        defer { close(fd) }
+        var addr = sockaddr_in()
+        addr.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
+        addr.sin_family = sa_family_t(AF_INET)
+        addr.sin_port = in_port_t(UInt16(port)).bigEndian
+        addr.sin_addr = in_addr(s_addr: inet_addr("127.0.0.1"))
+        let flags = fcntl(fd, F_GETFL, 0)
+        _ = fcntl(fd, F_SETFL, flags | O_NONBLOCK)
+        let rc = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { connect(fd, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
+        }
+        if rc == 0 { return true }
+        if errno != EINPROGRESS && errno != EAGAIN { return false }
+        var pollfd = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+        if poll(&pollfd, 1, 400) <= 0 { return false }
+        var err: Int32 = 0
+        var len = socklen_t(MemoryLayout<Int32>.size)
+        getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len)
+        return err == 0
     }
 
     static func tokenURL() -> URL {
@@ -108,6 +153,10 @@ enum HTTPTransport {
     }
 }
 
+private final class PortMisses {
+    var value = 0
+}
+
 private final class ServerState {
     let port: Int
     let auth: String
@@ -118,6 +167,7 @@ private final class ServerState {
     var active = 0
     var settled = false
     let sessions: SessionTable
+    var listening = false
 
     init(port: Int, auth: String, token: String?, queue: DispatchQueue, work: DispatchQueue) {
         self.port = port
@@ -156,6 +206,7 @@ private final class ServerState {
                 fail(state: "not_loopback", detail: detail)
                 return
             }
+            listening = true
             EndpointDiscovery.write(state: "listening", port: port, auth: auth)
             HTTPTransportLog.write("AgentReinsMCP listening on http://127.0.0.1:\(port)/mcp auth=\(auth)")
         case .failed(let error):
@@ -187,6 +238,29 @@ private final class ServerState {
         EndpointDiscovery.write(state: state, port: port, auth: auth, detail: detail)
         HTTPTransportLog.write("AgentReinsMCP: exiting (\(state)) \(detail)")
         exit(1)
+    }
+
+    /// The process can stay in dispatchMain after the listener stops accepting.
+    /// Two failed connects in a row exit so launchd KeepAlive starts a new process.
+    func startPortWatchdog() {
+        let misses = PortMisses()
+        func tick() {
+            queue.asyncAfter(deadline: .now() + 15) { [weak self] in
+                guard let self else { return }
+                guard self.settled, self.listening else { tick(); return }
+                if HTTPTransport.portAccepts(self.port) {
+                    misses.value = 0
+                } else {
+                    misses.value += 1
+                    if misses.value >= 2 {
+                        self.fail(state: "not_listening", detail: "process alive but 127.0.0.1:\(self.port) is not accepting")
+                        return
+                    }
+                }
+                tick()
+            }
+        }
+        tick()
     }
 
     func accept(_ conn: NWConnection) {
@@ -527,21 +601,9 @@ private final class ServerState {
         let url = URL(fileURLWithPath: "/usr/sbin/lsof")
         guard FileManager.default.isExecutableFile(atPath: url.path) else { return "" }
         var last = ""
-        for _ in 0..<10 {
-            let proc = Process()
-            proc.executableURL = url
-            proc.arguments = ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"]
-            let out = Pipe()
-            proc.standardOutput = out
-            proc.standardError = Pipe()
-            do {
-                try proc.run()
-                proc.waitUntilExit()
-                last = String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-                if last.contains("LISTEN") { return last }
-            } catch {
-                return ""
-            }
+        for _ in 0..<4 {
+            last = BoundedProcess.run(url.path, arguments: ["-nP", "-iTCP:\(port)", "-sTCP:LISTEN"], timeout: 1.5)
+            if last.contains("LISTEN") { return last }
             Thread.sleep(forTimeInterval: 0.05)
         }
         return last
@@ -670,66 +732,77 @@ private final class SessionTable {
 /// whose client has died (ppid 1), are signaled. A listener on this port is left
 /// alone so the existing port_in_use exit still applies. Other ports are left alone.
 private enum HTTPProcessGuard {
+    /// Does not block the caller. Listing is in-process. A fixture, or a last-resort
+    /// `/bin/ps`, is read with a hard timeout that kills the child.
+    static func reapAsync(port: Int) {
+        DispatchQueue.global(qos: .utility).async {
+            let done = reap(port: port)
+            if !done.isEmpty {
+                HTTPTransportLog.write("AgentReinsMCP: reaped \(done.count) orphan process(es): \(done.map(String.init).joined(separator: ","))")
+            }
+        }
+    }
+
     static func reap(port: Int) -> [Int32] {
         let listing = ServerState.lsofListen(port)
         let listeners = MCPHTTPOrphans.listenerPIDs(lsof: listing)
-        let procs = MCPHTTPOrphans.parsePS(psText())
+        let procs = MCPHTTPOrphans.parsePS(processText())
         let selfPid = ProcessInfo.processInfo.processIdentifier
-        let victims = MCPHTTPOrphans.orphanPIDs(procs, selfPid: selfPid, port: port, listenerPIDs: listeners)
+        let victims = MCPHTTPOrphans.reapPIDs(procs, selfPid: selfPid, port: port, listenerPIDs: listeners)
         let dry = ProcessInfo.processInfo.environment["AGENTREINS_MCP_REAP_DRY_RUN"] == "1"
         var done: [Int32] = []
-        for pid in victims {
+        for pid in victims where pid != selfPid {
             if dry {
                 HTTPTransportLog.write("AgentReinsMCP: orphan http pid=\(pid) not listening; dry-run")
                 done.append(pid)
                 continue
             }
-            let command = psCommand(pid)
+            let command = commandText(pid)
             guard MCPHTTPOrphans.isAgentReinsMCP(command) else { continue }
+            let legacy = MCPHTTPOrphans.isLegacyBundle(command)
             let samePort = MCPHTTPOrphans.isHTTPServerCommand(command)
                 && MCPHTTPOrphans.commandTargetsPort(command, port: port)
             let abandonedStdio = !MCPHTTPOrphans.isHTTPServerCommand(command)
-            guard samePort || abandonedStdio else { continue }
+            guard samePort || abandonedStdio || legacy else { continue }
             kill(pid, SIGTERM)
             done.append(pid)
             HTTPTransportLog.write("AgentReinsMCP: reaped orphan http pid=\(pid)")
         }
         if !dry && !done.isEmpty {
             Thread.sleep(forTimeInterval: 0.3)
-            for pid in done where PeerIdentity.processAlive(pid) {
+            for pid in done where pid != selfPid && PeerIdentity.processAlive(pid) {
                 kill(pid, SIGKILL)
             }
         }
         return done
     }
 
-    private static func psText() -> String {
+    private static func processText() -> String {
         if let path = ProcessInfo.processInfo.environment["AGENTREINS_MCP_PS_FIXTURE"], !path.isEmpty,
            let text = try? String(contentsOfFile: path, encoding: .utf8) {
             return text
         }
-        return run("/bin/ps", ["-ax", "-o", "pid=,ppid=,command="])
-    }
-
-    private static func psCommand(_ pid: Int32) -> String {
-        run("/bin/ps", ["-p", String(pid), "-o", "command="])
-            .trimmingCharacters(in: .whitespacesAndNewlines)
-    }
-
-    private static func run(_ exe: String, _ args: [String]) -> String {
-        let proc = Process()
-        proc.executableURL = URL(fileURLWithPath: exe)
-        proc.arguments = args
-        let out = Pipe()
-        proc.standardOutput = out
-        proc.standardError = Pipe()
-        do {
-            try proc.run()
-            proc.waitUntilExit()
-            return String(data: out.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
-        } catch {
-            return ""
+        let rows = ProcessTable.snapshot()
+        var lines: [String] = []
+        for row in rows where (row.path as NSString).lastPathComponent == "AgentReinsMCP" {
+            let command = ProcessTable.commandLine(row.pid)
+            let text = command.isEmpty ? row.path : command
+            lines.append("\(row.pid) \(row.ppid) \(text)")
         }
+        if !lines.isEmpty { return lines.joined(separator: "\n") }
+        // Last resort. Drained while running, and killed if it has not exited in 2.5s.
+        return BoundedProcess.run("/bin/ps", arguments: ["-ax", "-o", "pid=,ppid=,command="], timeout: 2.5)
+    }
+
+    private static func commandText(_ pid: Int32) -> String {
+        if ProcessInfo.processInfo.environment["AGENTREINS_MCP_PS_FIXTURE"] != nil {
+            let procs = MCPHTTPOrphans.parsePS(processText())
+            return procs.first { $0.pid == pid }?.command ?? ""
+        }
+        let command = ProcessTable.commandLine(pid)
+        if !command.isEmpty { return command }
+        return BoundedProcess.run("/bin/ps", arguments: ["-p", String(pid), "-o", "command="], timeout: 2.5)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 }
 
