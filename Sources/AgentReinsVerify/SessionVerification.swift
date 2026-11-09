@@ -422,7 +422,7 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
 private func readRecentLines(_ url: URL, maxScan: Int = 32 * 1024 * 1024, maxLine: Int = 65_536, maxLines: Int = 4_000) -> Data? {
     guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
     defer { try? handle.close() }
-    let size = Int(try? handle.seekToEnd() ?? 0)
+    let size = Int((try? handle.seekToEnd()) ?? 0)
     guard size > 0 else { return Data() }
     var pos = size
     var scanned = 0
@@ -437,10 +437,10 @@ private func readRecentLines(_ url: URL, maxScan: Int = 32 * 1024 * 1024, maxLin
         pending.insert(contentsOf: chunk, at: 0)
         let parts = pending.split(separator: 0x0A, omittingEmptySubsequences: false)
         guard parts.count > 1 else { continue }
-        pending = parts[0]
+        pending = Data(parts[0])
         for part in parts.dropFirst().reversed() {
             if part.count > maxLine { continue }
-            lines.append(part)
+            lines.append(Data(part))
             if lines.count >= maxLines { break }
         }
     }
