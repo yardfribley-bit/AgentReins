@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Combine
 import CryptoKit
 import Foundation
@@ -508,6 +509,13 @@ final class ToolActivityEvidenceProjector: ObservableObject {
         if result.isEmpty, let path = firstMatch(#"(?:^|[;&|]\s*)(?:cat|head|tail|less|more)\s+(?:-[^\s]+\s+)*(\S+)"#, in: command) {
             let resolved = absolute(path, workspace: workspace)
             if !resolved.isEmpty { result.append(.file(op: "read", path: resolved, relatedPath: nil)) }
+        }
+        for hit in FileLayerCapture.commandTargets(command) {
+            let already = result.contains { payload in
+                if case let .file(_, path, _) = payload { return path == hit.path }
+                return false
+            }
+            if !already { result.append(.file(op: hit.op, path: hit.path, relatedPath: nil)) }
         }
         return result
     }

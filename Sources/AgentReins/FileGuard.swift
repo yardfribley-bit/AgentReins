@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Foundation
 import SwiftUI
 
@@ -90,6 +91,7 @@ final class FileGuard: ObservableObject {
     }
 
     private func poll() {
+        pollBuiltinCredentials()
         let fm = FileManager.default
         let rules = currentRules
         var pending: [(rule: Rule, path: String, op: String, action: String, before: String?, after: String?, diff: String?, findings: [CodeFinding])] = []
@@ -173,7 +175,48 @@ final class FileGuard: ObservableObject {
             evidenceDatabase?.enqueueHealth(CollectorHealthRecord(
                 source: "file", state: .healthy, lastSuccess: Date(), lagSeconds: nil,
                 accepted: acceptedEvents, malformed: 0, dropped: 0,
-                detail: "Only explicitly protected paths are observed; rapid intermediate writes may be missed"))
+                detail: "Credential paths are observed without protect rules. Other files still need a protect rule. Rapid intermediate writes may be missed."))
+        }
+    }
+
+    private func protectedWatchPaths() -> Set<String> {
+        var paths = Set<String>()
+        for rule in currentRules where rule.isProtect {
+            for watch in rule.watch ?? [] {
+                paths.insert((watch as NSString).expandingTildeInPath)
+            }
+        }
+        return paths
+    }
+
+    /// Known credential files, independent of rules.json. Empty rules used to
+    /// mean this poll watched nothing, so a read of `.env` never became an event.
+    /// This does not restore or block. `/tmp` reads come from the vnode sampler.
+    private func pollBuiltinCredentials() {
+        let fm = FileManager.default
+        var changed: [String] = []
+        let alreadyWatched = protectedWatchPaths()
+        for path in FileLayerCapture.builtinCredentialFiles(home: NSHomeDirectory()) {
+            // A protect/block rule on this path already emits the change.
+            // The default deny policy has no watch list, so it does not count.
+            guard !alreadyWatched.contains(path) else { continue }
+            guard fm.fileExists(atPath: path) else { continue }
+            let now = mtime(of: path)
+            lock.lock()
+            let previous = lastMtime[path]
+            lastMtime[path] = now
+            lock.unlock()
+            if let previous, previous != now { changed.append(path) }
+        }
+        guard !changed.isEmpty else { return }
+        DispatchQueue.main.async {
+            for path in changed {
+                let rule = Rule(id: "credential_observe", kind: "file", watch: [path], pattern: nil,
+                                ops: ["modify"], severity: "high", action: "alert", restore: false,
+                                message: "credential path changed", naturalLanguage: nil)
+                self.emit(rule: rule, path: path, op: "modify", action: "observed",
+                          before: nil, after: nil, diff: nil, findings: [])
+            }
         }
     }
 

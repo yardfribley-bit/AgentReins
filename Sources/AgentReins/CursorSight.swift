@@ -1,3 +1,4 @@
+import AgentReinsCore
 import CryptoKit
 import Foundation
 import SQLite3
@@ -334,16 +335,22 @@ final class CursorSight: ObservableObject {
         timestamp: Date, session: String, turn: String?, workspace: String, intent: String?,
         model: String?, status: String, result: String?, parameters: String) -> [GuardEvent] {
         guard let object = dictionary(parameters) else { return [] }
+        let root = URL(fileURLWithPath: workspace).standardizedFileURL.path
         let targets = terminalOutputTargets(object, workspace: workspace)
-        var projected: [GuardEvent] = targets.compactMap { path in
-            guard let content = boundedWorkspaceFile(path: path, workspace: workspace) else { return nil }
+        var projected: [GuardEvent] = targets.map { path in
+            let outside = !path.hasPrefix(root + "/")
+            let credential = FileLayerCapture.isCredentialPath(path)
+            let content = (outside || credential) ? nil : boundedWorkspaceFile(path: path, workspace: workspace)
+            let method = outside
+                ? "Cursor terminal redirect outside the workspace. Path recorded; file body was not copied."
+                : "Cursor terminal redirect target + current workspace file observation"
             return event(id: "\(bubbleID):terminal-file:\(path)", kind: "file", op: "create_or_modify",
                 action: "independently_observed", ts: timestamp, session: session, turn: turn,
                 workspace: path, intent: intent, after: content, model: model,
                 toolCallId: callID, toolName: "run_terminal_command_v2",
                 codeFindings: CodeSecurityScanner.scan(path: path, before: nil, after: content),
                 confidence: .inferred,
-                method: "Cursor terminal redirect target + current workspace file observation")
+                method: method)
         }
         let terminalFinished = ["completed", "success", "ok"].contains(status.lowercased()) && result != nil
         let verificationAction = terminalFinished ? "verified" : (!projected.isEmpty ? "partial" : "unverified")
@@ -373,8 +380,10 @@ final class CursorSight: ObservableObject {
                   raw != "/dev/null" else { return nil }
             let expanded = NSString(string: raw).expandingTildeInPath
             let candidate = URL(fileURLWithPath: expanded, relativeTo: root).standardizedFileURL
-            guard candidate.path.hasPrefix(root.path + "/") else { return nil }
-            return candidate.path
+            if candidate.path.hasPrefix(root.path + "/") { return candidate.path }
+            let absolute = raw.hasPrefix("/") || raw.hasPrefix("~")
+            if absolute && !FileLayerCapture.isNoisePath(candidate.path) { return candidate.path }
+            return nil
         })).sorted()
     }
 

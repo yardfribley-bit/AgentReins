@@ -851,7 +851,7 @@ function renderCoverage(holder,payload,riskState){
  <p class="note" style="margin:8px 28px">绕过审计：外网列表会标出 auditBypass，以及命令里的 --noproxy / 非本机代理。风险告警 S07 只在 auditBypass=true 或已采样 viaProxy=false 时出现，不单凭参数推断。</p>
  <div class="risk-stats cov-only">
   <div class="risk-stat"><b class="${cov.proxyUp?'ok':''}">${cov.proxyUp?'在听':'未确认'}</b><span>审计代理 18891</span></div>
-  <div class="risk-stat"><b>S01</b><span>进程内读文件仍是盲区；PATH 参数会拒绝凭据路径</span></div>
+  <div class="risk-stat"><b>S01</b><span>PATH 会拒绝凭据路径。进程内读取靠 libproc / kqueue 观测，拦不住，也不是 Endpoint Security</span></div>
   <div class="risk-stat"><b>S06</b><span>配置监看 · 未接入</span></div>
   <div class="risk-stat"><b>${socketCoverage().state==='sampling'?'采样中':'看不到'}</b><span>未走代理流量 · ${socketCoverage().state==='sampling'?esc(socketCoverage().p95Text):'不估算'}</span></div>
  </div>

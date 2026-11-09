@@ -1,3 +1,4 @@
+import AgentReinsCore
 import AppKit
 import CryptoKit
 import SwiftUI
@@ -115,6 +116,31 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
             }
             if action == "loadMCPAudit" {
                 pushMCPAudit(to: message.webView)
+                return
+            }
+            if action == "loadDiskUsage" {
+                let webView = message.webView
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: nil))
+                }
+                return
+            }
+            if action == "deleteStaleData" {
+                let webView = message.webView
+                let id = body["id"] as? String ?? ""
+                DispatchQueue.global(qos: .utility).async { [weak self] in
+                    let support = EvidenceDatabase.defaultURL().deletingLastPathComponent()
+                    guard let url = StaleDataCatalog.canDelete(id: id, directory: support) else {
+                        self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: "这份文件不在可删名单里，没有删除。"))
+                        return
+                    }
+                    do {
+                        try FileManager.default.removeItem(at: url)
+                        self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: "已删除 \(url.lastPathComponent)。正在用的证据库没有动。"))
+                    } catch {
+                        self?.pushHostResult(to: webView, result: RealtimeWorkspaceState.diskUsagePayload(message: "没有删成：\(error.localizedDescription)"))
+                    }
+                }
                 return
             }
             if action == "applyRetention" {
@@ -743,6 +769,21 @@ final class RealtimeWorkspaceState: ObservableObject {
     private var deliveryCacheArtifacts: [RealtimeArtifact] = []
     private var deliveryCache: [RealtimeTask] = []
     private var addressCache: [String] = []
+    static func diskUsagePayload(message: String?) -> [String: Any] {
+        let support = EvidenceDatabase.defaultURL().deletingLastPathComponent()
+        let cloud = StaleDataCatalog.fileBytes(support.appendingPathComponent("CloudAudit", isDirectory: true))
+        let stale = StaleDataCatalog.suggestions(directory: support, cloudAuditBytes: cloud)
+        var payload: [String: Any] = [
+            "action": "diskUsage",
+            "evidenceBytes": EvidenceDatabase.fileBytes(EvidenceDatabase.defaultURL()),
+            "stale": stale.map { item in
+                ["id": item.id, "name": item.name, "path": item.path, "bytes": item.bytes, "reason": item.reason]
+            },
+        ]
+        if let message { payload["message"] = message }
+        return payload
+    }
+
     func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil, fileWatching: Bool = false) -> RealtimeWorkspacePayload {
         let tasks = projectedTasks()
         if deliveryCacheVersion != taskProjectionBuilds || deliveryCacheArtifacts != artifacts {

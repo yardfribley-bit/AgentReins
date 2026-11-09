@@ -54,6 +54,7 @@ struct AgentReinsApp: App {
     // create their own SQLite connections.
     @StateObject private var eventStore = EventStore(realtimeOnly: true)
     @StateObject private var fileGuard = FileGuard()
+    private let fileObserver = AgentTreeFileObserver()
     @StateObject private var processGuard = ProcessGuard()
     @StateObject private var turnJournalStore = TurnJournalStore()
     @StateObject private var workBuddySight = WorkBuddySight()
@@ -123,10 +124,15 @@ struct AgentReinsApp: App {
                         liveMemoryMonitor.stop()
                         processGuard.stop()
                         fileGuard.stop()
+                        fileObserver.stop()
                         webAgentSight.stop()
                     }
                     // Realtime branch: no historical analysis worker.
                     fileGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
+                    fileObserver.onEvents = { events in
+                        eventStore.record(events.map { attributionResolver.resolve($0) })
+                    }
+                    fileObserver.start()
                     processGuard.onEvent = { eventStore.record(attributionResolver.resolve($0)) }
                     processGuard.onEvents = { events in
                         eventStore.record(events.map { attributionResolver.resolve($0) })

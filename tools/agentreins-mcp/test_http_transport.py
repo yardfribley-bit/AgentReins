@@ -40,6 +40,16 @@ class InstallerPlistTests(unittest.TestCase):
         self.assertTrue(data["KeepAlive"])
         self.assertEqual(data["ProcessType"], "Background")
         self.assertEqual(data["ThrottleInterval"], 10)
+
+    def test_print_health_plist_signals_a_live_process_that_is_not_listening(self) -> None:
+        out = subprocess.check_output([sys.executable, str(INSTALLER), "--print-health", "--port", "18977"])
+        data = plistlib.loads(out)
+        self.assertEqual(data["Label"], "com.agentreins.mcp-http-health")
+        args = data["ProgramArguments"]
+        self.assertTrue(str(args[0]).endswith("AgentReinsMCP"), args)
+        self.assertEqual(args[1:], ["--http-health", "--port", "18977"])
+        self.assertEqual(data["StartInterval"], 20)
+        self.assertTrue(data["RunAtLoad"])
         self.assertTrue(str(data["StandardOutPath"]).endswith("mcp-http.log"), data["StandardOutPath"])
         self.assertEqual(data["StandardOutPath"], data["StandardErrorPath"])
 
@@ -704,7 +714,11 @@ class HTTPTransportTests(unittest.TestCase):
         })
         try:
             self.wait_health(server)
+            deadline = time.time() + 5
             log = server.log()
+            while "orphan http pid=4242" not in log and time.time() < deadline:
+                time.sleep(0.05)
+                log = server.log()
             self.assertIn("orphan http pid=4242", log)
             self.assertNotIn("pid=99", log)
             self.assertNotIn("pid=7", log)

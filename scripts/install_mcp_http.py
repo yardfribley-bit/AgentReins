@@ -28,8 +28,10 @@ import secrets
 import sys
 
 LABEL = "com.agentreins.mcp-http"
+HEALTH_LABEL = "com.agentreins.mcp-http-health"
 APPLICATIONS_BIN = pathlib.Path("/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP")
 PLIST = pathlib.Path.home() / "Library/LaunchAgents" / f"{LABEL}.plist"
+HEALTH_PLIST = pathlib.Path.home() / "Library/LaunchAgents" / f"{HEALTH_LABEL}.plist"
 LOG = pathlib.Path.home() / "Library/Logs/AgentReins/mcp-http.log"
 TOKEN = pathlib.Path.home() / "Library/Application Support/AgentGuard/mcp-http.token"
 HERE = pathlib.Path(__file__).resolve().parent
@@ -52,6 +54,21 @@ def resolve_binary(explicit: str | None) -> pathlib.Path:
     if bundled is not None:
         return bundled
     return APPLICATIONS_BIN
+
+
+def health_plist(binary: pathlib.Path, port: int) -> dict:
+    """Separate LaunchAgent. The HTTP process can be alive and still not listening
+    (the /bin/ps reap hang). This job notices and signals it so KeepAlive restarts it.
+    """
+    return {
+        "Label": HEALTH_LABEL,
+        "ProgramArguments": [str(binary), "--http-health", "--port", str(port)],
+        "RunAtLoad": True,
+        "StartInterval": 20,
+        "ProcessType": "Background",
+        "StandardOutPath": str(LOG),
+        "StandardErrorPath": str(LOG),
+    }
 
 
 def plist(binary: pathlib.Path, port: int, require_token: bool) -> dict:
@@ -98,8 +115,9 @@ def main() -> int:
                     help="Require Authorization: Bearer and create mcp-http.token if it is missing")
     ap.add_argument("--uninstall", action="store_true")
     ap.add_argument("--print", action="store_true", help="Write the plist to stdout and do not install")
+    ap.add_argument("--print-health", action="store_true", help="Write the health-check plist to stdout and do not install")
     args = ap.parse_args()
-    if args.print and args.uninstall:
+    if (args.print or args.print_health) and args.uninstall:
         print("--print and --uninstall are mutually exclusive", file=sys.stderr)
         return 2
     if not 1 <= args.port <= 65535:
@@ -107,6 +125,9 @@ def main() -> int:
         return 2
     binary = resolve_binary(args.binary)
     data = plist(binary, args.port, args.require_token)
+    if args.print_health:
+        sys.stdout.buffer.write(plistlib.dumps(health_plist(binary, args.port)))
+        return 0
     if args.print:
         sys.stdout.buffer.write(plistlib.dumps(data))
         return 0
@@ -114,7 +135,9 @@ def main() -> int:
         uid = str(os.getuid())
         import subprocess
         subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(PLIST)], check=False)
+        subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(HEALTH_PLIST)], check=False)
         PLIST.unlink(missing_ok=True)
+        HEALTH_PLIST.unlink(missing_ok=True)
         print("removed", PLIST)
         return 0
     if not binary.is_file():
@@ -128,8 +151,11 @@ def main() -> int:
     PLIST.parent.mkdir(parents=True, exist_ok=True)
     LOG.parent.mkdir(parents=True, exist_ok=True)
     subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(PLIST)], check=False, capture_output=True)
+    subprocess.run(["launchctl", "bootout", f"gui/{uid}", str(HEALTH_PLIST)], check=False, capture_output=True)
     PLIST.write_bytes(plistlib.dumps(data))
+    HEALTH_PLIST.write_bytes(plistlib.dumps(health_plist(binary, args.port)))
     subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(PLIST)], check=True)
+    subprocess.run(["launchctl", "bootstrap", f"gui/{uid}", str(HEALTH_PLIST)], check=True)
     print("installed", PLIST, "port", args.port, "auth", "bearer" if args.require_token else "none")
     print("endpoint http://127.0.0.1:%s/mcp" % args.port)
     return 0
