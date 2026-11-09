@@ -1,3 +1,4 @@
+import AgentReinsCore
 import Foundation
 import SwiftUI
 import CryptoKit
@@ -37,6 +38,9 @@ final class WorkBuddySight: ObservableObject {
     }
     private var parserStates: [String: ParserState] = [:]
     private var isPolling = false
+    private var logActivity = true
+    /// Only touched on `queue`. The cursor is the resumed directory walk.
+    nonisolated(unsafe) private let treeCursor = JSONLTreeCursor()
     private let evidenceDatabase: EvidenceDatabase?
     private let rootURL: URL
 
@@ -60,7 +64,14 @@ final class WorkBuddySight: ObservableObject {
             startupID = id
             let root = rootURL, database = evidenceDatabase, startedAt = realtimeSince!
             queue.async { [weak self] in
-                let offsets = RealtimeLogBaseline.offsets(root: root)
+                guard let sight = self else { return }
+                var spins = 0
+                while !sight.treeCursor.discoveryFinished && spins < 4 {
+                    _ = sight.treeCursor.refresh(root: root.path, now: Date(), fullInterval: 30, entryBudget: 1500)
+                    spins += 1
+                    if !sight.treeCursor.discoveryFinished { Thread.sleep(forTimeInterval: 0.02) }
+                }
+                let offsets = sight.treeCursor.sizes
                 let saved = (try? database?.parserStates(source: "workbuddy-live")) ?? [:]
                 let marker = root.path + "/.agentreins-activation"
                 let since = saved[marker].flatMap { try? JSONDecoder().decode(Date.self, from: $0) } ?? startedAt
@@ -170,6 +181,9 @@ final class WorkBuddySight: ObservableObject {
         guard !isPolling else {
             pendingTargets.formUnion(targets); pendingWakeup = true; return
         }
+        if targets.isEmpty && !RuntimeBudget.shared.allowMainLoop(lane: "workbuddy-logs", base: realtimeSince == nil ? 30 : 2, previousChanged: logActivity) {
+            return
+        }
         isPolling = true
         let root = rootURL.path
         let changedAfter = lastPoll
@@ -182,6 +196,7 @@ final class WorkBuddySight: ObservableObject {
         let cursorSource = since == nil ? "workbuddy" : "workbuddy-live"
         lastPoll = Date()
         queue.async { [weak self] in
+            guard let sight = self else { return }
             // Drain every decoded envelope only after durable acknowledgement.
             // Filtering before acknowledgement stranded pre-start files forever
             // and repeatedly decoded them at every live wakeup.
@@ -194,9 +209,34 @@ final class WorkBuddySight: ObservableObject {
                 }
             }
             let hinted = Array(Set(targets + liveHooks.compactMap(\.transcript)))
-            let batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
+            let refresh: JSONLTreeCursor.Refresh?
+            let baseline: [String: UInt64]
+            let sawReadable: Bool
+            let batch: (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int, states: [String: ParserState])
+            if hinted.isEmpty {
+                let scan = sight.treeCursor.refresh(
+                    root: root, now: Date(),
+                    fullInterval: RuntimeBudget.shared.isThrottled ? 90 : 30,
+                    entryBudget: RuntimeBudget.shared.isThrottled ? 400 : 1200)
+                let split = JSONLTreeCursor.partition(listed: scan.listed, knownSizes: previousSizes, acceptNewSince: since)
+                var sizesForRead = previousSizes
+                sizesForRead.merge(split.baseline) { current, _ in current }
+                refresh = scan
+                baseline = split.baseline
+                sawReadable = !split.readable.isEmpty
+                batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
+                                              previousSizes: sizesForRead, previousStates: previousStates,
+                                              prelisted: split.readable.map { URL(fileURLWithPath: $0.path) })
+            } else {
+                refresh = nil
+                baseline = [:]
+                sawReadable = true
+                batch = Self.readRecentEvents(root: root, changedAfter: changedAfter,
                                               previousSizes: previousSizes, previousStates: previousStates,
                                               targets: hinted)
+            }
+            let discoveryOpen = refresh.map { !$0.discoveryFinished } ?? false
+            let hadDelta = sawReadable
             let collectedEvents = (liveHooks.map(\.event) + batch.events).filter { since == nil || $0.ts >= since! }
             let malformed = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).malformedRows }
             let partial = batch.raw.reduce(0) { $0 + JSONLDiagnostics.inspect($1.payload).trailingPartialRows }
@@ -246,8 +286,10 @@ final class WorkBuddySight: ObservableObject {
                 self.parserStates.merge(batch.states) { _, new in new }
                 let isConnected = FileManager.default.fileExists(atPath: root)
                 if self.connected != isConnected { self.connected = isConnected }
+                self.fileSizes.merge(baseline) { current, _ in current }
                 self.fileSizes.merge(batch.sizes) { _, new in new }
                 let fresh = collectedEvents.filter { self.seen.insert($0.id).inserted }
+                self.logActivity = hadDelta || discoveryOpen || !fresh.isEmpty
                 self.collectionFailures += batch.rawFailures
                 self.malformedRows += malformed
                 self.partialRows += partial
@@ -275,11 +317,18 @@ final class WorkBuddySight: ObservableObject {
     }
 
     nonisolated static func readRecentEvents(root: String, changedAfter: Date,
-                                                     previousSizes: [String: UInt64], previousStates: [String: ParserState], targets: [URL] = [])
+                                                     previousSizes: [String: UInt64], previousStates: [String: ParserState], targets: [URL] = [],
+                                                     prelisted: [URL]? = nil)
         -> (events: [GuardEvent], sizes: [String: UInt64], raw: [RawEvidenceRecord], rawFailures: Int, states: [String: ParserState]) {
         let fm = FileManager.default
         var files: [(URL, Date, UInt64)] = []
-        if !targets.isEmpty {
+        if let prelisted {
+            for url in prelisted {
+                guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
+                      let size = values.fileSize else { continue }
+                files.append((url, values.contentModificationDate ?? .distantPast, UInt64(size)))
+            }
+        } else if !targets.isEmpty {
             for url in targets {
                 guard let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey]),
                       let size = values.fileSize else { continue }
@@ -289,7 +338,12 @@ final class WorkBuddySight: ObservableObject {
             guard let enumerator = fm.enumerator(at: URL(fileURLWithPath: root),
                 includingPropertiesForKeys: [.contentModificationDateKey, .fileSizeKey]) else { return ([], [:], [], 1, [:]) }
             let cutoff = Date().addingTimeInterval(-7 * 86_400)
-            for case let url as URL in enumerator where url.pathExtension == "jsonl" {
+            for case let url as URL in enumerator {
+                if JSONLTreeCursor.shouldSkip(url.lastPathComponent) {
+                    enumerator.skipDescendants()
+                    continue
+                }
+                guard url.pathExtension == "jsonl" else { continue }
                 let values = try? url.resourceValues(forKeys: [.contentModificationDateKey, .fileSizeKey])
                 let mtime = values?.contentModificationDate ?? .distantPast
                 let size = UInt64(values?.fileSize ?? 0)

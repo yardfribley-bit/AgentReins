@@ -10,7 +10,7 @@ struct RealtimeWorkspacePayload: Encodable {
     let health: [RealtimeHealth]
     let observing: Bool
     let persistenceError: String?
-    let publishedAt: Date
+    var publishedAt: Date
     let truncated: Bool
     var collectedCount: Int = 0
     var contexts: [RealtimeContextExchange] = []

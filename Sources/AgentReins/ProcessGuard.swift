@@ -1,3 +1,4 @@
+import AgentReinsCore
 import AppKit
 import Foundation
 import SwiftUI
@@ -76,6 +77,7 @@ final class ProcessGuard: ObservableObject {
     private var workingCollectionHealth = CollectionHealth()
     private var lastHealthPublish = Date.distantPast
     private var lastInventoryPublish = Date.distantPast
+    private var processActivity = true
 
     /// 内置默认高危命令监测集（对齐 agentguard/rules.json 的命令层规则）。
     static let builtin: [CmdRule] = {
@@ -193,10 +195,13 @@ final class ProcessGuard: ObservableObject {
         for old in pendingNetworkTriggers.sorted(by: { $0.value < $1.value }).prefix(max(0, pendingNetworkTriggers.count - 32)) {
             pendingNetworkTriggers.removeValue(forKey: old.key)
         }
-        if running { captureProcesses() }
+        if running { captureProcesses(forced: true) }
     }
 
-    private func captureProcesses() {
+    private func captureProcesses(forced: Bool = false) {
+        if !forced && !RuntimeBudget.shared.allowMainLoop(lane: "process-snapshot", base: 0.75, previousChanged: processActivity) {
+            return
+        }
         guard running, !processSnapshotInFlight else {
             if processSnapshotInFlight {
                 workingCollectionHealth.skippedProcessSnapshots += 1
@@ -220,6 +225,7 @@ final class ProcessGuard: ObservableObject {
             Task { @MainActor [weak self] in
                 guard let self else { return }
                 self.processSnapshotInFlight = false
+                self.processActivity = !armEvents.isEmpty
                 self.workingCollectionHealth.lastProcessDurationMS = Date().timeIntervalSince(started) * 1_000
                 if procs.isEmpty && self.snapshotProvider.snapshotFailed {
                     self.workingCollectionHealth.processFailures += 1
@@ -246,10 +252,12 @@ final class ProcessGuard: ObservableObject {
                 // are observable. Publishing an identical 500-process array at
                 // that cadence forced SwiftUI to rebuild the entire posture
                 // screen continuously and pinned a CPU core.
-                if inventory != self.processInventory,
-                   Date().timeIntervalSince(self.lastInventoryPublish) >= 2 {
-                    self.processInventory = inventory
-                    self.lastInventoryPublish = Date()
+                if inventory != self.processInventory {
+                    self.processActivity = true
+                    if Date().timeIntervalSince(self.lastInventoryPublish) >= 2 {
+                        self.processInventory = inventory
+                        self.lastInventoryPublish = Date()
+                    }
                 }
                 self.process(procs: procs, attributions: attributions)
                 self.onEvents?(armEvents + self.hookCorrelation.observeProcesses(inventory))
@@ -430,6 +438,7 @@ final class ProcessGuard: ObservableObject {
             }
         }
         guard !newEvents.isEmpty else { return }
+        processActivity = true
         workingCollectionHealth.acceptedProcessEvents += newEvents.count
         events.insert(contentsOf: newEvents, at: 0)
         if events.count > 300 { events.removeLast(events.count - 300) }

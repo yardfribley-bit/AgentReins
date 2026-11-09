@@ -1,3 +1,4 @@
+import AgentReinsCore
 import AgentReinsVerify
 import Foundation
 
@@ -143,7 +144,8 @@ final class SessionLogIndex {
     func kick(databaseURL: URL, onChange: @escaping () -> Void) {
         guard Self.scanEnabled else { return }
         lock.lock()
-        if scanning || Date().timeIntervalSince(lastScan) < 8 { lock.unlock(); return }
+        let wait: TimeInterval = RuntimeBudget.shared.isThrottled ? 30 : 8
+        if scanning || Date().timeIntervalSince(lastScan) < wait { lock.unlock(); return }
         scanning = true
         lock.unlock()
         queue.async { [weak self] in

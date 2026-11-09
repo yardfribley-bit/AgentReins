@@ -155,6 +155,28 @@ final class SessionVerificationTests: XCTestCase {
         XCTAssertEqual(list.taskId, "task-1")
     }
 
+    func testFiveHundredUnclaimedChangesStayBounded() throws {
+        var calls: [ParsedToolCall] = []
+        var effects: [HostEffect] = []
+        for index in 0..<500 {
+            let at = t0.addingTimeInterval(Double(index) * 400)
+            calls.append(editCall(id: "call-\(index)", at: at, pid: 10, path: "/tmp/proj/claimed-\(index).swift", reasoning: "改 claimed-\(index).swift。"))
+            effects.append(HostEffect(
+                id: "stray-\(index)", kind: "file", timestamp: at.addingTimeInterval(200), pid: 99,
+                path: "/tmp/other/unclaimed-\(index).swift", diff: "+x\n", sessionId: "sess", source: "file-observe"))
+        }
+        let distant = editCall(id: "far-call", at: t0.addingTimeInterval(500 * 400), pid: 3, path: "/tmp/proj/far.swift", reasoning: "改 far.swift。")
+        calls.append(distant)
+        effects.append(HostEffect(
+            id: "far-file", kind: "file", timestamp: t0.addingTimeInterval(500 * 400 + 5_000), pid: 4,
+            path: "/tmp/proj/far.swift", diff: "+y\n", toolCallId: "far-call", sessionId: "sess", source: "endpoint-security"))
+        let document = SessionVerification.verify(calls: calls, effects: effects, fileChannel: true)
+        XCTAssertEqual(document.unclaimed.count, 500)
+        let joined = try XCTUnwrap(document.cards.first { $0.callId == "far-call" }?.happened.first)
+        XCTAssertEqual(joined.join, "call-id")
+        XCTAssertLessThan(SessionVerification.lastJoinComparisons, 500 * 6, "join scanned \(SessionVerification.lastJoinComparisons) pairs; a full effects×calls scan is 500×501")
+    }
+
     private func editCall(id: String, at: Date, pid: Int32?, path: String, reasoning: String) -> ParsedToolCall {
         ParsedToolCall(id: id, callId: id, sessionId: "sess", agent: "Claude Code", sourcePath: "x", sourceOffset: 0, timestamp: at, pid: pid, reasoning: reasoning, reasoningTruncated: false, toolName: "Edit", arguments: "{\"file_path\":\"\(path)\"}", argumentsTruncated: false, claimedPaths: [path], claimsEdit: true)
     }

@@ -36,6 +36,8 @@ public final class RuntimeBudget: @unchecked Sendable {
     private var hot = 0
     private var throttled = false
     private var announced = false
+    private var loopLastAllowed: [String: Date] = [:]
+    private var loopQuietStreak: [String: Int] = [:]
 
     public var isThrottled: Bool {
         lock.lock(); defer { lock.unlock() }
@@ -53,7 +55,7 @@ public final class RuntimeBudget: @unchecked Sendable {
         let next = memoryPressure || hot >= 3
         if next && !announced {
             announced = true
-            fputs("AgentReins 本进程持续占用过高，已放慢采样并暂停非必要监视。\n", stderr)
+            fputs("AgentReins 本进程持续占用过高，已放慢首页核对、日志扫描和进程采样。\n", stderr)
         }
         if !next { announced = false }
         throttled = next
@@ -63,6 +65,28 @@ public final class RuntimeBudget: @unchecked Sendable {
     public static func cpuPercent(userMicros: Int64, systemMicros: Int64, elapsed: TimeInterval) -> Double {
         guard elapsed > 0.05 else { return 0 }
         return Double(userMicros + systemMicros) / (elapsed * 1_000_000) * 100
+    }
+
+    /// Main-process lanes (file watcher, session-log polls, process snapshots,
+    /// home verification). The pace file only slows the sampler helper; this
+    /// gate is what actually stretches the app's own timers.
+    /// Quiet lanes back off. A throttled process uses a longer floor. One log
+    /// line is written by `observe` the first time the breaker engages.
+    public func allowMainLoop(lane: String, base: TimeInterval, previousChanged: Bool, now: Date = Date(), maxInterval: TimeInterval? = nil) -> Bool {
+        lock.lock(); defer { lock.unlock() }
+        let streak = loopQuietStreak[lane] ?? 0
+        let quietFactor = previousChanged ? 1.0 : pow(2.0, Double(min(streak, 3)))
+        let scale = throttled ? 6.0 : 1.0
+        let cap = maxInterval ?? (throttled ? 15 : 4)
+        let interval = min(max(base, 0.05) * scale * quietFactor, cap)
+        let last = loopLastAllowed[lane] ?? .distantPast
+        guard now.timeIntervalSince(last) >= interval else {
+            MainProcessMeter.noteSkip()
+            return false
+        }
+        loopLastAllowed[lane] = now
+        loopQuietStreak[lane] = previousChanged ? 0 : min(streak + 1, 3)
+        return true
     }
 
     public static func paceText(_ mode: String) -> String {

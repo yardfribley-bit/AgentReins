@@ -1,4 +1,5 @@
 import AgentReinsCore
+import AgentReinsVerify
 import AppKit
 import CryptoKit
 import SwiftUI
@@ -474,6 +475,10 @@ final class RealtimeWorkspaceState: ObservableObject {
     private var cachedProcesses: [RealtimeProcess] = []
     private(set) var taskProjectionBuilds = 0
     private(set) var contextProjectionBuilds = 0
+    private var projectionSignature = ""
+    private var verificationKey = ""
+    private var verificationCache: SessionVerificationDocument?
+    private var publishedAtCache = Date()
     private func projectedTasks(force: Bool = false) -> [RealtimeTask] {
         if backgroundProjection && !force { scheduleLiveProjection(); return cachedTasks }
         if tasksDirty {
@@ -706,16 +711,24 @@ final class RealtimeWorkspaceState: ObservableObject {
                 return
             }
             let tasks = result.tasks, exchanges = result.contexts, candidates = result.candidates
+            let signature = tasks.map { $0.id + "\u{0}" + $0.projectionRevision }.joined(separator: "\n")
+                + "\n--\n" + exchanges.map { $0.id + "\u{0}" + String($0.timestamp.timeIntervalSince1970) }.joined(separator: "\n")
             DispatchQueue.main.async {
                 guard let self else { return }
                 self.projectionInFlight = false
                 // Publish coherent snapshots in worker order, then catch up with
-                // newer input. Never starve the UI while evidence keeps arriving.
+                // newer input. An unchanged projection must not invalidate SwiftUI:
+                // every invalidation rebuilt the home join on the main thread.
                 self.cachedTasks = tasks; self.cachedContexts = exchanges
-                self.taskProjectionBuilds += 1; self.contextProjectionBuilds += 1
+                let changed = signature != self.projectionSignature
+                if changed {
+                    self.projectionSignature = signature
+                    self.taskProjectionBuilds += 1; self.contextProjectionBuilds += 1
+                }
                 if generation == self.projectionGeneration { self.tasksDirty = false; self.contextsDirty = false }
                 if self.artifactCandidates != candidates { self.artifactCandidates = candidates; self.refreshArtifacts() }
-                self.revision += 1; self.scheduleCheckpoint(); self.scheduleLiveProjection()
+                if changed { self.revision += 1; self.scheduleCheckpoint() }
+                if self.tasksDirty || self.contextsDirty { self.scheduleLiveProjection() }
             }
         }
     }
@@ -784,6 +797,29 @@ final class RealtimeWorkspaceState: ObservableObject {
         return payload
     }
 
+    /// Identity of the inputs to the home join. Card bodies stay out of the key:
+    /// a task's projection revision already changes when those bodies change.
+    private static func verificationInputKey(tasks: [RealtimeTask], collected: [RealtimeCollectedRecord], processes: [RealtimeProcess], logs: SessionLogSnapshot, fileWatching: Bool) -> String {
+        var parts: [String] = []
+        parts.reserveCapacity(tasks.count + collected.count + processes.count + logs.calls.count + logs.sources.count + 1)
+        for task in tasks {
+            parts.append(task.id)
+            parts.append(task.projectionRevision)
+            parts.append(String(task.cards.count))
+        }
+        for row in collected { parts.append(row.id); parts.append(row.revision) }
+        for process in processes { parts.append(process.pid); parts.append(process.parent) }
+        for call in logs.calls { parts.append(call.id) }
+        for source in logs.sources {
+            parts.append(source.agent)
+            parts.append(source.state)
+            parts.append(String(source.filesRead))
+            parts.append(String(source.malformedLines))
+        }
+        parts.append(fileWatching ? "watch" : "idle")
+        return parts.joined(separator: "\u{1}")
+    }
+
     func payload(processes: [ProcessSnapshotRecord], health: [CollectorHealthRecord], observing: Bool, error: String?, geolocation: IPGeolocationStore? = nil, fileWatching: Bool = false) -> RealtimeWorkspacePayload {
         let tasks = projectedTasks()
         if deliveryCacheVersion != taskProjectionBuilds || deliveryCacheArtifacts != artifacts {
@@ -793,10 +829,13 @@ final class RealtimeWorkspaceState: ObservableObject {
             } }.filter(IPGeolocationStore.isPublicIPAddress)).sorted()
             deliveryCacheVersion = taskProjectionBuilds; deliveryCacheArtifacts = artifacts
         }
+        let collected = projectedCollected()
+        let projected = projectedProcesses(processes)
+        let contexts = projectedContexts()
         var value = RealtimeWorkspacePayload(tasks: deliveryCache,
-            collected: projectedCollected(), unattributedCount: evidence.unattributedCount,
-            processes: projectedProcesses(processes), health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
-            observing: observing, persistenceError: error, publishedAt: Date(), truncated: truncated, collectedCount: evidence.count, contexts: projectedContexts())
+            collected: collected, unattributedCount: evidence.unattributedCount,
+            processes: projected, health: health.map { RealtimeHealth(source: $0.source, state: $0.state.rawValue, accepted: $0.accepted, detail: $0.detail) },
+            observing: observing, persistenceError: error, publishedAt: publishedAtCache, truncated: truncated, collectedCount: evidence.count, contexts: contexts)
         if let geolocation {
             let networkAddresses = value.collected.filter { $0.kind == "network" }.flatMap { row in
                 [row.resource?.remoteIP].compactMap { $0 } + (row.resource?.addresses ?? [])
@@ -812,10 +851,17 @@ final class RealtimeWorkspaceState: ObservableObject {
         SessionLogIndex.shared.kick(databaseURL: EvidenceDatabase.defaultURL()) { [weak self] in
             DispatchQueue.main.async { self?.revision += 1 }
         }
-        value.verification = SessionVerificationFeed.document(tasks: value.tasks, collected: value.collected, processes: value.processes, logs: logs, fileWatching: fileWatching)
-        if let document = value.verification {
-            SessionLogIndex.shared.persistVerdicts(document, databaseURL: EvidenceDatabase.defaultURL())
+        let verifyKey = Self.verificationInputKey(tasks: value.tasks, collected: value.collected, processes: value.processes, logs: logs, fileWatching: fileWatching)
+        if verifyKey != verificationKey || verificationCache == nil {
+            verificationCache = SessionVerificationFeed.document(tasks: value.tasks, collected: value.collected, processes: value.processes, logs: logs, fileWatching: fileWatching)
+            verificationKey = verifyKey
+            publishedAtCache = Date()
+            value.publishedAt = publishedAtCache
+            if let document = verificationCache {
+                SessionLogIndex.shared.persistVerdicts(document, databaseURL: EvidenceDatabase.defaultURL())
+            }
         }
+        value.verification = verificationCache
         let notices = [continuityNotice, evidenceError, checkpointError].compactMap { $0 }
         value.continuityNotice = notices.isEmpty ? nil : notices.joined(separator: " · ")
         return value
