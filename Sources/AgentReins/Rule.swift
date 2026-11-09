@@ -12,6 +12,7 @@ struct Rule: Codable, Identifiable, Hashable {
     var restore: Bool?               // protect 时是否从备份还原
     var message: String
     var naturalLanguage: String?     // 原始自然语言
+    var allowHosts: [String]? = nil  // egress block：默认允许的主机
 
     var opsSet: Set<String> { Set(ops ?? []) }
     var isProtect: Bool { action == "protect" || action == "block" }
@@ -20,6 +21,7 @@ struct Rule: Codable, Identifiable, Hashable {
 /// 本应用写入的 rules.json 格式（version + rules）。
 struct RuleDocument: Codable {
     var version: Int = 1
+    var customized: Bool?
     var rules: [Rule]
 }
 

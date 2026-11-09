@@ -94,6 +94,32 @@ final class HardGateStoreTests: XCTestCase {
         XCTAssertNil(noted.first?["mechanism"] as? String)
     }
 
+    func testFreshInstallSeedsDefaultDenyPolicy() throws {
+        XCTAssertTrue(HardGateStore.seedDefaults())
+        let hosts = HardGateStore.snapshot().allowlist.compactMap { $0["subject"] as? String }
+        XCTAssertTrue(hosts.contains("host:github.com"))
+        XCTAssertTrue(hosts.contains("host:registry.npmjs.org"))
+        XCTAssertTrue(hosts.contains("host:api.openai.com"))
+        XCTAssertTrue(hosts.contains("host:api.anthropic.com"))
+        XCTAssertFalse(HardGateStore.seedDefaults())
+        let rules = tempDir.appendingPathComponent("rules.json")
+        XCTAssertTrue(HardGateStore.seedRulesFile(at: rules))
+        let seeded = try JSONSerialization.jsonObject(with: Data(contentsOf: rules)) as? [String: Any]
+        let list = seeded?["rules"] as? [[String: Any]] ?? []
+        XCTAssertEqual(Set(list.compactMap { $0["id"] as? String }), ["default-deny-egress", "default-deny-credential-read"])
+        XCTAssertTrue(list.allSatisfy { ($0["action"] as? String) == "block" })
+        let empty = tempDir.appendingPathComponent("empty-rules.json")
+        try Data("{\"version\":1,\"rules\":[]}".utf8).write(to: empty)
+        XCTAssertTrue(HardGateStore.seedRulesFile(at: empty))
+        let custom = tempDir.appendingPathComponent("custom-rules.json")
+        try Data("{\"version\":1,\"customized\":true,\"rules\":[]}".utf8).write(to: custom)
+        XCTAssertFalse(HardGateStore.seedRulesFile(at: custom))
+        let policy = HardGateStore.policyPayload()
+        XCTAssertEqual(policy["egress"] as? String, "deny-unlisted")
+        XCTAssertEqual(policy["credentialReads"] as? String, "deny")
+        XCTAssertTrue((policy["allowHosts"] as? [String])?.contains("github.com") == true)
+    }
+
     private static func flag(_ value: Any?) -> Bool {
         if let value = value as? Bool { return value }
         if let value = value as? NSNumber { return value.boolValue }

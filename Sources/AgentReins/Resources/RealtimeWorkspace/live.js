@@ -515,7 +515,7 @@ window.agentreinsHostResult=result=>{
   if(CONSOLE_VIEWS.includes(view))renderRisk();
  }
  if(result?.action==='hardGate'){
-  riskState.hardGate={inbox:result.inbox||[],receipts:result.receipts||[],allowlist:result.allowlist||[]};
+  riskState.hardGate={inbox:result.inbox||[],receipts:result.receipts||[],allowlist:result.allowlist||[],policy:result.policy||null};
   riskState.hardGateLoaded=true;
   if(CONSOLE_VIEWS.includes(view))renderRisk();
  }
@@ -585,8 +585,8 @@ document.addEventListener('click',e=>{
   if(!alert){toast('找不到这条告警');return;}
   const subject=api?.subjectOf?.(alert)||'';
   if((state==='allowlisted'||state==='blocked'||state==='gateway_block')&&!subject){toast('没有可处置的主机或路径，未写入硬门禁');return;}
-  const reason=(document.getElementById('hardgate-reason')?.value||'').trim();
-  if(state==='allowlisted'&&!reason){toast('允许必须写原因，未写入允许名单');return;}
+  const typed=(document.getElementById('hardgate-reason')?.value||'').trim();
+  const reason=typed||(state==='allowlisted'?('从告警允许 '+subject):'');
   const kind=subject.startsWith('path:')?'credential-read':'egress';
   if(state==='allowlisted')bridge('decideHardGate',{op:'allow',subject,kind,reason},{silent:true});
   if(state==='blocked'||state==='gateway_block')bridge('decideHardGate',{op:'deny',subject,kind,reason:reason||'用户在告警上选择阻断'},{silent:true});
@@ -616,6 +616,15 @@ document.addEventListener('click',e=>{
  else if(el.dataset.retentionClean!=null){
   const sent=bridge('applyRetention',{},{silent:true});
   if(!sent)toast('当前没有原生通道，清理只在 AgentReins 里执行');
+ }
+ else if(el.dataset.hardgateAllow!=null){
+  const subject=el.dataset.hardgateSubject||'';
+  if(!subject){toast('没有可允许的主机或路径');return;}
+  const kind=el.dataset.hardgateKind||(subject.startsWith('path:')?'credential-read':'egress');
+  const typed=(document.getElementById('hardgate-reason')?.value||'').trim();
+  const reason=typed||('从告警允许 '+subject);
+  const sent=bridge('decideHardGate',{op:'allow',subject,kind,reason},{silent:true});
+  if(!sent)toast('当前没有原生通道，允许名单没有写入');
  }
  else if(el.dataset.hardgateDecide){
   const op=el.dataset.hardgateDecide==='allow'?'allow':'deny';

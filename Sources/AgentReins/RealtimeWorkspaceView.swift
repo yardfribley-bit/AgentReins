@@ -356,6 +356,7 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 "inbox": dropNulls(snap.inbox),
                 "receipts": dropNulls(snap.receipts),
                 "allowlist": dropNulls(snap.allowlist),
+                "policy": HardGateStore.policyPayload(),
             ]
             if let message { result["message"] = message }
             pushHostResult(to: webView, result: result)

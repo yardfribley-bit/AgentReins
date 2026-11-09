@@ -791,6 +791,7 @@ function renderDetail(a,payload){
    <button type="button" class="primary" data-risk-decide="released" data-risk-id="${idAttr}">放行</button>
    <button type="button" class="quiet" data-risk-decide="blocked" data-risk-id="${idAttr}">阻断</button>
    <button type="button" class="quiet" data-risk-decide="allowlisted" data-risk-id="${idAttr}">加白</button>
+   ${(a.subject||subjectOf(a))?`<button type="button" class="primary" data-hardgate-allow="1" data-hardgate-subject="${esc(a.subject||subjectOf(a))}" data-hardgate-kind="${(a.subject||subjectOf(a)).startsWith('path:')?'credential-read':'egress'}">允许此后</button>`:''}
    <button type="button" class="quiet" data-risk-decide="escalated" data-risk-id="${idAttr}">转人工</button>
    ${a.acked?'':`<button type="button" class="quiet" data-risk-decide="acked" data-risk-id="${idAttr}">标记已知悉</button>`}
    ${a.call&&a.rule!=='S07'?`<button type="button" class="quiet" data-network-record-jump="${esc(r?.id||'')}">在外网访问中打开</button>`:''}
@@ -808,9 +809,15 @@ function renderDetail(a,payload){
  </article>`;
 }
 
+function policyMarkup(policy){
+ if(!policy)return '<section class="risk-card" id="active-policy"><h3>正在执行的策略</h3><p class="note">本机策略还没读到。</p></section>';
+ const hosts=list(policy.allowHosts);
+ return `<section class="risk-card" id="active-policy"><h3>正在执行的策略</h3><p>被监督的 Agent：未列出的外联默认拒绝。凭据路径默认拒绝。</p><p class="note">允许名单 ${hosts.length} 个主机。安装时写入包注册表和模型服务，告警上可以再允许一个主机。</p><ul class="tool-list">${hosts.length?hosts.map(h=>`<li>${esc(h)}</li>`).join(''):'<li>允许名单是空的。</li>'}</ul></section>`;
+}
 function renderRules(holder,payload,state){
  const alerts=applyDecisions(buildAlerts(payload),state?.decisions||[]);
  const rules=Array.isArray(state?.rules)?state.rules:RULES;
+ const policy=policyMarkup(state?.hardGate?.policy);
  const cards=rules.map(r=>{
   const hit=alerts.filter(a=>a.rule===r.id).length;
   const off=r.enabled===false;
@@ -820,7 +827,8 @@ function renderRules(holder,payload,state){
    <div class="m"><span><b>${hit}</b>今日命中</span><span>${esc(r.disposition||'仅告警')}</span><span>${esc(r.sources||'')}</span></div>
    <div class="cant"><b>看不到：</b>${esc(r.cant||'')}</div></div>`;
  }).join('');
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${rules.length} 条</div><h1>规则</h1><p>每条有版本和误报说明。命中数只来自本机已经采到的证据。</p></div></div>
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">本机规则 · ${rules.length} 条</div><h1>规则</h1><p>每条有版本和误报说明。命中数只来自本机已经采到的证据。上面是这台 Mac 正在执行的允许名单。</p></div></div>
+ ${policy}
  <div class="risk-rules">${cards}</div>
  <p class="note" style="margin:16px 28px">S01 没有 resource.path 不报。S03 没有执行哈希时保持 Inferred。S06 未启用。S08、S09、S10 没有检测器。WebLens 到规则的映射不在这版里。</p>`;
 }
@@ -878,7 +886,7 @@ function packFields(a){
 }
 window.AgentReinsRisk={
  RULES,buildAlerts,applyDecisions,renderList,renderAlerts,renderRules,renderCoverage,coverageModel,packFields,evidenceTextFor,associationOf,bypassed,isTestCapture,isActualExecution,isProvenShellParent,
- isAllowedHost,socketAlerts,subjectOf,dispositionOf,enforcementFired,applyEnforcement,isOpen,relatedEvents,coverageOf,
+ isAllowedHost,socketAlerts,subjectOf,dispositionOf,enforcementFired,applyEnforcement,isOpen,relatedEvents,coverageOf,policyMarkup,
  _lastAlerts:[]
 };
 })();

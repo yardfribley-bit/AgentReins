@@ -6,6 +6,7 @@ import SwiftUI
 @MainActor
 final class RuleStore: ObservableObject {
     @Published var rules: [Rule] = []
+    private var customized = false
     let fileURL: URL
 
     init() {
@@ -13,6 +14,8 @@ final class RuleStore: ObservableObject {
         let dir = appSup.appendingPathComponent("AgentReins", isDirectory: true)
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
         self.fileURL = dir.appendingPathComponent("rules.json")
+        HardGateStore.seedRulesFile(at: fileURL)
+        HardGateStore.seedDefaults()
         load()
     }
 
@@ -20,26 +23,28 @@ final class RuleStore: ObservableObject {
         guard let data = try? Data(contentsOf: fileURL) else { return }
         if let doc = try? JSONDecoder().decode(RuleDocument.self, from: data) {
             rules = doc.rules
+            customized = doc.customized == true
         } else if let w = try? JSONDecoder().decode(RuleWrapper.self, from: data) {
             rules = w.rules
         }
     }
 
     func save() {
-        let doc = RuleDocument(rules: rules)
+        let doc = RuleDocument(version: 1, customized: customized, rules: rules)
         if let data = try? JSONEncoder().encode(doc) {
             try? data.write(to: fileURL)
         }
     }
 
     func add(_ r: Rule) {
-        // 同 id 覆盖
+        customized = true
         rules.removeAll { $0.id == r.id }
         rules.append(r)
         save()
     }
 
     func remove(_ r: Rule) {
+        customized = true
         rules.removeAll { $0.id == r.id }
         save()
     }

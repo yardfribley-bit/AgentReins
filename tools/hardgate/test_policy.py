@@ -229,6 +229,32 @@ class AuditStoreTests(unittest.TestCase):
         left = policy.open_inbox(policy.load_rows(self.root), policy.load_allowlist(self.root))
         self.assertEqual([r["subject"] for r in left], ["path:/work/.env"])
 
+    def test_seed_default_deny_with_registries_and_model_hosts(self):
+        self.assertTrue(policy.ensure_seeded(self.root))
+        allow = policy.load_allowlist(self.root)
+        subjects = {entry["subject"] for entry in allow}
+        self.assertIn("host:github.com", subjects)
+        self.assertIn("host:registry.npmjs.org", subjects)
+        self.assertIn("host:pypi.org", subjects)
+        self.assertIn("host:api.openai.com", subjects)
+        self.assertIn("host:api.anthropic.com", subjects)
+        self.assertEqual(policy.classify_egress("github.com", "/", allow, set())["action"], "pass")
+        self.assertEqual(policy.classify_egress("uploads.example", "/", allow, set())["action"], "deny")
+        self.assertEqual(policy.classify_credential("path:/work/proj/.env", allow, set())["action"], "deny")
+        self.assertFalse(policy.ensure_seeded(self.root))
+        rules = self.root / "rules.json"
+        self.assertTrue(policy.seed_rules_file(rules))
+        doc = json.loads(rules.read_text(encoding="utf-8"))
+        self.assertEqual({row["id"] for row in doc["rules"]}, {"default-deny-egress", "default-deny-credential-read"})
+        self.assertTrue(all(row["action"] == "block" for row in doc["rules"]))
+        empty = self.root / "empty.json"
+        empty.write_text('{"version":1,"rules":[]}', encoding="utf-8")
+        self.assertTrue(policy.seed_rules_file(empty))
+        custom = self.root / "custom.json"
+        custom.write_text('{"version":1,"customized":true,"rules":[]}', encoding="utf-8")
+        self.assertFalse(policy.seed_rules_file(custom))
+        self.assertEqual(json.loads(custom.read_text(encoding="utf-8"))["rules"], [])
+
     def test_mcp_server_has_no_hard_gate_write(self):
         text = SERVER_PATH.read_text(encoding="utf-8")
         self.assertNotIn("hardgate", text.lower())

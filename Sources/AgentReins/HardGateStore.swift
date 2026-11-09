@@ -61,7 +61,7 @@ enum HardGateStore {
                 "actor": "user", "decidedAt": row["at"] as? String ?? "", "kind": kind,
                 "reason": cleaned, "subject": subject,
             ])
-            try writeAllowlist(entries)
+            try writeAllowlist(entries, customized: true)
         }
     }
 
@@ -76,7 +76,7 @@ enum HardGateStore {
                 "detail": "用户保持拒绝",
             ])
             let entries = usableAllowlist().filter { ($0["subject"] as? String) != subject }
-            try writeAllowlist(entries)
+            try writeAllowlist(entries, customized: true)
         }
     }
 
@@ -86,7 +86,79 @@ enum HardGateStore {
         try withFileLock { try appendUnlocked(actor: actor, record: record) }
     }
 
+    static let defaultEgressHosts = [
+        "github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+        "registry.npmjs.org", "registry.yarnpkg.org", "registry.yarnpkg.com",
+        "pypi.org", "files.pythonhosted.org",
+        "crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org",
+        "cdn.jsdelivr.net", "unpkg.com", "formulae.brew.sh", "ghcr.io",
+        "docker.io", "registry-1.docker.io",
+        "api.openai.com", "api.anthropic.com", "api2.cursor.sh",
+        "cursor.com", "www.cursor.com", "chatgpt.com", "claude.ai", "openrouter.ai",
+        "copilot.tencent.com",
+    ]
+    static let defaultAllowReason = "安装时写入的默认允许：包注册表或模型服务"
+
+    /// Empty or missing rules.json on a fresh install or upgrade. A customized file stays put.
+    @discardableResult
+    static func seedRulesFile(at url: URL) -> Bool {
+        if let data = try? Data(contentsOf: url),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            if (obj["customized"] as? Bool) == true { return false }
+            if let rules = obj["rules"] as? [Any], !rules.isEmpty { return false }
+        }
+        let rules: [[String: Any]] = [
+            [
+                "id": "default-deny-egress",
+                "kind": "egress",
+                "action": "block",
+                "severity": "high",
+                "message": "被监督的 Agent 访问允许名单之外的主机",
+                "allowHosts": defaultEgressHosts,
+                "naturalLanguage": "未列出的外联默认拒绝。允许名单是包注册表和模型服务。",
+            ],
+            [
+                "id": "default-deny-credential-read",
+                "kind": "credential-read",
+                "action": "block",
+                "severity": "high",
+                "message": "被监督的 Agent 读取凭据路径",
+                "naturalLanguage": "凭据路径默认拒绝，不在默认允许名单里。",
+            ],
+        ]
+        let payload: [String: Any] = ["customized": false, "rules": rules, "version": 1]
+        guard let data = try? JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys]) else { return false }
+        try? FileManager.default.createDirectory(at: url.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try data.write(to: url, options: .atomic)
+            try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
+            return true
+        } catch {
+            return false
+        }
+    }
+
+    @discardableResult
+    static func seedDefaults() -> Bool {
+        (try? withFileLock {
+            let doc = readAllowlistDocument()
+            if (doc?["customized"] as? Bool) == true { return false }
+            let entries = doc?["entries"] as? [[String: Any]] ?? []
+            if !entries.isEmpty { return false }
+            let stamp = isoNow()
+            let seeded: [[String: Any]] = defaultEgressHosts.map { host in
+                [
+                    "actor": "default", "decidedAt": stamp, "kind": "egress",
+                    "reason": defaultAllowReason, "subject": "host:" + host,
+                ]
+            }
+            try writeAllowlist(seeded, customized: false)
+            return true
+        }) ?? false
+    }
+
     static func snapshot() -> Snapshot {
+        _ = seedDefaults()
         let rows = loadRows()
         let allow = (try? readAllowlistEntries()) ?? []
         let usable = allow.filter(usableAllow)
@@ -95,6 +167,18 @@ enum HardGateStore {
             receipts: rows.suffix(400).map(receipt),
             allowlist: usable
         )
+    }
+
+    static func policyPayload() -> [String: Any] {
+        let hosts = ((try? readAllowlistEntries()) ?? []).filter(usableAllow).compactMap { entry -> String? in
+            guard (entry["kind"] as? String) == "egress", let subject = entry["subject"] as? String, subject.hasPrefix("host:") else { return nil }
+            return String(subject.dropFirst(5))
+        }
+        return [
+            "egress": "deny-unlisted",
+            "credentialReads": "deny",
+            "allowHosts": hosts,
+        ]
     }
 
     static func verifyChain() -> Bool {
@@ -215,16 +299,20 @@ enum HardGateStore {
         return data
     }
 
-    private static func writeAllowlist(_ entries: [[String: Any]]) throws {
-        let payload: [String: Any] = ["entries": entries, "version": 1]
+    private static func writeAllowlist(_ entries: [[String: Any]], customized: Bool) throws {
+        let payload: [String: Any] = ["customized": customized, "entries": entries, "version": 1]
         let data = try JSONSerialization.data(withJSONObject: payload, options: [.prettyPrinted, .sortedKeys])
         try data.write(to: allowlistURL, options: .atomic)
         try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: allowlistURL.path)
     }
 
+    private static func readAllowlistDocument() -> [String: Any]? {
+        guard let data = try? Data(contentsOf: allowlistURL), !data.isEmpty else { return nil }
+        return try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+    }
+
     private static func readAllowlistEntries() throws -> [[String: Any]] {
-        guard let data = try? Data(contentsOf: allowlistURL), !data.isEmpty else { return [] }
-        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any],
+        guard let obj = readAllowlistDocument(),
               let entries = obj["entries"] as? [[String: Any]] else { return [] }
         return entries
     }
@@ -234,7 +322,8 @@ enum HardGateStore {
     }
 
     private static func usableAllow(_ entry: [String: Any]) -> Bool {
-        guard (entry["actor"] as? String) == "user" else { return false }
+        let actor = entry["actor"] as? String
+        guard actor == "user" || actor == "default" else { return false }
         let reason = (entry["reason"] as? String ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         guard !reason.isEmpty else { return false }
         return valid(subject: entry["subject"] as? String ?? "", kind: entry["kind"] as? String ?? "")

@@ -37,6 +37,20 @@ from pathlib import Path
 
 TIER_KEEP = "keep"
 ZERO_PREV = "0" * 64
+DEFAULT_REASON = "安装时写入的默认允许：包注册表或模型服务"
+# Exact hosts. A fresh install and an empty rules file both get this list.
+# Unlisted egress stays denied. Credential paths are not in this list.
+DEFAULT_EGRESS_HOSTS = (
+    "github.com", "api.github.com", "raw.githubusercontent.com", "objects.githubusercontent.com",
+    "registry.npmjs.org", "registry.yarnpkg.org", "registry.yarnpkg.com",
+    "pypi.org", "files.pythonhosted.org",
+    "crates.io", "static.crates.io", "proxy.golang.org", "sum.golang.org",
+    "cdn.jsdelivr.net", "unpkg.com", "formulae.brew.sh", "ghcr.io",
+    "docker.io", "registry-1.docker.io",
+    "api.openai.com", "api.anthropic.com", "api2.cursor.sh",
+    "cursor.com", "www.cursor.com", "chatgpt.com", "claude.ai", "openrouter.ai",
+    "copilot.tencent.com",
+)
 HEARTBEAT_PATHS = frozenset({
     "/health", "/healthz", "/ready", "/readyz", "/heartbeat",
     "/ping", "/live", "/livez", "/status",
@@ -177,7 +191,7 @@ def load_allowlist(root=None):
 def _usable_allow(entry):
     if not isinstance(entry, dict):
         return False
-    if entry.get("actor") != "user":
+    if entry.get("actor") not in ("user", "default"):
         return False
     reason = entry.get("reason")
     if not isinstance(reason, str) or not reason.strip():
@@ -585,9 +599,25 @@ def append_record(root, record, actor):
         _unlock(fd)
 
 
-def _write_allowlist(root, entries):
+def _read_allowlist_doc(root):
     path = allowlist_path(root)
-    payload = {"version": 1, "entries": list(entries)}
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, ValueError):
+        return None
+    return value if isinstance(value, dict) else None
+
+
+def _write_allowlist(root, entries, customized=None):
+    path = allowlist_path(root)
+    if customized is None:
+        current = _read_allowlist_doc(root) or {}
+        customized = bool(current.get("customized"))
+    payload = {"customized": bool(customized), "entries": list(entries), "version": 1}
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2).encode("utf-8")
     directory = str(gate_root(root))
     tmp = tempfile.NamedTemporaryFile(dir=directory, delete=False)
@@ -624,12 +654,11 @@ def user_allow(root, subject, kind, reason):
             "actor": "user", "mechanism": None, "enforced": False, "inbox": False, "heartbeat": False,
         }, actor="user")
         entries = [e for e in load_allowlist(root) if e.get("subject") != subject]
-        # load_allowlist re-reads and filters. The new entry is not there yet.
         entries.append({
             "actor": "user", "decidedAt": row["at"], "kind": kind,
             "reason": reason, "subject": subject,
         })
-        _write_allowlist(root, entries)
+        _write_allowlist(root, entries, customized=True)
         return row
     finally:
         _unlock(fd)
@@ -648,8 +677,81 @@ def user_deny(root, subject, kind, reason):
             "detail": "用户保持拒绝",
         }, actor="user")
         entries = [e for e in load_allowlist(root) if e.get("subject") != subject]
-        _write_allowlist(root, entries)
+        _write_allowlist(root, entries, customized=True)
         return row
+    finally:
+        _unlock(fd)
+
+
+def default_allow_entries(now=None):
+    stamp = now or _now()
+    return [{
+        "actor": "default", "decidedAt": stamp, "kind": "egress",
+        "reason": DEFAULT_REASON, "subject": "host:" + host,
+    } for host in DEFAULT_EGRESS_HOSTS]
+
+
+def rules_document():
+    return {
+        "version": 1,
+        "customized": False,
+        "rules": [
+            {
+                "id": "default-deny-egress",
+                "kind": "egress",
+                "action": "block",
+                "severity": "high",
+                "message": "被监督的 Agent 访问允许名单之外的主机",
+                "allowHosts": list(DEFAULT_EGRESS_HOSTS),
+                "naturalLanguage": "未列出的外联默认拒绝。允许名单是包注册表和模型服务。",
+            },
+            {
+                "id": "default-deny-credential-read",
+                "kind": "credential-read",
+                "action": "block",
+                "severity": "high",
+                "message": "被监督的 Agent 读取凭据路径",
+                "naturalLanguage": "凭据路径默认拒绝，不在默认允许名单里。",
+            },
+        ],
+    }
+
+
+def seed_rules_file(path):
+    """Fill an empty installed rules.json. A customized file is left alone."""
+    path = Path(path)
+    if path.exists():
+        try:
+            doc = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError):
+            doc = None
+        if isinstance(doc, dict) and doc.get("customized") is True:
+            return False
+        rules = doc.get("rules") if isinstance(doc, dict) else None
+        if isinstance(rules, list) and rules:
+            return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(rules_document(), ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+    return True
+
+
+def ensure_seeded(root=None):
+    """Write the default egress allowlist when the file is missing or still empty."""
+    root = gate_root(root)
+    fd = _lock(root)
+    try:
+        doc = _read_allowlist_doc(root)
+        if isinstance(doc, dict) and doc.get("customized") is True:
+            return False
+        entries = doc.get("entries") if isinstance(doc, dict) else None
+        if isinstance(entries, list) and entries:
+            return False
+        _write_allowlist(root, default_allow_entries(), customized=False)
+        return True
     finally:
         _unlock(fd)
 
@@ -657,6 +759,7 @@ def user_deny(root, subject, kind, reason):
 def commit_wrapper(tool, args, cwd, home, root=None, extra_destination=None, env=None):
     """Classify and, on deny, record enforced=True. Caller must not exec when this returns 126."""
     root = gate_root(root)
+    ensure_seeded(root)
     fd = _lock(root)
     try:
         allow = load_allowlist(root)
@@ -687,6 +790,7 @@ def commit_wrapper(tool, args, cwd, home, root=None, extra_destination=None, env
 def enforce_proxy_flow(flow, root=None):
     """Deny non-allowlisted non-loopback before upstream. Returns True when the flow must not proceed."""
     root = gate_root(root)
+    ensure_seeded(root)
     request = getattr(flow, "request", None)
     host = host_from_destination(getattr(request, "pretty_host", None) or getattr(request, "host", None))
     raw_path = getattr(request, "path", "") or "/"
