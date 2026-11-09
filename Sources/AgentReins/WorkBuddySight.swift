@@ -122,7 +122,7 @@ final class WorkBuddySight: ObservableObject {
         try? FileManager.default.createDirectory(at: hookRoot, withIntermediateDirectories: true,
                                                 attributes: [.posixPermissions: 0o700])
         watch(hookRoot, isInbox: true)
-        poll()
+        poll(forced: true)
         // File/Hook events handle the hot path; scanning only backs up missed notifications.
         timer = Timer.scheduledTimer(withTimeInterval: realtimeOnly ? 2.0 : 30.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
@@ -171,17 +171,21 @@ final class WorkBuddySight: ObservableObject {
             self.debounce = nil
             let targets = Array(self.pendingTargets)
             self.pendingTargets.removeAll(); self.pendingWakeup = false
-            self.poll(targets: targets)
+            self.poll(targets: targets, forced: true)
         }
         debounce = work
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.05, execute: work)
     }
 
-    private func poll(targets: [URL] = []) {
+    private func poll(targets: [URL] = [], forced: Bool = false) {
         guard !isPolling else {
             pendingTargets.formUnion(targets); pendingWakeup = true; return
         }
-        if targets.isEmpty && !RuntimeBudget.shared.allowMainLoop(lane: "workbuddy-logs", base: realtimeSince == nil ? 30 : 2, previousChanged: logActivity) {
+        // A hook or a watched transcript must be read now. The timer is what
+        // backs off. Each collector keeps its own lane so one test cannot
+        // silence the next.
+        let lane = "workbuddy-logs-\(ObjectIdentifier(self).hashValue)"
+        if !forced && targets.isEmpty && !RuntimeBudget.shared.allowMainLoop(lane: lane, base: realtimeSince == nil ? 30 : 2, previousChanged: logActivity) {
             return
         }
         isPolling = true

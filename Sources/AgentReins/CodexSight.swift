@@ -201,7 +201,7 @@ final class CodexSight: ObservableObject {
     }
 
     private func activate(realtimeOnly: Bool) {
-        poll()
+        poll(forced: true)
         timer = Timer.scheduledTimer(withTimeInterval: realtimeOnly ? 1.0 : 10.0, repeats: true) { [weak self] _ in
             Task { @MainActor in self?.poll() }
         }
@@ -209,10 +209,11 @@ final class CodexSight: ObservableObject {
 
     func stop() { startupID = nil; timer?.invalidate(); timer = nil }
 
-    private func poll() {
+    private func poll(forced: Bool = false) {
         guard !isPolling else { return }
         let base: TimeInterval = realtimeSince == nil ? 10 : 1
-        if !RuntimeBudget.shared.allowMainLoop(lane: "codex-logs", base: base, previousChanged: logActivity) {
+        let lane = "codex-logs-\(ObjectIdentifier(self).hashValue)"
+        if !forced && !RuntimeBudget.shared.allowMainLoop(lane: lane, base: base, previousChanged: logActivity) {
             return
         }
         isPolling = true
