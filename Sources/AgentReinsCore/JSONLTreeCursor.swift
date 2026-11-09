@@ -149,14 +149,15 @@ public final class JSONLTreeCursor {
 }
 
 /// Cheap counters for the main-process hot path. Tests assert a tick stays bounded.
-public enum MainProcessMeter {
-    private static let lock = NSLock()
-    private static var directoryEntries = 0
-    private static var fullWalks = 0
-    private static var processScans = 0
-    private static var skips = 0
+public final class MainProcessMeter: @unchecked Sendable {
+    public static let shared = MainProcessMeter()
+    private let lock = NSLock()
+    private var directoryEntries = 0
+    private var fullWalks = 0
+    private var processScans = 0
+    private var skips = 0
 
-    public static func reset() {
+    public func reset() {
         lock.lock()
         directoryEntries = 0
         fullWalks = 0
@@ -165,23 +166,28 @@ public enum MainProcessMeter {
         lock.unlock()
     }
 
-    public static func addDirectoryEntries(_ count: Int, fullWalk: Bool) {
+    public func addDirectoryEntries(_ count: Int, fullWalk: Bool) {
         lock.lock()
         directoryEntries += count
         if fullWalk { fullWalks += 1 }
         lock.unlock()
     }
 
-    public static func noteProcessTableScan() {
+    public func noteProcessTableScan() {
         lock.lock(); processScans += 1; lock.unlock()
     }
 
-    public static func noteSkip() {
+    public func noteSkip() {
         lock.lock(); skips += 1; lock.unlock()
     }
 
-    public static var directoryEntriesVisited: Int { lock.lock(); defer { lock.unlock() }; return directoryEntries }
-    public static var fullTreeWalks: Int { lock.lock(); defer { lock.unlock() }; return fullWalks }
-    public static var processTableScans: Int { lock.lock(); defer { lock.unlock() }; return processScans }
-    public static var mainLoopsSkipped: Int { lock.lock(); defer { lock.unlock() }; return skips }
+    public var directoryEntriesVisited: Int { lock.lock(); defer { lock.unlock() }; return directoryEntries }
+    public var fullTreeWalks: Int { lock.lock(); defer { lock.unlock() }; return fullWalks }
+    public var processTableScans: Int { lock.lock(); defer { lock.unlock() }; return processScans }
+    public var mainLoopsSkipped: Int { lock.lock(); defer { lock.unlock() }; return skips }
+
+    public static func reset() { shared.reset() }
+    public static func addDirectoryEntries(_ count: Int, fullWalk: Bool) { shared.addDirectoryEntries(count, fullWalk: fullWalk) }
+    public static func noteProcessTableScan() { shared.noteProcessTableScan() }
+    public static func noteSkip() { shared.noteSkip() }
 }

@@ -8,9 +8,6 @@ public enum SessionVerification {
     public static let leadSeconds: TimeInterval = 2
     public static let tailSeconds: TimeInterval = 20
     public static let cardCap = 200
-    /// Comparisons performed by the most recent `verify` join. A tick must stay
-    /// far below effects × calls; tests read this after a 500-change fixture.
-    public private(set) static var lastJoinComparisons = 0
 
     public static func excerpt(_ text: String) -> (text: String, truncated: Bool) {
         let chars = Array(text)
@@ -50,6 +47,32 @@ public enum SessionVerification {
         fileChannel: Bool = false,
         networkChannel: Bool = false
     ) -> SessionVerificationDocument {
+        join(calls: calls, effects: effects, processes: processes, completions: completions, taskIDs: taskIDs, fileChannel: fileChannel, networkChannel: networkChannel).document
+    }
+
+    /// Same join as `verify`, plus how many call/effect pairs were actually compared.
+    /// A 500-change fixture must stay far below effects × calls.
+    public static func measure(
+        calls: [ParsedToolCall],
+        effects: [HostEffect],
+        processes: [ProcessLink] = [],
+        completions: [String: String] = [:],
+        taskIDs: [String: String] = [:],
+        fileChannel: Bool = false,
+        networkChannel: Bool = false
+    ) -> (document: SessionVerificationDocument, comparisons: Int) {
+        join(calls: calls, effects: effects, processes: processes, completions: completions, taskIDs: taskIDs, fileChannel: fileChannel, networkChannel: networkChannel)
+    }
+
+    private static func join(
+        calls: [ParsedToolCall],
+        effects: [HostEffect],
+        processes: [ProcessLink],
+        completions: [String: String],
+        taskIDs: [String: String],
+        fileChannel: Bool,
+        networkChannel: Bool
+    ) -> (document: SessionVerificationDocument, comparisons: Int) {
         let fileObservation = (fileChannel || effects.contains { $0.kind == "file" }) ? "present" : "absent"
         let networkObservation = (networkChannel || effects.contains { $0.kind == "network" }) ? "present" : "absent"
         let tree = Dictionary(processes.map { ($0.pid, $0.parentPid) }, uniquingKeysWith: { _, new in new })
@@ -112,7 +135,6 @@ public enum SessionVerification {
             let latest = effect.timestamp.addingTimeInterval(120)
             scan(indices, effect: effect, earliest: earliest, latest: latest)
         }
-        lastJoinComparisons = comparisons
         var happened: [String: [VerificationEffect]] = [:]
         var claimedEffects: Set<String> = []
         for effect in effects {
@@ -150,10 +172,11 @@ public enum SessionVerification {
             )
         }.sorted { $0.timestamp > $1.timestamp }
         let checklists = checklist(allCalls: ordered, effects: effects, completions: completions, taskIDs: taskIDs)
-        return SessionVerificationDocument(
+        let document = SessionVerificationDocument(
             sources: [], fileObservation: fileObservation, networkObservation: networkObservation,
             cards: cards, unclaimed: unclaimed, checklists: checklists, truncated: truncated
         )
+        return (document, comparisons)
     }
 
     public static func isCredential(_ text: String?) -> Bool {

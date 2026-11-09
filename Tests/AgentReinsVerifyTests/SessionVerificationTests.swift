@@ -169,12 +169,13 @@ final class SessionVerificationTests: XCTestCase {
         calls.append(distant)
         effects.append(HostEffect(
             id: "far-file", kind: "file", timestamp: t0.addingTimeInterval(500 * 400 + 5_000), pid: 4,
-            path: "/tmp/proj/far.swift", diff: "+y\n", toolCallId: "far-call", sessionId: "sess", source: "endpoint-security"))
-        let document = SessionVerification.verify(calls: calls, effects: effects, fileChannel: true)
+            path: "/tmp/proj/far.swift", diff: "+y\n", sessionId: "sess", toolCallId: "far-call", source: "endpoint-security"))
+        let measured = SessionVerification.measure(calls: calls, effects: effects, fileChannel: true)
+        let document = measured.document
         XCTAssertEqual(document.unclaimed.count, 500)
         let joined = try XCTUnwrap(document.cards.first { $0.callId == "far-call" }?.happened.first)
         XCTAssertEqual(joined.join, "call-id")
-        XCTAssertLessThan(SessionVerification.lastJoinComparisons, 500 * 6, "join scanned \(SessionVerification.lastJoinComparisons) pairs; a full effects×calls scan is 500×501")
+        XCTAssertLessThan(measured.comparisons, 500 * 6, "join scanned \(measured.comparisons) pairs; a full effects×calls scan is 500×501")
     }
 
     private func editCall(id: String, at: Date, pid: Int32?, path: String, reasoning: String) -> ParsedToolCall {

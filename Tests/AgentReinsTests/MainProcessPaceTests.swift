@@ -3,7 +3,7 @@ import XCTest
 
 final class MainProcessPaceTests: XCTestCase {
     func testHotProcessSlowsMainLoopsAndLogsOnce() {
-        MainProcessMeter.reset()
+        MainProcessMeter.shared.reset()
         let budget = RuntimeBudget()
         let start = Date(timeIntervalSince1970: 1_900_000_000)
         XCTAssertEqual(budget.observe(cpuPercent: 140, memoryPressure: false), "normal")
@@ -12,7 +12,7 @@ final class MainProcessPaceTests: XCTestCase {
         XCTAssertTrue(budget.allowMainLoop(lane: "file-layer", base: 0.4, previousChanged: true, now: start))
         XCTAssertFalse(budget.allowMainLoop(lane: "file-layer", base: 0.4, previousChanged: true, now: start.addingTimeInterval(1)))
         XCTAssertTrue(budget.allowMainLoop(lane: "file-layer", base: 0.4, previousChanged: true, now: start.addingTimeInterval(2.5)))
-        XCTAssertGreaterThan(MainProcessMeter.mainLoopsSkipped, 0)
+        XCTAssertGreaterThan(MainProcessMeter.shared.mainLoopsSkipped, 0)
     }
 
     func testQuietLaneBacksOffUntilSomethingChanges() {
@@ -24,7 +24,7 @@ final class MainProcessPaceTests: XCTestCase {
     }
 
     func testSessionTreeWalkSkipsHeavyFoldersAndDoesNotRescan() throws {
-        MainProcessMeter.reset()
+        MainProcessMeter.shared.reset()
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("pace-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -49,14 +49,14 @@ final class MainProcessPaceTests: XCTestCase {
         XCTAssertTrue(first.walked)
         XCTAssertEqual(cursor.sizes.count, 5)
         XCTAssertLessThan(first.entriesVisited, 80, "visited \(first.entriesVisited) entries; node_modules should not be entered")
-        let walked = MainProcessMeter.fullTreeWalks
+        let walked = MainProcessMeter.shared.fullTreeWalks
         XCTAssertGreaterThan(walked, 0)
-        MainProcessMeter.reset()
+        MainProcessMeter.shared.reset()
         let second = cursor.refresh(root: root.path, now: Date().addingTimeInterval(1), fullInterval: 60, entryBudget: 5000)
         XCTAssertFalse(second.walked)
         XCTAssertEqual(second.entriesVisited, 5)
-        XCTAssertEqual(MainProcessMeter.fullTreeWalks, 0)
-        XCTAssertEqual(MainProcessMeter.directoryEntriesVisited, 5)
+        XCTAssertEqual(MainProcessMeter.shared.fullTreeWalks, 0)
+        XCTAssertEqual(MainProcessMeter.shared.directoryEntriesVisited, 5)
         let old = Date(timeIntervalSince1970: 1_700_000_000)
         var listed = first.listed
         listed.append(JSONLTreeCursor.Listed(path: "/tmp/brand-new.jsonl", modified: Date(), size: 12))
