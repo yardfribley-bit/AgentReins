@@ -83,6 +83,19 @@ def resolve_interval(requested: float) -> tuple[float, str | None]:
             % DEFAULT_INTERVAL
         )
     return float(requested), None
+
+
+def pace_interval(configured: float) -> float:
+    """When the app is hot it writes ``throttled`` and the sampler sleeps longer."""
+    path = os.environ.get("AGENTREINS_PACE_FILE") or str(
+        pathlib.Path.home() / "Library/Application Support/AgentReins/runtime-pace")
+    try:
+        text = pathlib.Path(path).read_text(encoding="utf-8").strip()
+    except OSError:
+        return configured
+    if text == "throttled":
+        return max(float(configured), 8.0)
+    return float(configured)
 HERE = pathlib.Path(__file__).resolve().parent
 SUPPORT = pathlib.Path.home() / "Library/Application Support/AgentGuard"
 DEFAULT_LEDGER_HOME = SUPPORT / "socket-ledger.json"
@@ -1442,7 +1455,7 @@ def main(argv: list[str] | None = None) -> int:
             print(json.dumps(last, ensure_ascii=False, sort_keys=True), flush=True)
         if args.once or (deadline and time.time() >= deadline):
             return 0 if not last.get("failure") else 2
-        time.sleep(max(0.05, args.interval - (time.monotonic() - started)))
+        time.sleep(max(0.05, pace_interval(interval) - (time.monotonic() - started)))
     return 0
 
 

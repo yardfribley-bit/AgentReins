@@ -540,7 +540,8 @@ window.agentreinsHostResult=result=>{
 };
 document.addEventListener('click',e=>{
  const el=e.target.closest('button');if(!el)return;
- if(el.hasAttribute('data-graph-focus')){window.AgentReinsFlow.focus();}
+ if(el.dataset.plainToggle!=null){const box=el.parentElement&&el.parentElement.querySelector('.plain-detail');if(box)box.hidden=!box.hidden;}
+ else if(el.hasAttribute('data-graph-focus')){window.AgentReinsFlow.focus();}
  else if(el.dataset.keychainAuthorize){bridge('authorizeKeychain',{state:el.dataset.keychainAuthorize});}
  else if(el.dataset.destAlert){view='alerts';riskState.selected=el.dataset.destAlert;render();}
  else if(el.dataset.networkDestination!=null){networkDestination=el.dataset.networkDestination;networkTask=null;networkSelected=null;if(view!=='network'){view='network';render();}else renderNetwork();$('network-view')?.scrollTo?.(0,0);}

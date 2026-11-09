@@ -1,3 +1,5 @@
+import AgentReinsCore
+import Darwin
 import SwiftUI
 
 /// 菜单栏安全应用关闭窗口后继续运行，退出时清理扫描子进程。
@@ -9,10 +11,13 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillFinishLaunching(_ notification: Notification) {
         // Must run before SwiftUI applies MenuBarExtra's accessory defaults.
         NSApp.setActivationPolicy(.regular)
+        refuseSecondCopy()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         NSApp.setActivationPolicy(.regular)
+        RuntimeBudget.shared.startSampling()
+        syncBackgroundJobs(unload: false)
         AppNotifier.requestAuthorization()
         BrowserProtectionInstaller.installBundledAssets()
         // Integrity key readable? If macOS needs the user's approval, ask visibly (never silently).
@@ -43,6 +48,41 @@ final class AgentReinsAppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         Self.stopLiveCollectors?()
         MemoryScanManager.cleanupOnTerminate()
+        syncBackgroundJobs(unload: true)
+    }
+
+    /// A backup copy of AgentReins.app must not become a second writer.
+    private func refuseSecondCopy() {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let apps = NSWorkspace.shared.runningApplications.compactMap { app -> AppInstanceGate.Proc? in
+            guard let path = app.executableURL?.path else { return nil }
+            return AppInstanceGate.Proc(pid: app.processIdentifier, path: path)
+        }
+        let others = AppInstanceGate.others(selfPid: ProcessInfo.processInfo.processIdentifier, processes: apps)
+        guard let other = others.first else { return }
+        let alert = NSAlert()
+        alert.messageText = "AgentReins 已经在运行"
+        alert.informativeText = AppInstanceGate.message(otherPath: other.path)
+        alert.runModal()
+        NSApp.terminate(nil)
+    }
+
+    /// MCP, the socket sampler, and a mitm KeepAlive job. Quitting unloads them
+    /// so they do not keep a core busy. The next launch loads the plists again.
+    private func syncBackgroundJobs(unload: Bool) {
+        guard ProcessInfo.processInfo.environment["XCTestConfigurationFilePath"] == nil else { return }
+        let dir = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Library/LaunchAgents")
+        let names = (try? FileManager.default.contentsOfDirectory(atPath: dir.path)) ?? []
+        let discovered = names.filter { $0.hasSuffix(".plist") }.map { ($0 as NSString).deletingPathExtension }
+        let uid = getuid()
+        for label in BackgroundJobs.ownedLabels(discovered) {
+            let plist = dir.appendingPathComponent(label + ".plist").path
+            guard FileManager.default.fileExists(atPath: plist) else { continue }
+            let args = unload
+                ? BackgroundJobs.bootoutArguments(uid: uid, label: label)
+                : BackgroundJobs.bootstrapArguments(uid: uid, plistPath: plist)
+            _ = BoundedProcess.run("/bin/launchctl", arguments: args, timeout: 3)
+        }
     }
 }
 

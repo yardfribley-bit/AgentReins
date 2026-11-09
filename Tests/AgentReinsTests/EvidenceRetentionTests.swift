@@ -95,4 +95,65 @@ final class EvidenceRetentionTests: XCTestCase {
         _ = try database.prune()
         XCTAssertEqual(try database.recent(limit: 10).map(\.id), [join.id])
     }
+
+    func testHardCapSkipsAutomaticDeleteUntilTheUserConfirms() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let database = try EvidenceDatabase(url: root.appendingPathComponent("evidence.sqlite3"))
+        let security = GuardEvent(kind: "network", ruleId: "S02", path: "-", command: "curl https://example",
+                                   agent: "codex", op: "egress", severity: "high",
+                                   ts: Date().addingTimeInterval(-3 * 24 * 60 * 60), action: "observed", source: "retention")
+        let heartbeat = GuardEvent(kind: "activity", ruleId: "fixture", path: "-", command: nil,
+                                    agent: "codex", op: "exec", severity: "info",
+                                    ts: Date().addingTimeInterval(-2 * 24 * 60 * 60), action: "observed",
+                                    userIntent: "<heartbeat>ping", source: "retention")
+        try database.append([security, heartbeat])
+        var policy = EvidenceRetentionPolicy.default
+        policy.hardCapBytes = 1
+        let held = try database.prune(policy: policy)
+        XCTAssertEqual(held.deletedRecords, 0)
+        XCTAssertTrue(held.overCap)
+        XCTAssertEqual(try database.recent(limit: 10).count, 2)
+        let cleaned = try database.prune(policy: policy, userConfirmed: true)
+        XCTAssertGreaterThan(cleaned.deletedRecords, 0)
+        XCTAssertEqual(try database.recent(limit: 10).map(\.id), [security.id])
+        XCTAssertFalse(cleaned.note.contains("VACUUM。") && cleaned.reclaimedPages > 0)
+    }
+
+    func testHardCapRefusesNewNoiseButKeepsEgress() {
+        let heartbeat = GuardEvent(kind: "activity", ruleId: "fixture", path: "-", command: nil,
+                                    agent: "codex", op: "heartbeat", severity: "info",
+                                    ts: Date(), action: "observed", userIntent: "<heartbeat>ping", source: "retention")
+        let egress = GuardEvent(kind: "network", ruleId: "S02", path: "-", command: "curl https://example",
+                                 agent: "codex", op: "egress", severity: "high",
+                                 ts: Date(), action: "blocked", source: "retention")
+        let kept = EvidenceDatabase.rowsToStore([heartbeat, egress], onDiskBytes: 8, hardCap: 1)
+        XCTAssertEqual(kept.map(\.id), [egress.id])
+        XCTAssertEqual(EvidenceDatabase.rowsToStore([heartbeat, egress], onDiskBytes: 0, hardCap: 1).count, 2)
+    }
+
+    func testSecondAppCopyIsRefusedAndAHotProcessThrottles() {
+        let selfPid: Int32 = 10
+        let processes = [
+            AppInstanceGate.Proc(pid: 10, path: "/Applications/AgentReins.app/Contents/MacOS/AgentReins"),
+            AppInstanceGate.Proc(pid: 11, path: "/Users/me/Desktop/AgentReins copy.app/Contents/MacOS/AgentReins"),
+            AppInstanceGate.Proc(pid: 12, path: "/Applications/AgentReins.app/Contents/MacOS/AgentReinsMCP"),
+        ]
+        let others = AppInstanceGate.others(selfPid: selfPid, processes: processes)
+        XCTAssertEqual(others.map(\.pid), [11])
+        XCTAssertTrue(AppInstanceGate.message(otherPath: others[0].path).contains("已经有一个 AgentReins"))
+        let budget = RuntimeBudget()
+        XCTAssertEqual(budget.observe(cpuPercent: 20, memoryPressure: false), "normal")
+        XCTAssertEqual(budget.observe(cpuPercent: 140, memoryPressure: false), "normal")
+        XCTAssertEqual(budget.observe(cpuPercent: 140, memoryPressure: false), "normal")
+        XCTAssertEqual(budget.observe(cpuPercent: 140, memoryPressure: false), "throttled")
+        XCTAssertTrue(budget.isThrottled)
+        XCTAssertEqual(RuntimeBudget.cpuPercent(userMicros: 1_000_000, systemMicros: 0, elapsed: 1), 100, accuracy: 0.1)
+        let labels = BackgroundJobs.ownedLabels(["com.agentreins.mitm-proxy", "com.example.other"])
+        XCTAssertTrue(labels.contains("com.agentreins.mcp-http"))
+        XCTAssertTrue(labels.contains("com.agentreins.socket-sampler"))
+        XCTAssertTrue(labels.contains("com.agentreins.mitm-proxy"))
+        XCTAssertEqual(BackgroundJobs.bootoutArguments(uid: 501, label: "com.agentreins.mcp-http"), ["bootout", "gui/501/com.agentreins.mcp-http"])
+    }
 }

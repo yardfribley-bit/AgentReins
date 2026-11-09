@@ -53,8 +53,12 @@ public enum EvidenceValue {
     public static let noiseMaxAge: TimeInterval = 24 * 60 * 60
     /// Raw dumps and session copies, after a summary or excerpt exists.
     public static let bulkMaxAge: TimeInterval = 3 * 24 * 60 * 60
-    /// Safety backstop for noise and bulk only. Keep-tier rows are not auto-dropped to meet it.
+    /// Soft cap. Noise and bulk are pruned in small batches once the file is this large.
+    /// Keep-tier rows are not deleted to meet it.
     public static let backstopBytes: Int64 = 2 * 1024 * 1024 * 1024
+    /// Hard cap. Past this, automatic delete and VACUUM stop. A file already this
+    /// large (the old multi-gigabyte library) waits for the in-app confirm button.
+    public static let hardCapBytes: Int64 = 4 * 1024 * 1024 * 1024
     public static let batchRows = 200
     public static let maxBatchesPerPass = 4
 

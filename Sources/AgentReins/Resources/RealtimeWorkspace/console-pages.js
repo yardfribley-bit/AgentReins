@@ -235,7 +235,37 @@ function inboxItems(payload,decisions,opts){
  if(wantNoise) items.push(...telemetryNoiseItems(gate.receipts));
  else items.push(...gateInboxItems(gate.inbox,decisions,gate.allowlist));
  const order={gate:-1,confirm:0,review:1,failed:2};
- return items.sort((a,b)=>(order[a.bucket.id]??9)-(order[b.bucket.id]??9)||new Date(b.task.startedAt)-new Date(a.task.startedAt));
+ return items.sort((a,b)=>new Date(b.task.startedAt)-new Date(a.task.startedAt)||(order[a.bucket.id]??9)-(order[b.bucket.id]??9));
+}
+function telemetryBlob(alert){
+ return [alert&&alert.sub,alert&&alert.title,alert&&alert.hostText,alert&&alert.subject,alert&&alert.destination].join(' ');
+}
+function homeStatus(payload, alerts){
+ const rows=list(alerts).filter(a=>a&&!/telemetry/i.test(telemetryBlob(a)))
+  .sort((a,b)=>new Date(b.timestamp||b.startedAt||0)-new Date(a.timestamp||a.startedAt||0));
+ const cred=rows.find(a=>/凭证|凭据|credential|\.env|S01/i.test(String(a.title||'')+String(a.rule||'')+String(a.sub||'')));
+ const net=rows.find(a=>/S0[247]/.test(String(a.rule||''))||/外联|访问|连到/.test(String(a.title||'')));
+ const who=cred||net||rows[0]||null;
+ const what=who?(cred&&who===cred?'读了凭据':'往外连了'):'';
+ const line1=who?`${who.agent||'某个 Agent'} 刚刚${what}：${cut(who.title||who.sub||'细节没写清',72)}`:'还没有看到新的外联或凭据读取。';
+ const blocked=!!(who&&(who.blocked===true||(who.enforcement&&who.enforcement.fired===true)||who.disposition==='已阻断'));
+ const line2=!who?'没有要拦的事。':blocked?'拦住了。真实程序没有发出去。':'没拦住。这次只是记下来了。';
+ const verification=payload&&payload.verification;
+ const checks=list(verification&&verification.checklists);
+ const unclaimed=verification?list(verification.unclaimed).filter(row=>row&&row.path):[];
+ const done=checks[0];
+ let line3='还没有人说做完。';
+ if(done){
+  line3=unclaimed.length?`它说做完了，但有 ${unclaimed.length} 处改动没人认领。`:`它说做完了。对得上的改动是 ${done.actualFiles||0} 个文件。`;
+ }else if(unclaimed.length){
+  line3=`还没说做完。已有 ${unclaimed.length} 处改动没挂到工具调用上。`;
+ }
+ const detail=[who&&(who.why||who.sub),unclaimed.slice(0,5).map(row=>row.path).join('、')].filter(Boolean).join(' ');
+ return {line1,line2,line3,detail:detail||'没有更多依据。'};
+}
+function homeStatusHTML(payload, alerts){
+ const lines=homeStatus(payload, alerts);
+ return `<section class="plain-home"><p>${esc(lines.line1)}</p><p>${esc(lines.line2)}</p><p>${esc(lines.line3)}</p><button type="button" data-plain-toggle>看依据</button><div class="plain-detail" hidden><p>${esc(lines.detail)}</p></div></section>`;
 }
 function telemetryNoiseItems(records){
  const items=[];
@@ -374,15 +404,17 @@ function staleFilesHTML(disk){
 }
 function renderAbout(holder, install, disk){
  const kicker=esc(installLabel(install));
- holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。看得见主机层里已经采到的 agent 行为，并在本机确认、加白、复查。</p></div></div>
+ const bytes=Number(disk&&disk.evidenceBytes||0);
+ const huge=bytes>=4*1024*1024*1024;
+ holder.innerHTML=`<div class="risk-ph"><div><div class="k">${kicker}</div><h1>关于 AgentReins</h1><p>这台 Mac 上的 agent 安全观测。首页三句话：谁刚往外连或读了凭据，拦没拦住，说做完之后到底改了什么。确认、加白、复查都在本机。</p></div></div>
  <div class="about-body">
- <article class="risk-rc"><h3>现在能做的</h3><p>风险告警来自运输审计、内容审计，以及已经对上的文件卡片。确认、加白、已知悉，还有任务的通过和退回，都写在本机 Review，重新打开仍在。已阻断只在审计代理拒绝转发，或 PATH 命令入口没有执行真实命令时出现。只写了 Review、没有执行回执时，状态是「已记下，未拦截」。证据包可以导出当前投影。监督接入提供随包的只读工具。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说、做的比说的多，只留能看清的短摘录。工具名、路径、时间和 pid 会留着。心跳、没采到用户原话、重复采样、整段会话副本，以及已经有摘要的大块原文会清掉。不会为了凑容量丢掉这些高价值记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">清理走已经在跑的分层：心跳和没采到原话满一天，大块原文满三天。外联、凭据、文件改动、验收决定和短摘录不动。</p></article>
+ <article class="risk-rc"><h3>现在能做的</h3><p>看得见外联和凭据读取，拦得住的会写已阻断。已阻断只在审计代理拒绝转发，或 PATH 命令入口没有执行真实命令时出现。只写了 Review、没有执行回执时，状态是「已记下，未拦截」。</p><p class="note">证据按值留。外联、凭据、策略命中和处置决定会留着。对得上工具或没人认领的文件改动会留着。待我处理的决定和理由会留着。说了没做、做了没说，只留能看清的短摘录。心跳、没采到用户原话、重复采样和整段会话副本会清掉。不会为了凑容量丢掉这些记录。</p><div class="risk-actions"><button type="button" class="primary" data-retention-clean>清理旧证据</button></div><p class="note">${huge?'这份库已经很大。自动清理停了，点上面的按钮才按小批清，不会整库压缩。':'库还不大。心跳和大块原文会按小批清掉。外联、凭据、文件改动和验收决定不动。'}</p></article>
  ${staleFilesHTML(disk)}
  <article class="risk-rc"><h3>下一步</h3><ul class="about-next"><li>文件层 Endpoint Security 检测（S08–S10）。进程内读文件这版拦不住</li><li>Network Extension 仍未安装。绝对路径绕过 PATH、QUIC、参数里看不到目的地的 git 仍拦不住</li><li>WebLens 接到规则</li><li>安全设置监看（S06）和组织授权范围</li></ul></article>
  </div>`;
 }
 
 window.AgentReinsConsole={
- fileRows,fileAlertRows,renderFiles,unclaimedChanges,renderReason,inboxItems,inboxNoiseReason,evidencePack,evidenceItems,renderInbox,renderSupervise,renderAbout
+ fileRows,fileAlertRows,renderFiles,unclaimedChanges,renderReason,inboxItems,inboxNoiseReason,evidencePack,evidenceItems,renderInbox,renderSupervise,renderAbout,homeStatus,homeStatusHTML
 };
 })();
