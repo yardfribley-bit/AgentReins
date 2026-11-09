@@ -140,8 +140,8 @@ final class HardGateStoreTests: XCTestCase {
         try FileManager.default.createDirectory(at: legacy.deletingLastPathComponent(), withIntermediateDirectories: true)
         try Data("{\"rules\":[],\"version\":1}".utf8).write(to: reins)
         try Data("{\"version\":1,\"customized\":true,\"rules\":[]}".utf8).write(to: legacy)
-        let seeded = HardGateStore.seedInstalledRules(home: home)
-        XCTAssertEqual(seeded, [reins])
+        let installed = HardGateStore.seedInstalledRules(home: home)
+        XCTAssertEqual(installed, [reins])
         XCTAssertTrue(HardGateStore.seedInstalledRules(home: home).isEmpty)
         let legacyDoc = try JSONSerialization.jsonObject(with: Data(contentsOf: legacy)) as? [String: Any]
         XCTAssertEqual((legacyDoc?["customized"] as? Bool), true)
