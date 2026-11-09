@@ -618,7 +618,7 @@ enum NetworkTool {
                      transportTruncated: Bool = false) -> [String: Any] {
         let sinceTs = Clock.parse(since)
         let untilTs = Clock.parse(until)
-        let rows = records.compactMap { r -> [String: Any]? in
+        let commandRows = records.compactMap { r -> [String: Any]? in
             if let agent, agent != "all", str(r["agent"]) != agent { return nil }
             // `since` alone stays socket-only. Command rows are bounded once `until` is set.
             if let untilTs {
@@ -634,7 +634,8 @@ enum NetworkTool {
             for (k, v) in dest { row[k] = v }
             row["confidence"] = isNull(dest["destination"]) ? "Unknown" : "Observed"
             return row
-        } + blockedNetworkRows(agent: agent, since: sinceTs, until: untilTs)
+        }
+        let rows = blockedNetworkRows(agent: agent, since: sinceTs, until: untilTs) + commandRows
         let fetch = ListPage.socketFetchLimit(offset: offset, limit: limit)
         let sockets = SocketLedger.load(integrity, agent: agent, since: since, until: until, limit: fetch)
         let connections = sockets["connections"] as? [[String: Any]] ?? []

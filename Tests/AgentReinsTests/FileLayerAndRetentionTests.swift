@@ -212,6 +212,66 @@ final class MCPHealthAndStaleDataTests: XCTestCase {
         XCTAssertFalse(second.shellHookAdded)
     }
 
+    func testPythonChildOfTheAgentShellIsInTheTree() {
+        let pids: [Int32] = [10, 11, 12]
+        let parents: [Int32: Int32] = [10: 1, 11: 10, 12: 11]
+        let paths = [
+            10: "/Applications/WorkBuddy.app/Contents/MacOS/codebuddy",
+            11: "/bin/zsh",
+            12: "/usr/bin/python3",
+        ]
+        let tree = FileLayerCapture.agentTree(pids: pids, parents: parents, paths: paths)
+        XCTAssertEqual(tree[10], "workbuddy")
+        XCTAssertTrue(FileLayerCapture.isShell(paths[11]!))
+        XCTAssertTrue(FileLayerCapture.isPython(paths[12]!))
+        XCTAssertEqual(tree[12], "workbuddy")
+        let files = FileLayerCapture.watchFiles(home: "/Users/me", workspaces: [], directoryNames: [
+            "/tmp": ["job"],
+            "/private/tmp": ["job"],
+            "/tmp/job": [".env"],
+            "/private/tmp/job": [".env"],
+        ])
+        XCTAssertTrue(files.contains { $0.hasSuffix("/job/.env") })
+    }
+
+    func testAuditScriptWithASpaceParsesAndRetargetIsIdempotent() throws {
+        let bin = FileManager.default.temporaryDirectory
+            .appendingPathComponent("Library/Application Support/AgentReins/transport-audit/bin-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: bin, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: bin.deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent().deletingLastPathComponent()) }
+        try Data("#!/bin/sh\n".utf8).write(to: bin.appendingPathComponent("curl"))
+        let script = TransportWrapperInstall.auditScript(binDir: bin.path, home: "/Users/me")
+        XCTAssertTrue(script.contains(TransportWrapperInstall.shellQuote(bin.path)))
+        XCTAssertFalse(script.contains("export PATH=\(bin.path)"))
+        let file = FileManager.default.temporaryDirectory.appendingPathComponent("audit-\(UUID().uuidString).sh")
+        try script.write(to: file, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: file) }
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: shell)
+            process.arguments = ["-n", file.path]
+            let pipe = Pipe()
+            process.standardError = pipe
+            try process.run()
+            process.waitUntilExit()
+            let err = String(data: pipe.fileHandleForReading.readDataToEndOfFile(), encoding: .utf8) ?? ""
+            XCTAssertEqual(process.terminationStatus, 0, "\(shell) -n failed: \(err)")
+        }
+        XCTAssertEqual(TransportWrapperInstall.retarget(script, binDir: bin.path), script)
+        let broken = "case \":$PATH:\" in\n*:/Users/me/Library/Application Support/old/transport-audit/bin:*) ;;\nesac\n"
+        let fixed = TransportWrapperInstall.retarget(broken, binDir: bin.path)
+        XCTAssertTrue(fixed.contains(TransportWrapperInstall.shellQuote(bin.path)))
+        let brokenFile = FileManager.default.temporaryDirectory.appendingPathComponent("audit-broken-\(UUID().uuidString).sh")
+        try fixed.write(to: brokenFile, atomically: true, encoding: .utf8)
+        defer { try? FileManager.default.removeItem(at: brokenFile) }
+        let zsh = Process()
+        zsh.executableURL = URL(fileURLWithPath: "/bin/zsh")
+        zsh.arguments = ["-n", brokenFile.path]
+        try zsh.run()
+        zsh.waitUntilExit()
+        XCTAssertEqual(zsh.terminationStatus, 0)
+    }
+
     func testStaleSuggestionsSkipTheLiveDatabase() {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         try? FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

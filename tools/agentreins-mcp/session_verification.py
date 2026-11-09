@@ -39,6 +39,8 @@ def is_credential(text: str | None) -> bool:
 
 
 def _parse_time(value: Any) -> datetime | None:
+    if isinstance(value, str) and value.isdigit():
+        value = int(value)
     if isinstance(value, (int, float)):
         stamp = float(value) / 1000 if value > 10_000_000_000 else float(value)
         return datetime.fromtimestamp(stamp, timezone.utc)
@@ -196,7 +198,7 @@ def list_tool_calls(arguments: dict[str, Any], effects: list[dict[str, Any]] | N
     if agent and agent != "all":
         cards = [card for card in cards if agent.lower() in str(card["agent"]).lower()]
     if session_id:
-        cards = [card for card in cards if card["sessionId"] == session_id]
+        cards = [card for card in cards if session_matches(str(card["sessionId"]), str(session_id))]
     offset = int(arguments.get("offset") or 0)
     limit = arguments.get("limit")
     page = cards[offset:] if limit is None else cards[offset:offset + int(limit)]
@@ -217,15 +219,15 @@ def list_tool_calls(arguments: dict[str, Any], effects: list[dict[str, Any]] | N
 def get_session_verification(session_id: str, effects: list[dict[str, Any]] | None = None) -> dict[str, Any]:
     loaded = load()
     document = verify(_coerce_calls(loaded["calls"]), _coerce_effects((effects or []) + file_observation_effects()), completions=loaded["completions"])
-    cards = [card for card in document["cards"] if card["sessionId"] == session_id]
+    cards = [card for card in document["cards"] if session_matches(str(card["sessionId"]), str(session_id))]
     return {
         "sessionId": session_id,
         "sources": loaded["sources"],
         "fileObservation": document["fileObservation"],
         "networkObservation": document["networkObservation"],
         "cards": [_public_card(card) for card in cards],
-        "unclaimed": [_public_time(row) for row in document["unclaimed"] if row.get("sessionId") in (None, session_id)],
-        "checklists": [_public_time(row) for row in document["checklists"] if row["sessionId"] == session_id],
+        "unclaimed": [_public_time(row) for row in document["unclaimed"] if row.get("sessionId") in (None, "") or session_matches(str(row.get("sessionId") or ""), str(session_id))],
+        "checklists": [_public_time(row) for row in document["checklists"] if session_matches(str(row["sessionId"]), str(session_id))],
         "truncated": document["truncated"],
         "note": "这份会话日志里没有这个 session，或日志目录不在。" if not cards else "只读核对。",
     }
@@ -351,16 +353,20 @@ def _read_tree(root: str, agent: str, kind: str, max_files: int, max_bytes: int)
     malformed = 0
     for file in chosen:
         try:
-            data = file.read_bytes()
+            if kind == "workbuddy":
+                text = _recent_short_lines(file)
+            else:
+                data = file.read_bytes()
+                if len(data) > max_bytes:
+                    data = data[-max_bytes:]
+                    cut = data.find(b"\n")
+                    if cut >= 0:
+                        data = data[cut + 1:]
+                text = data.decode("utf-8", "replace")
         except OSError:
             malformed += 1
             continue
-        if len(data) > max_bytes:
-            data = data[-max_bytes:]
-            cut = data.find(b"\n")
-            if cut >= 0:
-                data = data[cut + 1:]
-        batch = _parse(data.decode("utf-8", "replace"), str(file), agent, kind)
+        batch = _parse(text, str(file), agent, kind)
         calls.extend(batch["calls"])
         completions.update(batch["completions"])
         malformed += batch["malformed"]
@@ -368,6 +374,46 @@ def _read_tree(root: str, agent: str, kind: str, max_files: int, max_bytes: int)
     if capped or len(files) > len(chosen):
         note = "只读了最近 %d 个 jsonl。全文仍在原来的日志里。" % len(chosen)
     return {"calls": calls, "completions": completions, "source": _source(agent, root, "present", len(chosen), max(0, len(files) - len(chosen)), malformed, note)}
+
+
+def _recent_short_lines(path: pathlib.Path, max_scan: int = 32 * 1024 * 1024, max_line: int = 65_536, max_lines: int = 4_000) -> str:
+    """Skip giant function_call_result lines so the tool calls in front of them stay visible."""
+    size = path.stat().st_size
+    if size <= 0:
+        return ""
+    lines: list[bytes] = []
+    with path.open("rb") as handle:
+        pos = size
+        scanned = 0
+        pending = b""
+        while pos > 0 and scanned < max_scan and len(lines) < max_lines:
+            step = min(256 * 1024, pos)
+            pos -= step
+            handle.seek(pos)
+            chunk = handle.read(step)
+            scanned += len(chunk)
+            pending = chunk + pending
+            parts = pending.split(b"\n")
+            pending = parts[0]
+            for part in reversed(parts[1:]):
+                if len(part) > max_line:
+                    continue
+                lines.append(part)
+                if len(lines) >= max_lines:
+                    break
+        if pos == 0 and pending and len(pending) <= max_line:
+            lines.append(pending)
+    return b"\n".join(reversed(lines)).decode("utf-8", "replace")
+
+
+def session_matches(stored: str, query: str) -> bool:
+    left, right = (stored or "").lower(), (query or "").lower()
+    if not left or not right:
+        return False
+    if left == right:
+        return True
+    short, long = (left, right) if len(left) <= len(right) else (right, left)
+    return len(short) >= 8 and long.startswith(short)
 
 
 def _source(agent: str, root: str, state: str, files_read: int, skipped: int, malformed: int, note: str) -> dict[str, Any]:
@@ -439,10 +485,7 @@ def _parse(text: str, source_path: str, agent: str, kind: str) -> dict[str, Any]
                 continue
             if row_type != "function_call":
                 continue
-            timestamp = _parse_time(row.get("timestamp"))
-            if timestamp is None:
-                malformed += 1
-                continue
+            timestamp = _parse_time(row.get("timestamp")) or datetime.fromtimestamp(0, timezone.utc)
             call_id = row.get("callId") or row.get("call_id") or "workbuddy-%d" % line_start
             calls.append(_call(call_id, session, agent, source_path, line_start, timestamp, row.get("pid"), row.get("reasoning") or pending, row.get("name") or "unknown_tool", _json_text(row.get("arguments", row.get("input"))), seen))
             pending = ""

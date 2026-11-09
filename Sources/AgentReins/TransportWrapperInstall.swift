@@ -49,59 +49,86 @@ enum TransportWrapperInstall {
         return Result(copied: copied, auditUpdated: auditUpdated, shellHookAdded: hook)
     }
 
-    /// Replace another install's `transport-audit/bin` with `binDir`.
-    /// A path under `Application Support` contains a space, so a second launch
-    /// must recognize that path and leave it alone.
+    /// Replace another install's `transport-audit/bin` with the shell-quoted `binDir`.
+    /// Comparison uses the quoted form, so a path that already contains a space
+    /// is left alone on the next launch.
     static func retarget(_ text: String, binDir: String) -> String {
         let needle = "transport-audit/bin"
         var output = ""
         var cursor = text.startIndex
         while let found = text[cursor...].range(of: needle) {
-            let start = pathStart(text, needle: found.lowerBound, floor: cursor)
-            var end = found.upperBound
-            if end < text.endIndex, text[end] == "/" {
-                var next = text.index(after: end)
-                while next < text.endIndex {
-                    let ch = text[next]
-                    if ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-" || ch == "+" {
-                        next = text.index(after: next)
-                    } else {
-                        break
-                    }
-                }
-                if text.distance(from: end, to: next) > 1 { end = next }
-            }
-            let dir = String(text[start..<found.upperBound])
-            output += text[cursor..<start]
-            if dir == binDir {
-                output += text[start..<end]
+            let span = pathSpan(text, needle: found, floor: cursor)
+            let tool = String(text[found.upperBound..<span.inner.upperBound])
+            let quoted = shellQuote(binDir + tool)
+            output += text[cursor..<span.start]
+            if text[span.start..<span.end] == quoted {
+                output += text[span.start..<span.end]
             } else {
-                output += binDir + String(text[found.upperBound..<end])
+                output += quoted
             }
-            cursor = end
+            cursor = span.end
         }
         output += text[cursor...]
         return output
     }
 
-    private static func pathStart(_ text: String, needle: String.Index, floor: String.Index) -> String.Index {
-        var index = needle
+    private struct PathSpan {
+        var start: String.Index
+        var end: String.Index
+        var inner: Range<String.Index>
+    }
+
+    /// The path token, including one surrounding quote when the path is quoted.
+    /// An unquoted path may already contain a space; the token then runs back to `:`, `*`, or `=`.
+    private static func pathSpan(_ text: String, needle: Range<String.Index>, floor: String.Index) -> PathSpan {
+        var index = needle.lowerBound
+        var quoteAt: String.Index?
         while index > floor {
             let previous = text.index(before: index)
             let ch = text[previous]
-            if ch == "'" || ch == "\"" { return index }
+            if ch == "'" || ch == "\"" {
+                quoteAt = previous
+                break
+            }
+            if ch == "\n" || ch == ";" { break }
             index = previous
         }
-        index = needle
-        var start = needle
-        while index > floor {
-            let previous = text.index(before: index)
-            let ch = text[previous]
-            if ch == " " || ch == "\n" || ch == "\t" || ch == ":" { return index }
-            index = previous
-            start = index
+        let innerStart: String.Index
+        let tokenStart: String.Index
+        if let quoteAt {
+            tokenStart = quoteAt
+            innerStart = text.index(after: quoteAt)
+        } else {
+            var start = needle.lowerBound
+            var cursor = needle.lowerBound
+            while cursor > floor {
+                let previous = text.index(before: cursor)
+                let ch = text[previous]
+                if ch == ":" || ch == "*" || ch == "=" || ch == "\n" || ch == ";" || ch == "(" || ch == ")" {
+                    start = cursor
+                    break
+                }
+                cursor = previous
+                start = cursor
+            }
+            tokenStart = start
+            innerStart = start
         }
-        return start
+        var innerEnd = needle.upperBound
+        if innerEnd < text.endIndex, text[innerEnd] == "/" {
+            var next = text.index(after: innerEnd)
+            while next < text.endIndex, isPathChar(text[next]) { next = text.index(after: next) }
+            if text.distance(from: innerEnd, to: next) > 1 { innerEnd = next }
+        }
+        var tokenEnd = innerEnd
+        if quoteAt != nil, innerEnd < text.endIndex, text[innerEnd] == text[quoteAt!] {
+            tokenEnd = text.index(after: innerEnd)
+        }
+        return PathSpan(start: tokenStart, end: tokenEnd, inner: innerStart..<innerEnd)
+    }
+
+    private static func isPathChar(_ ch: Character) -> Bool {
+        ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-" || ch == "+"
     }
 
     static func auditScript(binDir: String, home: String) -> String {
@@ -129,6 +156,7 @@ enum TransportWrapperInstall {
           return 0 2>/dev/null || exit 0
         fi
         export AGENTREINS_TRANSPORT_AGENT
+        AGENTREINS_TRANSPORT_BIN=\(quotedBin)
         if /usr/bin/nc -z -G 1 127.0.0.1 18891 >/dev/null 2>&1; then
           export HTTP_PROXY=http://127.0.0.1:18891 HTTPS_PROXY=http://127.0.0.1:18891 ALL_PROXY=http://127.0.0.1:18891
           export http_proxy="$HTTP_PROXY" https_proxy="$HTTPS_PROXY" all_proxy="$ALL_PROXY"
@@ -144,8 +172,8 @@ enum TransportWrapperInstall {
           fi
         fi
         case ":$PATH:" in
-          *:\(quotedBin):*) ;;
-          *) export PATH=\(quotedBin):$PATH ;;
+          *:"$AGENTREINS_TRANSPORT_BIN":*) ;;
+          *) PATH="$AGENTREINS_TRANSPORT_BIN:$PATH"; export PATH ;;
         esac
         \(functions)
 
