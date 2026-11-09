@@ -12,7 +12,7 @@ enum SessionVerificationTool {
             cards = cards.filter { $0.agent.localizedCaseInsensitiveContains(agent) }
         }
         if let session = str(args["session_id"]), !session.isEmpty {
-            cards = cards.filter { $0.sessionId == session }
+            cards = cards.filter { Self.sessionMatch($0.sessionId, session) }
         }
         let encoded = jsonArray(cards)
         let page = ListPage.slice(encoded, offset: offset, limit: limit)
@@ -33,9 +33,9 @@ enum SessionVerificationTool {
 
     static func session(_ records: [[String: Any]], sessionID: String) -> [String: Any] {
         let document = make(records)
-        let cards = document.cards.filter { $0.sessionId == sessionID }
-        let unclaimed = document.unclaimed.filter { $0.sessionId == nil || $0.sessionId == sessionID }
-        let checklists = document.checklists.filter { $0.sessionId == sessionID }
+        let cards = document.cards.filter { Self.sessionMatch($0.sessionId, sessionID) }
+        let unclaimed = document.unclaimed.filter { $0.sessionId == nil || Self.sessionMatch($0.sessionId ?? "", sessionID) }
+        let checklists = document.checklists.filter { Self.sessionMatch($0.sessionId, sessionID) }
         var result: [String: Any] = [
             "sessionId": sessionID,
             "sources": jsonArray(document.sources),
@@ -64,6 +64,16 @@ enum SessionVerificationTool {
             networkChannel: effects.contains { $0.kind == "network" })
         document.sources = logs.sources
         return document
+    }
+
+    static func sessionMatch(_ stored: String, _ query: String) -> Bool {
+        let left = stored.lowercased()
+        let right = query.lowercased()
+        if left.isEmpty || right.isEmpty { return false }
+        if left == right { return true }
+        let short = left.count <= right.count ? left : right
+        let long = left.count <= right.count ? right : left
+        return short.count >= 8 && long.hasPrefix(short)
     }
 
     private static func logRoots() -> (claude: String, codex: String, workbuddy: [String]) {

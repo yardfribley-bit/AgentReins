@@ -396,7 +396,8 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
     var completions: [String: String] = [:]
     var malformed = 0
     for (url, _) in chosen {
-        guard let data = readTail(url, maxBytes: maxBytes) else {
+        let data = kind == .workbuddy ? readRecentLines(url) : readTail(url, maxBytes: maxBytes)
+        guard let data else {
             malformed += 1
             continue
         }
@@ -414,6 +415,42 @@ private func readTree(root: String, agent: String, kind: LogKind, maxFiles: Int,
         note = "读了 \(chosen.count) 个 jsonl。卡片只留调用编号和摘录，不把日志抄进证据库。"
     }
     return TreeRead(calls: calls, completions: completions, source: SessionLogSource(agent: agent, root: root, state: "present", filesRead: chosen.count, filesSkipped: skipped, malformedLines: malformed, note: note))
+}
+
+/// Recent short lines only. A CodeBuddy `function_call_result` can be larger
+/// than the old 512KB tail, which then hid the Read/Edit/Bash lines in front of it.
+private func readRecentLines(_ url: URL, maxScan: Int = 32 * 1024 * 1024, maxLine: Int = 65_536, maxLines: Int = 4_000) -> Data? {
+    guard let handle = try? FileHandle(forReadingFrom: url) else { return nil }
+    defer { try? handle.close() }
+    let size = Int((try? handle.seekToEnd()) ?? 0)
+    guard size > 0 else { return Data() }
+    var pos = size
+    var scanned = 0
+    var pending = Data()
+    var lines: [Data] = []
+    while pos > 0 && scanned < maxScan && lines.count < maxLines {
+        let step = min(256 * 1024, pos)
+        pos -= step
+        try? handle.seek(toOffset: UInt64(pos))
+        guard let chunk = try? handle.read(upToCount: step), !chunk.isEmpty else { break }
+        scanned += chunk.count
+        pending.insert(contentsOf: chunk, at: 0)
+        let parts = pending.split(separator: 0x0A, omittingEmptySubsequences: false)
+        guard parts.count > 1 else { continue }
+        pending = Data(parts[0])
+        for part in parts.dropFirst().reversed() {
+            if part.count > maxLine { continue }
+            lines.append(Data(part))
+            if lines.count >= maxLines { break }
+        }
+    }
+    if pos == 0, pending.count <= maxLine, !pending.isEmpty { lines.append(pending) }
+    var out = Data()
+    for line in lines.reversed() {
+        out.append(line)
+        out.append(0x0A)
+    }
+    return out
 }
 
 private func readTail(_ url: URL, maxBytes: Int) -> Data? {
@@ -504,10 +541,7 @@ private func parseLines(_ data: Data, sourcePath: String, agent: String, kind: L
                 continue
             }
             guard type == "function_call" else { continue }
-            guard let timestamp = VerifyTime.parse(row["timestamp"]) else {
-                malformed += 1
-                continue
-            }
+            let timestamp = VerifyTime.parse(row["timestamp"]) ?? .distantPast
             let callId = string(row["callId"]) ?? string(row["call_id"]) ?? "workbuddy-\(lineStart)"
             let name = string(row["name"]) ?? "unknown_tool"
             let arguments = jsonText(row["arguments"] ?? row["input"])
@@ -683,8 +717,15 @@ private func redact(_ text: String) -> String {
 
 private enum VerifyTime {
     static func parse(_ value: Any?) -> Date? {
+        if let number = value as? NSNumber {
+            let raw = number.doubleValue
+            return Date(timeIntervalSince1970: raw > 10_000_000_000 ? raw / 1000 : raw)
+        }
         if let number = value as? Double { return Date(timeIntervalSince1970: number > 10_000_000_000 ? number / 1000 : number) }
         if let number = value as? Int { return Date(timeIntervalSince1970: number > 10_000_000_000 ? Double(number) / 1000 : Double(number)) }
+        if let raw = value as? String, let digits = Double(raw), raw.allSatisfy(\.isNumber) {
+            return Date(timeIntervalSince1970: digits > 10_000_000_000 ? digits / 1000 : digits)
+        }
         guard let raw = value as? String else { return nil }
         let formatter = ISO8601DateFormatter()
         formatter.formatOptions = [.withInternetDateTime, .withFractionalSeconds]

@@ -179,13 +179,12 @@ public enum SocketLedgerCore {
                     : "台账已签过名但现在不见了：按篡改处理，未走代理的流量不可见。",
             ] as [String: Any]]
         }
-        let sinceTs = Clock.parse(since)
-        let untilTs = Clock.parse(until)
         var rows: [[String: Any]] = []
         for case let row as [String: Any] in (root["connections"] as? [Any] ?? []) {
             if let agent, agent != "all", str(row["agent"]) != agent { continue }
-            if let sinceTs, (Clock.parse(row["lastSeen"]) ?? 0) < sinceTs { continue }
-            if let untilTs, (Clock.parse(row["lastSeen"]) ?? 0) > untilTs { continue }
+            // String compare on ISO timestamps. Parsing a DateFormatter per row
+            // is what made `list_network` with `since` time out on a full ledger.
+            if !Clock.isoTextInRange(row["lastSeen"], since: since, until: until) { continue }
             var out: [String: Any] = [:]
             for k in fields { if let v = row[k] { out[k] = v } }
             if tampered {

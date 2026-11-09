@@ -127,6 +127,26 @@ class ListPaging(unittest.TestCase):
         self.assertEqual(network["network"][0]["exitCode"], 126)
         self.assertTrue(network["network"][0]["blocked"])
 
+    def test_blocked_host_stays_on_the_first_page_when_transport_is_long(self) -> None:
+        records = [_row("Cursor", "e%03d" % i, "s", "2026-10-28T01:00:00Z") for i in range(250)]
+        blocked = {
+            "executionId": "hardgate:host:example.org",
+            "agent": "监督进程树",
+            "tool": "transport-wrapper",
+            "destination": "example.org",
+            "startedAt": "2026-11-09T08:00:00Z",
+            "blocked": True,
+            "disposition": "已阻断",
+            "exitCode": 126,
+            "confidence": "Observed",
+        }
+        with mock.patch.object(evidence, "blocked_network_rows", return_value=[blocked]), \
+             mock.patch.object(evidence, "load_socket_ledger", return_value={"connections": [], "total": 0, "coverage": {"integrity": {}}}):
+            out = evidence.list_network(records=records, limit=200)
+        self.assertEqual(out["network"][0]["destination"], "example.org")
+        self.assertEqual(out["network"][0]["disposition"], "已阻断")
+        self.assertEqual(len(out["network"]), 200)
+
     def test_list_network_until_filters_sockets_and_pages(self) -> None:
         rows = [
             {"id": "early", "agent": "Codex", "protocol": "TCP", "scope": "public", "viaProxy": False,

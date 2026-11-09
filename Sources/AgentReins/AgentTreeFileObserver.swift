@@ -45,27 +45,13 @@ final class AgentTreeFileObserver {
 
     private func sample() {
         let rows = ProcessTable.snapshot()
-        var owner: [Int32: String] = [:]
-        for row in rows {
-            if let agent = FileLayerCapture.agentOwner(path: row.path) {
-                owner[row.pid] = agent
-            }
-        }
-        var progressed = true
-        var guardrails = 0
-        while progressed && guardrails < 8 {
-            progressed = false
-            guardrails += 1
-            for row in rows where owner[row.pid] == nil {
-                if let parent = owner[row.ppid] {
-                    owner[row.pid] = parent
-                    progressed = true
-                }
-            }
-        }
+        let owner = FileLayerCapture.agentTree(
+            pids: rows.map(\.pid),
+            parents: Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { _, new in new }),
+            paths: Dictionary(rows.map { ($0.pid, $0.path) }, uniquingKeysWith: { _, new in new }))
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
         watchTick += 1
-        if watchList.isEmpty || watchTick % 4 == 0 {
+        if watchList.isEmpty || watchTick == 1 || watchTick % 2 == 0 {
             watchList = watchPaths(agentRows: mine)
             accessWatch?.replace(paths: watchList)
             accessStamps = accessStamps.filter { watchList.contains($0.key) }
@@ -142,22 +128,10 @@ final class AgentTreeFileObserver {
     /// same event is only possible (sampled).
     private func noteAccess(_ path: String, source: String = "credential-kqueue") {
         let rows = ProcessTable.snapshot()
-        var owner: [Int32: String] = [:]
-        for row in rows {
-            if let agent = FileLayerCapture.agentOwner(path: row.path) { owner[row.pid] = agent }
-        }
-        var guardrails = 0
-        var progressed = true
-        while progressed && guardrails < 8 {
-            progressed = false
-            guardrails += 1
-            for row in rows where owner[row.pid] == nil {
-                if let parent = owner[row.ppid] {
-                    owner[row.pid] = parent
-                    progressed = true
-                }
-            }
-        }
+        let owner = FileLayerCapture.agentTree(
+            pids: rows.map(\.pid),
+            parents: Dictionary(rows.map { ($0.pid, $0.ppid) }, uniquingKeysWith: { _, new in new }),
+            paths: Dictionary(rows.map { ($0.pid, $0.path) }, uniquingKeysWith: { _, new in new }))
         let mine = rows.filter { owner[$0.pid] != nil && !rowIsSelf($0.path) }
         var holder: ProcessTable.Row?
         var holderAgent: String?

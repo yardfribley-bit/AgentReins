@@ -92,6 +92,15 @@ public enum Clock {
         return f.string(from: date)
     }
 
+    /// ISO timestamps sort as text. Used so a ledger filter does not build a DateFormatter per row.
+    public static func isoTextInRange(_ value: Any?, since: String?, until: String?) -> Bool {
+        guard since != nil || until != nil else { return true }
+        guard let text = str(value), text.count >= 10 else { return true }
+        if let since, text < since { return false }
+        if let until, text > until { return false }
+        return true
+    }
+
     /// Python datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
     public static func parse(_ value: Any?) -> Double? {
         guard var s = str(value), !s.isEmpty else { return nil }

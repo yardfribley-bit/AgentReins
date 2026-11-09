@@ -231,12 +231,46 @@ public enum FileLayerCapture {
     /// Basename / bundle path only. A project directory named Cursor is not an agent.
     public static func agentOwner(path: String) -> String? {
         let base = (path as NSString).lastPathComponent.lowercased()
-        if base == "cursor-agent" || path.contains("/Cursor.app/") { return "cursor" }
+        let lower = path.lowercased()
+        if base == "cursor-agent" || lower.contains("/cursor.app/") { return "cursor" }
         if base == "claude" { return "claude" }
-        if base == "codex" || base.hasPrefix("codex-") || path.contains("/Codex.app/") { return "codex" }
-        if base == "workbuddy" || base == "codebuddy" || path.contains("/WorkBuddy.app/") || path.contains("/CodeBuddy.app/") {
+        if base == "codex" || base.hasPrefix("codex-") || lower.contains("/codex.app/") { return "codex" }
+        if base == "workbuddy" || base == "codebuddy" || lower.contains("/workbuddy.app/") || lower.contains("/codebuddy.app/") {
             return "workbuddy"
         }
         return nil
+    }
+
+    public static func isShell(_ path: String) -> Bool {
+        let base = (path as NSString).lastPathComponent.lowercased()
+        return base == "bash" || base == "zsh" || base == "sh" || base == "dash" || base == "fish"
+    }
+
+    public static func isPython(_ path: String) -> Bool {
+        let base = (path as NSString).lastPathComponent.lowercased()
+        return base == "python" || base == "python3" || base.hasPrefix("python3.")
+    }
+
+    /// Agent processes plus their descendants. A `python` child of the agent's
+    /// shell is included even though python itself is not an agent binary.
+    public static func agentTree(pids: [Int32], parents: [Int32: Int32], paths: [Int32: String], generations: Int = 32) -> [Int32: String] {
+        var owner: [Int32: String] = [:]
+        for pid in pids {
+            if let agent = agentOwner(path: paths[pid] ?? "") { owner[pid] = agent }
+        }
+        var guardrail = 0
+        var progressed = true
+        while progressed && guardrail < generations {
+            progressed = false
+            guardrail += 1
+            for pid in pids where owner[pid] == nil {
+                let parent = parents[pid] ?? 0
+                if let agent = owner[parent] {
+                    owner[pid] = agent
+                    progressed = true
+                }
+            }
+        }
+        return owner
     }
 }

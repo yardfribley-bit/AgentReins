@@ -1209,6 +1209,20 @@ SOCKET_FIELDS = (
 )
 
 
+def _iso_text_in_range(value: Any, since: str | None, until: str | None) -> bool:
+    """ISO timestamps sort as text. Avoids parsing every ledger row when `since` is set."""
+    if not since and not until:
+        return True
+    text = str(value or "")
+    if len(text) < 10:
+        return True
+    if since and text < since:
+        return False
+    if until and text > until:
+        return False
+    return True
+
+
 def _iso_ts(value: Any) -> float | None:
     if not value:
         return None
@@ -1378,7 +1392,6 @@ def load_socket_ledger(
                 if state == "not_running" else "台账已签过名但现在不见了：按篡改处理，未走代理的流量不可见。",
             },
         }
-    since_ts = _iso_ts(since)
     until_ts = _iso_ts(until)
     tampered = integrity["state"] == "tampered"
     rows = []
@@ -1387,9 +1400,10 @@ def load_socket_ledger(
             continue
         if agent and agent != "all" and str(row.get("agent")) != agent:
             continue
-        if since_ts is not None and (_iso_ts(row.get("lastSeen")) or 0) < since_ts:
+        seen = row.get("lastSeen")
+        if since and not _iso_text_in_range(seen, since, until):
             continue
-        if until_ts is not None and (_iso_ts(row.get("lastSeen")) or 0) > until_ts:
+        if not since and until_ts is not None and (_iso_ts(seen) or 0) > until_ts:
             continue
         out = {k: row.get(k) for k in SOCKET_FIELDS if k in row}
         if tampered:
@@ -1547,12 +1561,15 @@ def list_network(
                 "confidence": "Observed" if host else "Unknown",
             }
         )
+    blocked_rows = []
+    since_bound = _iso_ts(since)
     for blocked in blocked_network_rows():
         if agent and agent != "all" and str(blocked.get("agent")) != agent and str(agent).lower() not in ("workbuddy", "codebuddy"):
             continue
-        if until_ts is not None and not _in_time_range(blocked.get("startedAt"), since_ts, until_ts):
+        if since_bound is not None and not _in_time_range(blocked.get("startedAt"), since_bound, _iso_ts(until)):
             continue
-        rows.append(blocked)
+        blocked_rows.append(blocked)
+    rows = blocked_rows + rows
     page_offset, page_limit = _parse_page(limit, offset, cursor, None)
     fetch = min(5000, max(200, page_offset + (page_limit if page_limit is not None else 200)))
     sockets = load_socket_ledger(agent=agent, since=since, limit=fetch, until=until)

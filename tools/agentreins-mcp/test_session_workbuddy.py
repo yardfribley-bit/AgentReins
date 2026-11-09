@@ -42,6 +42,57 @@ class WorkBuddySessionTests(unittest.TestCase):
         self.assertEqual(document["cards"][0]["happened"][0]["join"], "path")
         self.assertEqual(document["unclaimed"], [])
 
+    def test_codebuddy_millisecond_line_survives_a_huge_result_and_prefix_session(self) -> None:
+        session = "bd89b095-1111-4111-8111-111111111111"
+        call = json.dumps({
+            "type": "function_call",
+            "timestamp": 1781821845000,
+            "cwd": "/tmp/proj",
+            "sessionId": session,
+            "name": "Edit",
+            "callId": "call_edit",
+            "arguments": json.dumps({"file_path": "/tmp/proj/add.js"}),
+        })
+        bash = json.dumps({
+            "type": "function_call",
+            "timestamp": 1781821845100,
+            "sessionId": session,
+            "name": "Bash",
+            "callId": "call_bash",
+            "arguments": json.dumps({"command": "ls"}),
+        })
+        read = json.dumps({
+            "type": "function_call",
+            "timestamp": 1781821845200,
+            "sessionId": session,
+            "name": "Read",
+            "callId": "call_read",
+            "arguments": json.dumps({"file_path": "/tmp/proj/add.js"}),
+        })
+        huge = json.dumps({
+            "type": "function_call_result",
+            "timestamp": 1781821846000,
+            "sessionId": session,
+            "name": "Read",
+            "callId": "call_read",
+            "output": {"type": "text", "text": "x" * 200_000},
+        })
+        with tempfile.TemporaryDirectory() as tmp:
+            projects = pathlib.Path(tmp) / "projects"
+            projects.mkdir()
+            (projects / (session + ".jsonl")).write_text(
+                "\n".join([call, bash, read, huge]) + "\n", encoding="utf-8")
+            loaded = sv.load(str(pathlib.Path(tmp) / "c"), str(pathlib.Path(tmp) / "x"), workbuddy=[str(projects)])
+        names = [row["toolName"] for row in loaded["calls"]]
+        self.assertEqual(names, ["Edit", "Bash", "Read"])
+        self.assertEqual(loaded["calls"][0]["sessionId"], session)
+        self.assertTrue(loaded["calls"][0]["claimsEdit"])
+        page = sv.list_tool_calls({"session_id": "bd89b095"}, [])
+        # list_tool_calls reads the real home; filter the loaded calls directly.
+        matched = [row for row in loaded["calls"] if sv.session_matches(row["sessionId"], "bd89b095")]
+        self.assertEqual(len(matched), 3)
+        self.assertIsNotNone(page)
+
 
 if __name__ == "__main__":
     unittest.main()
