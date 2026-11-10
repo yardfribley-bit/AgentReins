@@ -8,7 +8,7 @@ const statuses={running:'进行中',awaiting_confirmation:'等我确认',complet
 const typeNames={user:'用户原话',context:'模型上下文',model:'模型往返',plan:'计划与调度',command:'命令执行',tool:'工具调用',mcp:'MCP',skill:'Skill',files:'文件与变更',web:'网络资源',network:'网络资源',process:'进程观察',failure:'失败与纠偏',verify:'验证结果',artifact:'交付物',environment:'材料与约束',memory:'记忆访问',transfer:'数据传递',observation:'执行现场','tool-result':'工具返回'};
 let latest=normalize({}),shown=latest,view='alerts',taskID=null,following=true,paused=false,query='',agentFilter='all',collectionFilter='all',selection=null,snapshot=null,snapshotRevision='',detailTab='output',contextBlockID=null,toastTimer;
 let networkQuery='',networkAgent='all',networkTask=null,networkSelected=null,networkMode='list',networkDestination=null,networkSuspicious=false;
-const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false,hardGate:{inbox:[],receipts:[],allowlist:[]},hardGateLoaded:false};
+const riskState={filter:{sev:'all',rule:'all',agent:'all',disp:'all',q:''},selected:null,alerts:[],decisions:[],decisionsLoaded:false,transportsRequested:false,mcpAudit:[],mcpAuditPath:'',mcpAuditLoaded:false,hardGate:{inbox:[],receipts:[],allowlist:[]},hardGateLoaded:false,supplyChain:{entries:[],pending:[],decisions:[],alerts:[]},supplyAt:0};
 const consoleState={fileId:null,reasonId:null,inboxId:null,inboxBucket:'work',fileMode:'list',returnNote:'',returnInvalid:false};
 const CONSOLE_VIEWS=['alerts','rules','coverage','inbox','files','reason','supervise','about'];
 let graphMode='architecture',subtasksExpanded=false,pendingOpenKey=null;
@@ -351,6 +351,14 @@ function collectorPhrase(){
  if(health.length)return '已收到采集源状态';
  return '采集未启动';
 }
+function ensureSupply(){
+ const now=Date.now();
+ if(riskState.supplyAt&&now-riskState.supplyAt<20000)return;
+ const handler=window.webkit?.messageHandlers?.agentreins;
+ riskState.supplyAt=now;
+ if(!handler)return;
+ handler.postMessage({action:'loadSupplyChain'});
+}
 function ensureHardGate(){
  if(riskState.hardGateLoaded)return;
  const handler=window.webkit?.messageHandlers?.agentreins;
@@ -405,12 +413,14 @@ function renderRisk(){
 }
 function renderConsole(){
  const api=window.AgentReinsConsole;if(!api)return;
+ ensureSupply();
+ const supplyChain=riskState.supplyChain||{entries:[],pending:[],decisions:[],alerts:[]};
  if(view==='files')api.renderFiles($('files-view'),shown,consoleState);
  else if(view==='reason')api.renderReason($('reason-view'),shown,{...consoleState,decisions:riskState.decisions});
- else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions,hardGate:riskState.hardGate});
+ else if(view==='inbox')api.renderInbox($('inbox-view'),shown,{...consoleState,decisions:riskState.decisions,hardGate:riskState.hardGate,supplyChain});
  else if(view==='supervise')api.renderSupervise($('supervise-view'),shown,riskState);
  else if(view==='about')api.renderAbout($('about-view'),window.agentreinsInstall,riskState.disk);
- const inbox=api.inboxItems?.(shown,riskState.decisions,{hardGate:riskState.hardGate})||[];
+ const inbox=api.inboxItems?.(shown,riskState.decisions,{hardGate:riskState.hardGate,supplyChain})||[];
  const left=inbox.filter(i=>!i.decision||i.decision.state==='needs_evidence').length;
  const ib=$('inbox-badge');if(ib){ib.hidden=!left;ib.textContent=String(left);}
 }
@@ -517,6 +527,11 @@ window.agentreinsHostResult=result=>{
  if(result?.action==='hardGate'){
   riskState.hardGate={inbox:result.inbox||[],receipts:result.receipts||[],allowlist:result.allowlist||[],policy:result.policy||null};
   riskState.hardGateLoaded=true;
+  if(CONSOLE_VIEWS.includes(view))renderRisk();
+ }
+ if(result?.action==='supplyChain'){
+  riskState.supplyChain={entries:result.entries||[],pending:result.pending||[],decisions:result.decisions||[],alerts:result.alerts||[]};
+  riskState.supplyAt=Date.now();
   if(CONSOLE_VIEWS.includes(view))renderRisk();
  }
  if(result?.action==='evidenceExported'&&result.path){/* toast already shows the path */}
@@ -637,6 +652,15 @@ document.addEventListener('click',e=>{
   consoleState.hardGateReason=reason;
   const sent=bridge('decideHardGate',{op,subject,kind,reason:reason||'保持拒绝'},{silent:true});
   if(!sent)toast('当前没有原生通道，允许名单没有写入');
+ }
+ else if(el.dataset.supplyDecide){
+  const op=el.dataset.supplyDecide==='approve'?'approve':'reject';
+  const id=el.dataset.supplyId||'';
+  const note=(document.getElementById('supply-note')?.value||'').trim();
+  if(!id){toast('没有这条记录');return;}
+  if(op==='approve'&&!note){toast('允许要留一句原因');return;}
+  const sent=bridge('decideSupplyChain',{op,id,note},{silent:true});
+  if(!sent)toast('当前没有原生通道，决定没有写入');
  }
  else if(el.dataset.staleDelete){
   const sent=bridge('deleteStaleData',{id:el.dataset.staleDelete},{silent:true});

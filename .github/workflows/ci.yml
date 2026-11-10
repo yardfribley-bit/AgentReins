@@ -74,7 +74,8 @@ jobs:
           node Tests/Manual/network/test_runtime_console.cjs
           node Tests/Manual/network/test_phase2_views.cjs
           node Tests/Manual/network/test_shell_child_failures.cjs
-          echo "JS_TESTS_PASSED=8"
+          node Tests/Manual/network/test_supply_chain_inbox.cjs
+          echo "JS_TESTS_PASSED=9"
 
       - name: Hard-gate policy (default deny, append-only audit)
         run: python3 tools/hardgate/test_policy.py -v

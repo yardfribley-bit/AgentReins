@@ -92,6 +92,33 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                 pushHardGate(to: message.webView, message: nil)
                 return
             }
+            if action == "loadSupplyChain" {
+                pushSupply(to: message.webView, message: nil)
+                return
+            }
+            if action == "decideSupplyChain" {
+                let op = body["op"] as? String ?? ""
+                let id = String(((body["id"] as? String) ?? "").prefix(200))
+                let note = String(((body["note"] as? String) ?? "").prefix(500))
+                let store = SupplyChainCheck.storeURL()
+                do {
+                    if op == "approve" {
+                        _ = try SupplyChainCheck.approve(id: id, note: note, store: store)
+                        pushSupply(to: message.webView, message: "已记下允许。没有改 agent 的配置。")
+                    } else if op == "reject" {
+                        _ = try SupplyChainCheck.reject(id: id, note: note, store: store)
+                        let doc = SupplyChainCheck.load(store: store)
+                        let summary = ((doc["alerts"] as? [[String: Any]])?.first?["summary"] as? String) ?? "已拒绝。"
+                        AppNotifier.send(title: "拒绝了一条新装入的 MCP 或技能", body: String(summary.prefix(180)))
+                        pushSupply(to: message.webView, message: "已拒绝并标成告警。没有改配置，也没有拦住这个进程。")
+                    }
+                } catch SupplyChainCheck.Failure.noteRequired {
+                    pushSupply(to: message.webView, message: "允许要留一句原因，没有写入")
+                } catch {
+                    pushSupply(to: message.webView, message: "这条决定没有写上")
+                }
+                return
+            }
             if action == "decideHardGate" {
                 let op = body["op"] as? String ?? ""
                 let subject = String(((body["subject"] as? String) ?? "").prefix(300))
@@ -374,6 +401,19 @@ struct RealtimeWorkspaceView: NSViewRepresentable {
                     in: nil, contentWorld: .page
                 )
             }
+        }
+
+        private func pushSupply(to webView: WKWebView?, message: String?) {
+            let doc = SupplyChainCheck.load(store: SupplyChainCheck.storeURL())
+            var result: [String: Any] = [
+                "action": "supplyChain",
+                "entries": doc["entries"] ?? [],
+                "pending": doc["pending"] ?? [],
+                "decisions": doc["decisions"] ?? [],
+                "alerts": doc["alerts"] ?? [],
+            ]
+            if let message { result["message"] = message }
+            pushHostResult(to: webView, result: result)
         }
 
         private func pushHardGate(to webView: WKWebView?, message: String?) {
