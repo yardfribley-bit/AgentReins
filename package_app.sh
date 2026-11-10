@@ -88,12 +88,13 @@ TRANSPORT_RES="$APP_BUNDLE/Contents/Resources/transport-audit"
 rm -rf "$TRANSPORT_RES"
 mkdir -p "$TRANSPORT_RES/bin"
 cp "$PROJECT_DIR/tools/transport-audit/"*.py "$TRANSPORT_RES/"
+cp "$PROJECT_DIR/tools/transport-audit/credential_shell_gate.sh" "$TRANSPORT_RES/credential_shell_gate.sh"
 cp "$PROJECT_DIR/tools/transport-audit/VERSION" "$TRANSPORT_RES/VERSION"
 cp "$PROJECT_DIR/Sources/AgentReins/Resources/hardgate_policy.py" "$TRANSPORT_RES/hardgate_policy.py"
 cp "$PROJECT_DIR/Sources/AgentReins/Resources/content_audit.py" "$TRANSPORT_RES/content_audit.py"
 cp "$PROJECT_DIR/tools/redact_secrets.py" "$TRANSPORT_RES/redact_secrets.py"
 chmod 755 "$TRANSPORT_RES/auto.py"
-for tool in bash brew chmod curl gh git rsync scp sftp sh ssh wget cat head tail less more cp base64 xxd strings grep; do
+for tool in bash brew chmod curl gh git rsync scp sftp sh ssh wget cat head tail less more cp base64 xxd strings grep awk sed python python3 perl ruby node dd od hexdump zsh; do
   ln -s ../auto.py "$TRANSPORT_RES/bin/$tool"
 done
 cp "$PROJECT_DIR/Assets/AgentReins.icns" "$APP_BUNDLE/Contents/Resources/AgentReins.icns"
@@ -211,8 +212,12 @@ done
   || guard_fail "transport-audit/bin/curl must be a symlink to auto.py"
 grep -q 'commit_wrapper' "$APP_BUNDLE/Contents/Resources/transport-audit/auto.py" \
   || guard_fail "packaged transport wrapper is missing the hard gate"
-grep -q 'transport-wrappers/3' "$APP_BUNDLE/Contents/Resources/transport-audit/VERSION" \
-  || guard_fail "packaged transport wrapper VERSION is not transport-wrappers/3"
+grep -q 'transport-wrappers/4' "$APP_BUNDLE/Contents/Resources/transport-audit/VERSION" \
+  || guard_fail "packaged transport wrapper VERSION is not transport-wrappers/4"
+grep -q 'shell-gate' "$APP_BUNDLE/Contents/Resources/transport-audit/credential_shell_gate.sh" \
+  || guard_fail "packaged shell gate is missing"
+grep -q 'commit_shell' "$APP_BUNDLE/Contents/Resources/transport-audit/hardgate_policy.py" \
+  || guard_fail "packaged hard gate is missing the shell gate"
 if grep -l -e AGENTREINS_KEYCHAIN_BACKEND -e _MEMORY_KEYCHAIN -e AGENTREINS_REDACT_SELFTEST \
      "$APP_BUNDLE/Contents/Resources/agentreins-mcp/"*.py "$APP_BUNDLE/Contents/Resources/socket-sampler/"*.py 2>/dev/null; then
   guard_fail "a packaged script still carries a test-only Keychain/self-test switch"

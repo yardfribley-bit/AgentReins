@@ -68,7 +68,7 @@ enum MCPDispatcher {
          "inputSchema": ["type": "object", "properties": [:], "additionalProperties": false]],
         ["name": "list_mcp_audit", "description": "HMAC-chained MCP read audit.",
          "inputSchema": ["type": "object", "properties": schemaProps(), "additionalProperties": false]],
-        ["name": "list_tool_calls", "description": "Read-only tool-call cards: reasoning excerpt, tool name and arguments, host effects joined by time and process. Does not copy session logs into evidence.",
+        ["name": "list_tool_calls", "description": "Read-only chain for each tool call: what the model asked, what the host did, what the model was told. Excerpts and join keys only. Does not copy session logs into evidence.",
          "inputSchema": ["type": "object", "properties": schemaProps([
             "agent": ["type": "string"] as [String: Any],
             "session_id": ["type": "string"] as [String: Any],

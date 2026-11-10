@@ -768,11 +768,14 @@ def credential_observation_alerts(limit: int = 80) -> list[dict[str, Any]]:
                 "timestamp": row.get("at"),
                 "sub": target,
                 "why": (
-                    "进程内 open() 不经过 PATH 包装，拦不住。"
+                    "进程内 open() 不经过 shell 门禁，也没有 PATH 包装，拦不住。"
                     f"等级 {grade}，来源 {source}。"
+                    "这是只看见，未拦截。"
                     "文件描述符已经关掉时只能标 possible；APFS 没有更新 atime 时这次读取看不到。"
                 ),
                 "finding": None,
+                "blocked": False,
+                "disposition": "只看见，未拦截",
             }
         )
     return alerts
@@ -841,8 +844,10 @@ def hardgate_block_alerts(limit: int = 80) -> list[dict[str, Any]]:
     for subject, row in newest.items():
         mechanism = str(row.get("mechanism") or "")
         why = "已阻断。硬门禁拒绝了 %s，真实程序没有执行。" % subject
-        if mechanism == "transport-wrapper":
+        if mechanism in ("transport-wrapper", "shell-gate"):
             why += " 退出码 126。"
+        if mechanism == "shell-gate":
+            why += " shell 在执行前拒绝了这条凭据读取。"
         alerts.append({
             "id": "hardgate:%s:%s" % (row.get("at") or "", subject),
             "rule": "hardgate",
@@ -883,7 +888,7 @@ def blocked_network_rows(limit: int = 80) -> list[dict[str, Any]]:
             "nonWhitelist": True,
             "auditBypass": False,
             "startedAt": row.get("at"),
-            "exitCode": 126 if mechanism == "transport-wrapper" else None,
+            "exitCode": 126 if mechanism in ("transport-wrapper", "shell-gate") else None,
             "confidence": "Observed",
         })
     return rows
@@ -955,6 +960,8 @@ def list_alerts(
             "sub": alert.get("sub"),
             "why": alert.get("why"),
             "finding": alert.get("finding"),
+            "blocked": False,
+            "disposition": alert.get("disposition") or "只看见，未拦截",
         }
         if agent and agent != "all" and str(item.get("agent")) != agent:
             continue
@@ -1000,7 +1007,7 @@ def list_alerts(
     if engine_meta.get("warning"):
         result["warning"] = engine_meta["warning"]
     if observations:
-        result["note"] = str(result["note"]) + " 另有进程内凭据读取（confirmed / possible）。PATH 包装看不到、也拦不住这类 open()。"
+        result["note"] = str(result["note"]) + " 另有进程内凭据读取（confirmed / possible）。这类 open() 只看见，未拦截。"
     return result
 
 

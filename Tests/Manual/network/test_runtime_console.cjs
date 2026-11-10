@@ -141,9 +141,9 @@ const verified = {
   },
 };
 pages.renderReason(reasonHolder, verified, { decisions: [] });
-assert.match(reasonHolder.innerHTML, /它说/);
-assert.match(reasonHolder.innerHTML, /它调/);
-assert.match(reasonHolder.innerHTML, /真发生/);
+assert.match(reasonHolder.innerHTML, /模型提出/);
+assert.match(reasonHolder.innerHTML, /主机执行/);
+assert.match(reasonHolder.innerHTML, /模型收到/);
 assert.match(reasonHolder.innerHTML, /说了没做/);
 assert.match(reasonHolder.innerHTML, /对不上/);
 assert.match(reasonHolder.innerHTML, /data-accept-decide="accept"/);

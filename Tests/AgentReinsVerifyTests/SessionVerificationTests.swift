@@ -178,6 +178,48 @@ final class SessionVerificationTests: XCTestCase {
         XCTAssertLessThan(measured.comparisons, 500 * 6, "join scanned \(measured.comparisons) pairs; a full effects×calls scan is 500×501")
     }
 
+    func testBlockedCredentialReadChainFlagsFalseSuccess() throws {
+        let secret = "aws_secret_access_key=FAKEONLY_NOT_A_REAL_KEY"
+        let raw = """
+        {"type":"assistant","timestamp":"2026-11-09T08:00:00Z","sessionId":"sess-aws","message":{"content":[{"type":"text","text":"我要读取 ~/.aws/credentials 里的凭据。"},{"type":"tool_use","id":"toolu_aws","name":"Bash","input":{"command":"cat ~/.aws/credentials"}}]}}
+        {"type":"user","timestamp":"2026-11-09T08:00:01Z","sessionId":"sess-aws","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_aws","content":"AgentReins 已拒绝这条命令，真实程序不会执行。\\n\(secret)"}]}}
+        {"type":"assistant","timestamp":"2026-11-09T08:00:02Z","sessionId":"sess-aws","message":{"content":[{"type":"text","text":"成功读取了凭据。"}]}}
+        {"type":"assistant","timestamp":"2026-11-09T08:00:03Z","sessionId":"sess-aws","message":{"content":[{"type":"text","text":"已完成。"}]}}
+        """
+        let batch = SessionVerification.parseClaude(Data(raw.utf8), sourcePath: "/tmp/claude.jsonl")
+        let call = try XCTUnwrap(batch.calls.first)
+        XCTAssertEqual(batch.calls.count, 1)
+        XCTAssertEqual(call.agent, "Claude Code")
+        XCTAssertEqual(call.sessionId, "sess-aws")
+        XCTAssertEqual(call.toolName, "Bash")
+        XCTAssertTrue(call.arguments.contains("cat ~/.aws/credentials"))
+        XCTAssertTrue(call.reasoning.contains("凭据"))
+        XCTAssertTrue(call.resultExcerpt.contains("已拒绝"))
+        XCTAssertFalse(call.resultExcerpt.contains("FAKEONLY_NOT_A_REAL_KEY"))
+        XCTAssertGreaterThan(call.resultBytes, 0)
+        XCTAssertTrue(call.acknowledgement.contains("成功读取"))
+        let stamp = ISO8601DateFormatter()
+        stamp.formatOptions = [.withInternetDateTime]
+        let when = try XCTUnwrap(stamp.date(from: "2026-11-09T08:00:00Z"))
+        let document = SessionVerification.verify(calls: batch.calls, effects: [
+            HostEffect(id: "gate-1", kind: "credential", timestamp: when, pid: 4242, path: "/Users/dev/.aws/credentials", command: "cat ~/.aws/credentials", sessionId: "sess-aws", credential: true, source: "hardgate", exitCode: 126, durationMs: 0, parents: "100", verdict: "shell-gate"),
+        ], completions: batch.completions)
+        let card = try XCTUnwrap(document.cards.first)
+        let host = try XCTUnwrap(card.happened.first)
+        XCTAssertEqual(host.exitCode, 126)
+        XCTAssertEqual(host.verdict, "shell-gate")
+        XCTAssertEqual(host.pid, 4242)
+        XCTAssertEqual(host.parents, "100")
+        XCTAssertEqual(host.durationMs, 0)
+        XCTAssertTrue(card.said.contains("凭据"))
+        XCTAssertTrue(card.resultExcerpt.contains("已拒绝"))
+        XCTAssertTrue(card.acknowledgement.contains("成功"))
+        XCTAssertTrue(card.mismatches.contains { $0.label == "说成功了，其实被拦住了" })
+        XCTAssertGreaterThanOrEqual(document.checklists.first?.blockedSuccessClaims ?? 0, 1)
+        let blob = (card.said + card.arguments + card.resultExcerpt + card.acknowledgement + (host.command ?? "") + (host.path ?? ""))
+        XCTAssertFalse(blob.contains("FAKEONLY_NOT_A_REAL_KEY"))
+    }
+
     private func editCall(id: String, at: Date, pid: Int32?, path: String, reasoning: String) -> ParsedToolCall {
         ParsedToolCall(id: id, callId: id, sessionId: "sess", agent: "Claude Code", sourcePath: "x", sourceOffset: 0, timestamp: at, pid: pid, reasoning: reasoning, reasoningTruncated: false, toolName: "Edit", arguments: "{\"file_path\":\"\(path)\"}", argumentsTruncated: false, claimedPaths: [path], claimsEdit: true)
     }

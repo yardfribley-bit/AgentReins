@@ -36,6 +36,11 @@ final class FileLayerCaptureTests: XCTestCase {
         XCTAssertTrue(files.contains("/Users/me/.ssh/id_ed25519"))
         XCTAssertTrue(files.contains("/Users/me/.aws/credentials"))
         XCTAssertTrue(files.contains("/Users/me/Library/Keychains/login.keychain-db"))
+        XCTAssertTrue(files.contains("/Users/me/.docker/config.json"))
+        XCTAssertTrue(files.contains("/Users/me/.config/gh/hosts.yml"))
+        XCTAssertTrue(FileLayerCapture.isCredentialPath("/Users/me/.netrc"))
+        XCTAssertTrue(FileLayerCapture.isCredentialPath("/Users/me/.docker/config.json"))
+        XCTAssertFalse(FileLayerCapture.isCredentialPath("/Users/me/project/notes.txt"))
     }
 
     func testAccessTimeReadIsDistinctFromAWriteAndGradeFollowsTheOpenDescriptor() {

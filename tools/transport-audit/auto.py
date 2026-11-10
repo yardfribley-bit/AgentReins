@@ -8,9 +8,11 @@ Unguarded shells (no AGENTREINS_TRANSPORT_AGENT) are unchanged.
 import datetime,importlib.util,json,os,pathlib,re,signal,subprocess,sys,threading,time,uuid
 BASE=pathlib.Path(__file__).resolve().parent
 ENCRYPTED_TOOLS={'ssh','scp','sftp','rsync'}
-# File readers are not network tools. Credential paths are denied; every other
-# invocation execs the real binary and writes no transport audit.
-FILE_READ_TOOLS={'cat','head','tail','less','more','cp','base64','xxd','strings','grep'}
+# Not network tools. Credential paths are denied first; every other invocation
+# execs the real binary and writes no transport audit. Interpreters are included
+# so a PATH hit denies `python -c open(...)` before the real binary runs.
+# Absolute paths and a shell that resets PATH skip this set; the shell gate covers those.
+FILE_READ_TOOLS={'cat','head','tail','less','more','cp','base64','xxd','strings','grep','awk','sed','python','python3','perl','ruby','node','dd','od','hexdump','zsh'}
 _TOOLS=BASE.parents[1]/'tools' if (BASE.parents[1]/'tools'/'redact_secrets.py').is_file() else BASE.parent
 # Prefer repo tools/redact_secrets.py; packaged MCP copy is a fallback.
 for _p in (BASE.parents[1]/'tools', BASE.parent, BASE):
@@ -390,7 +392,7 @@ def main():
     real=env.get('AGENTREINS_REAL_'+tool.upper()) or next((os.path.join(directory,tool) for directory in env.get('PATH','/usr/bin:/bin:/opt/homebrew/bin').split(os.pathsep) if os.path.realpath(directory)!=os.path.realpath(BASE/'bin') and os.access(os.path.join(directory,tool),os.X_OK)),'/usr/bin/'+tool)
     if pathlib.Path(real).resolve().parent==BASE/'bin':raise SystemExit('Recursive transport entry')
     agent=env.get('AGENTREINS_TRANSPORT_AGENT')
-    if agent not in ('WorkBuddy','Codex','Cursor'):os.execv(real,[real,*args])
+    if agent not in ('WorkBuddy','Codex','Cursor','Claude'):os.execv(real,[real,*args])
     blocked=transport_hard_gate(tool, args, env)
     if blocked:
         return blocked

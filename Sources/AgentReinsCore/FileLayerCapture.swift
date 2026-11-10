@@ -12,7 +12,7 @@ public enum FileLayerCapture {
     /// bounded credential set uses access-time (NOTE_ATTRIB). APFS may skip
     /// or coalesce atime, so a kqueue hit without an open descriptor is only
     /// "possible (sampled)". This is not a full-disk watch and not Endpoint Security.
-    public static let limits = "libproc sees only descriptors still open, so a short read between samples can be missed. A kqueue NOTE_ATTRIB watch covers known credential paths and .env* one directory under the agent working directory, /tmp, and /private/tmp, including /tmp/<dir>/.env. If the agent still has the file open, the read is confirmed. If not, it is possible (sampled): APFS often does not update atime on every read, and then neither kqueue nor the stat poll can see it. PATH wrappers do not see an in-process open(). File bytes are not copied."
+    public static let limits = "libproc sees only descriptors still open, so a short read between samples can be missed. A kqueue NOTE_ATTRIB watch covers known credential paths and .env* one directory under the agent working directory, /tmp, and /private/tmp, including /tmp/<dir>/.env. If the agent still has the file open, the read is confirmed. If not, it is possible (sampled): APFS often does not update atime on every read, and then neither kqueue nor the stat poll can see it. PATH wrappers and the shell gate do not see an in-process open(). The shell gate blocks an agent shell command before exec when the command text names a credential path, including /bin/cat and python -c. An in-process open() is detection only. File bytes are not copied."
 
     public static let watchCap = 256
 
@@ -62,7 +62,7 @@ public enum FileLayerCapture {
     public static func isCredentialPath(_ path: String) -> Bool {
         let value = path.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !value.isEmpty else { return false }
-        if value.range(of: #"(?i)(\.ssh/|/\.aws/|\.env(?:\.|$)|id_rsa|id_ed25519|credentials\.json|\.pem\b|secrets?\.|keychains?/|\.keychain(?:-db)?)"#, options: .regularExpression) != nil {
+        if value.range(of: #"(?i)(\.ssh/|/\.aws/|\.env(?:\.|$)|id_rsa|id_ed25519|credentials\.json|\.pem\b|secrets?\.|keychains?/|\.keychain(?:-db)?|(?:^|/)\.netrc$|(?:^|/)\.npmrc$|(?:^|/)\.pypirc$|\.docker/config\.json|\.config/gh/hosts\.yml)"#, options: .regularExpression) != nil {
             return true
         }
         let name = (value as NSString).lastPathComponent
@@ -134,6 +134,7 @@ public enum FileLayerCapture {
             ".config/gcloud/credentials.db",
             ".netrc", ".npmrc", ".pypirc",
             ".config/gh/hosts.yml",
+            ".docker/config.json",
             "Library/Keychains/login.keychain-db",
         ]
         return names.map { (root as NSString).appendingPathComponent($0) }

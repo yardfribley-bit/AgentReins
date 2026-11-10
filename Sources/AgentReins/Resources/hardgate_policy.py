@@ -5,14 +5,26 @@ What this module actually stops
   ``enforce_proxy_flow`` and kills the flow or installs a 403 before upstream).
 - Non-loopback egress and credential-path reads that reach the PATH wrappers
   in ``tools/transport-audit`` (the wrapper returns before ``exec``).
+- Credential-path reads whose path is visible in an agent shell command.
+  ``credential_shell_gate.sh`` runs before exec (zsh TRAPDEBUG or bash DEBUG)
+  and calls ``commit_shell``. That covers ``cat``, ``head``, ``/bin/cat``,
+  ``python -c open(...)``, awk/sed, and shell redirects, including after PATH
+  is reset to ``/usr/bin:/bin``. Exit code 126. File bytes are not read or stored.
 
 What this module does not stop
 - Network Extension is not installed.
-- In-process Read/Edit tools that never spawn a wrapped command.
-- Absolute paths that skip the PATH entry (``/usr/bin/curl``).
+- In-process Read/Edit tools and any ``open()`` that is not a shell command.
+  libproc / kqueue can record those as confirmed or possible. That record is
+  detection only (``blocked`` false). It is not 已阻断.
+- ``zsh -f`` and ``bash --noprofile --norc`` when BASH_ENV is not the gate,
+  so the shell never loads the gate.
+- A credential path that is not visible in the command text.
+- Absolute-path egress such as ``/usr/bin/curl``. The shell gate denies
+  credential paths only, not egress.
 - QUIC, and git remotes that are not visible in argv.
-- A review click. ``enforced`` is true only after kill/Response.make or a
-  wrapper refusal. The UI must not say 已阻断 for a review row alone.
+- A review click. ``enforced`` is true only after kill/Response.make, a
+  PATH-wrapper refusal, or a shell-gate refusal. The UI must not say 已阻断
+  for a review row or a detection-only credential observation.
 
 Allowlist entries count only when ``actor`` is ``user`` and ``reason`` is
 non-empty. Loopback (localhost, ::1, 127.0.0.0/8) is allowed and is not an
@@ -627,6 +639,17 @@ def _append_unlocked(root, record, actor):
         body["agent"] = str(record["agent"])[:80]
     if record.get("session"):
         body["session"] = str(record["session"])[:120]
+    command = record.get("command")
+    if isinstance(command, str) and command:
+        body["command"] = command[:180]
+    if record.get("shellPid") is not None:
+        body["shellPid"] = int(record["shellPid"])
+    if record.get("parentPid") is not None:
+        body["parentPid"] = int(record["parentPid"])
+    if record.get("exitCode") is not None:
+        body["exitCode"] = int(record["exitCode"])
+    if record.get("durationMs") is not None:
+        body["durationMs"] = int(record["durationMs"])
     line = (json.dumps(body, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     fd = os.open(str(path), os.O_CREAT | os.O_APPEND | os.O_WRONLY, 0o600)
     try:
@@ -762,7 +785,7 @@ def rules_document():
                 "action": "block",
                 "severity": "high",
                 "message": "被监督的 Agent 读取凭据路径",
-                "naturalLanguage": "凭据路径默认拒绝，不在默认允许名单里。",
+                "naturalLanguage": "凭据路径默认拒绝。agent 的 shell 和 PATH 入口会在执行前拦住；进程内 open() 只看见，拦不住。",
             },
         ],
     }
@@ -974,3 +997,130 @@ def open_inbox(rows, allowlist=None):
         seen.add(subject)
         picked.append(row)
     return picked
+
+
+def _shell_session(agent, env):
+    env = env or {}
+    if agent == "WorkBuddy":
+        return env.get("CODEBUDDY_SESSION_ID") or env.get("CODEBUDDY_CONVERSATION_REQUEST_ID")
+    if agent == "Codex":
+        return env.get("CODEX_THREAD_ID")
+    if agent == "Cursor":
+        return env.get("CURSOR_CONVERSATION_ID")
+    if agent == "Claude":
+        return env.get("CLAUDE_SESSION_ID")
+    return None
+
+
+_COMMAND_SECRET = re.compile(
+    r"(?i)(aws_secret_access_key|aws_access_key_id|password|token|secret|api_key|authorization)\s*[:=]\s*[\"']?[^\s\"',}]+"
+)
+
+
+def command_excerpt(command):
+    """The command text, capped and redacted. Never the bytes that were read."""
+    text = _COMMAND_SECRET.sub(r"\1=[redacted]", str(command or ""))
+    text = " ".join(text.split())
+    return text[:180]
+
+
+def normalize_shell_command(command, home):
+    """Expand $HOME so ~/.aws and $HOME/.aws classify as the same path. Do not read the file."""
+    text = str(command or "")
+    root = str(home or "")
+    if root:
+        text = text.replace("${HOME}", root).replace("$HOME", root)
+    return text
+
+
+def commit_shell(command, cwd, home, root=None, env=None, agent=None, session=None, shell_pid=None, parent_pid=None):
+    """Deny a credential read before the shell runs the command.
+
+    Returns 126 when the command text names a credential path that is not
+    allowlisted. Returns 0 otherwise. The audit row stores the path and the
+    disposition, never the file contents and never the command text.
+    """
+    root = gate_root(root)
+    text = normalize_shell_command(command, home)
+    subjects = credential_subjects([text], cwd, home)
+    if not subjects:
+        return 0
+    ensure_seeded(root)
+    fd = _lock(root)
+    try:
+        allow = load_allowlist(root)
+        seen = seen_subjects(root)
+        local_seen = set(seen)
+        decisions = []
+        for subject in subjects:
+            row = classify_credential(subject, allow, local_seen)
+            decisions.append(row)
+            if row.get("record"):
+                local_seen.add(row["subject"])
+        denies = [d for d in decisions if d.get("action") == "deny"]
+        for decision in decisions:
+            if not decision.get("record"):
+                continue
+            decision["mechanism"] = "shell-gate"
+            decision["enforced"] = decision.get("action") == "deny"
+            if decision.get("action") == "deny":
+                decision["detail"] = "shell 在执行前拒绝了凭据读取"
+                decision["command"] = command_excerpt(text)
+                decision["exitCode"] = 126
+                decision["durationMs"] = 0
+                if shell_pid is not None:
+                    decision["shellPid"] = int(shell_pid)
+                if parent_pid is not None:
+                    decision["parentPid"] = int(parent_pid)
+            if agent:
+                decision["agent"] = agent
+            if session:
+                decision["session"] = session
+            try:
+                _append_unlocked(root, decision, actor="enforcer")
+            except OSError:
+                if decision.get("action") == "deny":
+                    decision["enforced"] = True
+        if denies:
+            return 126
+        return 0
+    finally:
+        _unlock(fd)
+
+
+def shell_gate_main(argv=None):
+    """Entry point for ``python3 hardgate_policy.py --shell-gate``.
+
+    The command arrives in ``AGENTREINS_GATE_COMMAND`` so the process argv
+    does not contain the path (the shell trap would see it again).
+    """
+    import sys
+    argv = list(sys.argv if argv is None else argv)
+    if "--shell-gate" not in argv:
+        return 0
+    command = os.environ.get("AGENTREINS_GATE_COMMAND") or ""
+    cwd = os.environ.get("PWD") or os.getcwd()
+    home = os.environ.get("HOME") or str(Path.home())
+    agent = os.environ.get("AGENTREINS_TRANSPORT_AGENT") or ""
+    session = _shell_session(agent, os.environ)
+
+    def _pid(name):
+        raw = os.environ.get(name)
+        if raw is None or not str(raw).isdigit():
+            return None
+        return int(raw)
+
+    try:
+        return commit_shell(
+            command, cwd, home,
+            env=os.environ, agent=agent or None, session=session,
+            shell_pid=_pid("AGENTREINS_GATE_PID"), parent_pid=_pid("AGENTREINS_GATE_PPID"),
+        )
+    except Exception:
+        return 126
+
+
+if __name__ == "__main__":
+    import sys
+    if "--shell-gate" in sys.argv:
+        sys.exit(shell_gate_main(sys.argv))

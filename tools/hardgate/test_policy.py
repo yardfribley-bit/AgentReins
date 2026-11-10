@@ -3,6 +3,7 @@ import importlib.util
 import json
 import os
 import pathlib
+import shutil
 import stat
 import subprocess
 import tempfile
@@ -15,6 +16,8 @@ SERVER_PATH = ROOT / "tools" / "agentreins-mcp" / "server.py"
 WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "curl"
 SH_WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "sh"
 CAT_WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "cat"
+PYTHON_WRAPPER = ROOT / "tools" / "transport-audit" / "bin" / "python3"
+GATE = ROOT / "tools" / "transport-audit" / "credential_shell_gate.sh"
 
 
 def load_policy():
@@ -414,6 +417,24 @@ class EnforcementTests(unittest.TestCase):
         self.assertTrue(self.marker.exists())
         self.assertFalse(self.transport.exists())
 
+    def test_python3_wrapper_denies_an_open_of_credentials(self):
+        env = self._env("python3")
+        cred = self.home / ".aws" / "credentials"
+        cred.parent.mkdir()
+        cred.write_text("aws_secret_access_key=FAKEONLY_NOT_A_REAL_KEY\n")
+        denied = subprocess.run(
+            [str(PYTHON_WRAPPER), "-c", "print(open(%r).read())" % str(cred)],
+            env=env, cwd=str(self.home), capture_output=True, text=True, timeout=15,
+        )
+        self.assertEqual(denied.returncode, 126, denied.stderr)
+        self.assertNotIn("FAKEONLY_NOT_A_REAL_KEY", denied.stdout)
+        self.assertNotIn("FAKEONLY_NOT_A_REAL_KEY", denied.stderr)
+        self.assertFalse(self.marker.exists())
+        rows = policy.load_rows(self.root / "gate")
+        self.assertEqual(rows[0]["kind"], "credential-read")
+        self.assertTrue(rows[0]["enforced"])
+        self.assertEqual(rows[0]["mechanism"], "transport-wrapper")
+
     def test_wrapper_executes_loopback(self):
         env = self._env("curl")
         self.assertEqual(self._wait_until_exec([str(WRAPPER), "http://127.0.0.1:9/health"], env), 0)
@@ -544,6 +565,150 @@ class CaptureHookTests(unittest.TestCase):
         rows = policy.load_rows(root / "gate")
         self.assertTrue(rows and rows[0]["enforced"] and rows[0]["mechanism"] == "audit-proxy")
         out.cleanup()
+
+
+def _shell_binary(name):
+    for candidate in ("/bin/" + name, "/usr/bin/" + name):
+        if os.access(candidate, os.X_OK):
+            return candidate
+    return shutil.which(name)
+
+
+class ShellGateTests(unittest.TestCase):
+    """Agent shells are /bin/zsh -c or bash -c, not the PATH wrapper.
+
+    Cursor resets PATH to /usr/bin:/bin first, and `command cat` / `/bin/cat`
+    skip shell functions. The gate has to refuse the command before exec.
+    """
+
+    SECRET = "aws_secret_access_key=FAKEONLY_NOT_A_REAL_KEY"
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.root = pathlib.Path(self.tmp.name)
+        self.home = self.root / "home"
+        self.home.mkdir()
+        cred = self.home / ".aws" / "credentials"
+        cred.parent.mkdir()
+        cred.write_text(self.SECRET + "\n")
+        self.plain = self.home / "readme.txt"
+        self.plain.write_text("hello-plain-file\n")
+        self.gate_root = self.root / "gate"
+        self.zdot = self.root / "zdot"
+        self.zdot.mkdir()
+        (self.zdot / ".zshenv").write_text(
+            '[ -n "$AGENTREINS_SHELL_GATE" ] && [ -f "$AGENTREINS_SHELL_GATE" ] && . "$AGENTREINS_SHELL_GATE"\n'
+        )
+
+    def tearDown(self):
+        self.tmp.cleanup()
+
+    def env_for(self, agent=True):
+        env = {
+            "HOME": str(self.home),
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "TMPDIR": str(self.root),
+            "PYTHONDONTWRITEBYTECODE": "1",
+            "AGENTREINS_HARDGATE_ROOT": str(self.gate_root),
+            "AGENTREINS_HARDGATE_POLICY": str(POLICY_PATH),
+            "AGENTREINS_SHELL_GATE": str(GATE),
+            "ZDOTDIR": str(self.zdot),
+        }
+        if agent:
+            env["AGENTREINS_TRANSPORT_AGENT"] = "Cursor"
+            env["CURSOR_AGENT"] = "1"
+            env["CURSOR_CONVERSATION_ID"] = "cursor-session-1"
+        return env
+
+    def run_shell(self, shell, command, env):
+        return subprocess.run(
+            [shell, "-c", command],
+            env=env, capture_output=True, text=True, timeout=20,
+        )
+
+    def assert_blocked(self, proc, label):
+        self.assertEqual(proc.returncode, 126, "%s\nstderr=%s\nstdout=%s" % (label, proc.stderr, proc.stdout))
+        self.assertNotIn(self.SECRET, proc.stdout, label)
+        self.assertNotIn(self.SECRET, proc.stderr, label)
+
+    def test_commit_shell_records_the_path_and_a_redacted_command_excerpt(self):
+        code = policy.commit_shell(
+            "cat %s && echo aws_secret_access_key=%s" % (self.home / ".aws" / "credentials", "FAKEONLY_NOT_A_REAL_KEY"),
+            str(self.home), str(self.home), root=self.gate_root,
+            agent="Cursor", session="cursor-session-1", shell_pid=42, parent_pid=7,
+        )
+        self.assertEqual(code, 126)
+        raw = (self.gate_root / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn("FAKEONLY_NOT_A_REAL_KEY", raw)
+        self.assertNotIn(self.SECRET, raw)
+        self.assertIn("shell-gate", raw)
+        self.assertIn("/.aws/credentials", raw)
+        self.assertIn("aws_secret_access_key=[redacted]", raw)
+        self.assertEqual(policy.load_rows(self.gate_root)[0]["exitCode"], 126)
+        self.assertEqual(policy.load_rows(self.gate_root)[0]["shellPid"], 42)
+        rows = policy.load_rows(self.gate_root)
+        self.assertTrue(rows[0]["enforced"])
+        self.assertEqual(rows[0]["agent"], "Cursor")
+        self.assertEqual(rows[0]["session"], "cursor-session-1")
+        self.assertTrue(rows[0]["inbox"])
+
+    def test_agent_shell_blocks_cat_head_absolute_and_python(self):
+        reads = [
+            "cat ~/.aws/credentials",
+            "head -n 1 ~/.aws/credentials",
+            "/bin/cat ~/.aws/credentials",
+            "command cat ~/.aws/credentials",
+            'python3 -c \'import os; print(open(os.path.expanduser("~/.aws/credentials")).read())\'',
+            'export PATH="/usr/bin:/bin${PATH:+:$PATH}"; cat ~/.aws/credentials',
+        ]
+        shells = [("bash", _shell_binary("bash"))]
+        zsh = _shell_binary("zsh")
+        if zsh:
+            shells.append(("zsh", zsh))
+        elif os.uname().sysname == "Darwin":
+            self.fail("macOS agent shells are zsh; /bin/zsh is missing")
+        env = self.env_for(agent=True)
+        for name, binary in shells:
+            self.assertTrue(binary, name)
+            run_env = dict(env)
+            if name == "bash":
+                run_env["BASH_ENV"] = str(GATE)
+            for command in reads:
+                proc = self.run_shell(binary, command, run_env)
+                self.assert_blocked(proc, "%s: %s" % (name, command))
+            plain = self.run_shell(binary, "cat " + str(self.plain), run_env)
+            self.assertEqual(plain.returncode, 0, plain.stderr)
+            self.assertIn("hello-plain-file", plain.stdout)
+        raw = (self.gate_root / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn(self.SECRET, raw)
+        rows = [row for row in policy.load_rows(self.gate_root) if row.get("action") == "deny"]
+        self.assertGreaterEqual(len(rows), len(reads))
+        self.assertTrue(all(row["mechanism"] == "shell-gate" and row["enforced"] for row in rows))
+        self.assertTrue(all(row["kind"] == "credential-read" for row in rows))
+        self.assertTrue(all(str(row["subject"]).endswith("/.aws/credentials") for row in rows))
+        self.assertEqual(rows[0]["agent"], "Cursor")
+        self.assertEqual(rows[0]["session"], "cursor-session-1")
+        self.assertTrue(rows[0]["inbox"])
+        self.assertFalse(rows[-1]["inbox"])
+
+    def test_allowlist_lets_the_shell_read_and_a_normal_shell_is_unchanged(self):
+        bash = _shell_binary("bash")
+        env = self.env_for(agent=True)
+        env["BASH_ENV"] = str(GATE)
+        blocked = self.run_shell(bash, "cat ~/.aws/credentials", env)
+        self.assert_blocked(blocked, "before allow")
+        subject = policy.load_rows(self.gate_root)[0]["subject"]
+        policy.user_allow(self.gate_root, subject, "credential-read", "测试放行假凭据")
+        allowed = self.run_shell(bash, "cat ~/.aws/credentials", env)
+        self.assertEqual(allowed.returncode, 0, allowed.stderr)
+        self.assertIn(self.SECRET, allowed.stdout)
+        raw = (self.gate_root / "audit.jsonl").read_text(encoding="utf-8")
+        self.assertNotIn(self.SECRET, raw)
+        normal = self.env_for(agent=False)
+        normal["BASH_ENV"] = str(GATE)
+        untouched = self.run_shell(bash, "cat ~/.aws/credentials", normal)
+        self.assertEqual(untouched.returncode, 0, untouched.stderr)
+        self.assertIn(self.SECRET, untouched.stdout)
 
 
 if __name__ == "__main__":

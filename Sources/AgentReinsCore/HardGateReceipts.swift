@@ -14,8 +14,13 @@ public enum HardGateReceipts {
         public var detail: String
         public var agent: String
         public var session: String
+        public var command: String
+        public var shellPid: Int32
+        public var parentPid: Int32
+        public var exitCode: Int
+        public var durationMs: Int
 
-        public init(at: String, action: String, kind: String, subject: String, enforced: Bool, mechanism: String, detail: String, agent: String = "", session: String = "") {
+        public init(at: String, action: String, kind: String, subject: String, enforced: Bool, mechanism: String, detail: String, agent: String = "", session: String = "", command: String = "", shellPid: Int32 = 0, parentPid: Int32 = 0, exitCode: Int = 126, durationMs: Int = 0) {
             self.at = at
             self.action = action
             self.kind = kind
@@ -25,6 +30,11 @@ public enum HardGateReceipts {
             self.detail = detail
             self.agent = agent
             self.session = session
+            self.command = command
+            self.shellPid = shellPid
+            self.parentPid = parentPid
+            self.exitCode = exitCode
+            self.durationMs = durationMs
         }
     }
 
@@ -63,7 +73,12 @@ public enum HardGateReceipts {
                 mechanism: obj["mechanism"] as? String ?? "",
                 detail: obj["detail"] as? String ?? "",
                 agent: obj["agent"] as? String ?? "",
-                session: obj["session"] as? String ?? ""
+                session: obj["session"] as? String ?? "",
+                command: obj["command"] as? String ?? "",
+                shellPid: (obj["shellPid"] as? NSNumber)?.int32Value ?? Int32(obj["shellPid"] as? Int ?? 0),
+                parentPid: (obj["parentPid"] as? NSNumber)?.int32Value ?? Int32(obj["parentPid"] as? Int ?? 0),
+                exitCode: (obj["exitCode"] as? NSNumber)?.intValue ?? (obj["exitCode"] as? Int ?? 126),
+                durationMs: (obj["durationMs"] as? NSNumber)?.intValue ?? (obj["durationMs"] as? Int ?? 0)
             ))
         }
         if rows.count <= limit { return rows }

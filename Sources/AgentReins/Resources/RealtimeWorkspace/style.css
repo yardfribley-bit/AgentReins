@@ -285,7 +285,9 @@ textarea#accept-note{width:100%;border:1px solid var(--line);border-radius:6px;p
 .tc-card.mismatched{border-left-color:var(--red);background:var(--red-bg)}
 .tc-head{display:flex;justify-content:space-between;gap:12px;margin-bottom:8px}
 .tc-status.matched{color:var(--green)}.tc-status.mismatched{color:var(--red)}
-.tc-grid{display:grid;grid-template-columns:1fr 1fr 1.15fr;gap:10px}
+.tc-grid{display:flex;flex-direction:column;gap:10px}
+.tc-grid section{border-top:1px solid var(--line);padding-top:8px}
+.tc-grid section:first-child{border-top:0;padding-top:0}
 .tc-grid h3,.tc-effect b{font-size:12px}
 .tc-grid pre,.tc-effect pre{white-space:pre-wrap;background:var(--tint);border-radius:6px;padding:8px;max-height:220px;overflow:auto}
 .tc-flags{margin:8px 0 0;padding-left:18px}

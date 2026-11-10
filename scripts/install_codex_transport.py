@@ -16,6 +16,10 @@ else:
 tools = sorted(path.name for path in bin_dir.iterdir() if path.name != 'auto.py' and not path.name.startswith('.') and path.name.replace('.', '').replace('_', '').replace('-', '').replace('+', '').isalnum())
 if not tools:
     raise SystemExit('No transport entries installed')
+policy = bin_dir.parent / 'hardgate_policy.py'
+if not policy.is_file():
+    policy = root / 'Sources' / 'AgentReins' / 'Resources' / 'hardgate_policy.py'
+gate = bin_dir.parent / 'credential_shell_gate.sh'
 home = pathlib.Path.home()
 ca = home / '.mitmproxy' / 'mitmproxy-ca-cert.pem'
 proxy = 'http://127.0.0.1:18891'
@@ -32,11 +36,13 @@ if [ -z "${{AGENTREINS_TRANSPORT_AGENT:-}}" ]; then
     AGENTREINS_TRANSPORT_AGENT=Codex
   elif [ -n "${{CODEBUDDY_SESSION_ID:-}}" ] || [ -n "${{CODEBUDDY_CONVERSATION_REQUEST_ID:-}}" ]; then
     AGENTREINS_TRANSPORT_AGENT=WorkBuddy
-  elif [ "${{CURSOR_AGENT:-}}" = "1" ]; then
+  elif [ "${{CURSOR_AGENT:-}}" = "1" ] || [ -n "${{CURSOR_CONVERSATION_ID:-}}" ]; then
     AGENTREINS_TRANSPORT_AGENT=Cursor
+  elif [ -n "${{CLAUDE_SESSION_ID:-}}" ] || [ "${{CLAUDECODE:-}}" = "1" ]; then
+    AGENTREINS_TRANSPORT_AGENT=Claude
   fi
 fi
-if [ "$AGENTREINS_TRANSPORT_AGENT" != "WorkBuddy" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Codex" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Cursor" ]; then
+if [ "$AGENTREINS_TRANSPORT_AGENT" != "WorkBuddy" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Codex" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Cursor" ] && [ "$AGENTREINS_TRANSPORT_AGENT" != "Claude" ]; then
   return 0 2>/dev/null || exit 0
 fi
 export AGENTREINS_TRANSPORT_AGENT
@@ -68,6 +74,12 @@ case ":$PATH:" in
   *) export PATH={shlex.quote(str(bin_dir))}:$PATH ;;
 esac
 {functions}
+AGENTREINS_SHELL_GATE={shlex.quote(str(gate))}
+AGENTREINS_HARDGATE_POLICY={shlex.quote(str(policy))}
+export AGENTREINS_SHELL_GATE AGENTREINS_HARDGATE_POLICY
+if [ -f "$AGENTREINS_SHELL_GATE" ]; then
+  . "$AGENTREINS_SHELL_GATE"
+fi
 ''')
 audit.chmod(0o700)
 start = '# BEGIN AgentReins transport\n'
